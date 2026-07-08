@@ -55,6 +55,19 @@
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": true
       }
+    },
+    "macos": {
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      },
+      "appimage": {
+        "bundle": true
+      }
     }
   },
   "plugins": {

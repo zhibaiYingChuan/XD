@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka numpy
+          pip install -e .
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Build Nuitka engine
+        working-directory: desktop/xuandun-desktop
+        run: python build_engine.py
+
+      - name: Install frontend dependencies
+        working-directory: desktop/xuandun-desktop
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: desktop/xuandun-desktop
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xuandun-${{ matrix.target }}
+          path: |
+            desktop/xuandun-desktop/src-tauri/target/release/bundle/**/*.exe
+            desktop/xuandun-desktop/src-tauri/target/release/bundle/**/*.dmg
+            desktop/xuandun-desktop/src-tauri/target/release/bundle/**/*.AppImage
+            desktop/xuandun-desktop/src-tauri/target/release/bundle/**/*.deb
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*
