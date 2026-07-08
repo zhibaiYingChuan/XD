@@ -1,9 +1,9 @@
 {
   "name": "internal_extended",
   "version": "1.0",
-  "description": "Internal Extended Benchmark - Chinese localization + obfuscation attacks (200+ samples, 17 categories)",
+  "description": "Internal Extended Benchmark - Chinese localization + obfuscation attacks (154 samples: 93 attacks + 61 benign, 17 categories)",
   "source": "Daoti XuanDun Internal Test Suite",
-  "reference": "https://github.com/smallloong/XuanDun",
+  "reference": "https://github.com/zhibaiYingChuan/XD",
   "categories": [
     {
       "name": "direct_injection_cn",

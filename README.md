@@ -13,13 +13,13 @@
 - **活性在线学习**：从通过的请求中自动学习，防御能力随使用持续增强
 - **反逆向保护**：Nuitka 编译 + 三端 anti_debug + 编译期 key 注入 + 阈值加密
 - **三端桌面应用**：Windows / macOS (Apple Silicon + Intel) / Linux
-- **会话隔离**：不同会话输出不可关联（汉明距离 > 50%）
+- **会话隔离**：不同会话施加特定置换，设计目标为汉明距离 > 50%（实际值取决于输入与运行时状态）
 
 ## 下载安装
 
 ### 桌面端（推荐普通用户）
 
-前往 [Releases](https://github.com/zhibaiYingChuan/xuandun/releases) 下载对应平台的安装包：
+前往 [Releases](https://github.com/zhibaiYingChuan/XD/releases) 下载对应平台的安装包：
 
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
@@ -109,7 +109,7 @@ shield = XuanDun(mode="low_false_positive")
 - **动态阴阳壳** (`dynamic_shell.py`)：状态依赖权重演化 + 混沌非零偏置，任何输入都产生高熵输出
 - **拒绝门** (`reject_gate.py`)：三重检测融合决策，支持四级防御层级（BASIC/STANDARD/STRICT/PARANOID）
 - **时序校验** (`timing_checker.py`)：检测重复/模式化攻击
-- **自组织符号映射** (`ancient_mapper.py`)：符号边界动态调整，攻击者无法建立静态逆映射
+- **自组织符号映射** (`ancient_mapper.py`)：符号边界动态调整，增加静态逆映射难度
 
 ## 性能基准
 
@@ -187,7 +187,7 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE_
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/zhibaiYingChuan/xuandun.git
+git clone https://github.com/zhibaiYingChuan/XD.git
 cd xuandun
 
 # 2. 安装 Python 依赖
@@ -240,18 +240,20 @@ python -m industry_benchmarks.run --suite owasp_llm_top10 --mode balanced --warm
 ```python
 from daoti_xuandun import XuanDunConfig, DefenseLevel
 
-# BASIC — 内部低风险场景（~48%攻击拒绝率，最快）
+# BASIC — 内部低风险场景（防御最弱，延迟最低）
 config = XuanDunConfig.for_level(DefenseLevel.BASIC)
 
-# STANDARD — 生产环境推荐（≥95%攻击拒绝率，延迟~5ms）
+# STANDARD — 生产环境推荐（基准测试实测 100% 攻击拒绝率，延迟~5ms）
 config = XuanDunConfig.for_level(DefenseLevel.STANDARD)
 
-# STRICT — 高安全场景（≥98%攻击拒绝率，延迟~7ms）
+# STRICT — 高安全场景（更严格的结构异常检测，延迟~7ms）
 config = XuanDunConfig.for_level(DefenseLevel.STRICT)
 
-# PARANOID — 极端安全场景（延迟~12ms）
+# PARANOID — 极端安全场景（全开+熵校验+完整性校验，延迟~12ms）
 config = XuanDunConfig.for_level(DefenseLevel.PARANOID)
 ```
+
+> *注：仅 STANDARD（balanced）模式经过完整基准测试验证。BASIC/STRICT/PARANOID 的拒绝率未单独基准测试，实际效果取决于部署场景。*
 
 ## FastAPI 集成
 
@@ -286,7 +288,7 @@ async def chat(message: str):
   title={道体·玄盾: 活性防护 LLM 防火墙},
   author={独立研究者，知白},
   year={2026},
-  url={https://github.com/zhibaiYingChuan/xuandun}
+  url={https://github.com/zhibaiYingChuan/XD}
 }
 ```
 
@@ -295,7 +297,7 @@ async def chat(message: str):
 - **作者**：独立研究者，知白
 - **Email**：spring60@vip.qq.com
 - **Website**：sfang.cc
-- **Repository**：https://github.com/zhibaiYingChuan/xuandun
+- **Repository**：https://github.com/zhibaiYingChuan/XD
 
 ## 常见问题
 

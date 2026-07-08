@@ -24,8 +24,8 @@ dependencies = [
 requires-python = ">=3.10"
 
 [project.urls]
-Homepage = "https://github.com/smallloong/daoti-xuandun"
-Repository = "https://github.com/smallloong/daoti-xuandun.git"
+Homepage = "https://github.com/zhibaiYingChuan/XD"
+Repository = "https://github.com/zhibaiYingChuan/XD.git"
 
 [project.optional-dependencies]
 torch = ["torch>=2.0.0"]
