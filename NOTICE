@@ -1,0 +1,26 @@
+道体·玄盾 (XuanDun)
+Copyright (c) 2026 独立研究者，知白
+
+本产品包含两类资产：
+
+1. 核心算法资产（受道体研究许可证 v1.0 约束）：
+   - src/daoti_xuandun/ 目录下的核心算法 .py 文件（详见 LICENSE Section 1.1）
+   - desktop/xuandun-desktop/engine_flask.py
+   - desktop/xuandun-desktop/anti_debug.py
+   - desktop/xuandun-desktop/build_engine.py
+   核心算法禁止逆向工程和再分发。Nuitka 编译产物为脱敏版本，
+   明文源码不公开，作为商业秘密保护。
+
+2. 外围代码资产（受 Apache License 2.0 约束）：
+   - 桌面端 Rust 代码（desktop/xuandun-desktop/src-tauri/）
+   - 前端 TypeScript/React 代码（desktop/xuandun-desktop/src/）
+   - 配置文件、文档、测试代码、构建脚本
+   外围代码遵循 Apache 2.0 开源协议，允许自由使用、修改和分发。
+
+详见 LICENSE（道体研究许可证）和 LICENSE_CODE（Apache 2.0）。
+
+联系方式：
+  独立研究者，知白
+  Email: spring60@vip.qq.com
+  Website: sfang.cc
+  Repository: https://github.com/zhibaiYingChuan/xuandun

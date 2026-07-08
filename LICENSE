@@ -1,0 +1,239 @@
+DAO TI RESEARCH LICENSE
+道体研究许可证
+Version 1.0, May 2026
+Copyright (c) 2026 独立研究者，知白
+================================================================================
+IMPORTANT — READ CAREFULLY BEFORE USING, COPYING, OR DISTRIBUTING
+重要提示 — 在使用、复制或分发前请仔细阅读
+================================================================================
+This License governs the use, reproduction, and distribution of the DaoTi
+XuanDun (道体·玄盾) LLM Firewall, comprising two categories of assets defined
+below.
+本许可证管辖道体·玄盾（XuanDun）LLM 防火墙的使用、复制和分发。该产品包含以下两类资产。
+1. DEFINITIONS | 定义
+--------------------------------------------------------------------------------
+1.1 "Repository Assets" means all files included in the public repository,
+    including:
+    (a) src/daoti_xuandun/reject_gate.py (reject gate core algorithm);
+    (b) src/daoti_xuandun/preprocessors.py (preprocessing pipeline);
+    (c) src/daoti_xuandun/config.py (configuration object with dynamic
+        activity parameters);
+    (d) src/daoti_xuandun/xuandun.py (main engine entry);
+    (e) src/daoti_xuandun/luoshu_mapper.py (Luoshu symbol mapper);
+    (f) src/daoti_xuandun/secure_strings.py (sensitive parameter protection);
+    (g) src/daoti_xuandun/timing_checker.py (timing consistency checker);
+    (h) src/daoti_xuandun/dynamic_shell.py (dynamic yin-yang shell);
+    (i) src/daoti_xuandun/ancient_mapper.py (self-organizing symbol mapping);
+    (j) src/daoti_xuandun/atlas_mapping.py (atlas mapping);
+    (k) desktop/xuandun-desktop/engine_flask.py (engine Flask service);
+    (l) desktop/xuandun-desktop/anti_debug.py (anti-reverse engineering
+        detection);
+    (m) desktop/xuandun-desktop/build_engine.py (Nuitka compilation script).
+    "仓库资产" 指公开仓库中包含的所有文件，具体包括：
+    (a) src/daoti_xuandun/reject_gate.py（拒绝门核心算法）；
+    (b) src/daoti_xuandun/preprocessors.py（预处理管道）；
+    (c) src/daoti_xuandun/config.py（配置对象，含动态活性参数）；
+    (d) src/daoti_xuandun/xuandun.py（主引擎入口）；
+    (e) src/daoti_xuandun/luoshu_mapper.py（洛书符号映射器）；
+    (f) src/daoti_xuandun/secure_strings.py（敏感参数保护）；
+    (g) src/daoti_xuandun/timing_checker.py（时序一致性校验）；
+    (h) src/daoti_xuandun/dynamic_shell.py（动态阴阳壳）；
+    (i) src/daoti_xuandun/ancient_mapper.py（自组织符号映射）；
+    (j) src/daoti_xuandun/atlas_mapping.py（图谱映射）；
+    (k) desktop/xuandun-desktop/engine_flask.py（引擎 Flask 服务）；
+    (l) desktop/xuandun-desktop/anti_debug.py（反逆向检测）；
+    (m) desktop/xuandun-desktop/build_engine.py（Nuitka 编译脚本）。
+1.2 "Architecture Source Code" means the complete core algorithm
+    implementation including original class names, detection logic, threshold
+    parameters, and data processing pipelines. An obfuscated version of the
+    architecture (Nuitka-compiled binary) is included in the repository
+    with machine-code constants and no design-intent comments. The original
+    Architecture Source Code with full design documentation is NOT
+    included in the public repository and is protected as a trade secret.
+    "架构源码" 指完整的核心算法实现，包括原始类名、检测逻辑、阈值参数
+    和数据处理流水线。架构的脱敏版本（Nuitka 编译二进制）已包含在仓库中，
+    使用机器码常量且不含设计意图注释。包含完整设计文档的原始架构源码
+    不包含在公开仓库中，作为商业秘密受到保护。
+1.3 "Documentation" means the written materials describing the theoretical
+    foundations, detection methodology, experimental results, and system
+    design, including but not limited to the Whitepaper and docs directory.
+    "文档" 指描述理论基础、检测方法、实验结果和系统设计的书面材料，包括但不限于
+    白皮书和 docs 目录。
+1.4 "Encrypted Threshold Constants" means the pre-encrypted threshold values
+    contained in src/daoti_xuandun/_key_generated.py (the SECURE_VALUES
+    dictionary) and any derivative constants created through recompilation
+    based on the original key.
+    "预加密阈值常量" 指 src/daoti_xuandun/_key_generated.py（SECURE_VALUES 字典）
+    中包含的预加密阈值，以及基于原始 key 通过重新编译产生的任何衍生常量。
+1.5 "Academic Use" means use by an accredited educational or research
+    institution for non-commercial research, teaching, or scholarly publication.
+    Use by research divisions of commercial entities does not qualify as
+    Academic Use.
+    "学术用途" 指经认证的教育或研究机构为非商业研究、教学或学术发表目的而使用。
+    商业实体的研究部门使用不构成学术用途。
+    For the avoidance of doubt, research conducted by a university laboratory
+    that receives funding from a commercial entity qualifies as Academic Use,
+    provided the research results are intended for scholarly publication and
+    the core algorithm is not transferred to the funding entity for its
+    independent use.
+    为避免疑义，接受商业实体资助的大学实验室所进行的研究属于学术用途，
+    前提是研究成果旨在学术发表，且核心算法未转让给资助实体供其独立使用。
+1.6 "Commercial Use" means any use that generates revenue or provides
+    competitive advantage in a commercial context, including but not limited to:
+    (a) integration into a product or service offered for sale or subscription;
+    (b) use as a component of a revenue-generating system;
+    (c) use by a for-profit entity in its operations;
+    (d) provision of LLM input detection as a service.
+    "商业用途" 指在商业背景下产生收入或提供竞争优势的任何使用，包括但不限于：
+    (a) 集成至销售或订阅形式提供的产品或服务中；
+    (b) 作为营利系统的组成部分使用；
+    (c) 由营利性实体在其运营中使用；
+    (d) 以 LLM 输入检测即服务形式提供。
+1.7 "Redistribution" means making the core algorithm binary available for
+    download, access, or use by any third party, whether through a public
+    repository, private distribution channel, cloud API, or any other means.
+    "再分发" 指通过公开仓库、私密分发渠道、云端API或任何其他方式，
+    使核心算法二进制可供任何第三方下载、访问或使用。
+2. TIERED LICENSE GRANT | 分层授权
+--------------------------------------------------------------------------------
+2.1 REPOSITORY ASSETS — PUBLIC USE LICENSE
+    Subject to the terms of this License, you are granted a worldwide,
+    royalty-free, non-exclusive license to:
+    (a) use, reproduce, and distribute the Repository Assets;
+    (b) use the core algorithm for LLM input detection, including
+        in commercial applications;
+    (c) create derivative works based on the public API interface;
+    (d) publicly display and perform the Documentation;
+    provided that:
+    (i)   you retain all copyright, patent, trademark notices, and this
+          License in all copies;
+    (ii)  you clearly attribute 独立研究者，知白 as the original author;
+    (iii) any derivative works of the public API are distributed under
+          this same License;
+    (iv)  you do NOT reverse-engineer, decompile, or attempt to reconstruct
+          the Architecture Source Code from the Nuitka-compiled binary or
+          the Repository Assets;
+    (v)   you do NOT sublicense, resell, or redistribute the core algorithm
+          binary (xuandun-engine) as a standalone product or as part of any
+          distribution platform, repository, or marketplace without
+          prior written consent from 独立研究者，知白;
+    (vi)  any derivative work created through modification of the core
+          algorithm shall also be distributed under this License.
+    仓库资产 — 公共使用许可
+    依据本许可证条款，您被授予全球范围内、免版税、非独占的许可：
+    (a) 使用、复制和分发仓库资产；
+    (b) 使用核心算法进行 LLM 输入检测，包括商业应用；
+    (c) 基于公开 API 接口创作衍生作品；
+    (d) 公开展示和执行文档；
+    但须满足以下条件：
+    (i)   在所有副本中保留所有版权、专利、商标声明及本许可证；
+    (ii)  明确标注原作者为 独立研究者，知白；
+    (iii) 公开 API 的衍生作品须依据本许可证分发；
+    (iv)  不得从 Nuitka 编译二进制或仓库资产中进行逆向工程、反编译或尝试重建
+          架构源码；
+    (v)   未经 独立研究者，知白 事先书面同意，不得将核心算法二进制（xuandun-engine）
+          作为独立产品或任何分发平台、仓库、市场的一部分进行转授权、转售或再分发；
+    (vi)  任何基于核心算法修改产生的衍生作品均须依据本许可证分发。
+2.2 ARCHITECTURE SOURCE CODE — CASE-BY-CASE AUTHORIZATION
+    Architecture Source Code is NOT included in the public repository.
+    Architecture Source Code is protected as a trade secret.
+    Access to Architecture Source Code (core algorithm class definitions,
+    detection logic, threshold parameters, data processing pipelines)
+    requires a separate written authorization from 独立研究者，知白.
+    架构源码 — 逐案授权
+    架构源码不包含在公开仓库中。
+    架构源码作为商业秘密受到保护。
+    获取架构源码（核心算法类定义、检测逻辑、阈值参数、数据处理流水线）需要
+    独立研究者，知白 另行书面授权。
+    To request access | 获取授权：
+    (a) Academic institutions in the Chinese mainland (中国大陆学术机构):
+        Submit an Academic Use Agreement including institution name, research
+        scope, and responsible PI. Free of charge.
+        提交学术使用协议，包含机构名称、研究范围和负责人。免费。
+    (b) Commercial entities in the Chinese mainland (中国大陆商业实体):
+        Submit a Commercial License Application. Terms negotiated per use case.
+        提交商业许可申请。按使用场景谈判条款。
+    (c) Entities outside the Chinese mainland (中国大陆境外实体):
+        Submit a detailed proposal including use case, entity background,
+        and compliance declaration. Reviewed case-by-case.
+        提交详细方案，包含用途、实体背景和合规声明。逐案审核。
+3. EXPORT CONTROL AND GEOPOLITICAL RESTRICTIONS | 出口管制与地缘限制
+--------------------------------------------------------------------------------
+3.1 This License is subject to all applicable export control laws and
+    regulations of the People's Republic of China.
+    本许可证须遵守中华人民共和国所有适用的出口管制法律法规。
+3.2 Architecture Source Code shall not be exported, re-exported, or transferred to:
+    (a) any entity or individual subject to technology transfer restrictions
+        under applicable Chinese law;
+    (b) any military, intelligence, or surveillance organization;
+    (c) any jurisdiction where such transfer is prohibited.
+    架构源码不得出口、再出口或转让至：
+    (a) 受适用中国法律技术转让限制的任何实体或个人；
+    (b) 任何军事、情报或监控组织；
+    (c) 禁止此类转让的任何司法管辖区。
+3.3 Any person or entity receiving Architecture Source Code under a separate
+    authorization may NOT further distribute, sublicense, or transfer the
+    Architecture Source Code to any third party without explicit written consent
+    from 独立研究者，知白.
+    任何依据另行授权获得架构源码的个人或实体，未经 独立研究者，知白 明确书面同意，
+    不得进一步分发、转授权或转让架构源码给任何第三方。
+4. INTELLECTUAL PROPERTY | 知识产权
+--------------------------------------------------------------------------------
+4.1 All title, ownership rights, and intellectual property rights in and to
+    the DaoTi XuanDun LLM Firewall (Repository Assets, Documentation,
+    Encrypted Threshold Constants, and Architecture Source Code) shall
+    remain with 独立研究者，知白.
+    道体·玄盾 LLM 防火墙（仓库资产、文档、预加密阈值常量和架构源码）的全部所有权、
+    产权和知识产权属于独立研究者，知白。
+4.2 The DaoTi (道体) name, the XuanDun (玄盾) name, the Luoshu Mapper design,
+    the Dynamic Yin-Yang Shell architecture, and the Reject Gate detection
+    theory are original intellectual property of 独立研究者，知白. This License
+    does not grant any trademark rights.
+    道体(DaoTi)名称、玄盾(XuanDun)名称、洛书映射器设计、动态阴阳壳架构以及
+    拒绝门检测理论是 独立研究者，知白 的原创知识产权。本许可证不授予任何商标权利。
+5. PATENT NON-ASSERTION (FOR PUBLIC ASSETS ONLY) | 专利不主张（仅限公共资产）
+--------------------------------------------------------------------------------
+5.1 With respect to the Repository Assets only, 独立研究者，知白
+    agrees not to assert any patent claims against licensees for
+    their use of the Repository Assets in accordance with this License, provided
+    such use does not involve unauthorized access to Architecture Source Code.
+    仅就仓库资产而言，独立研究者，知白 同意不对被许可方依据本许可证
+    使用仓库资产的行为主张任何专利权利，前提是该使用不涉及未经授权的架构源码访问。
+5.2 This Section 5 does not apply to Architecture Source Code.
+    本第 5 条不适用于架构源码。
+6. DISCLAIMER OF WARRANTY | 免责声明
+--------------------------------------------------------------------------------
+THE REPOSITORY ASSETS AND DOCUMENTATION ARE PROVIDED "AS IS", WITHOUT WARRANTY
+OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+仓库资产与文档按"原样"提供，不附带任何形式的明示或默示保证，包括但不限于对
+适销性、特定用途适用性和不侵权的保证。
+7. LIMITATION OF LIABILITY | 责任限制
+--------------------------------------------------------------------------------
+IN NO EVENT SHALL 独立研究者，知白 BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY ARISING FROM THE USE OF THE REPOSITORY ASSETS OR DOCUMENTATION.
+在任何情况下，独立研究者，知白 均不对因使用仓库资产或文档而产生的任何索赔、
+损害或其他责任承担责任。
+8. GOVERNING LAW AND JURISDICTION | 管辖法律与司法管辖
+--------------------------------------------------------------------------------
+8.1 This License shall be governed by and construed in accordance with the
+    laws of the People's Republic of China.
+    本许可证受中华人民共和国法律管辖并据其解释。
+8.2 Any dispute arising from this License shall be subject to the exclusive
+    jurisdiction of the courts of the People's Republic of China.
+    因本许可证产生的任何争议应受中华人民共和国法院的专属管辖。
+8.3 In case of any discrepancy between the Chinese and English versions,
+    the Chinese version shall prevail.
+    中英文版本如有歧义，以中文版本为准。
+9. CONTACT | 联系方式
+--------------------------------------------------------------------------------
+For license inquiries and Architecture Source Code access requests:
+许可咨询与架构源码获取请求：
+    独立研究者，知白
+    联系人：知白
+    Email: spring60@vip.qq.com
+    Website: sfang.cc
+    Repository: https://github.com/zhibaiYingChuan/xuandun
+================================================================================
+END OF LICENSE | 许可证结束
+================================================================================

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daoti-xuandun"
+version = "1.0.0"
+description = "道体·玄盾 - 轻量级AI运行时安全网关"
+readme = "README.md"
+authors = [{ name = "Small Loong" }]
+license = { text = "MIT" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+requires-python = ">=3.10"
+
+[project.urls]
+Homepage = "https://github.com/smallloong/daoti-xuandun"
+Repository = "https://github.com/smallloong/daoti-xuandun.git"
+
+[project.optional-dependencies]
+torch = ["torch>=2.0.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-xdist",
+    "mypy>=1.0",
+    "black>=23.0",
+    "isort>=5.12",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "tests"]
+
+[tool.mypy]
+ignore_missing_imports = true
+python_version = "3.10"

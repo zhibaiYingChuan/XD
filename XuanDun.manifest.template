@@ -1,0 +1,58 @@
+# 道体·玄盾 Gramine (SGX) Manifest 模板
+# 用于将 daoti-xuandun 运行在 Intel SGX enclave 中
+#
+# 使用方法：
+#   1. 安装 Gramine: https://gramine.readthedocs.io/
+#   2. 生成密钥: gramine-sgx-gen-private-key
+#   3. 生成 manifest: gramine-manifest -Dlog_level=error XuanDun.manifest.template XuanDun.manifest
+#   4. 签名: gramine-sgx-sign --manifest XuanDun.manifest --output XuanDun.sig
+#   5. 运行: gramine-sgx XuanDun
+
+loader.entrypoint = "{{ gramine.libos }}"
+loader.argv = [
+    "{{ gramine.libos }}",
+    "/usr/bin/python3",
+    "serve.py",
+]
+
+loader.env.LD_LIBRARY_PATH = "/lib:/usr/lib:/usr/local/lib"
+loader.env.PYTHONPATH = "/daoti_xuandun/src"
+loader.env.PYTHONUNBUFFERED = "1"
+
+# 网络访问（提供 HTTP API）
+sys.insecure__allow_all_networking = "1"
+
+# 文件系统挂载
+# 注意：需要根据实际部署环境调整路径
+fs.mount.entry = [
+    { path = "/usr/bin/python3", uri = "file:///usr/bin/python3" },
+    { path = "/usr/lib", uri = "file:///usr/lib" },
+    { path = "/usr/local/lib", uri = "file:///usr/local/lib" },
+    { path = "/lib", uri = "file:///lib" },
+    { path = "/serve.py", uri = "file:///path/to/serve.py" },
+    { path = "/daoti_xuandun", uri = "file:///path/to/src/daoti_xuandun" },
+]
+
+# SGX 配置
+sgx.enclave_size = "1G"
+sgx.max_threads = 32
+sgx.remote_attestation = "none"
+
+# 可选：启用远程证明
+# sgx.remote_attestation = "dcap"
+# sgx.ra_client_spid = "your_spid"
+# sgx.ra_client_linkable = "1"
+
+# 信任文件
+sgx.trusted_files = [
+    "file:///usr/bin/python3",
+    "file:///serve.py",
+    "file:///daoti_xuandun/__init__.py",
+    "file:///daoti_xuandun/config.py",
+    "file:///daoti_xuandun/types.py",
+    "file:///daoti_xuandun/reject_gate.py",
+    "file:///daoti_xuandun/dynamic_shell.py",
+    "file:///daoti_xuandun/ancient_mapper.py",
+    "file:///daoti_xuandun/timing_checker.py",
+    "file:///daoti_xuandun/xuandun.py",
+]

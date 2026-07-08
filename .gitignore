@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Nuitka build artifacts
+*.build/
+*.dist/
+*.onefile-build/
+src/daoti_xuandun/_key_generated.py
+
+# Rust / Tauri
+desktop/xuandun-desktop/src-tauri/target/
+desktop/xuandun-desktop/node_modules/
+desktop/xuandun-desktop/dist/
+desktop/xuandun-desktop/src-tauri/binaries/*
+!desktop/xuandun-desktop/src-tauri/binaries/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop_test_report.txt
+test_report.json
+security_stress_report.json
+pylint_output.txt
+
+# Logs
+*.log
+
+# Build outputs (kept out of git, released via GitHub Releases)
+benchmark_results/
+
+# Test coverage
+.coverage
+htmlcov/
+*.coverage
+
+# Industry benchmark runtime outputs (historical data, not source)
+industry_benchmarks/results/
+industry_benchmarks/feedback/
+full_output.txt
