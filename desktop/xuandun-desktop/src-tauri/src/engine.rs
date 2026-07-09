@@ -106,7 +106,11 @@ pub async fn send_protect_request(engine_url: &str, text: &str, session: &str, m
 pub async fn sync_mode_to_engine(engine_url: &str, mode: &str) -> Result<(), String> {
     let url = format!("{}/set-mode", engine_url);
     let body = serde_json::json!({ "mode": mode });
-    let _ = HTTP_CLIENT.post(&url).json(&body).send().await.map_err(|e| format!("Sync mode failed: {}", e))?;
+    let resp = HTTP_CLIENT.post(&url).json(&body).send().await
+        .map_err(|e| format!("Sync mode failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Sync mode HTTP error: {}", resp.status()));
+    }
     Ok(())
 }
 
@@ -127,6 +131,10 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
 
     if is_running && check_engine_health(&engine_url).await {
         return Ok(());
+    }
+
+    if is_running {
+        let _ = stop_engine(app);
     }
 
     start_engine_sidecar(app)?;
@@ -239,6 +247,9 @@ fn kill_process(pid: u32) -> Result<(), String> {
 }
 
 pub async fn monitor_engine_health(app: &AppHandle) {
+    let mut consecutive_failures: u32 = 0;
+    const MAX_FAILURES: u32 = 5;
+
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let engine_url = {
@@ -256,11 +267,24 @@ pub async fn monitor_engine_health(app: &AppHandle) {
         };
 
         if was_running && !healthy {
-            eprintln!("[XuanDun] Engine health check failed, attempting restart...");
+            if consecutive_failures >= MAX_FAILURES {
+                eprintln!("[XuanDun] Engine restart failed {} times, giving up", MAX_FAILURES);
+                if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                    s.running = false;
+                    s.healthy = false;
+                }
+                consecutive_failures = 0;
+                continue;
+            }
+
+            eprintln!("[XuanDun] Engine health check failed, attempting restart ({}/{})...",
+                consecutive_failures + 1, MAX_FAILURES);
+            let _ = stop_engine(app);
             if let Ok(()) = start_engine_sidecar(app) {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 if check_engine_health(&engine_url).await {
                     eprintln!("[XuanDun] Engine restarted successfully");
+                    consecutive_failures = 0;
                     if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                         s.healthy = true;
                         s.started_at = Some(Instant::now());
@@ -268,6 +292,7 @@ pub async fn monitor_engine_health(app: &AppHandle) {
                     continue;
                 }
             }
+            consecutive_failures += 1;
         }
 
         if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {

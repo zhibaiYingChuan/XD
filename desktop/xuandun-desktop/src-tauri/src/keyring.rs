@@ -21,7 +21,17 @@ pub fn delete_key() -> Result<(), String> {
 pub fn has_key() -> bool {
     let entry = match Entry::new(SERVICE_NAME, KEY_NAME) {
         Ok(e) => e,
-        Err(_) => return false,
+        Err(e) => {
+            eprintln!("[XuanDun] Keyring entry creation failed: {}", e);
+            return false;
+        }
     };
-    entry.get_password().is_ok()
+    match entry.get_password() {
+        Ok(_) => true,
+        Err(keyring::Error::NoEntry) => false,
+        Err(e) => {
+            eprintln!("[XuanDun] Keyring access error (treating as no key): {}", e);
+            false
+        }
+    }
 }

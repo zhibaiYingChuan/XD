@@ -402,41 +402,42 @@ th {{ background: #f5f5f5; }}
         false_positives = []
         false_negatives = []
 
-        original_debug = self.config.debug
-        self.config.debug = True
+        with self._protect_lock:
+            original_debug = self.config.debug
+            self.config.debug = True
 
-        try:
-            for i, text in enumerate(inputs):
-                result = self.protect(text, session_id=f"analyze_{i}")
-                expected = expected_labels[i] if expected_labels and i < len(expected_labels) else None
+            try:
+                for i, text in enumerate(inputs):
+                    result = self.protect(text, session_id=f"analyze_{i}")
+                    expected = expected_labels[i] if expected_labels and i < len(expected_labels) else None
 
-                entry = {
-                    "index": i,
-                    "input_preview": text[:80] + ("..." if len(text) > 80 else ""),
-                    "actual_decision": "allowed" if result.allowed else "rejected",
-                    "trust_level": result.trust_level.value if result.trust_level else "UNKNOWN",
-                    "domain_distance": round(result.domain_distance, 3) if result.domain_distance else None,
-                    "reason": self._interpret_debug_info(result.debug_info, result.allowed),
-                }
+                    entry = {
+                        "index": i,
+                        "input_preview": text[:80] + ("..." if len(text) > 80 else ""),
+                        "actual_decision": "allowed" if result.allowed else "rejected",
+                        "trust_level": result.trust_level.value if result.trust_level else "UNKNOWN",
+                        "domain_distance": round(result.domain_distance, 3) if result.domain_distance else None,
+                        "reason": self._interpret_debug_info(result.debug_info, result.allowed),
+                    }
 
-                if expected:
-                    entry["expected"] = expected
-                    is_misclassified = (
-                        (expected == "safe" and not result.allowed)
-                        or (expected == "attack" and result.allowed)
-                    )
-                    entry["misclassified"] = is_misclassified
+                    if expected:
+                        entry["expected"] = expected
+                        is_misclassified = (
+                            (expected == "safe" and not result.allowed)
+                            or (expected == "attack" and result.allowed)
+                        )
+                        entry["misclassified"] = is_misclassified
 
-                    if is_misclassified:
-                        misclassified.append(entry)
-                        if expected == "safe" and not result.allowed:
-                            false_positives.append(entry)
-                        elif expected == "attack" and result.allowed:
-                            false_negatives.append(entry)
+                        if is_misclassified:
+                            misclassified.append(entry)
+                            if expected == "safe" and not result.allowed:
+                                false_positives.append(entry)
+                            elif expected == "attack" and result.allowed:
+                                false_negatives.append(entry)
 
-                results.append(entry)
-        finally:
-            self.config.debug = original_debug
+                    results.append(entry)
+            finally:
+                self.config.debug = original_debug
 
         total = len(inputs)
         fp_count = len(false_positives)

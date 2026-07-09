@@ -92,7 +92,7 @@ class ChallengeState:
                 "allowed": False,
                 "trust_level": "REJECTED",
                 "decision": "REJECT",
-                "error": str(e),
+                "error": type(e).__name__,
             }
             self.total_blocked += 1
 

@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# Copyright (c) 2026 独立研究者，知白
+# 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
+
 """性能基准测试 — 实测各防御层级的延迟、吞吐量、QPS。
 
 活性防护哲学：性能不是猜测，而是实测。本模块在当前硬件环境下
@@ -185,8 +189,11 @@ def _detect_environment() -> dict:
     try:
         if platform.system() == "Windows":
             import subprocess
+            kwargs = {"text": True, "timeout": 5}
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             output = subprocess.check_output(
-                ["wmic", "cpu", "get", "Name"], text=True, timeout=5
+                ["wmic", "cpu", "get", "Name"], **kwargs
             )
             lines = [l.strip() for l in output.strip().split("\n") if l.strip()]
             if len(lines) > 1:

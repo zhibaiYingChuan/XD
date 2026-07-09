@@ -79,14 +79,14 @@ export default function Settings() {
   };
 
   const handleWarmup = async () => {
+    const safeTexts = warmupSafeText.split('\n').filter(t => t.trim());
+    const attackTexts = warmupAttackText.split('\n').filter(t => t.trim());
+    if (!safeTexts.length && !attackTexts.length) {
+      setWarmupStatus('请输入至少一条预热文本');
+      return;
+    }
+    setWarmupStatus('预热中...');
     try {
-      setWarmupStatus('预热中...');
-      const safeTexts = warmupSafeText.split('\n').filter(t => t.trim());
-      const attackTexts = warmupAttackText.split('\n').filter(t => t.trim());
-      if (!safeTexts.length && !attackTexts.length) {
-        setWarmupStatus('请输入至少一条预热文本');
-        return;
-      }
       const result = await api.warmup(safeTexts, attackTexts);
       await api.setConfig('warmup_safe_text', warmupSafeText);
       await api.setConfig('warmup_attack_text', warmupAttackText);
@@ -246,7 +246,7 @@ export default function Settings() {
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button className="btn btn-primary" onClick={handleWarmup}>提交预热</button>
-            {warmupStatus && <span style={{ fontSize: '0.85em', color: warmupStatus.startsWith('预热成功') ? '#22c55e' : '#ef4444' }}>{warmupStatus}</span>}
+            {warmupStatus && <span style={{ fontSize: '0.85em', color: warmupStatus.startsWith('预热成功') ? 'var(--success)' : 'var(--danger)' }}>{warmupStatus}</span>}
           </div>
         </div>
       </div>

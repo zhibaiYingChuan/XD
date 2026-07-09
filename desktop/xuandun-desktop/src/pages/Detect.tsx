@@ -84,7 +84,7 @@ export default function Detect() {
                 <span className="result-text">{result.allowed ? '通过' : '已拦截'}</span>
               </div>
               <div className="result-details">
-                <span>信任等级: <span className={`trust-badge trust-${result.trust_level.toLowerCase()}`}>{result.trust_level}</span></span>
+                <span>信任等级: <span className={`trust-badge trust-${(result.trust_level || 'unknown').toLowerCase()}`}>{result.trust_level || '—'}</span></span>
                 {result.reject_stage && <span>拦截阶段: {result.reject_stage}</span>}
                 {result.domain_distance != null && (
                   <span>域距离: {result.domain_distance.toFixed(4)}</span>

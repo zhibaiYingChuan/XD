@@ -242,8 +242,10 @@ def verify_binary_integrity() -> bool:
             return _verify_executable()
         else:
             return _verify_source_files()
-    except Exception:
-        return True
+    except Exception as e:
+        import sys as _sys
+        print(f"[XuanDun] Binary integrity check error: {e}", file=_sys.stderr)
+        return False
 
 
 def _get_hash_file_path(filename: str) -> str:

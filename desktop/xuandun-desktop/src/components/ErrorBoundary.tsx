@@ -42,7 +42,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               <details className="error-boundary-details">
                 <summary>错误详情</summary>
                 <pre>{this.state.error.message}</pre>
-                <pre>{this.state.error.stack}</pre>
+                {import.meta.env.DEV && <pre>{this.state.error.stack}</pre>}
               </details>
             )}
             <button className="btn btn-primary" onClick={this.handleReload}>

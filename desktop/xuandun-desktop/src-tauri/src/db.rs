@@ -92,10 +92,17 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let timestamp = chrono::Utc::now().to_rfc3339();
 
-        let prev_hash: String = conn.query_row(
+        let prev_hash: String = match conn.query_row(
             "SELECT hash FROM logs ORDER BY id DESC LIMIT 1",
             [], |row| row.get(0)
-        ).unwrap_or_default();
+        ) {
+            Ok(hash) => hash,
+            Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
+            Err(e) => {
+                eprintln!("[XuanDun] DB error fetching prev_hash: {}", e);
+                return Err(format!("DB error: {}", e));
+            }
+        };
 
         let hash_input = format!("{}{}{}{}{}{}{}",
             timestamp, text_preview, allowed as i32,

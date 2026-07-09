@@ -65,6 +65,7 @@ _start_time = time.time()
 _total_requests = 0
 _total_blocked = 0
 _stats_lock = threading.Lock()
+_shields_lock = threading.Lock()
 running = True
 
 _DEBUG_TOKEN = os.environ.get("XUANDUN_DEBUG_TOKEN", "")
@@ -90,13 +91,14 @@ def _attach_cors(resp):
 
 
 def _get_shield(mode: str) -> XuanDun:
-    if mode not in _shields:
-        logger.info("Creating new XuanDun instance for mode=%s", mode)
-        level = _MODE_MAP.get(mode, DefenseLevel.STANDARD)
-        config = XuanDunConfig.for_level(level)
-        _shields[mode] = XuanDun(config)
-        logger.info("XuanDun instance created for mode=%s", mode)
-    return _shields[mode]
+    with _shields_lock:
+        if mode not in _shields:
+            logger.info("Creating new XuanDun instance for mode=%s", mode)
+            level = _MODE_MAP.get(mode, DefenseLevel.STANDARD)
+            config = XuanDunConfig.for_level(level)
+            _shields[mode] = XuanDun(config)
+            logger.info("XuanDun instance created for mode=%s", mode)
+        return _shields[mode]
 
 
 @app.route("/health", methods=["GET"])
@@ -225,7 +227,7 @@ def protect():
             "domain_distance": None,
             "timing_distance": None,
             "fallback": True,
-            "message": f"Engine error: {str(e)}",
+            "message": f"Engine error: {type(e).__name__}",
         })
         return _attach_cors(resp)
 
@@ -275,7 +277,7 @@ def warmup():
         return jsonify({"status": "ok", "safe_count": len(safe_texts), "attack_count": len(attack_texts), "mode": mode})
     except Exception as e:
         logger.error("Warmup failed: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Warmup failed: {type(e).__name__}"}), 500
 
 
 def _signal_handler(signum, frame):

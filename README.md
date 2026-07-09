@@ -133,8 +133,8 @@ shield = XuanDun(mode="low_false_positive")
 |---------|---------|----------------------|----------|
 | 个人开发/测试 | 1核2G | 延迟~10ms，QPS~50 | <300MB |
 | 中小型API | 2核4G | 延迟~7ms，QPS~100 | <500MB |
-| 生产环境 | 4核8G | 延迟~5ms，QPS~200 | <1GB |
-| 高并发 | 8核16G+ | 延迟~4ms，QPS~500+ | <2GB |
+| 生产环境 | 4核8G | 延迟~6ms，QPS~160 | <1GB |
+| 高并发 | 8核16G+ | 延迟~5ms，QPS~400+ | <2GB |
 
 详细报告见 [docs/benchmarks.md](docs/benchmarks.md)。
 
@@ -187,7 +187,7 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE_
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/zhibaiYingChuan/XD.git
-cd xuandun
+cd XD
 
 # 2. 安装 Python 依赖
 pip install -e .
@@ -242,7 +242,7 @@ from daoti_xuandun import XuanDunConfig, DefenseLevel
 # BASIC — 内部低风险场景（防御最弱，延迟最低）
 config = XuanDunConfig.for_level(DefenseLevel.BASIC)
 
-# STANDARD — 生产环境推荐（基准测试实测 100% 攻击拒绝率，延迟~5ms）
+# STANDARD — 生产环境推荐（基准测试实测 100% 攻击拒绝率，延迟~6ms）
 config = XuanDunConfig.for_level(DefenseLevel.STANDARD)
 
 # STRICT — 高安全场景（更严格的结构异常检测，延迟~7ms）

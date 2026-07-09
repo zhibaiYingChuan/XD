@@ -182,7 +182,7 @@ python -m industry_benchmarks.run --apply-feedback industry_benchmarks/feedback/
 
 | 套件 | 文件 | 攻击类别数 | 说明 |
 |------|------|-----------|------|
-| OWASP LLM Top 10 | `industry_benchmarks/suites/owasp_llm_top10.json` | 15 | 覆盖 OWASP LLM Top 10 2025 全部风险类别 |
+| OWASP LLM Top 10 | `industry_benchmarks/suites/owasp_llm_top10.json` | 15 | 覆盖 OWASP LLM Top 10 2025 全部 10 类风险（含 15 个子类别） |
 | raucle-bench 兼容 | `industry_benchmarks/suites/raucle_bench_compat.json` | 5 | 与 raucle-bench 标准对齐，用于横向对比 |
 | 内部扩展 | `industry_benchmarks/suites/internal_extended.json` | 17 | 中文本地化 + 编码/混淆攻击 + 模型窃取 |
 

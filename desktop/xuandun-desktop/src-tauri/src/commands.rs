@@ -125,9 +125,10 @@ pub async fn protect(
                 fallback: false,
             })
         }
-        Err(_) => {
-            if let Err(e) = db.insert_audit("fallback", "engine_unavailable") {
-                eprintln!("[xuandun] insert_audit(fallback) failed: {}", e);
+        Err(e) => {
+            eprintln!("[xuandun] Engine protect error: {}", e);
+            if let Err(audit_err) = db.insert_audit("fallback", "engine_unavailable") {
+                eprintln!("[xuandun] insert_audit(fallback) failed: {}", audit_err);
             }
             Ok(ProtectResponse {
                 allowed: false,

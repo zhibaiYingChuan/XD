@@ -49,6 +49,7 @@ sgx.trusted_files = [
     "file:///challenge_api.py",
     "file:///daoti_xuandun/__init__.py",
     "file:///daoti_xuandun/config.py",
+    "file:///daoti_xuandun/types.py",
     "file:///daoti_xuandun/reject_gate.py",
     "file:///daoti_xuandun/dynamic_shell.py",
     "file:///daoti_xuandun/ancient_mapper.py",

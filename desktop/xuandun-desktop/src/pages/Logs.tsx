@@ -97,10 +97,10 @@ export default function Logs() {
               onChange={(e) => handleRejectStageChange(e.target.value)}
               style={{
                 padding: '4px 8px',
-                borderRadius: '6px',
-                border: '1px solid var(--border-color, #333)',
-                background: 'var(--bg-secondary, #1a1a2e)',
-                color: 'var(--text-primary, #e0e0e0)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border)',
+                background: 'var(--bg-card)',
+                color: 'var(--text-primary)',
                 fontSize: '0.85em',
               }}
             >
@@ -115,10 +115,10 @@ export default function Logs() {
               onChange={(e) => handleSearch(e.target.value)}
               style={{
                 padding: '4px 8px',
-                borderRadius: '6px',
-                border: '1px solid var(--border-color, #333)',
-                background: 'var(--bg-secondary, #1a1a2e)',
-                color: 'var(--text-primary, #e0e0e0)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border)',
+                background: 'var(--bg-card)',
+                color: 'var(--text-primary)',
                 fontSize: '0.85em',
                 flex: 1,
                 minWidth: '120px',
@@ -152,7 +152,7 @@ export default function Logs() {
                         {entry.allowed ? '放行' : '拦截'}
                       </span>
                     </td>
-                    <td><span className={`trust-badge trust-${entry.trust_level.toLowerCase()}`}>{entry.trust_level}</span></td>
+                    <td><span className={`trust-badge trust-${(entry.trust_level || 'unknown').toLowerCase()}`}>{entry.trust_level || '—'}</span></td>
                     <td>{entry.reject_stage ?? '--'}</td>
                     <td className="mono" style={{ fontSize: '0.8em' }}>{entry.session_id ?? '--'}</td>
                   </tr>

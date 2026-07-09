@@ -145,7 +145,7 @@ def _handle_tools_call(params: dict) -> dict:
             }
         except Exception as e:
             return {
-                "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                "content": [{"type": "text", "text": f"Protection check failed (type: {type(e).__name__})"}],
                 "isError": True,
             }
 
@@ -169,7 +169,7 @@ def _handle_tools_call(params: dict) -> dict:
             return {
                 "content": [{"type": "text", "text": json.dumps({
                     "status": "Offline",
-                    "error": str(e),
+                    "error": f"Connection failed ({type(e).__name__})",
                 }, ensure_ascii=False)}]
             }
 

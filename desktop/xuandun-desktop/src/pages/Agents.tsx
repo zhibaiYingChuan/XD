@@ -97,7 +97,7 @@ export default function Agents() {
                           </>
                         ) : agent.installed ? (
                           <>
-                            <span className="status-dot" style={{ background: '#eab308' }}></span>
+                            <span className="status-dot" style={{ background: 'var(--warning)' }}></span>
                             已安装
                           </>
                         ) : (
@@ -114,10 +114,10 @@ export default function Agents() {
                         onChange={(e) => handlePolicyChange(agent.name, e.target.value)}
                         style={{
                           padding: '2px 6px',
-                          borderRadius: '4px',
-                          border: '1px solid var(--border-color, #333)',
-                          background: 'var(--bg-secondary, #1a1a2e)',
-                          color: 'var(--text-primary, #e0e0e0)',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border)',
+                          background: 'var(--bg-card)',
+                          color: 'var(--text-primary)',
                           fontSize: '0.8em',
                         }}
                       >

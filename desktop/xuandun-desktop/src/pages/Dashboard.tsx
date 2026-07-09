@@ -159,8 +159,8 @@ export default function Dashboard() {
                 <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
                 <YAxis tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
                 <Tooltip />
-                <Area type="monotone" dataKey="requests" stroke="#3b82f6" fill="#3b82f620" name="请求" />
-                <Area type="monotone" dataKey="blocked" stroke="#ef4444" fill="#ef444420" name="拦截" />
+                <Area type="monotone" dataKey="requests" stroke="var(--accent)" fill="var(--accent-glow)" name="请求" />
+                <Area type="monotone" dataKey="blocked" stroke="var(--danger)" fill="var(--danger-bg)" name="拦截" />
               </AreaChart>
             </ResponsiveContainer>
           )}
@@ -179,7 +179,7 @@ export default function Dashboard() {
                 <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="var(--text-secondary, #999)" />
                 <YAxis tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
                 <Tooltip />
-                <Bar dataKey="count" fill="#8b5cf6" name="数量" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="count" fill="var(--accent)" name="数量" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -208,7 +208,7 @@ export default function Dashboard() {
                   <tr key={entry.id}>
                     <td className="mono">{new Date(entry.timestamp).toLocaleTimeString()}</td>
                     <td className="text-preview">{entry.text_preview}</td>
-                    <td><span className={`trust-badge trust-${entry.trust_level.toLowerCase()}`}>{entry.trust_level}</span></td>
+                    <td><span className={`trust-badge trust-${(entry.trust_level || 'unknown').toLowerCase()}`}>{entry.trust_level || '—'}</span></td>
                     <td>{entry.reject_stage ?? '--'}</td>
                   </tr>
                 ))}
