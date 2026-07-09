@@ -42,32 +42,38 @@ export default function Settings() {
   };
 
   const handleModeChange = async (newMode: string) => {
+    const oldMode = mode;
     setMode(newMode);
     try {
       await api.setMode(newMode);
       await api.setConfig('mode', newMode);
       showMessage('success', '模式已更新');
     } catch {
+      setMode(oldMode);
       showMessage('error', '模式更新失败');
     }
   };
 
   const handleAutoStartChange = async (val: boolean) => {
+    const oldVal = autoStart;
     setAutoStart(val);
     try {
       await api.setConfig('auto_start', val ? 'true' : 'false');
       showMessage('success', '设置已保存');
     } catch {
+      setAutoStart(oldVal);
       showMessage('error', '设置保存失败');
     }
   };
 
   const handleInterceptTrafficChange = async (val: boolean) => {
+    const oldVal = interceptTraffic;
     setInterceptTraffic(val);
     try {
       await api.setConfig('intercept_traffic', val ? 'true' : 'false');
       showMessage('success', '设置已保存');
     } catch {
+      setInterceptTraffic(oldVal);
       showMessage('error', '设置保存失败');
     }
   };

@@ -119,6 +119,7 @@ class XuanDun:
         self._global_requests: int = 0
         self._global_window_start: float = time.monotonic()
         self._rate_lock = threading.Lock()
+        self._protect_lock = threading.RLock()
         self._entropy_check_counter: int = 0
         self._rng = np.random.default_rng()
         self._auto_warmed: bool = False
@@ -298,9 +299,10 @@ class XuanDun:
         Args:
             safe_texts: 安全域文本样本列表。
         """
-        if self.domain_awareness is not None:
-            for text in safe_texts:
-                self.domain_awareness.seed_prototype(text)
+        with self._protect_lock:
+            if self.domain_awareness is not None:
+                for text in safe_texts:
+                    self.domain_awareness.seed_prototype(text)
 
     def recommend_config(self, output_format: str = "dict") -> Union[dict, str]:
         """基于当前域档案自动推荐配置参数。
@@ -950,6 +952,11 @@ th {{ background: #f5f5f5; }}
         Returns:
             ProtectResult 包含是否允许、信任等级、输出符号序列等信息。
         """
+        with self._protect_lock:
+            return self._protect_impl(raw_input, session_id)
+
+    def _protect_impl(self, raw_input: Union[str, Vector], session_id: str = "default") -> ProtectResult:
+        """protect() 的内部实现，由 protect() 持锁调用。"""
         timing_distance = None
         trust_level = TrustLevel.UNKNOWN
         domain_distance = None

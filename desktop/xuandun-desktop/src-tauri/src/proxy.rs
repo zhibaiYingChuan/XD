@@ -78,20 +78,23 @@ async fn handle_proxy_connection(
         return Ok(());
     }
 
-    let request_str = String::from_utf8_lossy(&buf[..n]);
-    let first_line = request_str.lines().next().unwrap_or("");
+    let raw = &buf[..n];
+    let first_line = std::str::from_utf8(raw)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        handle_connect_tunnel(client, first_line, &buf[..n]).await
+        handle_connect_tunnel(client, first_line).await
     } else {
-        handle_http_request(client, &request_str, &buf[..n], app).await
+        handle_http_request(client, raw, app).await
     }
 }
 
 async fn handle_connect_tunnel(
     mut client: tokio::net::TcpStream,
     first_line: &str,
-    _raw: &[u8],
 ) -> Result<(), String> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -125,11 +128,18 @@ async fn handle_connect_tunnel(
 
 async fn handle_http_request(
     mut client: tokio::net::TcpStream,
-    request_str: &str,
-    _raw: &[u8],
+    raw: &[u8],
     app: &AppHandle,
 ) -> Result<(), String> {
-    let first_line = request_str.lines().next().unwrap_or("");
+    let header_end = find_header_end(raw);
+    let header_end = match header_end {
+        Some(idx) => idx,
+        None => return Err("Malformed HTTP request: no header terminator".to_string()),
+    };
+
+    let headers_str = std::str::from_utf8(&raw[..header_end])
+        .map_err(|e| format!("Invalid UTF-8 in headers: {}", e))?;
+    let first_line = headers_str.lines().next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 3 {
         return Err("Invalid HTTP request".to_string());
@@ -145,33 +155,33 @@ async fn handle_http_request(
 
     let is_llm_request = LLM_DOMAINS.iter().any(|d| host == *d || host.ends_with(&format!(".{}", d)));
 
+    let body_bytes = &raw[header_end + 4..];
+
     if is_llm_request && method == "POST" {
-        if let Some(body_start) = request_str.find("\r\n\r\n") {
-            let body = &request_str[body_start + 4..];
-            if let Some(prompt_text) = extract_prompt_from_body(body) {
-                let engine_url = {
-                    let state = app.state::<std::sync::Mutex<crate::engine::EngineState>>();
-                    let s = state.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-                    s.get_engine_url()
-                };
+        let body_str = String::from_utf8_lossy(body_bytes);
+        if let Some(prompt_text) = extract_prompt_from_body(&body_str) {
+            let engine_url = {
+                let state = app.state::<std::sync::Mutex<crate::engine::EngineState>>();
+                let s = state.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+                s.get_engine_url()
+            };
 
-                let result = crate::engine::send_protect_request(&engine_url, &prompt_text, "proxy", "balanced").await;
-                if let Ok(r) = result {
-                    if !r.allowed {
-                        eprintln!("[XuanDun] Proxy blocked request to {}: trust_level={}", host, r.trust_level);
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{\"error\":\"Blocked by XuanDun\",\"trust_level\":\"{}\"}}",
-                            r.trust_level
-                        );
-                        client.write_all(response.as_bytes()).await.map_err(|e| e.to_string())?;
+            let result = crate::engine::send_protect_request(&engine_url, &prompt_text, "proxy", "balanced").await;
+            if let Ok(r) = result {
+                if !r.allowed {
+                    eprintln!("[XuanDun] Proxy blocked request to {}: trust_level={}", host, r.trust_level);
+                    let response = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{\"error\":\"Blocked by XuanDun\",\"trust_level\":\"{}\"}}",
+                        r.trust_level
+                    );
+                    client.write_all(response.as_bytes()).await.map_err(|e| e.to_string())?;
 
-                        let _ = app.notification()
-                            .builder()
-                            .title("道体·玄盾 - 攻击拦截")
-                            .body(&format!("拦截发往 {} 的恶意请求，信任等级: {}", host, r.trust_level))
-                            .show();
-                        return Ok(());
-                    }
+                    let _ = app.notification()
+                        .builder()
+                        .title("道体·玄盾 - 攻击拦截")
+                        .body(&format!("拦截发往 {} 的恶意请求，信任等级: {}", host, r.trust_level))
+                        .show();
+                    return Ok(());
                 }
             }
         }
@@ -181,8 +191,11 @@ async fn handle_http_request(
         .await
         .map_err(|e| format!("Connect to {}:{} failed: {}", host, port, e))?;
 
-    let rewritten_request = rewrite_request(request_str, host, path);
-    server.write_all(rewritten_request.as_bytes()).await.map_err(|e| e.to_string())?;
+    let rewritten_headers = rewrite_headers(headers_str, host, path);
+    server.write_all(rewritten_headers.as_bytes()).await.map_err(|e| e.to_string())?;
+    if !body_bytes.is_empty() {
+        server.write_all(body_bytes).await.map_err(|e| e.to_string())?;
+    }
 
     let mut response_buf = vec![0u8; 65536];
     let mut total_written = 0usize;
@@ -217,12 +230,21 @@ async fn handle_http_request(
     Ok(())
 }
 
-fn rewrite_request(request_str: &str, host: &str, path: &str) -> String {
-    let mut lines = request_str.lines();
+fn find_header_end(raw: &[u8]) -> Option<usize> {
+    for i in 0..raw.len().saturating_sub(3) {
+        if raw[i] == b'\r' && raw[i + 1] == b'\n' && raw[i + 2] == b'\r' && raw[i + 3] == b'\n' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn rewrite_headers(headers_str: &str, host: &str, path: &str) -> String {
+    let mut lines = headers_str.lines();
     let first_line = lines.next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 3 {
-        return request_str.to_string();
+        return format!("{}\r\n\r\n", headers_str);
     }
 
     let method = parts[0];
@@ -231,7 +253,6 @@ fn rewrite_request(request_str: &str, host: &str, path: &str) -> String {
 
     for line in lines {
         if line.is_empty() {
-            result.push_str("\r\n");
             break;
         }
         let lower = line.to_lowercase();
@@ -244,14 +265,7 @@ fn rewrite_request(request_str: &str, host: &str, path: &str) -> String {
         }
     }
 
-    let body_start = request_str.find("\r\n\r\n");
-    if let Some(idx) = body_start {
-        let body = &request_str[idx + 4..];
-        if !body.is_empty() {
-            result.push_str(body);
-        }
-    }
-
+    result.push_str("\r\n");
     result
 }
 
