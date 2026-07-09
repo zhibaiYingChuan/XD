@@ -71,6 +71,8 @@ def build_engine():
         target = "x86_64-pc-windows-msvc"
         ext = ".exe"
     elif system == "darwin":
+        if machine in ("arm64", "aarch64"):
+            machine = "aarch64"
         target = f"{machine}-apple-darwin"
         ext = ""
     else:
