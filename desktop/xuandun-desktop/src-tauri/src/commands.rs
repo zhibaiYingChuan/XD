@@ -93,13 +93,15 @@ pub async fn protect(
 
     match result {
         Ok(r) => {
-            let _ = db.insert_log(
+            if let Err(e) = db.insert_log(
                 safe_preview(&req.text, 50),
                 r.allowed,
                 &r.trust_level,
                 r.reject_stage.as_deref(),
                 Some(&req.session),
-            );
+            ) {
+                eprintln!("[xuandun] insert_log failed: {}", e);
+            }
             {
                 let mut s = state.lock().map_err(|e| e.to_string())?;
                 s.record_result(&req.text, &r);
@@ -110,7 +112,9 @@ pub async fn protect(
                     .title("道体·玄盾 - 攻击拦截")
                     .body(&format!("检测到恶意输入，信任等级: {}", r.trust_level))
                     .show();
-                let _ = db.insert_audit("block", &format!("trust_level={}", r.trust_level));
+                if let Err(e) = db.insert_audit("block", &format!("trust_level={}", r.trust_level)) {
+                    eprintln!("[xuandun] insert_audit(block) failed: {}", e);
+                }
             }
             Ok(ProtectResponse {
                 allowed: r.allowed,
@@ -122,7 +126,9 @@ pub async fn protect(
             })
         }
         Err(_) => {
-            let _ = db.insert_audit("fallback", "engine_unavailable");
+            if let Err(e) = db.insert_audit("fallback", "engine_unavailable") {
+                eprintln!("[xuandun] insert_audit(fallback) failed: {}", e);
+            }
             Ok(ProtectResponse {
                 allowed: false,
                 trust_level: "BLOCKED".to_string(),
@@ -149,9 +155,15 @@ pub async fn set_mode(
         let s = state.lock().map_err(|e| e.to_string())?;
         s.get_engine_url()
     };
-    let _ = sync_mode_to_engine(&engine_url, &mode).await;
-    let _ = db.set_config("mode", &mode);
-    let _ = db.insert_audit("mode_change", &mode);
+    if let Err(e) = sync_mode_to_engine(&engine_url, &mode).await {
+        eprintln!("[xuandun] sync_mode_to_engine failed: {}", e);
+    }
+    if let Err(e) = db.set_config("mode", &mode) {
+        eprintln!("[xuandun] set_config(mode) failed: {}", e);
+    }
+    if let Err(e) = db.insert_audit("mode_change", &mode) {
+        eprintln!("[xuandun] insert_audit(mode_change) failed: {}", e);
+    }
     Ok(())
 }
 
@@ -236,7 +248,9 @@ pub async fn warmup(
         .map_err(|e| format!("Warmup request failed: {}", e))?;
 
     let result: serde_json::Value = resp.json().await.map_err(|e| format!("Parse response failed: {}", e))?;
-    let _ = app.state::<Database>().insert_audit("warmup", &format!("safe={}, attack={}", req.safe_texts.len(), req.attack_texts.len()));
+    if let Err(e) = app.state::<Database>().insert_audit("warmup", &format!("safe={}, attack={}", req.safe_texts.len(), req.attack_texts.len())) {
+        eprintln!("[xuandun] insert_audit(warmup) failed: {}", e);
+    }
     Ok(result)
 }
 

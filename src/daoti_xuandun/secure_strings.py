@@ -18,7 +18,12 @@ except ImportError:
 def _get_key() -> bytes:
     global _KEY
     if _KEY is None:
-        _KEY = os.environ.get("XUANDUN_DEV_KEY", "dev-fallback-key-do-not-use-in-production").encode("utf-8").ljust(32, b"\x00")[:32]
+        key_str = os.environ.get("XUANDUN_DEV_KEY")
+        if not key_str:
+            import sys
+            sys.stderr.write("[XuanDun] WARNING: XUANDUN_DEV_KEY not set, using insecure fallback key\n")
+            key_str = "dev-fallback-key-do-not-use-in-production"
+        _KEY = key_str.encode("utf-8").ljust(32, b"\x00")[:32]
     return _KEY
 
 

@@ -329,7 +329,7 @@ def main():
     try:
         from waitress import serve
         logger.info("Using waitress production WSGI server")
-        serve(app, host='127.0.0.1', port=args.port, threads=4)
+        serve(app, host=args.host, port=args.port, threads=4)
     except ImportError:
         logger.warning("waitress not available, falling back to Flask development server")
         app.run(host=args.host, port=args.port, threaded=True, debug=False)

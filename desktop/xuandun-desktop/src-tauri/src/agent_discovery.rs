@@ -172,7 +172,3 @@ pub async fn discover() -> Result<Vec<AgentInfo>, String> {
         Ok(results)
     }).await.map_err(|e| e.to_string())?
 }
-
-pub fn get_agent_policy(agent_name: &str) -> Option<&'static str> {
-    KNOWN_AGENTS.iter().find(|a| a.name == agent_name).map(|a| a.default_mode)
-}

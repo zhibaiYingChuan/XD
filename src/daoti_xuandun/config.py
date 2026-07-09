@@ -8,6 +8,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+import os
 
 from .secure_strings import secure_value
 
@@ -150,9 +151,11 @@ class XuanDunConfig:
 
     def __post_init__(self):
         if self.shell_key is None:
-            self.shell_key = b"daoti_xuandun_16"
+            env_key = os.environ.get("XUANDUN_SHELL_KEY")
+            self.shell_key = env_key.encode("utf-8") if env_key else b"daoti_xuandun_16"
         if self.mapping_key is None:
-            self.mapping_key = b"ancient_map_16b!"
+            env_key = os.environ.get("XUANDUN_MAPPING_KEY")
+            self.mapping_key = env_key.encode("utf-8") if env_key else b"ancient_map_16b!"
 
     @classmethod
     def for_level(cls, level: DefenseLevel, **overrides) -> "XuanDunConfig":

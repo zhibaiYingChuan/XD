@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/tauriApi';
 
 interface WizardProps {
@@ -8,20 +8,22 @@ interface WizardProps {
 export default function Wizard({ onComplete }: WizardProps) {
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState('balanced');
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     const checkWizard = async () => {
       try {
         const completed = await api.getConfig('wizard_completed');
         if (completed === 'true') {
-          onComplete();
+          onCompleteRef.current();
         }
       } catch {
         // ignore, show wizard
       }
     };
     checkWizard();
-  }, [onComplete]);
+  }, []);
 
   const handleFinish = async () => {
     try {
@@ -31,7 +33,7 @@ export default function Wizard({ onComplete }: WizardProps) {
     } catch {
       // ignore
     }
-    onComplete();
+    onCompleteRef.current();
   };
 
   const steps = [

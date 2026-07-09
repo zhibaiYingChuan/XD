@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "道体·玄盾",
         "width": 480,
         "height": 600,

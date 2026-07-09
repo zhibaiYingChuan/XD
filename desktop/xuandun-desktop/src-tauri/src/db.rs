@@ -17,12 +17,6 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigEntry {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashChainReport {
     pub total_entries: u64,
     pub verified_entries: u64,
@@ -161,11 +155,14 @@ impl Database {
 
     pub fn get_config(&self, key: &str) -> Result<Option<String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let result = conn.query_row(
+        match conn.query_row(
             "SELECT value FROM config WHERE key = ?1",
             [key], |row| row.get(0)
-        ).ok();
-        Ok(result)
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     pub fn set_config(&self, key: &str, value: &str) -> Result<(), String> {
@@ -204,23 +201,25 @@ impl Database {
     }
 
     pub fn restore_snapshot(&self, snapshot_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let config_json: String = conn.query_row(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let config_json: String = tx.query_row(
             "SELECT config_json FROM config_snapshots WHERE id = ?1",
             [snapshot_id], |row| row.get(0)
         ).map_err(|e| format!("Snapshot not found: {}", e))?;
         let pairs: Vec<(String, String)> = serde_json::from_str(&config_json)
             .map_err(|e| format!("Invalid snapshot data: {}", e))?;
-        conn.execute("DELETE FROM config", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM config", []).map_err(|e| e.to_string())?;
         for (key, value) in &pairs {
-            conn.execute("INSERT INTO config (key, value) VALUES (?1, ?2)", params![key, value])
+            tx.execute("INSERT INTO config (key, value) VALUES (?1, ?2)", params![key, value])
                 .map_err(|e| e.to_string())?;
         }
         let timestamp = chrono::Utc::now().to_rfc3339();
-        conn.execute(
+        tx.execute(
             "INSERT INTO audit (timestamp, event_type, detail) VALUES (?1, ?2, ?3)",
             params![timestamp, "snapshot_restore", format!("Restored snapshot id={}", snapshot_id)],
         ).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 

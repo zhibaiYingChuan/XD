@@ -147,7 +147,8 @@ def _handle_tools_call(params: dict) -> dict:
     elif name == "xuandun_status":
         try:
             import urllib.request
-            req = urllib.request.Request("http://localhost:18765/status", method="GET")
+            engine_url = os.environ.get("XUANDUN_ENGINE_URL", "http://localhost:18765")
+            req = urllib.request.Request(f"{engine_url}/status", method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
                 engine_status = json.loads(resp.read().decode("utf-8"))
             return {

@@ -48,7 +48,9 @@ pub fn create_tray(app: &AppHandle) -> Result<TrayIcon, String> {
                         let _ = s.set_mode("high_security");
                     }
                     let engine_url = app.state::<std::sync::Mutex<crate::engine::EngineState>>().lock().ok().map(|s| s.get_engine_url()).unwrap_or_default();
-                    let _ = tauri::async_runtime::block_on(crate::engine::sync_mode_to_engine(&engine_url, "high_security"));
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::engine::sync_mode_to_engine(&engine_url, "high_security").await;
+                    });
                     if let Some(db) = app.try_state::<crate::db::Database>() {
                         let _ = db.set_config("mode", "high_security");
                     }
@@ -61,7 +63,9 @@ pub fn create_tray(app: &AppHandle) -> Result<TrayIcon, String> {
                         let _ = s.set_mode("balanced");
                     }
                     let engine_url = app.state::<std::sync::Mutex<crate::engine::EngineState>>().lock().ok().map(|s| s.get_engine_url()).unwrap_or_default();
-                    let _ = tauri::async_runtime::block_on(crate::engine::sync_mode_to_engine(&engine_url, "balanced"));
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::engine::sync_mode_to_engine(&engine_url, "balanced").await;
+                    });
                     if let Some(db) = app.try_state::<crate::db::Database>() {
                         let _ = db.set_config("mode", "balanced");
                     }
@@ -74,7 +78,9 @@ pub fn create_tray(app: &AppHandle) -> Result<TrayIcon, String> {
                         let _ = s.set_mode("low_false_positive");
                     }
                     let engine_url = app.state::<std::sync::Mutex<crate::engine::EngineState>>().lock().ok().map(|s| s.get_engine_url()).unwrap_or_default();
-                    let _ = tauri::async_runtime::block_on(crate::engine::sync_mode_to_engine(&engine_url, "low_false_positive"));
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::engine::sync_mode_to_engine(&engine_url, "low_false_positive").await;
+                    });
                     if let Some(db) = app.try_state::<crate::db::Database>() {
                         let _ = db.set_config("mode", "low_false_positive");
                     }
@@ -101,15 +107,4 @@ pub fn create_tray(app: &AppHandle) -> Result<TrayIcon, String> {
         .map_err(|e| e.to_string())?;
 
     Ok(tray)
-}
-
-pub fn update_tray_tooltip(tray: &TrayIcon, healthy: bool, mode: &str) {
-    let status = if healthy { "守护中" } else { "引擎异常" };
-    let mode_label = match mode {
-        "high_security" => "高安全",
-        "balanced" => "平衡",
-        "low_false_positive" => "低误报",
-        _ => mode,
-    };
-    let _ = tray.set_tooltip(Some(&format!("道体·玄盾 - {} [{}]", status, mode_label)));
 }
