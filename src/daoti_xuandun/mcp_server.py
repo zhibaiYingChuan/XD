@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# Copyright (c) 2026 独立研究者，知白
+# 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
+# 详见 LICENSE 文件
+
 """道体·玄盾 MCP Server。
 
 作为 MCP (Model Context Protocol) Server 运行，
@@ -15,9 +20,9 @@
 """
 
 import json
+import os
 import sys
 import uuid
-from typing import Any
 
 from daoti_xuandun import XuanDun, XuanDunConfig, DefenseLevel
 

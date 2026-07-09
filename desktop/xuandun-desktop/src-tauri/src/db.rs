@@ -80,7 +80,9 @@ impl Database {
         let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
         if user_version < 2 {
-            let _ = conn.execute("UPDATE logs SET hash_version = 1 WHERE hash_version = 2 AND length(hash) = 32", []);
+            if let Err(e) = conn.execute("UPDATE logs SET hash_version = 1 WHERE hash_version = 2 AND length(hash) = 32", []) {
+                eprintln!("[xuandun] hash_version migration failed: {}", e);
+            }
             conn.execute_batch("PRAGMA user_version = 2;").map_err(|e| e.to_string())?;
         }
         Ok(())

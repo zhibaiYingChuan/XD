@@ -152,10 +152,20 @@ class XuanDunConfig:
     def __post_init__(self):
         if self.shell_key is None:
             env_key = os.environ.get("XUANDUN_SHELL_KEY")
-            self.shell_key = env_key.encode("utf-8") if env_key else b"daoti_xuandun_16"
+            if env_key:
+                self.shell_key = env_key.encode("utf-8")
+            else:
+                import sys
+                sys.stderr.write("[XuanDun] WARNING: XUANDUN_SHELL_KEY not set, using insecure fallback key\n")
+                self.shell_key = b"daoti_xuandun_16"
         if self.mapping_key is None:
             env_key = os.environ.get("XUANDUN_MAPPING_KEY")
-            self.mapping_key = env_key.encode("utf-8") if env_key else b"ancient_map_16b!"
+            if env_key:
+                self.mapping_key = env_key.encode("utf-8")
+            else:
+                import sys
+                sys.stderr.write("[XuanDun] WARNING: XUANDUN_MAPPING_KEY not set, using insecure fallback key\n")
+                self.mapping_key = b"ancient_map_16b!"
 
     @classmethod
     def for_level(cls, level: DefenseLevel, **overrides) -> "XuanDunConfig":

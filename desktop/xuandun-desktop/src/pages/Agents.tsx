@@ -83,8 +83,8 @@ export default function Agents() {
                 </tr>
               </thead>
               <tbody>
-                {agents.map((agent, idx) => (
-                  <tr key={idx}>
+                {agents.map((agent) => (
+                  <tr key={agent.name}>
                     <td className="font-medium">{agent.name}</td>
                     <td className="mono">{agent.process_name || '--'}</td>
                     <td className="mono">{agent.pid ?? '--'}</td>

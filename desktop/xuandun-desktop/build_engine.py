@@ -117,7 +117,8 @@ def build_engine():
     env["PYTHONPATH"] = os.path.join(project_root, "src")
 
     print(f"Building: {' '.join(cmd)}")
-    result = subprocess.run(cmd, env=env, cwd=script_dir)
+    result = subprocess.run(cmd, env=env, cwd=script_dir,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     if result.returncode == 0:
         print(f"Build successful: {os.path.join(output_dir, output_name)}")

@@ -24,8 +24,11 @@ export default function Dashboard() {
   const [trustDist, setTrustDist] = useState<{ name: string; count: number }[]>([]);
   const prevRequests = useRef(0);
   const prevBlocked = useRef(0);
+  const fetchingRef = useRef(false);
 
   const fetchStatus = useCallback(async () => {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
     try {
       const s = await api.getStatus();
       setStatus(s);
@@ -45,6 +48,8 @@ export default function Dashboard() {
     } catch {
       setStatus(null);
       setError('无法连接到引擎');
+    } finally {
+      fetchingRef.current = false;
     }
   }, []);
 

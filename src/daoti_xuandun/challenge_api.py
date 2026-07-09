@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# Copyright (c) 2026 独立研究者，知白
+# 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
+# 详见 LICENSE 文件
+
 """道体·玄盾挑战赛API — 供外部安全研究者测试防御能力。
 
 启动方式：
@@ -163,6 +168,7 @@ class ChallengeHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="道体·玄盾挑战赛API")
     parser.add_argument("--port", type=int, default=8080, help="监听端口")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="监听地址（默认 127.0.0.1，设为 0.0.0.0 对外开放）")
     parser.add_argument("--level", type=str, default="STANDARD",
                         choices=["BASIC", "STANDARD", "STRICT", "PARANOID"],
                         help="防御层级")
@@ -170,8 +176,8 @@ def main():
 
     ChallengeHandler.state = ChallengeState(args.level)
 
-    server = HTTPServer(("0.0.0.0", args.port), ChallengeHandler)
-    print(f"道体·玄盾挑战赛API已启动: http://0.0.0.0:{args.port}")
+    server = HTTPServer((args.host, args.port), ChallengeHandler)
+    print(f"道体·玄盾挑战赛API已启动: http://{args.host}:{args.port}")
     print(f"防御层级: {args.level}")
     print("端点: POST /challenge | GET /status | GET /rules")
     try:

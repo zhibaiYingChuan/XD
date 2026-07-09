@@ -263,11 +263,10 @@ def warmup():
 
     global _shields
     mode = _default_mode
-    level = _MODE_MAP.get(mode, DefenseLevel.STANDARD)
 
     try:
         shield = XuanDun(
-            level=level,
+            mode=mode,
             warmup_safe=safe_texts if safe_texts else None,
             warmup_attacks=attack_texts if attack_texts else None,
         )

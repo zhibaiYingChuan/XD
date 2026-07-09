@@ -10,13 +10,19 @@ export default function Logs() {
   const [filter, setFilter] = useState<'all' | 'blocked' | 'allowed'>('all');
   const [rejectStageFilter, setRejectStageFilter] = useState<string>('all');
   const [searchText, setSearchText] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchText), 300);
+    return () => clearTimeout(timer);
+  }, [searchText]);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
     try {
       const filterAllowed = filter === 'all' ? undefined : filter === 'allowed';
-      const hasClientFilter = rejectStageFilter !== 'all' || searchText.trim() !== '';
+      const hasClientFilter = rejectStageFilter !== 'all' || debouncedSearch.trim() !== '';
 
       if (hasClientFilter) {
         const res = await api.getLogs(filterAllowed, 10000, 0);
@@ -24,8 +30,8 @@ export default function Logs() {
         if (rejectStageFilter !== 'all') {
           filtered = filtered.filter(e => e.reject_stage === rejectStageFilter);
         }
-        if (searchText.trim()) {
-          const q = searchText.toLowerCase();
+        if (debouncedSearch.trim()) {
+          const q = debouncedSearch.toLowerCase();
           filtered = filtered.filter(e =>
             e.text_preview.toLowerCase().includes(q) ||
             (e.session_id && e.session_id.toLowerCase().includes(q))
@@ -43,7 +49,7 @@ export default function Logs() {
     } finally {
       setLoading(false);
     }
-  }, [filter, offset, rejectStageFilter, searchText]);
+  }, [filter, offset, rejectStageFilter, debouncedSearch]);
 
   useEffect(() => {
     fetchLogs();

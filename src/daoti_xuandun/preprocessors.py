@@ -639,7 +639,7 @@ def try_decode_payloads(text: str) -> List[str]:
             decoded = base64.b64decode(stripped).decode('utf-8', errors='ignore')
             if decoded and len(decoded) >= 4:
                 results.append(decoded)
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
     if _HEX_PATTERN.match(stripped):
@@ -647,7 +647,7 @@ def try_decode_payloads(text: str) -> List[str]:
             decoded = bytes.fromhex(stripped).decode('utf-8', errors='ignore')
             if decoded and len(decoded) >= 4:
                 results.append(decoded)
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
     return results
