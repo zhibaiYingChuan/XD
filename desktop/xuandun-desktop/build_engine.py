@@ -85,7 +85,6 @@ def build_engine():
         "--onefile",
         "--remove-output",
         "--lto=yes",
-        "--strip",
         f"--output-filename={output_name}",
         f"--output-dir={output_dir}",
         "--enable-plugin=numpy",
@@ -100,7 +99,7 @@ def build_engine():
 
     if system == "windows":
         cmd.extend([
-            "--windows-disable-console",
+            "--windows-console-mode=disable",
             f"--windows-company-name=Daoti",
             f"--windows-product-name=XuanDun Engine",
             f"--windows-file-version=1.0.0",
