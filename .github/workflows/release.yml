@@ -63,6 +63,17 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ''
 
+      - name: Rename bundle files to ASCII
+        shell: bash
+        run: |
+          cd desktop/xuandun-desktop/src-tauri/target/release/bundle
+          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) | while read f; do
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            newbase=$(echo "$base" | sed 's/道体·玄盾/XuanDun/g')
+            [ "$base" != "$newbase" ] && mv "$f" "$dir/$newbase" && echo "Renamed: $base -> $newbase"
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

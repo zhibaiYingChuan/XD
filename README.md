@@ -23,11 +23,11 @@
 
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
-| Windows x64 | `道体·玄盾_1.0.0_x64-setup.exe` | NSIS 安装程序，支持中英文 |
-| macOS (Apple Silicon) | `道体·玄盾_1.0.0_aarch64.dmg` | M1/M2/M3 芯片 |
-| macOS (Intel) | `道体·玄盾_1.0.0_x64.dmg` | Intel 芯片 |
-| Linux x64 | `道体·玄盾_1.0.0_amd64.AppImage` | 便携版，无需安装 |
-| Linux x64 | `道体·玄盾_1.0.0_amd64.deb` | Debian/Ubuntu 包管理 |
+| Windows x64 | `XuanDun_1.0.0_x64-setup.exe` | NSIS 安装程序，支持中英文 |
+| macOS (Apple Silicon) | `XuanDun_1.0.0_aarch64.dmg` | M1/M2/M3 芯片 |
+| macOS (Intel) | `XuanDun_1.0.0_x64.dmg` | Intel 芯片 |
+| Linux x64 | `XuanDun_1.0.0_amd64.AppImage` | 便携版，无需安装 |
+| Linux x64 | `XuanDun_1.0.0_amd64.deb` | Debian/Ubuntu 包管理 |
 
 > **macOS 用户注意**：DMG 未签名（待 Apple Developer ID 申请后签名），首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。
 
