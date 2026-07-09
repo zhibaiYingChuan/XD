@@ -180,7 +180,7 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE_
 - **Python** 3.11+
 - **Rust** 1.75+（stable）
 - **Node.js** 20+
-- **Nuitka** 2.x（`pip install nuitka`）
+- **Nuitka** 4.x（`pip install nuitka`）
 
 ### 构建步骤
 

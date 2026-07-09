@@ -8,9 +8,7 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
-COPY run_benchmark.py .
 COPY industry_benchmarks/ industry_benchmarks/
-COPY scripts/ scripts/
 
 RUN pip install --no-cache-dir -e .
 

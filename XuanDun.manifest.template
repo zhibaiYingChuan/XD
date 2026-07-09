@@ -12,7 +12,7 @@ loader.entrypoint = "{{ gramine.libos }}"
 loader.argv = [
     "{{ gramine.libos }}",
     "/usr/bin/python3",
-    "serve.py",
+    "challenge_api.py",
 ]
 
 loader.env.LD_LIBRARY_PATH = "/lib:/usr/lib:/usr/local/lib"
@@ -29,7 +29,7 @@ fs.mount.entry = [
     { path = "/usr/lib", uri = "file:///usr/lib" },
     { path = "/usr/local/lib", uri = "file:///usr/local/lib" },
     { path = "/lib", uri = "file:///lib" },
-    { path = "/serve.py", uri = "file:///path/to/serve.py" },
+    { path = "/challenge_api.py", uri = "file:///path/to/challenge_api.py" },
     { path = "/daoti_xuandun", uri = "file:///path/to/src/daoti_xuandun" },
 ]
 
@@ -46,7 +46,7 @@ sgx.remote_attestation = "none"
 # 信任文件
 sgx.trusted_files = [
     "file:///usr/bin/python3",
-    "file:///serve.py",
+    "file:///challenge_api.py",
     "file:///daoti_xuandun/__init__.py",
     "file:///daoti_xuandun/config.py",
     "file:///daoti_xuandun/types.py",

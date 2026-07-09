@@ -17,7 +17,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(std::sync::Mutex::new(engine::EngineState::new()))
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()

@@ -8,9 +8,9 @@ version = "1.0.0"
 description = "道体·玄盾 - 轻量级AI运行时安全网关"
 readme = "README.md"
 authors = [{ name = "Small Loong" }]
-license = { text = "MIT" }
+license = { text = "DaoTi-Research-1.0 (core) + Apache-2.0 (periphery)" }
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

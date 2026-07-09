@@ -58,8 +58,6 @@ jobs:
       - name: Build Tauri app
         working-directory: desktop/xuandun-desktop
         run: npm run tauri build
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ''
 
       - name: Rename bundle files to ASCII
         shell: bash
