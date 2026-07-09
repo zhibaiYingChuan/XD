@@ -56,7 +56,7 @@
         "displayLanguageSelector": true
       }
     },
-    "macos": {
+    "macOS": {
       "signingIdentity": null,
       "providerShortName": null,
       "entitlements": null
@@ -65,9 +65,7 @@
       "deb": {
         "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
       },
-      "appimage": {
-        "bundle": true
-      }
+      "appimage": {}
     }
   },
   "plugins": {
