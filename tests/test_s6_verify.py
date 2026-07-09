@@ -1,6 +1,7 @@
 """S6-1 修复验证：中文 prompt injection 攻击关键词检测。"""
 import sys
-sys.path.insert(0, r"e:\smallloong\XuanDun\src")
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from daoti_xuandun import XuanDun, XuanDunConfig, DefenseLevel
 

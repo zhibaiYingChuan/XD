@@ -46,6 +46,7 @@ pub struct LogResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarmupRequest {
     pub safe_texts: Vec<String>,
     pub attack_texts: Vec<String>,

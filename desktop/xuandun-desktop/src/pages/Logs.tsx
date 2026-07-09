@@ -16,20 +16,28 @@ export default function Logs() {
     setLoading(true);
     try {
       const filterAllowed = filter === 'all' ? undefined : filter === 'allowed';
-      const res = await api.getLogs(filterAllowed, PAGE_SIZE, offset);
-      let filtered = res.entries;
-      if (rejectStageFilter !== 'all') {
-        filtered = filtered.filter(e => e.reject_stage === rejectStageFilter);
+      const hasClientFilter = rejectStageFilter !== 'all' || searchText.trim() !== '';
+
+      if (hasClientFilter) {
+        const res = await api.getLogs(filterAllowed, 10000, 0);
+        let filtered = res.entries;
+        if (rejectStageFilter !== 'all') {
+          filtered = filtered.filter(e => e.reject_stage === rejectStageFilter);
+        }
+        if (searchText.trim()) {
+          const q = searchText.toLowerCase();
+          filtered = filtered.filter(e =>
+            e.text_preview.toLowerCase().includes(q) ||
+            (e.session_id && e.session_id.toLowerCase().includes(q))
+          );
+        }
+        setEntries(filtered.slice(offset, offset + PAGE_SIZE));
+        setTotal(filtered.length);
+      } else {
+        const res = await api.getLogs(filterAllowed, PAGE_SIZE, offset);
+        setEntries(res.entries);
+        setTotal(res.total);
       }
-      if (searchText.trim()) {
-        const q = searchText.toLowerCase();
-        filtered = filtered.filter(e =>
-          e.text_preview.toLowerCase().includes(q) ||
-          (e.session_id && e.session_id.toLowerCase().includes(q))
-        );
-      }
-      setEntries(filtered);
-      setTotal(res.total);
     } catch {
       // ignore
     } finally {
@@ -138,7 +146,7 @@ export default function Logs() {
                         {entry.allowed ? '放行' : '拦截'}
                       </span>
                     </td>
-                    <td><span className={`trust-badge trust-${entry.trust_level}`}>{entry.trust_level}</span></td>
+                    <td><span className={`trust-badge trust-${entry.trust_level.toLowerCase()}`}>{entry.trust_level}</span></td>
                     <td>{entry.reject_stage ?? '--'}</td>
                     <td className="mono" style={{ fontSize: '0.8em' }}>{entry.session_id ?? '--'}</td>
                   </tr>

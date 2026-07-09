@@ -53,7 +53,7 @@ import { invoke } from '@tauri-apps/api/core';
 export const api = {
   getStatus: () => invoke<StatusResponse>('get_status'),
   protect: (text: string, session: string = 'default', mode: string = 'balanced') =>
-    invoke<ProtectResponse>('protect', { text, session, mode }),
+    invoke<ProtectResponse>('protect', { req: { text, session, mode } }),
   setMode: (mode: string) => invoke<void>('set_mode', { mode }),
   discoverAgents: () => invoke<AgentInfo[]>('discover_agents'),
   getLogs: (filterAllowed?: boolean, limit?: number, offset?: number) =>
@@ -63,7 +63,7 @@ export const api = {
   restartEngine: () => invoke<void>('restart_engine'),
   stopEngine: () => invoke<void>('stop_engine'),
   warmup: (safeTexts: string[], attackTexts: string[]) =>
-    invoke<any>('warmup', { safeTexts, attackTexts }),
+    invoke<any>('warmup', { req: { safeTexts, attackTexts } }),
   verifyAudit: () => invoke<HashChainReport>('verify_audit'),
   storeSecretKey: (key: string) => invoke<void>('store_secret_key', { key }),
   getSecretKey: () => invoke<string>('get_secret_key'),

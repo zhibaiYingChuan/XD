@@ -4,6 +4,7 @@
   --bg-card: #1a2332;
   --bg-hover: #1e293b;
   --border: #2a3a4e;
+  --border-color: #2a3a4e;
   --border-light: #334155;
   --text-primary: #e2e8f0;
   --text-secondary: #94a3b8;
@@ -37,7 +38,6 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
-  user-select: none;
 }
 
 .app-layout {

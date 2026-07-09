@@ -7,6 +7,7 @@ LABEL version="1.0.0"
 WORKDIR /app
 
 COPY pyproject.toml .
+COPY README.md .
 COPY src/ src/
 COPY industry_benchmarks/ industry_benchmarks/
 

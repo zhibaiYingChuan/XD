@@ -27,24 +27,26 @@ pub async fn start_proxy(app: AppHandle, port: u16) -> Result<(), String> {
     PROXY_RUNNING.store(true, Ordering::SeqCst);
     eprintln!("[XuanDun] Proxy started on 127.0.0.1:{}", port);
 
-    while PROXY_RUNNING.load(Ordering::SeqCst) {
-        tokio::select! {
-            result = listener.accept() => {
-                match result {
-                    Ok((stream, _addr)) => {
-                        let app = app.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_proxy_connection(stream, &app).await {
-                                eprintln!("[XuanDun] Proxy connection error: {}", e);
-                            }
-                        });
+    tokio::spawn(async move {
+        while PROXY_RUNNING.load(Ordering::SeqCst) {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _addr)) => {
+                            let app = app.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_proxy_connection(stream, &app).await {
+                                    eprintln!("[XuanDun] Proxy connection error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => eprintln!("[XuanDun] Proxy accept error: {}", e),
                     }
-                    Err(e) => eprintln!("[XuanDun] Proxy accept error: {}", e),
                 }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
         }
-    }
+    });
 
     Ok(())
 }

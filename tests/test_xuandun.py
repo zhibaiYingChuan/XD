@@ -112,8 +112,8 @@ class TestXuanDunIntegration:
         assert result.allowed is True
         assert result.final_output is not None
 
-    def test_timing_reject(self):
-        """时序校验拒绝异常。"""
+    def test_timing_warning(self):
+        """时序校验已降级为告警模式，仅记录距离不行使拒绝权。"""
         config = XuanDunConfig(
             hidden_dim=16,
             chaos_nursery_size=4,
@@ -127,8 +127,7 @@ class TestXuanDunIntegration:
         for _ in range(config.max_window_size):
             xuandun.protect("normal input here", session_id="timing")
         result = xuandun.protect("completely different abnormal exploit hack", session_id="timing")
-        assert result.allowed is False
-        assert result.reject_stage == "timing_checker"
+        assert result.allowed is True
 
     def test_seed_method(self):
         """播种方法正常工作。auto_warmup 会额外播种预热样本。"""

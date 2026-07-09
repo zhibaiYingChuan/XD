@@ -16,7 +16,7 @@ loader.argv = [
 ]
 
 loader.env.LD_LIBRARY_PATH = "/lib:/usr/lib:/usr/local/lib"
-loader.env.PYTHONPATH = "/daoti_xuandun/src"
+loader.env.PYTHONPATH = "/"
 loader.env.PYTHONUNBUFFERED = "1"
 
 # 网络访问（提供 HTTP API）
@@ -49,10 +49,13 @@ sgx.trusted_files = [
     "file:///challenge_api.py",
     "file:///daoti_xuandun/__init__.py",
     "file:///daoti_xuandun/config.py",
-    "file:///daoti_xuandun/types.py",
     "file:///daoti_xuandun/reject_gate.py",
     "file:///daoti_xuandun/dynamic_shell.py",
     "file:///daoti_xuandun/ancient_mapper.py",
+    "file:///daoti_xuandun/luoshu_mapper.py",
+    "file:///daoti_xuandun/secure_strings.py",
+    "file:///daoti_xuandun/atlas_mapping.py",
+    "file:///daoti_xuandun/preprocessors.py",
     "file:///daoti_xuandun/timing_checker.py",
     "file:///daoti_xuandun/xuandun.py",
 ]

@@ -203,7 +203,7 @@ export default function Dashboard() {
                   <tr key={entry.id}>
                     <td className="mono">{new Date(entry.timestamp).toLocaleTimeString()}</td>
                     <td className="text-preview">{entry.text_preview}</td>
-                    <td><span className={`trust-badge trust-${entry.trust_level}`}>{entry.trust_level}</span></td>
+                    <td><span className={`trust-badge trust-${entry.trust_level.toLowerCase()}`}>{entry.trust_level}</span></td>
                     <td>{entry.reject_stage ?? '--'}</td>
                   </tr>
                 ))}

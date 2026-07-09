@@ -44,7 +44,6 @@ pub struct EngineState {
     pub total_requests: u64,
     pub total_blocked: u64,
     started_at: Option<Instant>,
-    logs: Vec<serde_json::Value>,
     engine_url: String,
     child_pid: Option<u32>,
 }
@@ -58,7 +57,6 @@ impl EngineState {
             total_requests: 0,
             total_blocked: 0,
             started_at: None,
-            logs: Vec::new(),
             engine_url: "http://localhost:18765".to_string(),
             child_pid: None,
         }
@@ -84,23 +82,9 @@ impl EngineState {
 
     pub fn get_engine_url(&self) -> String { self.engine_url.clone() }
 
-    pub fn record_result(&mut self, text: &str, result: &ProtectResult) {
+    pub fn record_result(&mut self, _text: &str, result: &ProtectResult) {
         self.total_requests += 1;
         if !result.allowed { self.total_blocked += 1; }
-        let log_entry = serde_json::json!({
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "text_preview": safe_preview(text, 50),
-            "allowed": result.allowed,
-            "trust_level": &result.trust_level,
-            "reject_stage": &result.reject_stage,
-        });
-        self.logs.push(log_entry);
-        if self.logs.len() > 10000 { self.logs.drain(0..5000); }
-    }
-
-    pub fn get_logs(&self, limit: usize) -> Vec<serde_json::Value> {
-        let start = if self.logs.len() > limit { self.logs.len() - limit } else { 0 };
-        self.logs[start..].to_vec()
     }
 }
 
@@ -281,6 +265,7 @@ pub async fn monitor_engine_health(app: &AppHandle) {
                         s.healthy = true;
                         s.started_at = Some(Instant::now());
                     }
+                    continue;
                 }
             }
         }

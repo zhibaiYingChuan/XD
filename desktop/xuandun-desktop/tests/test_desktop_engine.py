@@ -23,11 +23,13 @@ def start_engine():
     src_dir = os.path.join(os.path.dirname(__file__), "..", "..", "src")
     env = os.environ.copy()
     env["PYTHONPATH"] = src_dir + os.pathsep + env.get("PYTHONPATH", "")
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     ENGINE_PROCESS = subprocess.Popen(
         [sys.executable, engine_script, "--port", "18765", "--mode", "balanced"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        creationflags=creationflags,
     )
     for _ in range(30):
         try:
