@@ -28,6 +28,7 @@ desktop/xuandun-desktop/node_modules/
 desktop/xuandun-desktop/dist/
 desktop/xuandun-desktop/src-tauri/binaries/*
 !desktop/xuandun-desktop/src-tauri/binaries/.gitkeep
+!desktop/xuandun-desktop/src-tauri/binaries/xuandun-engine-*.exe
 
 # IDE
 .vscode/
