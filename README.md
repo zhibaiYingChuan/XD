@@ -12,7 +12,7 @@
 - **原创理论架构**：拒绝门理论 + 洛书符号映射器 + 动态阴阳壳
 - **活性在线学习**：从通过的请求中自动学习，防御能力随使用持续增强
 - **反逆向保护**：Nuitka 编译 + 三端 anti_debug + 编译期 key 注入 + 阈值加密
-- **三端桌面应用**：Windows / macOS (Apple Silicon + Intel) / Linux
+- **三端桌面应用**：Windows / macOS (Apple Silicon) / Linux
 - **会话隔离**：不同会话施加特定置换，设计目标为汉明距离 > 50%（实际值取决于输入与运行时状态）
 
 ## 下载安装
@@ -25,11 +25,10 @@
 |------|--------|------|
 | Windows x64 | `XuanDun_1.0.0_x64-setup.exe` | NSIS 安装程序，支持中英文 |
 | macOS (Apple Silicon) | `XuanDun_1.0.0_aarch64.dmg` | M1/M2/M3 芯片 |
-| macOS (Intel) | `XuanDun_1.0.0_x64.dmg` | Intel 芯片 |
 | Linux x64 | `XuanDun_1.0.0_amd64.AppImage` | 便携版，无需安装 |
 | Linux x64 | `XuanDun_1.0.0_amd64.deb` | Debian/Ubuntu 包管理 |
 
-> **macOS 用户注意**：DMG 未签名（待 Apple Developer ID 申请后签名），首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。
+> **macOS 用户注意**：DMG 未签名（待 Apple Developer ID 申请后签名），首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。仅提供 Apple Silicon (M1/M2/M3+) 原生版本，Intel Mac 用户建议升级至 Apple Silicon 设备。
 
 ### Python SDK（开发者集成）
 
