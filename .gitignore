@@ -99,3 +99,6 @@ desktop/xuandun-desktop/src-tauri/gen/
 # Internal-only scripts
 scripts/code_quality_gate.py
 tests/test_audit_deep.py
+
+# Local temporary verification scripts (not for public release)
+_verify_examples.py

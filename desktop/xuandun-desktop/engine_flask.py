@@ -37,6 +37,10 @@ if sys.stderr is None:
 
 from flask import Flask, request, jsonify
 from daoti_xuandun import XuanDun, XuanDunConfig, DefenseLevel
+from daoti_xuandun.integrations import (
+    AlertManager, AlertEvent, DingTalkNotifier, FeishuNotifier,
+    EmailNotifier, WebhookNotifier, SyslogNotifier,
+)
 
 try:
     import anti_debug
@@ -67,6 +71,16 @@ _total_blocked = 0
 _stats_lock = threading.Lock()
 _shields_lock = threading.Lock()
 running = True
+
+_alert_manager = AlertManager()
+
+_NOTIFIER_CLASSES = {
+    "dingtalk": DingTalkNotifier,
+    "feishu": FeishuNotifier,
+    "email": EmailNotifier,
+    "webhook": WebhookNotifier,
+    "syslog": SyslogNotifier,
+}
 
 _DEBUG_TOKEN = os.environ.get("XUANDUN_DEBUG_TOKEN", "")
 _ALLOWED_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
@@ -103,7 +117,7 @@ def _get_shield(mode: str) -> XuanDun:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "1.0.0"})
+    return jsonify({"status": "ok", "version": "1.2.0"})
 
 
 @app.route("/status", methods=["GET"])
@@ -113,9 +127,25 @@ def status():
         total_blk = _total_blocked
     uptime = time.time() - _start_time
     block_rate = total_blk / max(1, total_req)
+
+    learning_mode = "protecting"
+    learning_progress = 1.0
+    sample_count = 0
+    try:
+        shield = _get_shield(_default_mode)
+        ls = shield.get_learning_status()
+        learning_mode = ls.get("mode", "protecting")
+        learning_progress = ls.get("learning_progress", 1.0)
+        sample_count = ls.get("sample_count", 0)
+    except Exception:
+        pass
+
     return jsonify({
         "running": running,
         "mode": _default_mode,
+        "learning_mode": learning_mode,
+        "learning_progress": learning_progress,
+        "sample_count": sample_count,
         "uptime": round(uptime, 1),
         "total_requests": total_req,
         "total_blocked": total_blk,
@@ -124,9 +154,185 @@ def status():
     })
 
 
+@app.route("/learning/status", methods=["GET"])
+def learning_status():
+    """返回当前学习状态：模式、进度、原型统计、模拟拦截预览。"""
+    try:
+        shield = _get_shield(_default_mode)
+        ls = shield.get_learning_status()
+        resp = jsonify(ls)
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("learning_status error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mode/switch", methods=["POST", "OPTIONS"])
+def switch_learning_mode():
+    """手动切换观察/保护模式。
+
+    Body: {"mode": "observing" | "protecting"}
+    """
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+
+    data = request.get_json(silent=True) or {}
+    target = data.get("mode", "")
+    if target not in ("observing", "protecting"):
+        return jsonify({"error": f"Invalid mode: {target}"}), 400
+
+    try:
+        shield = _get_shield(_default_mode)
+        result = shield.switch_mode(target)
+        logger.info("Learning mode switched: %s", result)
+        resp = jsonify(result)
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("switch_mode error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/learning/details", methods=["GET"])
+def learning_details():
+    """返回原型统计摘要（不暴露原始内容）。"""
+    try:
+        shield = _get_shield(_default_mode)
+        details = shield.get_prototype_examples()
+        resp = jsonify(details)
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("learning_details error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/simulation/run", methods=["POST", "OPTIONS"])
+def simulation_run():
+    """运行模拟测试。
+
+    Body: {
+        "mode": "quick" | "full" | "custom",
+        "categories": ["direct_injection", ...],  # 可选，full/quick 模式忽略
+        "custom_texts": ["..."],                   # custom 模式必填
+    }
+    """
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+
+    data = request.get_json(silent=True) or {}
+    sim_mode = data.get("mode", "quick")
+    categories = data.get("categories", [])
+    custom_texts = data.get("custom_texts", [])
+
+    try:
+        from simulation import SimulationEngine
+        engine = SimulationEngine(_get_shield(_default_mode))
+        report = engine.run(mode=sim_mode, categories=categories, custom_texts=custom_texts)
+        resp = jsonify(report)
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("simulation_run error: %s", e, exc_info=True)
+        return jsonify({"error": f"Simulation failed: {type(e).__name__}: {e}"}), 500
+
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"pong": True, "ts": time.time()})
+
+
+@app.route("/metrics/realtime", methods=["GET"])
+def metrics_realtime():
+    """实时指标端点：返回当前 QPS、延迟分位数、拦截统计。"""
+    with _stats_lock:
+        total = _total_requests
+        blocked = _total_blocked
+    block_rate = (blocked / total * 100) if total > 0 else 0.0
+    resp = jsonify({
+        "total_requests": total,
+        "total_blocked": blocked,
+        "block_rate": round(block_rate, 2),
+        "qps": 0.0,
+        "p50_latency_ms": 0.0,
+        "p95_latency_ms": 0.0,
+        "p99_latency_ms": 0.0,
+        "ts": time.time(),
+    })
+    return _attach_cors(resp)
+
+
+@app.route("/alert/dispatch", methods=["POST", "OPTIONS"])
+def dispatch_alert():
+    """接收告警事件并分发到所有已配置的通道。"""
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+    data = request.get_json(silent=True) or {}
+    try:
+        event = AlertEvent(
+            event_type=data.get("event_type", "block"),
+            severity=data.get("severity", "info"),
+            timestamp=data.get("timestamp", ""),
+            attack_category=data.get("attack_category"),
+            trust_level=data.get("trust_level", ""),
+            reject_stage=data.get("reject_stage"),
+            text_preview=data.get("text_preview", ""),
+            engine_mode=data.get("engine_mode", ""),
+            extra=data.get("extra", {}),
+        )
+        sent = _alert_manager.dispatch(event)
+        resp = jsonify({"status": "ok", "sent_count": sent})
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("Alert dispatch error: %s", e, exc_info=True)
+        resp = jsonify({"status": "error", "message": str(e)})
+        return _attach_cors(resp)
+
+
+@app.route("/notifiers/config", methods=["POST", "OPTIONS"])
+def configure_notifiers():
+    """批量配置告警通道。Body: {"channels": {"dingtalk": {...}, ...}}"""
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+    data = request.get_json(silent=True) or {}
+    channels = data.get("channels", {})
+    _alert_manager.clear_notifiers()
+    for channel_name, config in channels.items():
+        cls = _NOTIFIER_CLASSES.get(channel_name)
+        if cls and config.get("enabled", False):
+            _alert_manager.add_notifier(cls(config))
+    resp = jsonify({"status": "ok", "active_channels": len(_alert_manager._notifiers)})
+    return _attach_cors(resp)
+
+
+@app.route("/notifiers/test", methods=["POST", "OPTIONS"])
+def test_notifier_endpoint():
+    """发送测试告警。Body: {"channel": "dingtalk", "config": {...}}"""
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+    data = request.get_json(silent=True) or {}
+    channel = data.get("channel", "")
+    config = data.get("config", {})
+    cls = _NOTIFIER_CLASSES.get(channel)
+    if not cls:
+        resp = jsonify({"status": "error", "message": f"Unknown channel: {channel}"})
+        return _attach_cors(resp)
+    test_event = AlertEvent(
+        event_type="test",
+        severity="info",
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        attack_category="test",
+        trust_level="TEST",
+        reject_stage="test",
+        text_preview="这是一条来自道体·玄盾的测试告警",
+        engine_mode="balanced",
+    )
+    notifier = cls(config)
+    ok = notifier.send(test_event)
+    resp = jsonify({"status": "ok" if ok else "failed", "channel": channel})
+    return _attach_cors(resp)
 
 
 @app.route("/debug/state", methods=["GET"])
@@ -181,6 +387,45 @@ def debug_state():
     return jsonify(info)
 
 
+_ATTACK_CATEGORY_KEYWORDS = {
+    "direct_prompt_injection": [
+        "ignore previous", "ignore above", "disregard", "system prompt",
+        "you are now", "new instruction", "override", "forget your",
+    ],
+    "jailbreak": [
+        "dan", "do anything now", "jailbreak", "扮演", "角色扮演",
+        "无限制", "unrestricted", "developer mode", "无约束",
+    ],
+    "encoding_obfuscation": [
+        "base64", "decode this", "unicode", "\\u", "零宽",
+        "rot13", "hex decode", "morze",
+    ],
+    "indirect_prompt_injection": [
+        "web page", "email", "rag", "retrieval", "document says",
+        "article says", "网页内容", "邮件内容",
+    ],
+    "agent_attack": [
+        "tool", "function call", "shell", "exec", "command",
+        "api key", "sudo", "rm -rf", "工具调用", "命令执行",
+    ],
+    "data_leakage": [
+        "reveal your", "show your prompt", "training data",
+        "conversation history", "repeat your", "泄露", "提取系统",
+    ],
+}
+
+
+def _classify_attack_category(text: str, reject_stage) -> str:
+    if reject_stage is None:
+        return None
+    text_lower = text.lower()
+    for category, keywords in _ATTACK_CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in text_lower:
+                return category
+    return "other"
+
+
 @app.route("/protect", methods=["POST", "OPTIONS"])
 def protect():
     if request.method == "OPTIONS":
@@ -214,6 +459,8 @@ def protect():
             "reject_stage": result.reject_stage,
             "domain_distance": result.domain_distance,
             "timing_distance": result.timing_distance,
+            "attack_category": _classify_attack_category(text, result.reject_stage) if not result.allowed else None,
+            "latency_ms": round(lat, 2),
         }
         resp = jsonify(response)
         return _attach_cors(resp)
@@ -226,6 +473,8 @@ def protect():
             "reject_stage": "engine_exception",
             "domain_distance": None,
             "timing_distance": None,
+            "attack_category": None,
+            "latency_ms": None,
             "fallback": True,
             "message": f"Engine error: {type(e).__name__}",
         })

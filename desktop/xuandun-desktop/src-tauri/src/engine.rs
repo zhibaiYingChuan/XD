@@ -35,6 +35,8 @@ pub struct ProtectResult {
     pub reject_stage: Option<String>,
     pub domain_distance: Option<f64>,
     pub timing_distance: Option<f64>,
+    pub attack_category: Option<String>,
+    pub latency_ms: Option<f64>,
 }
 
 pub struct EngineState {
@@ -100,6 +102,8 @@ pub async fn send_protect_request(engine_url: &str, text: &str, session: &str, m
         reject_stage: result["reject_stage"].as_str().map(|s| s.to_string()),
         domain_distance: result["domain_distance"].as_f64(),
         timing_distance: result["timing_distance"].as_f64(),
+        attack_category: result["attack_category"].as_str().map(|s| s.to_string()),
+        latency_ms: result["latency_ms"].as_f64(),
     })
 }
 
@@ -109,9 +113,23 @@ pub async fn sync_mode_to_engine(engine_url: &str, mode: &str) -> Result<(), Str
     let resp = HTTP_CLIENT.post(&url).json(&body).send().await
         .map_err(|e| format!("Sync mode failed: {}", e))?;
     if !resp.status().is_success() {
-        return Err(format!("Sync mode HTTP error: {}", resp.status()));
+        return Err("Failed to sync mode".to_string());
     }
     Ok(())
+}
+
+pub async fn engine_get(engine_url: &str, path: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", engine_url, path);
+    let resp = HTTP_CLIENT.get(&url).send().await
+        .map_err(|e| format!("Engine GET failed: {}", e))?;
+    resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))
+}
+
+pub async fn engine_post(engine_url: &str, path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", engine_url, path);
+    let resp = HTTP_CLIENT.post(&url).json(&body).send().await
+        .map_err(|e| format!("Engine POST failed: {}", e))?;
+    resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))
 }
 
 pub async fn check_engine_health(engine_url: &str) -> bool {
@@ -356,6 +374,8 @@ mod tests {
             reject_stage: Some("reject_gate".to_string()),
             domain_distance: Some(0.9),
             timing_distance: Some(0.8),
+            attack_category: Some("prompt_injection".to_string()),
+            latency_ms: Some(12.5),
         };
         state.record_result("attack", &r);
         assert_eq!(state.total_requests, 1);

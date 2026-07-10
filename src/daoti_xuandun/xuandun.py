@@ -304,6 +304,28 @@ class XuanDun:
                 for text in safe_texts:
                     self.domain_awareness.seed_prototype(text)
 
+    def get_learning_status(self) -> dict:
+        """返回观察模式学习状态（模式、进度、原型统计）。"""
+        if self.domain_awareness is None:
+            return {"mode": "disabled", "learning_progress": 0.0}
+        return self.domain_awareness.get_learning_status()
+
+    def switch_mode(self, target: str) -> dict:
+        """手动切换观察/保护模式。
+
+        Args:
+            target: "observing" 或 "protecting"
+        """
+        if self.domain_awareness is None:
+            return {"ok": False, "error": "domain_awareness not initialized"}
+        return self.domain_awareness.switch_mode(target)
+
+    def get_prototype_examples(self, n: int = 5) -> dict:
+        """返回原型统计摘要（不暴露原始内容）。"""
+        if self.domain_awareness is None:
+            return {}
+        return self.domain_awareness.get_prototype_examples(n)
+
     def recommend_config(self, output_format: str = "dict") -> Union[dict, str]:
         """基于当前域档案自动推荐配置参数。
 

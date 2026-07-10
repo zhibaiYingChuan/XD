@@ -140,6 +140,11 @@ class XuanDunConfig:
     # EWMA预热安全锁
     lock_negation_weights_after_warmup: bool = False  # 预热完成后锁定否定信号权重，防止运行时污染
 
+    # 观察→学习→自动切换（活性防护架构）
+    enable_observing_mode: bool = True      # 启用观察模式：接入后先旁听学习，积累样本后自动切换到拦截
+    min_samples_for_switch: int = 1000      # 自动切换到保护模式所需的最小正常样本数
+    enable_builtin_attacks: bool = True     # 启用内置攻击样本（让洛书攻击原型库从一开始就不为空）
+
     # 预处理管道（可选，不影响核心架构）
     enable_decode_preprocess: bool = True   # 启用 Base64/Hex 解码预处理，检测编码攻击
     enable_unicode_normalize: bool = True   # 启用 Unicode 正规化，降低混淆良性误拒

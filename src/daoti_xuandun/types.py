@@ -59,3 +59,4 @@ class ProtectResult:
     trust_level: TrustLevel = TrustLevel.UNKNOWN
     domain_distance: Optional[float] = None
     debug_info: Optional[dict] = None
+    attack_category: Optional[str] = None

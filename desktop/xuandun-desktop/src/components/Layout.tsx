@@ -1,10 +1,14 @@
 import { NavLink, Outlet } from 'react-router-dom';
+import StatusBar from './StatusBar';
 
 const navItems = [
   { to: '/', icon: '📊', label: '仪表盘' },
   { to: '/detect', icon: '🔍', label: '安全检测' },
   { to: '/agents', icon: '🤖', label: 'Agent' },
   { to: '/logs', icon: '📋', label: '日志' },
+  { to: '/learning', icon: '🎓', label: '学习状态' },
+  { to: '/simulation', icon: '🧪', label: '模拟测试' },
+  { to: '/reports', icon: '📄', label: '安全报告' },
   { to: '/settings', icon: '⚙️', label: '设置' },
 ];
 
@@ -36,6 +40,7 @@ export default function Layout() {
         </div>
       </aside>
       <main className="main-content">
+        <StatusBar />
         <Outlet />
       </main>
     </div>

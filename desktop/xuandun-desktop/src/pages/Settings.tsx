@@ -1,5 +1,74 @@
-import { useState, useEffect } from 'react';
-import { api } from '../services/tauriApi';
+import { useState, useEffect, useCallback } from 'react';
+import { api, LearningStatus } from '../services/tauriApi';
+
+interface NotifierField {
+  key: string;
+  label: string;
+  type: string;
+  placeholder?: string;
+}
+
+function NotifierChannel({
+  channel,
+  label,
+  icon,
+  config,
+  fields,
+  onFieldChange,
+  onSave,
+  onTest,
+  testing,
+}: {
+  channel: string;
+  label: string;
+  icon: string;
+  config: any;
+  fields: NotifierField[];
+  onFieldChange: (channel: string, field: string, value: any) => void;
+  onSave: (channel: string, config: any) => void;
+  onTest: (channel: string, config: any) => void;
+  testing: boolean;
+}) {
+  const enabled = config.enabled || false;
+  return (
+    <div className={`notifier-channel ${enabled ? 'notifier-enabled' : ''}`}>
+      <div className="notifier-header">
+        <span className="notifier-icon">{icon}</span>
+        <span className="notifier-label">{label}</span>
+        <label className="toggle toggle-sm">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => onFieldChange(channel, 'enabled', e.target.checked)}
+          />
+          <span className="toggle-slider"></span>
+        </label>
+      </div>
+      {enabled && (
+        <div className="notifier-fields">
+          {fields.map((f) => (
+            <div key={f.key} className="form-group form-group-inline">
+              <label className="form-label form-label-sm">{f.label}</label>
+              <input
+                type={f.type}
+                className="form-input"
+                value={config[f.key] || ''}
+                placeholder={f.placeholder || ''}
+                onChange={(e) => onFieldChange(channel, f.key, e.target.value)}
+              />
+            </div>
+          ))}
+          <div className="notifier-actions">
+            <button className="btn btn-sm btn-primary" onClick={() => onSave(channel, config)}>保存</button>
+            <button className="btn btn-sm btn-secondary" onClick={() => onTest(channel, config)} disabled={testing}>
+              {testing ? '测试中...' : '测试告警'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Settings() {
   const [mode, setMode] = useState('balanced');
@@ -13,6 +82,19 @@ export default function Settings() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [auditReport, setAuditReport] = useState<string>('');
   const [hasKey, setHasKey] = useState(false);
+  const [learning, setLearning] = useState<LearningStatus | null>(null);
+  const [switchingMode, setSwitchingMode] = useState(false);
+  const [notifierConfigs, setNotifierConfigs] = useState<Record<string, any>>({});
+  const [testingChannel, setTestingChannel] = useState<string | null>(null);
+
+  const fetchLearning = useCallback(async () => {
+    try {
+      const l = await api.getLearningStatus();
+      setLearning(l);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -29,12 +111,37 @@ export default function Settings() {
         if (wa) setWarmupAttackText(wa);
         const hk = await api.hasSecretKey();
         setHasKey(hk);
+        const channels = ['dingtalk', 'feishu', 'email', 'webhook', 'syslog'];
+        const configs: Record<string, any> = {};
+        for (const ch of channels) {
+          try {
+            const cfg = await api.getNotifierConfig(ch);
+            if (cfg) configs[ch] = cfg;
+          } catch { /* ignore */ }
+        }
+        setNotifierConfigs(configs);
       } catch {
         // ignore
       }
     };
     loadConfig();
-  }, []);
+    fetchLearning();
+    const interval = setInterval(fetchLearning, 5000);
+    return () => clearInterval(interval);
+  }, [fetchLearning]);
+
+  const handleSwitchLearningMode = async (target: string) => {
+    setSwitchingMode(true);
+    try {
+      await api.switchLearningMode(target);
+      showMessage('success', `已切换到${target === 'protecting' ? '保护' : '观察'}模式`);
+      await fetchLearning();
+    } catch {
+      showMessage('error', '模式切换失败');
+    } finally {
+      setSwitchingMode(false);
+    }
+  };
 
   const showMessage = (type: 'success' | 'error', text: string) => {
     setMessage({ type, text });
@@ -155,6 +262,39 @@ export default function Settings() {
     }
   };
 
+  const handleSaveNotifier = async (channel: string, config: any) => {
+    try {
+      await api.saveNotifierConfig(channel, config);
+      setNotifierConfigs(prev => ({ ...prev, [channel]: config }));
+      showMessage('success', `${channel} 配置已保存`);
+    } catch (e: any) {
+      showMessage('error', `保存失败: ${e}`);
+    }
+  };
+
+  const handleTestNotifier = async (channel: string, config: any) => {
+    setTestingChannel(channel);
+    try {
+      const result = await api.testNotifier(channel, config);
+      if (result?.status === 'ok') {
+        showMessage('success', `${channel} 测试告警发送成功`);
+      } else {
+        showMessage('error', `${channel} 测试告警发送失败`);
+      }
+    } catch (e: any) {
+      showMessage('error', `测试失败: ${e}`);
+    } finally {
+      setTestingChannel(null);
+    }
+  };
+
+  const handleNotifierFieldChange = (channel: string, field: string, value: any) => {
+    setNotifierConfigs(prev => ({
+      ...prev,
+      [channel]: { ...(prev[channel] || {}), [field]: value },
+    }));
+  };
+
   const modes = [
     { key: 'high_security', label: '高安全', desc: '最严格的防护策略，可能产生较多误报' },
     { key: 'balanced', label: '平衡', desc: '兼顾安全与可用性的推荐策略' },
@@ -187,6 +327,67 @@ export default function Settings() {
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h3>活性防护模式</h3>
+          <span className="card-subtitle">观察→学习→自动切换架构</span>
+        </div>
+        <div className="card-body">
+          {learning ? (
+            <>
+              <div className="learning-mode-display">
+                <span className={`mode-badge ${learning.mode === 'observing' ? 'mode-observing' : 'mode-protecting'}`}>
+                  {learning.mode === 'observing' ? '🟡 观察模式（学习中）' : '🛡️ 保护模式'}
+                </span>
+              </div>
+
+              {learning.mode === 'observing' && (
+                <div className="learning-progress-section">
+                  <div className="learning-progress-label">
+                    已学习：{learning.sample_count} / {learning.min_samples_for_switch} 条正常对话
+                  </div>
+                  <div className="learning-progress-bar-large">
+                    <div className="learning-progress-fill-large" style={{ width: `${Math.round(learning.learning_progress * 100)}%` }}>
+                      <span className="learning-progress-text">{Math.round(learning.learning_progress * 100)}%</span>
+                    </div>
+                  </div>
+                  <div className="learning-prototypes-mini">
+                    <span>安全原型: {learning.safe_prototypes}</span>
+                    <span>攻击原型: {learning.attack_prototypes}</span>
+                    <span>模拟拦截: {learning.would_block_count}</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="mode-switch-buttons" style={{ marginTop: '16px' }}>
+                <button
+                  className={`btn ${learning.mode === 'observing' ? 'btn-warning' : 'btn-secondary'}`}
+                  onClick={() => handleSwitchLearningMode('observing')}
+                  disabled={switchingMode || learning.mode === 'observing'}
+                >
+                  🟡 切换到观察模式
+                </button>
+                <button
+                  className={`btn ${learning.mode === 'protecting' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => handleSwitchLearningMode('protecting')}
+                  disabled={switchingMode || learning.mode === 'protecting'}
+                >
+                  🛡️ 切换到保护模式
+                </button>
+              </div>
+
+              {learning.mode === 'observing' && learning.sample_count < learning.min_samples_for_switch && (
+                <div className="mode-switch-warning">
+                  ⚠️ 样本不足（{learning.sample_count}/{learning.min_samples_for_switch}），提前切换到保护模式可能导致误报率升高
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="empty-state">加载学习中...</div>
+          )}
         </div>
       </div>
 
@@ -275,6 +476,91 @@ export default function Settings() {
               {hasKey && <button className="btn btn-danger" onClick={handleDeleteKey}>删除密钥</button>}
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h3>告警通道</h3>
+          <span className="card-subtitle">拦截事件自动推送到企业 IM / 邮件 / SIEM</span>
+        </div>
+        <div className="card-body">
+          <NotifierChannel
+            channel="dingtalk"
+            label="钉钉机器人"
+            icon="📱"
+            config={notifierConfigs['dingtalk'] || {}}
+            onFieldChange={handleNotifierFieldChange}
+            onSave={handleSaveNotifier}
+            onTest={handleTestNotifier}
+            testing={testingChannel === 'dingtalk'}
+            fields={[
+              { key: 'webhook_url', label: 'Webhook URL', type: 'text', placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=...' },
+              { key: 'secret', label: '加签密钥（可选）', type: 'text', placeholder: 'SEC...' },
+              { key: 'at_phones', label: '@手机号（逗号分隔）', type: 'text', placeholder: '13800138000,13900139000' },
+            ]}
+          />
+          <NotifierChannel
+            channel="feishu"
+            label="飞书机器人"
+            icon="💬"
+            config={notifierConfigs['feishu'] || {}}
+            onFieldChange={handleNotifierFieldChange}
+            onSave={handleSaveNotifier}
+            onTest={handleTestNotifier}
+            testing={testingChannel === 'feishu'}
+            fields={[
+              { key: 'webhook_url', label: 'Webhook URL', type: 'text', placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/...' },
+              { key: 'secret', label: '签名密钥（可选）', type: 'text', placeholder: '' },
+            ]}
+          />
+          <NotifierChannel
+            channel="email"
+            label="邮件告警 (SMTP)"
+            icon="📧"
+            config={notifierConfigs['email'] || {}}
+            onFieldChange={handleNotifierFieldChange}
+            onSave={handleSaveNotifier}
+            onTest={handleTestNotifier}
+            testing={testingChannel === 'email'}
+            fields={[
+              { key: 'smtp_host', label: 'SMTP 服务器', type: 'text', placeholder: 'smtp.gmail.com' },
+              { key: 'smtp_port', label: '端口', type: 'text', placeholder: '465' },
+              { key: 'username', label: '用户名', type: 'text', placeholder: '' },
+              { key: 'password', label: '密码', type: 'password', placeholder: '' },
+              { key: 'from_addr', label: '发件人', type: 'text', placeholder: 'xuandun@company.com' },
+              { key: 'to_addrs', label: '收件人（逗号分隔）', type: 'text', placeholder: 'admin@company.com' },
+            ]}
+          />
+          <NotifierChannel
+            channel="webhook"
+            label="Webhook 通用告警"
+            icon="🔗"
+            config={notifierConfigs['webhook'] || {}}
+            onFieldChange={handleNotifierFieldChange}
+            onSave={handleSaveNotifier}
+            onTest={handleTestNotifier}
+            testing={testingChannel === 'webhook'}
+            fields={[
+              { key: 'webhook_url', label: 'Webhook URL', type: 'text', placeholder: 'https://your-siem.example.com/api/alert' },
+            ]}
+          />
+          <NotifierChannel
+            channel="syslog"
+            label="Syslog (SIEM)"
+            icon="🖥️"
+            config={notifierConfigs['syslog'] || {}}
+            onFieldChange={handleNotifierFieldChange}
+            onSave={handleSaveNotifier}
+            onTest={handleTestNotifier}
+            testing={testingChannel === 'syslog'}
+            fields={[
+              { key: 'host', label: '服务器地址', type: 'text', placeholder: '192.168.1.100' },
+              { key: 'port', label: '端口', type: 'text', placeholder: '514' },
+              { key: 'protocol', label: '协议 (udp/tcp)', type: 'text', placeholder: 'udp' },
+              { key: 'facility', label: 'Facility', type: 'text', placeholder: 'local0' },
+            ]}
+          />
         </div>
       </div>
 

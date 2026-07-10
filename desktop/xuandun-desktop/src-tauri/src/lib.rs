@@ -124,6 +124,22 @@ pub fn run() {
             commands::create_snapshot,
             commands::list_snapshots,
             commands::restore_snapshot,
+            commands::get_learning_status,
+            commands::switch_learning_mode,
+            commands::get_learning_details,
+            commands::run_simulation,
+            commands::send_notification,
+            commands::get_trend_stats,
+            commands::get_attack_distribution,
+            commands::get_realtime_metrics,
+            commands::get_comparison_stats,
+            commands::generate_report,
+            commands::list_reports,
+            commands::get_report,
+            commands::delete_report,
+            commands::save_notifier_config,
+            commands::get_notifier_config,
+            commands::test_notifier,
         ])
         .build(tauri::generate_context!());
 

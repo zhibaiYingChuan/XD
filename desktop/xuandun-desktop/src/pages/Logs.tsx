@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { api, LogEntry } from '../services/tauriApi';
+import { api, LogEntry, LearningStatus } from '../services/tauriApi';
 
 const PAGE_SIZE = 20;
 
@@ -12,6 +12,22 @@ export default function Logs() {
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [learning, setLearning] = useState<LearningStatus | null>(null);
+
+  const fetchLearning = useCallback(async () => {
+    try {
+      const l = await api.getLearningStatus();
+      setLearning(l);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchLearning();
+    const interval = setInterval(fetchLearning, 5000);
+    return () => clearInterval(interval);
+  }, [fetchLearning]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(searchText), 300);
@@ -75,6 +91,17 @@ export default function Logs() {
 
   return (
     <div className="page logs-page">
+      {learning && learning.mode === 'observing' && (
+        <div className="alert-banner alert-warning observing-banner">
+          <span className="alert-icon">🎓</span>
+          <span>
+            当前为<strong>观察模式</strong>，所有请求均已放行。
+            观察期间检测到 <strong>{learning.would_block_count}</strong> 条潜在攻击（如开启保护将被拦截），
+            <a href="#/learning" className="banner-link">查看模拟拦截详情 →</a>
+          </span>
+        </div>
+      )}
+
       <div className="card">
         <div className="card-header">
           <h3>日志查看</h3>
