@@ -40,6 +40,7 @@ impl Database {
 
     fn init_tables(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
         conn.execute_batch("
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,9 +54,6 @@ impl Database {
                 hash TEXT NOT NULL DEFAULT '',
                 hash_version INTEGER NOT NULL DEFAULT 2
             );
-            CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_logs_allowed ON logs(allowed);
-            CREATE INDEX IF NOT EXISTS idx_logs_hash_version ON logs(hash_version);
 
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
@@ -75,6 +73,33 @@ impl Database {
                 label TEXT NOT NULL,
                 config_json TEXT NOT NULL
             );
+        ").map_err(|e| e.to_string())?;
+
+        let has_hash_version: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(logs)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            }).map_err(|e| e.to_string())?;
+            let mut found = false;
+            for row in rows {
+                if let Ok(name) = row {
+                    if name == "hash_version" { found = true; break; }
+                }
+            }
+            found
+        };
+
+        if !has_hash_version {
+            conn.execute("ALTER TABLE logs ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 2", [])
+                .map_err(|e| format!("Failed to add hash_version column: {}", e))?;
+            eprintln!("[xuandun] Added hash_version column to logs table");
+        }
+
+        conn.execute_batch("
+            CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_logs_allowed ON logs(allowed);
+            CREATE INDEX IF NOT EXISTS idx_logs_hash_version ON logs(hash_version);
         ").map_err(|e| e.to_string())?;
 
         let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))

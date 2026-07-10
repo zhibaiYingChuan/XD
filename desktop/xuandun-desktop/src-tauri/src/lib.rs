@@ -8,6 +8,39 @@ mod agent_discovery;
 mod proxy;
 mod keyring;
 
+#[cfg(target_os = "windows")]
+pub fn show_message_box(title: &str, body: &str) {
+    use std::ffi::CString;
+    let title_c = match CString::new(title) { Ok(s) => s, Err(_) => return };
+    let body_c = match CString::new(body) { Ok(s) => s, Err(_) => return };
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxA(hwnd: *mut std::ffi::c_void, text: *const i8, caption: *const i8, utype: u32) -> i32;
+        }
+        MessageBoxA(std::ptr::null_mut(), body_c.as_ptr() as *const i8, title_c.as_ptr() as *const i8, 0x10);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn show_message_box(title: &str, body: &str) {
+    eprintln!("{}: {}", title, body);
+}
+
+fn setup_log(msg: &str) {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir());
+    let dir = base.join("com.daoti.xuandun-desktop");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("crash.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", chrono::Utc::now().to_rfc3339(), msg);
+    }
+    eprintln!("[XuanDun] {}", msg);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -19,26 +52,54 @@ pub fn run() {
         ))
         .manage(std::sync::Mutex::new(engine::EngineState::new()))
         .setup(|app| {
-            let app_data_dir = app.path().app_data_dir()
-                .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-            std::fs::create_dir_all(&app_data_dir)
-                .map_err(|e| format!("Failed to create app data dir: {}", e))?;
-            let db_path = app_data_dir.join("xuandun.db");
-            let database = db::Database::open(&db_path)
-                .map_err(|e| format!("Failed to open database: {}", e))?;
-            app.manage(database);
+            setup_log("Setup: start");
 
-            tray::create_tray(app.handle())?;
+            let app_data_dir = app.path().app_data_dir()
+                .map_err(|e| {
+                    let msg = format!("Failed to get app data dir: {}", e);
+                    setup_log(&msg);
+                    msg
+                })?;
+            setup_log(&format!("Setup: app_data_dir = {}", app_data_dir.display()));
+
+            std::fs::create_dir_all(&app_data_dir)
+                .map_err(|e| {
+                    let msg = format!("Failed to create app data dir: {}", e);
+                    setup_log(&msg);
+                    msg
+                })?;
+
+            let db_path = app_data_dir.join("xuandun.db");
+            setup_log(&format!("Setup: db_path = {}", db_path.display()));
+
+            let database = db::Database::open(&db_path)
+                .map_err(|e| {
+                    let msg = format!("Failed to open database: {}", e);
+                    setup_log(&msg);
+                    msg
+                })?;
+            app.manage(database);
+            setup_log("Setup: database opened");
+
+            match tray::create_tray(app.handle()) {
+                Ok(_tray) => setup_log("Setup: tray created"),
+                Err(e) => {
+                    let msg = format!("Setup: tray creation failed (non-fatal): {}", e);
+                    setup_log(&msg);
+                }
+            }
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = engine::ensure_engine_running(&handle).await {
-                    eprintln!("Engine start error: {}", e);
+                    eprintln!("[XuanDun] Engine start error: {}", e);
                 }
             });
             let health_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 engine::monitor_engine_health(&health_handle).await;
             });
+            setup_log("Setup: complete");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -64,8 +125,23 @@ pub fn run() {
             commands::list_snapshots,
             commands::restore_snapshot,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(a) => a,
+        Err(e) => {
+            let msg = format!("Failed to build tauri application: {}", e);
+            setup_log(&msg);
+            show_message_box(
+                "XuanDun Startup Error",
+                &format!(
+                    "Application failed to start:\n\n{}\n\nCrash log: %LOCALAPPDATA%\\com.daoti.xuandun-desktop\\crash.log",
+                    e
+                ),
+            );
+            std::process::exit(1);
+        }
+    };
 
     app.run(|app_handle, event| match event {
         tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
