@@ -193,7 +193,7 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
         let state = app.state::<StdMutex<EngineState>>();
         if let Ok(mut s) = state.lock() {
             s.startup_error = Some(msg.clone());
-        }
+        };
     }
     Err(msg)
 }
