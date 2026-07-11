@@ -91,6 +91,8 @@ def build_engine():
         f"--output-filename={output_name}",
         f"--output-dir={output_dir}",
         "--include-package=daoti_xuandun",
+        "--include-package=flask",
+        "--include-package=waitress",
         "--nofollow-import-to=tkinter",
         "--nofollow-import-to=test",
         "--nofollow-import-to=unittest",
