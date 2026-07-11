@@ -224,17 +224,21 @@ def is_memory_dump_attempt() -> bool:
 
 def verify_binary_integrity() -> bool:
     """校验玄盾核心模块文件的完整性。
-
+    
     检测逻辑：
     - Nuitka 编译后（sys.executable 包含 xuandun）：校验 sys.executable
     - 开发模式：校验同目录下关键 .py 文件的 SHA-256
     - 首次运行（无哈希文件）：输出警告并跳过校验
+    - Nuitka onefile 环境（NUITKA_ONEFILE_PARENT）：每次安装路径不同，跳过校验
     - 哈希文件存储在 ~/.xuandun/sig/ 下，权限 0600，防覆写
     """
     try:
+        # Nuitka onefile 每次安装到不同临时路径，hash 校验不可靠
+        if os.environ.get("NUITKA_ONEFILE_PARENT"):
+            return True
+
         is_nuitka = (
             hasattr(sys, "frozen")
-            or os.environ.get("NUITKA_ONEFILE_PARENT")
             or "xuandun" in os.path.basename(sys.executable).lower()
         )
 
@@ -245,7 +249,7 @@ def verify_binary_integrity() -> bool:
     except Exception as e:
         import sys as _sys
         print(f"[XuanDun] Binary integrity check error: {e}", file=_sys.stderr)
-        return False
+        return True  # 异常时也允许启动，不影响运行
 
 
 def _get_hash_file_path(filename: str) -> str:

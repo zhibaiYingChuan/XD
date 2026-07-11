@@ -45,6 +45,7 @@ pub struct EngineState {
     pub mode: String,
     pub total_requests: u64,
     pub total_blocked: u64,
+    pub startup_error: Option<String>,
     started_at: Option<Instant>,
     engine_url: String,
     child_pid: Option<u32>,
@@ -58,6 +59,7 @@ impl EngineState {
             mode: "balanced".to_string(),
             total_requests: 0,
             total_blocked: 0,
+            startup_error: None,
             started_at: None,
             engine_url: "http://localhost:18765".to_string(),
             child_pid: None,
@@ -186,7 +188,14 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
     }
 
     log_engine("Engine failed to start within 60 seconds");
-    Err("Engine failed to start within 60 seconds".to_string())
+    let msg = "Engine failed to start within 60 seconds".to_string();
+    {
+        let state = app.state::<StdMutex<EngineState>>();
+        if let Ok(mut s) = state.lock() {
+            s.startup_error = Some(msg.clone());
+        }
+    }
+    Err(msg)
 }
 
 fn log_engine(msg: &str) {
@@ -199,6 +208,7 @@ fn log_engine(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         use std::io::Write;
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().to_rfc3339(), msg);
+        let _ = f.flush();
     }
     eprintln!("[XuanDun:engine] {}", msg);
 }

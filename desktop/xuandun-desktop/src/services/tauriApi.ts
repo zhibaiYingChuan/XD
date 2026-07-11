@@ -9,6 +9,7 @@ export interface StatusResponse {
   total_requests: number;
   total_blocked: number;
   block_rate: number;
+  startup_error?: string | null;
 }
 
 export interface LearningStatus {

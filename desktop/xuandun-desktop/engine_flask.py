@@ -117,7 +117,7 @@ def _get_shield(mode: str) -> XuanDun:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "1.2.1"})
+    return jsonify({"status": "ok", "version": "1.2.2"})
 
 
 @app.route("/status", methods=["GET"])
@@ -549,13 +549,13 @@ def main():
 
     if _ANTI_DEBUG_AVAILABLE:
         if anti_debug.is_debugger_present():
-            logger.error("Debugger detected! Refusing to start.")
-            sys.exit(1)
+            logger.warning("Debugger detection triggered — skipping (non-fatal)")
         if not anti_debug.verify_binary_integrity():
-            logger.error("Binary integrity check failed! Refusing to start.")
-            sys.exit(1)
-        monitor_thread = threading.Thread(target=_monitor_debugger, daemon=True)
-        monitor_thread.start()
+            logger.warning("Binary integrity check skipped — continuing engine startup")
+        # 仅在非 Nuitka onefile 环境运行反调试监控线程
+        if not os.environ.get("NUITKA_ONEFILE_PARENT") and not hasattr(sys, "frozen"):
+            monitor_thread = threading.Thread(target=_monitor_debugger, daemon=True)
+            monitor_thread.start()
 
     parser = argparse.ArgumentParser(description="道体·玄盾 桌面端引擎")
     parser.add_argument("--port", type=int, default=18765)

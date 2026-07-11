@@ -1,5 +1,7 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import StatusBar from './StatusBar';
+import { useState, useEffect } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 
 const navItems = [
   { to: '/', icon: '📊', label: '仪表盘' },
@@ -13,6 +15,12 @@ const navItems = [
 ];
 
 export default function Layout() {
+  const [version, setVersion] = useState('');
+  useEffect(() => {
+    getVersion()
+      .then(v => setVersion(`v${v}`))
+      .catch(() => setVersion('v1.0.0'));
+  }, []);
   return (
     <div className="app-layout">
       <aside className="sidebar">
@@ -36,7 +44,7 @@ export default function Layout() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span className="sidebar-version">v1.0.0</span>
+          <span className="sidebar-version">{version}</span>
         </div>
       </aside>
       <main className="main-content">

@@ -287,7 +287,14 @@ export default function Dashboard() {
           </div>
           <div className="status-hero-info">
             <div className="status-hero-label">引擎状态</div>
-            <div className="status-hero-value">{status?.running ? '在线运行' : '启动中...'}</div>
+            <div className="status-hero-value">
+              {status?.running ? '在线运行' : status?.startup_error ? '启动失败' : '启动中...'}
+            </div>
+            {status?.startup_error && (
+              <div className="status-hero-error">
+                引擎启动失败，请查看日志：%LOCALAPPDATA%/com.daoti.xuandun-desktop/engine.log
+              </div>
+            )}
           </div>
         </div>
 

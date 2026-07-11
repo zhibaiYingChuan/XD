@@ -15,6 +15,7 @@ pub struct StatusResponse {
     pub total_requests: u64,
     pub total_blocked: u64,
     pub block_rate: f64,
+    pub startup_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +66,7 @@ pub async fn get_status(state: State<'_, Mutex<EngineState>>) -> Result<StatusRe
         total_requests: s.total_requests,
         total_blocked: s.total_blocked,
         block_rate: s.block_rate(),
+        startup_error: s.startup_error.clone(),
     })
 }
 

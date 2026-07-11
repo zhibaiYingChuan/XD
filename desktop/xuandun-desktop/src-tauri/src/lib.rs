@@ -92,7 +92,15 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = engine::ensure_engine_running(&handle).await {
+                    // 引擎启动失败时更新 EngineState，让前端知道启动出错了
+                    if let Ok(mut s) = handle.state::<std::sync::Mutex<engine::EngineState>>().lock() {
+                        s.startup_error = Some(e.clone());
+                    }
+                    let log_path = std::env::var_os("LOCALAPPDATA")
+                        .map(|p| format!("{:?}\\com.daoti.xuandun-desktop\\engine.log", p))
+                        .unwrap_or_else(|| "engine.log".to_string());
                     eprintln!("[XuanDun] Engine start error: {}", e);
+                    eprintln!("[XuanDun] See {} for engine crash diagnostics", log_path);
                 }
             });
             let health_handle = app.handle().clone();
