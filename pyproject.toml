@@ -29,6 +29,7 @@ Repository = "https://github.com/zhibaiYingChuan/XD.git"
 
 [project.optional-dependencies]
 torch = ["torch>=2.0.0"]
+engine = ["flask>=3.0", "waitress>=3.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
