@@ -157,7 +157,9 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
 
     start_engine_sidecar(app)?;
 
-    for _ in 0..30 {
+    // 渐进式健康检查：Nuitka onefile 134MB 自解压需要较长时间
+    // 阶段1：前10秒，每500ms检查一次（快速响应）
+    for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if check_engine_health(&engine_url).await {
             let state = app.state::<StdMutex<EngineState>>();
@@ -165,59 +167,199 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
             s.running = true;
             s.healthy = true;
             s.started_at = Some(Instant::now());
+            log_engine("Engine health check passed (phase 1)");
+            return Ok(());
+        }
+    }
+    // 阶段2：10-60秒，每1秒检查一次（等待自解压完成）
+    for i in 0..50 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if check_engine_health(&engine_url).await {
+            let state = app.state::<StdMutex<EngineState>>();
+            let mut s = state.lock().map_err(|e| e.to_string())?;
+            s.running = true;
+            s.healthy = true;
+            s.started_at = Some(Instant::now());
+            log_engine(&format!("Engine health check passed (phase 2, attempt {})", i + 1));
             return Ok(());
         }
     }
 
-    Err("Engine failed to start within 15 seconds".to_string())
+    log_engine("Engine failed to start within 60 seconds");
+    Err("Engine failed to start within 60 seconds".to_string())
+}
+
+fn log_engine(msg: &str) {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir());
+    let dir = base.join("com.daoti.xuandun-desktop");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("engine.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", chrono::Utc::now().to_rfc3339(), msg);
+    }
+    eprintln!("[XuanDun:engine] {}", msg);
+}
+
+fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let mut searched: Vec<String> = Vec::new();
+
+    // 1. current_exe 同级目录（打包模式主路径）
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let cands = [
+                dir.join("xuandun-engine-x86_64-pc-windows-msvc.exe"),
+                dir.join("xuandun-engine.exe"),
+                dir.join("xuandun-engine"),
+            ];
+            for c in &cands {
+                searched.push(c.display().to_string());
+                if c.exists() {
+                    log_engine(&format!("Engine found at: {}", c.display()));
+                    return Some(c.clone());
+                }
+            }
+        }
+    }
+
+    // 2. Tauri resource_dir（macOS/Linux 打包模式）
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let cands = [
+            res_dir.join("xuandun-engine-x86_64-pc-windows-msvc.exe"),
+            res_dir.join("xuandun-engine"),
+        ];
+        for c in &cands {
+            searched.push(c.display().to_string());
+            if c.exists() {
+                log_engine(&format!("Engine found at: {}", c.display()));
+                return Some(c.clone());
+            }
+        }
+    }
+
+    // 3. 开发模式：src-tauri/binaries/
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(src_tauri) = dir.parent() {
+                let dev_path = src_tauri.join("src-tauri").join("binaries").join("xuandun-engine-x86_64-pc-windows-msvc.exe");
+                searched.push(dev_path.display().to_string());
+                if dev_path.exists() {
+                    log_engine(&format!("Engine found at (dev): {}", dev_path.display()));
+                    return Some(dev_path);
+                }
+            }
+        }
+    }
+
+    log_engine(&format!("Engine NOT found. Searched paths:\n  {}", searched.join("\n  ")));
+    None
 }
 
 fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
+    log_engine("start_engine_sidecar: begin");
+
     #[cfg(target_os = "windows")]
     {
         use std::process::{Command, Stdio};
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        // 在 exe 同级目录查找引擎，支持打包模式（带 target 三元组后缀）和开发模式（无后缀）
-        let engine_path = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .and_then(|dir| {
-                let candidates = [
-                    dir.join("xuandun-engine-x86_64-pc-windows-msvc.exe"),
-                    dir.join("xuandun-engine.exe"),
-                ];
-                candidates.into_iter().find(|p| p.exists())
-            });
-
-        if let Some(path) = engine_path {
-            let child = Command::new(&path)
+        if let Some(path) = find_engine_path(app) {
+            log_engine(&format!("Spawning engine: {}", path.display()));
+            let mut child = Command::new(&path)
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("Failed to spawn engine at {:?}: {}", path, e))?;
+                .map_err(|e| {
+                    let msg = format!("Failed to spawn engine at {:?}: {}", path, e);
+                    log_engine(&msg);
+                    msg
+                })?;
             let pid = child.id();
+
+            // 在独立线程中读取 stderr 输出到日志（帮助诊断引擎崩溃）
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(stderr);
+                    for line in reader.lines().take(50) {
+                        if let Ok(line) = line {
+                            log_engine(&format!("engine stderr: {}", line));
+                        }
+                    }
+                });
+            }
+
             std::mem::forget(child);
 
             if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                 s.child_pid = Some(pid);
             }
+            log_engine(&format!("Engine spawned, pid={}", pid));
             return Ok(());
         }
-        // 回退到 tauri-plugin-shell sidecar API
+        log_engine("Engine binary not found via std::process, falling back to sidecar API");
     }
 
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(path) = find_engine_path(app) {
+            use std::process::{Command, Stdio};
+            log_engine(&format!("Spawning engine: {}", path.display()));
+            let mut child = Command::new(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| {
+                    let msg = format!("Failed to spawn engine at {:?}: {}", path, e);
+                    log_engine(&msg);
+                    msg
+                })?;
+            let pid = child.id();
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(stderr);
+                    for line in reader.lines().take(50) {
+                        if let Ok(line) = line {
+                            log_engine(&format!("engine stderr: {}", line));
+                        }
+                    }
+                });
+            }
+            std::mem::forget(child);
+            if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                s.child_pid = Some(pid);
+            }
+            log_engine(&format!("Engine spawned, pid={}", pid));
+            return Ok(());
+        }
+    }
+
+    // 回退到 tauri-plugin-shell sidecar API
+    log_engine("Falling back to tauri-plugin-shell sidecar API");
     let sidecar_command = app.shell()
         .sidecar("xuandun-engine")
-        .map_err(|e| format!("Failed to create sidecar: {}", e))?;
-    let (_rx, child) = sidecar_command.spawn().map_err(|e| format!("Failed to spawn engine: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to create sidecar: {}", e);
+            log_engine(&msg);
+            msg
+        })?;
+    let (_rx, child) = sidecar_command.spawn().map_err(|e| {
+        let msg = format!("Failed to spawn engine via sidecar: {}", e);
+        log_engine(&msg);
+        msg
+    })?;
     let pid = child.pid();
     if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
         s.child_pid = Some(pid);
     }
+    log_engine(&format!("Engine spawned via sidecar, pid={}", pid));
     Ok(())
 }
 

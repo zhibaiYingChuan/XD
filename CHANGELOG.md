@@ -2,6 +2,35 @@
 
 本项目变更遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.2.1] - 2026-07-11
+
+### 修复
+
+#### 引擎启动超时问题（根本原因修复）
+- 健康检查超时从 15 秒提升到 60 秒，采用渐进式检查策略
+  - 阶段 1：前 10 秒每 500ms 检查一次（快速响应）
+  - 阶段 2：10-60 秒每 1 秒检查一次（等待 Nuitka onefile 自解压完成）
+- 引擎启动时只初始化默认模式（balanced），其他模式按需懒加载
+  - 原先预初始化 3 个 shield 模式导致启动时间过长
+
+#### 观察模式状态修复
+- `get_learning_status` 引擎未运行时返回 `observing` 而非 `protecting`
+- 首次安装默认进入观察模式，符合产品优化方案设计
+
+#### 引导向导体验优化
+- 移除引擎启动等待界面，直接显示接入方式选择
+- 引擎未运行时在观察模式徽章中显示"引擎正在后台启动..."提示
+- Dashboard 引擎状态显示"启动中..."而非"离线"
+
+#### 引擎路径查找增强
+- 新增 `log_engine()` 诊断日志（写入 `%LOCALAPPDATA%\com.daoti.xuandun-desktop\engine.log`）
+- `find_engine_path()` 三路径搜索（current_exe/resource_dir/dev_mode）
+- 引擎 stderr 捕获线程（前 50 行输出到日志）
+
+### 变更
+- 版本号同步更新：package.json/tauri.conf.json/Cargo.toml/pyproject.toml/engine_flask.py
+- 应用图标替换为新 logo
+
 ## [1.2.0] - 2026-07-11
 
 ### 新增

@@ -2088,6 +2088,49 @@ body {
   background: var(--bg-secondary);
 }
 
+.wizard-engine-waiting {
+  text-align: center;
+  padding: 40px 20px;
+}
+.wizard-engine-waiting h3 {
+  margin: 16px 0 8px;
+  font-size: 1.2rem;
+}
+.wizard-engine-waiting p {
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+.wizard-engine-icon {
+  font-size: 3rem;
+  display: inline-block;
+}
+.wizard-engine-icon.spinning {
+  animation: wizardSpin 2s linear infinite;
+}
+.wizard-engine-tips {
+  text-align: left;
+  max-width: 280px;
+  margin: 0 auto;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  line-height: 1.8;
+}
+.wizard-observing-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: rgba(255, 193, 7, 0.12);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 0.85rem;
+  color: #ffc107;
+}
+.wizard-badge-icon {
+  font-size: 1rem;
+}
+
 /* Dashboard v1.2.0 可视化增强 */
 .time-range-selector {
   display: flex;

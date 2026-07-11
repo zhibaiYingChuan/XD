@@ -117,7 +117,7 @@ def _get_shield(mode: str) -> XuanDun:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "1.2.0"})
+    return jsonify({"status": "ok", "version": "1.2.1"})
 
 
 @app.route("/status", methods=["GET"])
@@ -569,10 +569,10 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    logger.info("Pre-initializing all shield modes...")
-    for mode in _MODE_MAP:
-        _get_shield(mode)
-    logger.info("All shield modes initialized.")
+    # 只初始化默认模式，其他模式按需懒加载（加速启动）
+    logger.info("Initializing default shield mode: %s", args.mode)
+    _get_shield(args.mode)
+    logger.info("Default shield mode initialized.")
 
     logger.info("道体·玄盾引擎启动: %s:%d (mode=%s)", args.host, args.port, args.mode)
 

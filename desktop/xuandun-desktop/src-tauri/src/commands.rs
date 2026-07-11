@@ -328,12 +328,17 @@ pub async fn get_learning_status(state: State<'_, Mutex<EngineState>>) -> Result
     };
     if !is_running {
         return Ok(serde_json::json!({
-            "mode": "protecting",
-            "learning_progress": 1.0,
+            "mode": "observing",
+            "learning_progress": 0.0,
             "sample_count": 0,
+            "min_samples_for_switch": 1000,
             "safe_prototypes": 0,
             "attack_prototypes": 0,
+            "builtin_attacks_loaded": 0,
             "would_block_count": 0,
+            "would_block_preview": [],
+            "switched_at": null,
+            "call_count": 0,
         }));
     }
     engine_get(&engine_url, "/learning/status").await

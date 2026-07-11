@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daoti-xuandun"
-version = "1.2.0"
+version = "1.2.1"
 description = "道体·玄盾 - 轻量级AI运行时安全网关"
 readme = "README.md"
 authors = [{ name = "Small Loong" }]

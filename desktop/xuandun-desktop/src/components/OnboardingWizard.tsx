@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 
 interface OnboardingWizardProps {
   totalRequests: number;
+  engineRunning: boolean;
   onSkip: () => void;
   onNavigate: (path: string) => void;
 }
@@ -57,7 +58,7 @@ const METHODS: Method[] = [
 
 const WIZARD_STEPS = ['选择接入方式', '按步骤配置', '验证连通性', '完成'];
 
-export default function OnboardingWizard({ totalRequests, onSkip, onNavigate }: OnboardingWizardProps) {
+export default function OnboardingWizard({ totalRequests, engineRunning, onSkip, onNavigate }: OnboardingWizardProps) {
   const [wizardStep, setWizardStep] = useState(0);
   const [selectedMethod, setSelectedMethod] = useState<MethodId | null>(null);
   const [checkedSteps, setCheckedSteps] = useState<Record<number, boolean>>({});
@@ -142,8 +143,15 @@ export default function OnboardingWizard({ totalRequests, onSkip, onNavigate }: 
         <div className="wizard-body">
           {wizardStep === 0 && (
             <div className="wizard-step-content">
+              <div className="wizard-observing-badge">
+                <span className="wizard-badge-icon">🟡</span>
+                <span>
+                  观察模式已启用 — 玄盾正在旁听学习，不会拦截任何请求
+                  {!engineRunning && <span className="wizard-engine-hint">（引擎正在后台启动...）</span>}
+                </span>
+              </div>
               <p className="wizard-intro">
-                玄盾已就绪，但尚未检测到任何流量。请选择一种接入方式，我们将引导您完成配置。
+                玄盾已就绪！请选择一种接入方式，让玄盾开始学习您的正常对话模式。
               </p>
               <div className="wizard-method-grid">
                 {METHODS.map((m) => (

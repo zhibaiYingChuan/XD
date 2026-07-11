@@ -261,9 +261,10 @@ export default function Dashboard() {
         </div>
       )}
 
-      {showWizard && status && status.running && status.total_requests === 0 && (
+      {showWizard && (!status || status.total_requests === 0) && (
         <OnboardingWizard
-          totalRequests={status.total_requests}
+          totalRequests={status?.total_requests ?? 0}
+          engineRunning={status?.running ?? false}
           onSkip={() => {
             localStorage.setItem('xuandun_onboarding_skip', 'true');
             setShowWizard(false);
@@ -286,7 +287,7 @@ export default function Dashboard() {
           </div>
           <div className="status-hero-info">
             <div className="status-hero-label">引擎状态</div>
-            <div className="status-hero-value">{status?.running ? '在线运行' : '离线'}</div>
+            <div className="status-hero-value">{status?.running ? '在线运行' : '启动中...'}</div>
           </div>
         </div>
 
