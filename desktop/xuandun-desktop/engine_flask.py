@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque, Counter
 
 import numpy as np
 
@@ -85,6 +86,12 @@ _NOTIFIER_CLASSES = {
 _DEBUG_TOKEN = os.environ.get("XUANDUN_DEBUG_TOKEN", "")
 _ALLOWED_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 
+# --- 学习数据快照：定期将运行时学习状态持久化到磁盘 ---
+_LEARNING_SNAPSHOT_DIR = None  # 在 main() 中初始化为引擎数据目录
+_LEARNING_SNAPSHOT_PATH = None  # 完整快照文件路径
+_last_snapshot_call_count = 0  # 上次快照时的 call_count
+_SNAPSHOT_INTERVAL = 100  # 每 100 次 call_count 增长保存一次快照
+
 
 def _cors_origin() -> str:
     origin = request.headers.get("Origin", "")
@@ -104,20 +111,190 @@ def _attach_cors(resp):
     return resp
 
 
+def _transfer_learning_data(target: XuanDun, source: XuanDun):
+    """从源 shield 迁移学习数据到目标 shield（仅维度无关的数据）。
+
+    当防御层级切换（如 balanced → high_security）时，不同层级的
+    hidden_dim 可能不同（64/128/256），因此维度相关的原型向量、
+    投影矩阵等无法直接拷贝。本函数迁移所有维度无关的学习数据，
+    确保已有的域知识、否定校准、EWMA 状态等不丢失。
+    """
+    src = source.domain_awareness
+    dst = target.domain_awareness
+
+    # --- 标量 ---
+    dst.sample_count = src.sample_count
+    dst.call_count = src.call_count
+    dst._domain_char_count = src._domain_char_count
+    dst._domain_byte_count = src._domain_byte_count
+    dst._domain_trigram_count = src._domain_trigram_count
+    dst._domain_fourgram_count = src._domain_fourgram_count
+    dst._rejected_fourgram_count = src._rejected_fourgram_count
+    dst._negation_sample_count = src._negation_sample_count
+    dst._language_feature_weight = src._language_feature_weight
+    dst._language_weight_update_counter = src._language_weight_update_counter
+    dst._last_forget_time = src._last_forget_time
+    dst._last_binary_anomaly = src._last_binary_anomaly
+    dst._negation_calibrated = src._negation_calibrated
+    dst._negation_weights_locked = src._negation_weights_locked
+    if src._ewma_mean is not None:
+        dst._ewma_mean = src._ewma_mean
+    if src._ewma_var is not None:
+        dst._ewma_var = src._ewma_var
+
+    # --- 字典（深拷贝避免引用共享） ---
+    dst._domain_char_profile = dict(src._domain_char_profile)
+    dst._domain_trigram_profile = dict(src._domain_trigram_profile)
+    dst._domain_char_fourgram_profile = dict(src._domain_char_fourgram_profile)
+    dst._domain_inquiry_prefixes = dict(src._domain_inquiry_prefixes)
+    dst._rejected_fourgram_profile = dict(src._rejected_fourgram_profile)
+    dst._domain_imperative_prefixes = dict(src._domain_imperative_prefixes)
+    dst._domain_learning_phrases = dict(src._domain_learning_phrases)
+    dst._negation_weights = dict(src._negation_weights)
+    dst._negation_feedback = dict(src._negation_feedback)
+    dst._negation_signal_history = {k: list(v) for k, v in src._negation_signal_history.items()}
+    dst._repetition_cache = dict(src._repetition_cache)
+    dst._pattern_timestamps = dict(src._pattern_timestamps)
+
+    # --- deque（保持目标 maxlen） ---
+    dst.chaos_nursery = deque(src.chaos_nursery, maxlen=dst.chaos_nursery.maxlen)
+    dst.distance_history = deque(src.distance_history, maxlen=dst.distance_history.maxlen)
+    dst._accepted_distances = deque(src._accepted_distances, maxlen=dst._accepted_distances.maxlen)
+    dst.observing_would_block = deque(src.observing_would_block, maxlen=dst.observing_would_block.maxlen)
+    dst._recent_inputs = deque(src._recent_inputs, maxlen=dst._recent_inputs.maxlen)
+
+    # --- numpy 数组（维度无关：字节频率分布，shape 固定为 256） ---
+    if src._domain_byte_profile is not None:
+        dst._domain_byte_profile = src._domain_byte_profile.copy()
+
+    # --- 洛书映射器状态（均在 176 维原生空间，维度无关） ---
+    if dst._luoshu is not None and src._luoshu is not None:
+        dst._luoshu.safe_prototypes = [p.copy() for p in src._luoshu.safe_prototypes]
+        dst._luoshu.attack_prototypes = [p.copy() for p in src._luoshu.attack_prototypes]
+        dst._luoshu._attack_fingerprint_counter = Counter(src._luoshu._attack_fingerprint_counter)
+
+    logger.info(
+        "Transferred learning data from existing shield: "
+        "call_count=%d, sample_count=%d, char_profile=%d, trigram_profile=%d, "
+        "rejected_fourgram=%d, negation_calibrated=%s, "
+        "ewma=%s, luoshu_safe=%d, luoshu_attack=%d",
+        src.call_count, src.sample_count, len(src._domain_char_profile),
+        len(src._domain_trigram_profile), src._rejected_fourgram_count,
+        src._negation_calibrated,
+        f"mean={src._ewma_mean:.4f}" if src._ewma_mean is not None else "None",
+        len(src._luoshu.safe_prototypes) if src._luoshu else 0,
+        len(src._luoshu.attack_prototypes) if src._luoshu else 0,
+    )
+
+
+def _save_learning_snapshot():
+    """保存轻量级学习状态快照到 JSON 文件。
+
+    定期将各 shield 的学习统计摘要写入磁盘，用于：
+    1. 引擎重启后了解之前的学习进展
+    2. 外部系统（如 LRC 记忆库）读取快照进行记忆同步
+    3. 调试和监控学习趋势
+
+    本函数仅保存维度无关的统计信息，不保存原始数据（原型向量等）。
+    快照文件位于引擎数据目录下的 learning_snapshot.json。
+    """
+    if not _shields:
+        return
+    if not _LEARNING_SNAPSHOT_PATH:
+        return
+
+    snapshots = {}
+    for mode, shield in _shields.items():
+        da = shield.domain_awareness
+        snapshots[mode] = {
+            "call_count": da.call_count,
+            "sample_count": da.sample_count,
+            "profile_sizes": {
+                "char": len(da._domain_char_profile),
+                "trigram": len(da._domain_trigram_profile),
+                "fourgram": len(da._domain_char_fourgram_profile),
+                "inquiry_prefixes": len(da._domain_inquiry_prefixes),
+                "imperative_prefixes": len(da._domain_imperative_prefixes),
+                "learning_phrases": len(da._domain_learning_phrases),
+                "rejected_fourgram": len(da._rejected_fourgram_profile),
+            },
+            "prototype_counts": {
+                "total": len(da.prototypes),
+                "luoshu_safe": len(da._luoshu.safe_prototypes) if da._luoshu else 0,
+                "luoshu_attack": len(da._luoshu.attack_prototypes) if da._luoshu else 0,
+            },
+            "negation": {
+                "calibrated": da._negation_calibrated,
+                "sample_count": da._negation_sample_count,
+                "weights_locked": da._negation_weights_locked,
+            },
+            "rejected_fourgram_count": da._rejected_fourgram_count,
+            "ewma_mean": da._ewma_mean,
+        }
+
+    payload = {
+        "timestamp": time.time(),
+        "engine_mode": _default_mode,
+        "uptime": round(time.time() - _start_time, 1),
+        "cached_modes": list(_shields.keys()),
+        "shields": snapshots,
+        "version": 1,
+    }
+
+    try:
+        with open(_LEARNING_SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        logger.info("Learning snapshot saved (%d shields, %s)", len(_shields), _LEARNING_SNAPSHOT_PATH)
+    except Exception as e:
+        logger.warning("Failed to save learning snapshot: %s", e)
+
+
+def _maybe_save_snapshot(mode: str):
+    """检查是否需要保存快照，按 call_count 增长阈值触发。
+
+    由 /protect 端点在每次请求后调用，避免在每次请求时都写 IO。
+    """
+    global _last_snapshot_call_count
+
+    shield = _shields.get(mode)
+    if shield is None:
+        return
+
+    current = shield.domain_awareness.call_count
+    if current - _last_snapshot_call_count >= _SNAPSHOT_INTERVAL:
+        _last_snapshot_call_count = current
+        _save_learning_snapshot()
+
+
 def _get_shield(mode: str) -> XuanDun:
     with _shields_lock:
         if mode not in _shields:
             logger.info("Creating new XuanDun instance for mode=%s", mode)
             level = _MODE_MAP.get(mode, DefenseLevel.STANDARD)
             config = XuanDunConfig.for_level(level)
-            _shields[mode] = XuanDun(config)
-            logger.info("XuanDun instance created for mode=%s", mode)
+            shield = XuanDun(config)
+            # 桌面端强制启用保护模式，无需等待样本积累
+            # 内置攻击/安全原型已提供充分的初始防护能力
+            shield.switch_mode("protecting")
+
+            # 如果有其他模式的 shield 已有学习数据，迁移之
+            if _shields:
+                source = max(_shields.values(), key=lambda s: s.domain_awareness.call_count)
+                if source.domain_awareness.call_count > 0:
+                    logger.info(
+                        "Preparing to transfer learning data from mode with call_count=%d",
+                        source.domain_awareness.call_count,
+                    )
+                    _transfer_learning_data(shield, source)
+
+            _shields[mode] = shield
+            logger.info("XuanDun instance created for mode=%s (mode=protecting)", mode)
         return _shields[mode]
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "1.2.2"})
+    return jsonify({"status": "ok", "version": "1.2.3"})
 
 
 @app.route("/status", methods=["GET"])
@@ -204,6 +381,53 @@ def learning_details():
     except Exception as e:
         logger.error("learning_details error: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/learning/snapshot", methods=["GET"])
+def get_learning_snapshot():
+    """返回当前学习快照数据（从内存读取，不从文件读取）。
+    
+    快照保存的是各 shield 学习状态统计摘要，包括 call_count、域档案大小、
+    原型计数、否定校准状态等。用于前端展示学习趋势和外部系统记忆同步。
+    """
+    if not _shields:
+        return jsonify({"error": "No shields available"}), 404
+    snapshots = {}
+    for mode, shield in _shields.items():
+        da = shield.domain_awareness
+        snapshots[mode] = {
+            "call_count": da.call_count,
+            "sample_count": da.sample_count,
+            "profile_sizes": {
+                "char": len(da._domain_char_profile),
+                "trigram": len(da._domain_trigram_profile),
+                "fourgram": len(da._domain_char_fourgram_profile),
+                "inquiry_prefixes": len(da._domain_inquiry_prefixes),
+                "imperative_prefixes": len(da._domain_imperative_prefixes),
+                "learning_phrases": len(da._domain_learning_phrases),
+                "rejected_fourgram": len(da._rejected_fourgram_profile),
+            },
+            "prototype_counts": {
+                "total": len(da.prototypes),
+                "luoshu_safe": len(da._luoshu.safe_prototypes) if da._luoshu else 0,
+                "luoshu_attack": len(da._luoshu.attack_prototypes) if da._luoshu else 0,
+            },
+            "negation": {
+                "calibrated": da._negation_calibrated,
+                "sample_count": da._negation_sample_count,
+                "weights_locked": da._negation_weights_locked,
+            },
+            "rejected_fourgram_count": da._rejected_fourgram_count,
+            "ewma_mean": da._ewma_mean,
+        }
+    resp = jsonify({
+        "timestamp": time.time(),
+        "engine_mode": _default_mode,
+        "uptime": round(time.time() - _start_time, 1),
+        "cached_modes": list(_shields.keys()),
+        "shields": snapshots,
+    })
+    return _attach_cors(resp)
 
 
 @app.route("/simulation/run", methods=["POST", "OPTIONS"])
@@ -415,9 +639,12 @@ _ATTACK_CATEGORY_KEYWORDS = {
 }
 
 
-def _classify_attack_category(text: str, reject_stage) -> str:
-    if reject_stage is None:
-        return None
+def _classify_attack_category(text: str, reject_stage=None) -> str:
+    """基于关键词匹配对输入文本进行攻击分类。
+
+    无论引擎是否拦截，都返回分类结果。
+    reject_stage 仅用于日志和告警增强，不影响分类逻辑。
+    """
     text_lower = text.lower()
     for category, keywords in _ATTACK_CATEGORY_KEYWORDS.items():
         for kw in keywords:
@@ -435,17 +662,16 @@ def protect():
     data = request.get_json(silent=True) or {}
     text = data.get("text", "")
     session = data.get("session", str(uuid.uuid4())[:8])
-    mode = data.get("mode", _default_mode)
 
     if not text:
         return jsonify({"error": "text is required"}), 400
 
     try:
-        shield = _get_shield(mode)
+        shield = _get_shield(_default_mode)
         t0 = time.perf_counter()
         result = shield.protect(text, session_id=session)
         lat = (time.perf_counter() - t0) * 1000
-        logger.info("protect() took %.1fms session=%s mode=%s", lat, session, mode)
+        logger.info("protect() took %.1fms session=%s mode=%s", lat, session, _default_mode)
 
         with _stats_lock:
             global _total_requests, _total_blocked
@@ -459,10 +685,14 @@ def protect():
             "reject_stage": result.reject_stage,
             "domain_distance": result.domain_distance,
             "timing_distance": result.timing_distance,
-            "attack_category": _classify_attack_category(text, result.reject_stage) if not result.allowed else None,
+            "attack_category": _classify_attack_category(text, result.reject_stage),
             "latency_ms": round(lat, 2),
         }
         resp = jsonify(response)
+
+        # 检查是否需要保存学习快照（按 call_count 增长阈值触发）
+        _maybe_save_snapshot(_default_mode)
+
         return _attach_cors(resp)
 
     except Exception as e:
@@ -495,6 +725,7 @@ def set_mode():
 
     _default_mode = new_mode
     _get_shield(new_mode)
+    _save_learning_snapshot()
     logger.info("Mode switched to %s", new_mode)
     return jsonify({"status": "ok", "mode": new_mode})
 
@@ -545,7 +776,7 @@ def _monitor_debugger():
 
 
 def main():
-    global _default_mode
+    global _default_mode, _LEARNING_SNAPSHOT_DIR, _LEARNING_SNAPSHOT_PATH
 
     if _ANTI_DEBUG_AVAILABLE:
         if anti_debug.is_debugger_present():
@@ -562,9 +793,16 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--mode", type=str, default="balanced",
                         choices=["high_security", "balanced", "low_false_positive"])
+    parser.add_argument("--data-dir", type=str, default=None,
+                        help="引擎数据目录，用于存放快照和持久化数据（默认：当前目录）")
     args = parser.parse_args()
 
     _default_mode = args.mode
+
+    # 初始化学习快照路径
+    _LEARNING_SNAPSHOT_DIR = args.data_dir or os.getcwd()
+    _LEARNING_SNAPSHOT_PATH = os.path.join(_LEARNING_SNAPSHOT_DIR, "learning_snapshot.json")
+    logger.info("Learning snapshot path: %s", _LEARNING_SNAPSHOT_PATH)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)

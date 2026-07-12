@@ -17,6 +17,55 @@ from typing import List, Optional
 
 from attack_samples import build_all_attack_categories, get_benign_samples
 
+# 攻击分类关键词映射（与 engine_flask 保持同步）
+_ATTACK_CATEGORY_KEYWORDS = {
+    "direct_prompt_injection": [
+        "忽略之前", "忽略所有", "忘记指令", "忘掉", "override",
+        "disregard", "ignore all", "ignored", "new instruction",
+        "你是一个", "你现在是", "扮演", "假装", "pretend",
+        "acting as", "you are now", "从今天起", "作为",
+    ],
+    "indirect_prompt_injection": [
+        "邮件内容说", "网页内容包含", "文档中提到",
+        "the email says", "the page says", "injected",
+        "根据附件", "根据收到的消息",
+    ],
+    "jailbreak": [
+        "DAN", "jailbreak", "越狱", "已解锁", "unlocked",
+        "mode", "filters", "bypass", "bypassing",
+        "不受限制", "unrestricted", "没有限制", "no restrictions",
+        "filter bypass", "解放", "自由模式", "不受约束",
+    ],
+    "encoding_obfuscation": [
+        "base64", "rot13", "hex", "编码", "encoded",
+        "obfuscated", "混淆", "unicode", "escape",
+        "反向", "倒序", "reverse",
+    ],
+    "agent_attack": [
+        "执行命令", "运行", "execute", "shell", "terminal",
+        "system", "cmd", "powershell", "sudo", "bash",
+        "curl", "wget", "http请求", "访问网站", "访问链接",
+        "delete file", "写入文件", "write to", "read file",
+        "入侵", "攻击", "exploit",
+    ],
+    "data_leakage": [
+        "告诉我密码", "泄露", "泄漏", "leak", "密码是",
+        "credit card", "ssn", "social security", "token",
+        "api key", "secret key", "私钥", "password",
+        "database credentials", "connection string",
+    ],
+}
+
+
+def _classify_attack_category(text: str) -> str:
+    """基于关键词匹配对输入文本进行攻击分类。"""
+    text_lower = text.lower()
+    for category, keywords in _ATTACK_CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in text_lower:
+                return category
+    return "other"
+
 
 class SimulationEngine:
     """模拟测试引擎：调用玄盾检测引擎批量测试攻击样本。"""
@@ -133,6 +182,7 @@ class SimulationEngine:
             "latency_ms": round(elapsed_ms, 2),
             "trust_level": result.trust_level.value if hasattr(result, 'trust_level') and result.trust_level else None,
             "domain_distance": round(result.domain_distance, 4) if hasattr(result, 'domain_distance') and result.domain_distance else None,
+            "attack_category": _classify_attack_category(text),
         }
 
     def _build_report(self, results: List[dict], mode: str, elapsed: float) -> dict:

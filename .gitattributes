@@ -1,0 +1,1 @@
+desktop/xuandun-desktop/src-tauri/binaries/xuandun-engine-*.exe filter=lfs diff=lfs merge=lfs -text

@@ -102,3 +102,9 @@ tests/test_audit_deep.py
 
 # Local temporary verification scripts (not for public release)
 _verify_examples.py
+
+# Runtime runtime artifacts
+learning_snapshot.json
+
+# Local design assets (not part of source)
+xdlogo.jpg
