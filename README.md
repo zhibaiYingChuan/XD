@@ -18,6 +18,8 @@
 - **三端桌面应用**：Windows / macOS (Apple Silicon) / Linux
 - **会话隔离**：不同会话施加特定置换，设计目标为汉明距离 > 50%（实际值取决于输入与运行时状态）
 
+> 📖 **用户指南**：如需完整的使用说明、API 参考和最佳实践，请参阅 [docs/用户指南.md](docs/用户指南.md)。
+
 ## 下载安装
 
 ### 桌面端（推荐企业用户）
@@ -48,13 +50,7 @@ pip install daoti-xuandun==1.2.0
    - Windows：`XuanDun_setup.exe /S`（NSIS静默安装）
    - Linux：脚本批量执行 `sudo dpkg -i XuanDun_*.deb`
 3. **配置分发**：将标准配置文件分发到各终端
-4. **安装验证**：运行验证脚本确认部署成功
-
-```bash
-python scripts/verify_installation.py
-```
-
-脚本验证4个环节：环境检查 → 引擎连通性 → 基础防护测试 → 学习状态检查。全部通过即表示安装成功。
+4. **安装验证**：通过 SDK 调用 `shield.status()` 或桌面端状态页确认引擎运行正常。
 
 > 详细部署指南见 [docs/白皮书.md](docs/白皮书.md) 第15章"B端部署指南"。
 
@@ -232,7 +228,6 @@ shield = XuanDun(mode="low_false_positive")
 - `src/daoti_xuandun/ancient_mapper.py` — 自组织符号映射
 - `src/daoti_xuandun/atlas_mapping.py` — 图谱映射
 - `desktop/xuandun-desktop/engine_flask.py` — 引擎 Flask 服务
-- `desktop/xuandun-desktop/anti_debug.py` — 反逆向检测
 - `desktop/xuandun-desktop/build_engine.py` — Nuitka 编译脚本
 
 **核心限制**：
@@ -305,8 +300,7 @@ python -m daoti_xuandun.manage import --input profile.json
 # 性能基准测试
 python -m daoti_xuandun.benchmark.performance_benchmark --level STANDARD --requests 100
 
-# 行业基准测试
-python -m industry_benchmarks.run --suite owasp_llm_top10 --mode balanced --warmup-en
+
 ```
 
 ## 防御层级（高级）

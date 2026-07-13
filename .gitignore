@@ -67,6 +67,9 @@ archive/
 
 # Internal development docs (not for public release)
 docs/
+!docs/白皮书.md
+!docs/benchmarks.md
+!docs/用户指南.md
 
 # Root-level internal planning docs (Chinese)
 6.5计划.md
