@@ -149,6 +149,12 @@ class EndogenousDomainAwareness:
         # 记录最近输入文本和对应原型索引，用于 get_prototype_examples 展示典型输入
         self._recent_inputs: deque = deque(maxlen=500)
 
+        # 企业级运维：逃生通道 + 灰度部署
+        self._emergency_bypass: bool = config.emergency_bypass
+        self._gray_deploy_ratio: float = config.gray_deploy_ratio
+        self._gray_bypass_count: int = 0
+        self._bypass_log: deque = deque(maxlen=50)
+
         if config.enable_builtin_attacks:
             self._load_builtin_attacks()
 
@@ -210,6 +216,47 @@ class EndogenousDomainAwareness:
             self._mode_switched_at = time.monotonic()
         return {"ok": True, "from": old, "to": target, "sample_count": self.sample_count}
 
+    def set_emergency_bypass(self, enabled: bool) -> dict:
+        """设置逃生通道开关。
+
+        开启后所有请求直接放行，不经过任何检测。
+        """
+        old = self._emergency_bypass
+        self._emergency_bypass = enabled
+        self._bypass_log.append({
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "reason": f"emergency_bypass_{'enabled' if enabled else 'disabled'}",
+        })
+        return {"ok": True, "from": old, "to": enabled}
+
+    def get_emergency_bypass(self) -> bool:
+        """返回逃生通道状态。"""
+        return self._emergency_bypass
+
+    def set_gray_deploy_ratio(self, ratio: float) -> dict:
+        """设置灰度部署比例。
+
+        Args:
+            ratio: 0.0~1.0，表示实际拦截的请求比例
+        """
+        ratio = max(0.0, min(1.0, ratio))
+        old = self._gray_deploy_ratio
+        self._gray_deploy_ratio = ratio
+        return {"ok": True, "from": old, "to": ratio}
+
+    def get_gray_deploy_ratio(self) -> float:
+        """返回灰度部署比例。"""
+        return self._gray_deploy_ratio
+
+    def get_bypass_stats(self) -> dict:
+        """返回逃生通道和灰度部署的统计信息。"""
+        return {
+            "emergency_bypass": self._emergency_bypass,
+            "gray_deploy_ratio": self._gray_deploy_ratio,
+            "gray_bypass_count": self._gray_bypass_count,
+            "bypass_log": list(self._bypass_log)[-20:],
+        }
+
     def get_prototype_examples(self, n: int = 5) -> dict:
         """返回安全原型和攻击原型的统计摘要，以及每个原型的典型输入示例。
 
@@ -257,6 +304,18 @@ class EndogenousDomainAwareness:
         Returns:
             (decision, feature_vector, trust_level, distance)
         """
+        # 逃生通道：紧急放行所有请求，不经过任何检测
+        if self._emergency_bypass:
+            self.call_count += 1
+            feat = self._input_to_vector(raw_input)
+            dist, _ = self._nearest_prototype(feat)
+            self._bypass_log.append({
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "reason": "emergency_bypass",
+                "text_preview": (raw_input[:80] + "...") if isinstance(raw_input, str) and len(raw_input) > 80 else str(raw_input)[:80],
+            })
+            return Decision.PASS, feat, TrustLevel.LOW, float(dist)
+
         feat = self._input_to_vector(raw_input)
         self.call_count += 1
 
@@ -793,6 +852,18 @@ class EndogenousDomainAwareness:
             self._check_auto_switch()
             decision = Decision.PASS
             trust = TrustLevel.LOW
+
+        # 灰度部署：保护模式下按比例放行 REJECT 请求（仅观察不拦截）
+        if self.mode == "protecting" and decision == Decision.REJECT and self._gray_deploy_ratio < 1.0:
+            if self._rng.random() > self._gray_deploy_ratio:
+                self._gray_bypass_count += 1
+                self._bypass_log.append({
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "reason": "gray_deploy_bypass",
+                    "text_preview": (raw_input[:80] + "...") if isinstance(raw_input, str) and len(raw_input) > 80 else str(raw_input)[:80],
+                })
+                decision = Decision.PASS
+                trust = TrustLevel.LOW
 
         # 记录最近输入文本和对应原型索引，用于 get_prototype_examples 展示典型输入
         if isinstance(raw_input, str) and proto_idx >= 0:

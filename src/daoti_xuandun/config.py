@@ -145,6 +145,10 @@ class XuanDunConfig:
     min_samples_for_switch: int = 1000      # 自动切换到保护模式所需的最小正常样本数
     enable_builtin_attacks: bool = True     # 启用内置攻击样本（让洛书攻击原型库从一开始就不为空）
 
+    # 企业级运维（逃生通道 + 灰度部署）
+    emergency_bypass: bool = False           # 逃生通道：开启后所有请求直接放行，不经过任何检测
+    gray_deploy_ratio: float = 1.0           # 灰度部署比例：0.0~1.0，表示实际拦截的请求比例（1.0=全量拦截）
+
     # 预处理管道（可选，不影响核心架构）
     enable_decode_preprocess: bool = True   # 启用 Base64/Hex 解码预处理，检测编码攻击
     enable_unicode_normalize: bool = True   # 启用 Unicode 正规化，降低混淆良性误拒

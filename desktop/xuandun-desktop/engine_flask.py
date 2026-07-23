@@ -383,6 +383,80 @@ def learning_details():
         return jsonify({"error": str(e)}), 500
 
 
+# ── 企业级运维：逃生通道 + 灰度部署 ──
+
+@app.route("/emergency/bypass", methods=["GET", "POST", "OPTIONS"])
+def emergency_bypass():
+    """逃生通道：紧急放行所有请求。
+
+    GET: 返回当前状态
+    POST: {"enabled": true/false} 设置开关
+    """
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+
+    try:
+        shield = _get_shield(_default_mode)
+        if request.method == "POST":
+            data = request.get_json(silent=True) or {}
+            enabled = bool(data.get("enabled", False))
+            result = shield.set_emergency_bypass(enabled)
+            logger.warning("Emergency bypass %s: %s",
+                           "ENABLED" if enabled else "DISABLED", result)
+            resp = jsonify(result)
+        else:
+            resp = jsonify({
+                "emergency_bypass": shield.get_emergency_bypass(),
+            })
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("emergency_bypass error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/gray/deploy", methods=["GET", "POST", "OPTIONS"])
+def gray_deploy():
+    """灰度部署：按比例拦截请求。
+
+    GET: 返回当前比例
+    POST: {"ratio": 0.1} 设置比例（0.0~1.0）
+    """
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+
+    try:
+        shield = _get_shield(_default_mode)
+        if request.method == "POST":
+            data = request.get_json(silent=True) or {}
+            ratio = float(data.get("ratio", 1.0))
+            result = shield.set_gray_deploy_ratio(ratio)
+            logger.info("Gray deploy ratio set: %s", result)
+            resp = jsonify(result)
+        else:
+            resp = jsonify({
+                "gray_deploy_ratio": shield.get_gray_deploy_ratio(),
+            })
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("gray_deploy error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/bypass/stats", methods=["GET"])
+def bypass_stats():
+    """返回逃生通道和灰度部署的统计信息。"""
+    try:
+        shield = _get_shield(_default_mode)
+        stats = shield.get_bypass_stats()
+        resp = jsonify(stats)
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("bypass_stats error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/learning/snapshot", methods=["GET"])
 def get_learning_snapshot():
     """返回当前学习快照数据（从内存读取，不从文件读取）。

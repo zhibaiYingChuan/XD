@@ -374,6 +374,81 @@ pub async fn get_learning_details(state: State<'_, Mutex<EngineState>>) -> Resul
     engine_get(&engine_url, "/learning/details").await
 }
 
+// ── 企业级运维：逃生通道 + 灰度部署 ──
+
+#[tauri::command]
+pub async fn set_emergency_bypass(
+    state: State<'_, Mutex<EngineState>>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Err("Engine not running".to_string());
+    }
+    let body = serde_json::json!({ "enabled": enabled });
+    engine_post(&engine_url, "/emergency/bypass", body).await
+}
+
+#[tauri::command]
+pub async fn get_emergency_bypass(state: State<'_, Mutex<EngineState>>) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Ok(serde_json::json!({ "emergency_bypass": false }));
+    }
+    engine_get(&engine_url, "/emergency/bypass").await
+}
+
+#[tauri::command]
+pub async fn set_gray_deploy_ratio(
+    state: State<'_, Mutex<EngineState>>,
+    ratio: f64,
+) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Err("Engine not running".to_string());
+    }
+    let body = serde_json::json!({ "ratio": ratio });
+    engine_post(&engine_url, "/gray/deploy", body).await
+}
+
+#[tauri::command]
+pub async fn get_gray_deploy_ratio(state: State<'_, Mutex<EngineState>>) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Ok(serde_json::json!({ "gray_deploy_ratio": 1.0 }));
+    }
+    engine_get(&engine_url, "/gray/deploy").await
+}
+
+#[tauri::command]
+pub async fn get_bypass_stats(state: State<'_, Mutex<EngineState>>) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Ok(serde_json::json!({
+            "emergency_bypass": false,
+            "gray_deploy_ratio": 1.0,
+            "gray_bypass_count": 0,
+            "bypass_log": []
+        }));
+    }
+    engine_get(&engine_url, "/bypass/stats").await
+}
+
 #[tauri::command]
 pub async fn run_simulation(
     state: State<'_, Mutex<EngineState>>,

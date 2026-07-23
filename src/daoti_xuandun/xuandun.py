@@ -326,6 +326,38 @@ class XuanDun:
             return {}
         return self.domain_awareness.get_prototype_examples(n)
 
+    # ── 企业级运维：逃生通道 + 灰度部署 ──
+
+    def set_emergency_bypass(self, enabled: bool) -> dict:
+        """逃生通道：开启后所有请求直接放行，不经过任何检测。"""
+        if self.domain_awareness is None:
+            return {"ok": False, "error": "domain_awareness not initialized"}
+        return self.domain_awareness.set_emergency_bypass(enabled)
+
+    def get_emergency_bypass(self) -> bool:
+        """返回逃生通道状态。"""
+        if self.domain_awareness is None:
+            return False
+        return self.domain_awareness.get_emergency_bypass()
+
+    def set_gray_deploy_ratio(self, ratio: float) -> dict:
+        """灰度部署：设置实际拦截的请求比例（0.0~1.0）。"""
+        if self.domain_awareness is None:
+            return {"ok": False, "error": "domain_awareness not initialized"}
+        return self.domain_awareness.set_gray_deploy_ratio(ratio)
+
+    def get_gray_deploy_ratio(self) -> float:
+        """返回灰度部署比例。"""
+        if self.domain_awareness is None:
+            return 1.0
+        return self.domain_awareness.get_gray_deploy_ratio()
+
+    def get_bypass_stats(self) -> dict:
+        """返回逃生通道和灰度部署的统计信息。"""
+        if self.domain_awareness is None:
+            return {"emergency_bypass": False, "gray_deploy_ratio": 1.0}
+        return self.domain_awareness.get_bypass_stats()
+
     def recommend_config(self, output_format: str = "dict") -> Union[dict, str]:
         """基于当前域档案自动推荐配置参数。
 
