@@ -292,10 +292,10 @@ def main():
     level = level_map.get(args.level, DefenseLevel.STANDARD)
 
     print(f"[玄盾] 初始化引擎（{args.level}）...", file=sys.stderr)
-    # 测试环境禁用观察模式和内置攻击，确保拦截功能正常
+    # 禁用观察模式确保实际拦截，启用内置攻击样本提供基线知识
     config = XuanDunConfig.preset(level,
                                   enable_observing_mode=False,
-                                  enable_builtin_attacks=False)
+                                  enable_builtin_attacks=True)
     shield = XuanDun(config=config)
 
     print(f"[玄盾] 运行 {args.mode} 模式测试...", file=sys.stderr)

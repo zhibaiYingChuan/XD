@@ -50,6 +50,10 @@ def create_snapshot(shield, reason: str = "manual") -> dict:
 
     config = shield.config
     config_data = asdict(config)
+    # bytes 字段转为字符串以便 JSON 序列化
+    for k, v in config_data.items():
+        if isinstance(v, bytes):
+            config_data[k] = v.decode("utf-8", errors="replace")
 
     learning_status = shield.get_learning_status()
 
