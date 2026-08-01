@@ -1,0 +1,296 @@
+# 玄盾桌面端 HCSE 安全不变式配置（Sprint 4）
+# 文件: invariants.yaml
+# 生成时间: 2026-08-01
+# 依据: docs/interaction_audit_sprint4.md + 源码静态分析
+# 验证对象: xuandun-desktop.exe (PID 5144) + Flask引擎 (127.0.0.1:18765)
+#
+# 不变式分类:
+#   DATA  - 数据一致性不变式
+#   UI    - UI 安全不变式
+#   AUTH  - 认证/密钥不变式
+#   ISO   - 资源隔离不变式
+#   IDEM  - 幂等性不变式
+#   TIME  - 超时机制不变式
+#
+# 严重度: P0(阻断/数据损坏) P1(体验崩坏) P2(可用性)
+# 验证方式: CDP = Chrome DevTools Protocol, STATIC = 静态代码分析, RUNTIME = 运行时注入
+
+metadata:
+  project: "道体·玄盾 (XuanDun) Desktop"
+  version: "1.2.3"
+  sprint: "Sprint 4"
+  audit_baseline: "docs/interaction_audit_sprint4.md"
+  cdp_endpoint: "http://127.0.0.1:9224"
+  engine_endpoint: "http://127.0.0.1:18765"
+  desktop_pid: 5144
+
+# ──────────────────────────────────────────────────────────────────
+# 核心安全不变式 (10 条硬不变式 + 2 条沙箱不变式)
+# ──────────────────────────────────────────────────────────────────
+invariants:
+
+  # ── 数据一致性不变式 ──
+  - id: INV-01
+    name: "引擎未运行保护性阻断不变式"
+    category: DATA
+    severity: P0
+    description: |
+      当 EngineState.running == false 时，所有 protect 检测请求必须返回
+      fallback=true 且 trust_level="FALLBACK"，禁止放行（allowed=false）。
+      防止引擎离线时 AI 请求未经检测通过。
+    source_code: "desktop/xuandun-desktop/src-tauri/src/commands.rs:114-130"
+    assertion: |
+      对任意 protect(text, session, mode) 调用，
+      若 EngineState.running == false，
+      则返回的 ProtectResponse 满足:
+        fallback == true
+        AND allowed == false
+        AND trust_level == "FALLBACK"
+        AND reject_stage IN ("engine_not_running", "engine_unavailable")
+    verification: RUNTIME
+    cdp_events: ["Network.requestWillBeSent", "Network.responseReceived"]
+    gap_ref: "G-14"
+
+  - id: INV-02
+    name: "引擎不可达审计追溯不变式"
+    category: DATA
+    severity: P0
+    description: |
+      protect 调用 send_protect_request 失败时，必须插入 audit 记录
+      ("fallback", "engine_unavailable")，且返回 fallback=true。
+      保证每次保护性阻断可被审计追溯，不出现"静默 fallback"。
+    source_code: "commands.rs:187-204"
+    assertion: |
+      若 send_protect_request 返回 Err(e)，
+      则 db.insert_audit("fallback", "engine_unavailable") 必须被调用，
+      且响应 fallback == true
+    verification: RUNTIME
+    cdp_events: ["Network.responseReceived"]
+    gap_ref: "R-01"
+
+  - id: INV-06
+    name: "防护模式同步失败必须返回错误 (GAP-05)"
+    category: DATA
+    severity: P0
+    description: |
+      set_mode 命令调用 sync_mode_to_engine 失败时，
+      必须返回 Err 而非 Ok(())，避免前端误认为模式已切换。
+      安全产品模式不一致是致命缺陷（用户以为高安全，实际引擎用旧模式）。
+    source_code: "commands.rs:221-228"
+    assertion: |
+      若 sync_mode_to_engine(&engine_url, &mode).await == Err(e)，
+      则 set_mode 返回 Err("防护模式已保存但引擎同步失败：...")
+      且 db.set_config("mode", &mode) 仍执行（保留用户意图）
+      且 db.insert_audit("mode_change", "...engine sync failed...") 被调用
+    verification: RUNTIME
+    cdp_events: ["Network.responseReceived"]
+    gap_ref: "GAP-05"
+
+  - id: INV-07
+    name: "通知配置同步失败必须返回错误 (GAP-04)"
+    category: DATA
+    severity: P0
+    description: |
+      save_notifier_config 命令在 DB 写入成功但 engine_post("/notifiers/config") 失败时，
+      必须返回 Err 而非静默 Ok。避免半成品状态（DB 有新配置，引擎用旧配置）。
+    source_code: "commands.rs:770-775"
+    assertion: |
+      若 engine_post(&engine_url, "/notifiers/config", body).await == Err(e)，
+      则返回 Err("通知配置已保存到数据库，但引擎同步失败：...")
+      不允许 let _ = engine_post(...) 静默吞错
+    verification: RUNTIME
+    cdp_events: ["Network.responseReceived"]
+    gap_ref: "GAP-04"
+
+  # ── UI 安全不变式 ──
+  - id: INV-03
+    name: "ConfirmModal 并发不永挂不变式 (GAP-01)"
+    category: UI
+    severity: P0
+    description: |
+      useConfirmModal 在并发 confirm() 调用时，
+      必须使用队列模式（queueRef + showNext）逐个处理，
+      每个 Promise 必须在用户操作后 resolve，不允许出现 Promise 永挂。
+      历史缺陷：单 resolveRef 被覆盖导致首个 Promise 永久 pending。
+    source_code: "components/ConfirmModal.tsx:85-130"
+    assertion: |
+      对任意 N 个并发 confirm(msg_i) 调用 (N >= 2)，
+      每个返回的 Promise 必须在 30s 内 resolve 为 boolean 值，
+      不允许任何 Promise 永久 pending。
+      queueRef.current.length 在所有 confirm 处理完后必须为 0。
+    verification: RUNTIME
+    cdp_events: ["Runtime.executionContextCreated"]
+    gap_ref: "GAP-01"
+
+  - id: INV-04
+    name: "密钥删除二次确认不变式"
+    category: AUTH
+    severity: P0
+    description: |
+      handleDeleteKey 必须先调用 confirm() 等待用户确认，
+      返回 false 时立即 return，禁止直接调用 api.deleteSecretKey()。
+      密钥删除不可恢复，必须强制二次确认。
+    source_code: "pages/Settings.tsx:357-365"
+    assertion: |
+      调用 api.deleteSecretKey() 之前，
+      必须先 await confirm("确定要删除引擎密钥吗？...")
+      且 confirm 返回 true。
+      若 confirm 返回 false，则 api.deleteSecretKey 不应被调用。
+    verification: RUNTIME
+    cdp_events: ["DOM.childNodeInserted"]
+    gap_ref: "P0-03"
+
+  - id: INV-05
+    name: "引擎重启/停止二次确认不变式"
+    category: UI
+    severity: P0
+    description: |
+      handleRestart 和 handleStop 必须先调用 confirm() 等待用户确认。
+      引擎重启/停止会中断所有 AI 检测保护，必须强制二次确认。
+    source_code: "pages/Settings.tsx:287-313"
+    assertion: |
+      调用 api.restartEngine() 之前，必须 await confirm("确定要重启引擎吗？...")
+      调用 api.stopEngine() 之前，必须 await confirm("确定要停止引擎吗？...")
+      两者 confirm 返回 false 时对应 API 不应被调用。
+    verification: RUNTIME
+    cdp_events: ["DOM.childNodeInserted"]
+    gap_ref: "P1-16, P0-03"
+
+  # ── 资源隔离/幂等性不变式 ──
+  - id: INV-10
+    name: "快照恢复防并发不变式 (GAP-03)"
+    category: IDEM
+    severity: P0
+    description: |
+      handleRestoreSnapshot 必须使用 restoringSnapshot 状态守卫，
+      恢复中拒绝新的点击（if (restoringSnapshot) return），
+      且恢复按钮 disabled={restoringSnapshot}。
+      防止用户连点导致并发 restore_snapshot 调用，造成配置数据错乱。
+    source_code: "pages/Settings.tsx:520-525, 942"
+    assertion: |
+      当 restoringSnapshot == true 时，
+      任何 handleRestoreSnapshot 调用必须立即 return，
+      且 api.restoreSnapshot 不应被再次调用。
+      UI 上恢复按钮必须 disabled。
+    verification: RUNTIME
+    cdp_events: ["DOM.attributeModified"]
+    gap_ref: "GAP-03"
+
+  - id: INV-11
+    name: "密钥存储后立即验证不变式"
+    category: AUTH
+    severity: P1
+    description: |
+      store_key 必须在 set_password 之后立即调用 get_password 验证存储内容匹配，
+      防止 keyring 静默失败导致密钥实际未存储但用户以为已设置。
+    source_code: "src-tauri/src/keyring.rs:6-15"
+    assertion: |
+      store_key 调用 entry.set_password(key) 后，
+      必须调用 entry.get_password() 验证返回值 == key，
+      若不匹配或失败必须返回 Err。
+    verification: STATIC
+    gap_ref: "NEW-P1-01"
+
+  # ── 超时机制不变式 ──
+  - id: INV-08
+    name: "Invoke 超时机制触发不变式"
+    category: TIME
+    severity: P0
+    description: |
+      invokeWithTimeout 必须通过 Promise.race([invoke(), timeoutPromise]) 实现超时，
+      超时后必须抛出 InvokeTimeoutError（含 command 和 timeoutMs 字段）。
+      超时阈值: FAST=5s, NORMAL=15s, SLOW=60s。
+      restartEngine/stopEngine 必须使用 TIMEOUT.SLOW=60s（GAP-02 修复）。
+    source_code: "services/tauriApi.ts:243-285, 357-358"
+    assertion: |
+      1. invokeWithTimeout 内部使用 Promise.race 机制
+      2. 超时抛出的错误 instanceof InvokeTimeoutError == true
+      3. api.restartEngine 使用 TIMEOUT.SLOW (60000ms)
+      4. api.stopEngine 使用 TIMEOUT.SLOW (60000ms)
+    verification: RUNTIME
+    cdp_events: ["Runtime.exceptionThrown"]
+    gap_ref: "P0-04, GAP-02"
+
+  - id: INV-09
+    name: "Tauri Bridge 缺失检测不变式"
+    category: UI
+    severity: P0
+    description: |
+      invokeWithTimeout 必须在调用前检测 window.__TAURI_INTERNALS__.invoke 是否为 function，
+      若缺失必须立即 Promise.reject(Error("Tauri 桥接未就绪..."))，
+      禁止调用 invoke() 触发模糊错误。
+    source_code: "services/tauriApi.ts:267-277"
+    assertion: |
+      若 typeof window.__TAURI_INTERNALS__ !== 'object'
+      OR typeof window.__TAURI_INTERNALS__.invoke !== 'function'，
+      则 invokeWithTimeout 必须立即 reject，
+      不调用 @tauri-apps/api/core 的 invoke 函数。
+    verification: RUNTIME
+    cdp_events: ["Runtime.exceptionThrown"]
+    gap_ref: "P0-01"
+
+  # ── 沙箱不变式 (Phase 6) ──
+  - id: INV-12
+    name: "路径白名单不变式 (HCSE 沙箱)"
+    category: ISO
+    severity: P0
+    description: |
+      所有 HCSE 测试脚本的文件操作必须经 PathValidator 验证，
+      仅允许在 ./temp, ./logs, ./screenshots, ./evidence 目录下操作。
+      任何访问系统目录（C:\Windows, C:\Users, /etc 等）的尝试必须 Hard Halt 并标记测试失败。
+    source_code: "hcse_resilience_tester/rv_monitor.py:PathValidator"
+    assertion: |
+      对任意 open(path) / write(path) / read(path) 调用，
+      path 必须在白名单目录内，
+      否则触发 HardHaltError 并终止测试。
+    verification: STATIC
+    gap_ref: "HCSE-PHASE-6"
+
+# ──────────────────────────────────────────────────────────────────
+# 不变式覆盖率统计
+# ──────────────────────────────────────────────────────────────────
+coverage:
+  total_invariants: 12
+  by_category:
+    DATA: 4   # INV-01, INV-02, INV-06, INV-07
+    UI: 4     # INV-03, INV-05, INV-09, INV-12
+    AUTH: 2   # INV-04, INV-11
+    IDEM: 1   # INV-10
+    TIME: 1   # INV-08
+  by_severity:
+    P0: 11
+    P1: 1
+  by_verification:
+    RUNTIME: 9
+    STATIC: 3
+  # 与 Sprint4 已知修复的映射
+  gap_coverage:
+    GAP-01: "INV-03"
+    GAP-02: "INV-08"
+    GAP-03: "INV-10"
+    GAP-04: "INV-07"
+    GAP-05: "INV-06"
+    P0-01: "INV-09"
+    P0-03: "INV-04, INV-05"
+    P0-04: "INV-08"
+    G-14:  "INV-01, INV-02"
+    NEW-P1-01: "INV-11"
+
+# ──────────────────────────────────────────────────────────────────
+# HCSE 沙箱资源限制
+# ──────────────────────────────────────────────────────────────────
+sandbox:
+  max_memory_mb: 1024
+  max_cpu_time_sec: 60
+  allowed_paths:
+    - "./temp"
+    - "./logs"
+    - "./screenshots"
+    - "./evidence"
+  redaction:
+    cookie_value: "REDACT"
+    authorization_header: "[BEARER_TOKEN_REDACTED]"
+    email_pattern: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    email_replacement: "[EMAIL_REDACTED]"
+    phone_pattern: '(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}'
+    phone_replacement: "[PHONE_REDACTED]"

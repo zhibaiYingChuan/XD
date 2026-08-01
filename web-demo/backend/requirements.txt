@@ -1,0 +1,6 @@
+# 道体·玄盾 Web Demo 后端依赖
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0
+# 核心算法 SDK（通过 PyPI 安装，不暴露源码）
+daoti-xuandun==1.2.3

@@ -1,0 +1,38 @@
+# CODEOWNERS — 代码审查责任人
+# 格式：路径模式 @用户名
+
+# 核心算法（道体研究许可证，需 CLA）
+/src/daoti_xuandun/reject_gate.py    @zhibaiYingChuan
+/src/daoti_xuandun/luoshu_mapper.py  @zhibaiYingChuan
+/src/daoti_xuandun/dynamic_shell.py  @zhibaiYingChuan
+/src/daoti_xuandun/preprocessors.py  @zhibaiYingChuan
+/src/daoti_xuandun/config.py         @zhibaiYingChuan
+/src/daoti_xuandun/xuandun.py        @zhibaiYingChuan
+/src/daoti_xuandun/secure_strings.py @zhibaiYingChuan
+/src/daoti_xuandun/timing_checker.py @zhibaiYingChuan
+/src/daoti_xuandun/ancient_mapper.py @zhibaiYingChuan
+/src/daoti_xuandun/atlas_mapping.py  @zhibaiYingChuan
+
+# 引擎（Flask + Nuitka）
+/desktop/xuandun-desktop/engine_flask.py  @zhibaiYingChuan
+/desktop/xuandun-desktop/build_engine.py  @zhibaiYingChuan
+
+# Tauri 桌面端（Rust + TypeScript，Apache 2.0）
+/desktop/xuandun-desktop/src-tauri/  @zhibaiYingChuan
+/desktop/xuandun-desktop/src/        @zhibaiYingChuan
+
+# CI/CD
+/.github/workflows/  @zhibaiYingChuan
+
+# 文档
+/docs/         @zhibaiYingChuan
+/README.md     @zhibaiYingChuan
+/CHANGELOG.md  @zhibaiYingChuan
+
+# 许可证
+/LICENSE       @zhibaiYingChuan
+/LICENSE_CODE  @zhibaiYingChuan
+/NOTICE        @zhibaiYingChuan
+
+# 默认（所有未匹配的文件）
+*  @zhibaiYingChuan

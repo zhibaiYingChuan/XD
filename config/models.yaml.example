@@ -1,0 +1,141 @@
+# ============================================================
+# 玄盾 AI 安全网关 — 模型路由配置示例
+# 文档：https://xuandun.dev/docs/models-yaml
+# 修改后自动热加载，无需重启服务（watchdog + 原子替换）
+#
+# 使用方式：
+#   1. 复制本文件为 config/models.yaml
+#   2. 配置环境变量 XUANDUN_MODEL_<MODEL_ID>_KEY（见下方注释）
+#   3. 启动网关：python -m daoti_xuandun.gateway.app --config config/models.yaml
+#
+# 密钥注入规范（A-08/P-04）：
+#   命名规则：XUANDUN_MODEL_<MODEL_ID_UPPER_SNAKE>_KEY
+#   示例：
+#     deepseek-chat -> XUANDUN_MODEL_DEEPSEEK_CHAT_KEY
+#     gpt-4o        -> XUANDUN_MODEL_GPT_4O_KEY
+#   生产环境通过 systemd EnvironmentFile 或 Docker env_file 注入
+#   绝不在本文件中存储明文密钥
+# ============================================================
+
+version: "1.0"
+
+# 全局默认安全策略（未匹配到模型专属策略时使用）
+default:
+  security_policy: balanced        # strict / balanced / permissive
+  audit_log: true                  # 默认开启审计日志
+  timeout_seconds: 300             # 单次请求总超时
+
+# 模型列表 — 每个模型一个条目
+models:
+  # ---------- DeepSeek 客服场景 ----------
+  - id: deepseek-chat              # 调用方在 model 字段填这个 id
+    display_name: "DeepSeek 客服"
+    provider: deepseek
+    backend:
+      base_url: https://api.deepseek.com/v1
+      model: deepseek-chat         # 实际发给后端的 model 名
+      # 密钥环境变量：XUANDUN_MODEL_DEEPSEEK_CHAT_KEY
+      api_key_env: XUANDUN_MODEL_DEEPSEEK_CHAT_KEY
+    security:
+      input_check: true
+      output_check: false          # 默认关闭，性能优先
+      strict_output_check: false
+      policy: balanced
+    fallback: deepseek-chat-backup # 故障转移目标（可选，需在 models 中定义）
+    timeout_seconds: 60
+    enabled: true
+
+  # ---------- DeepSeek 备用模型（故障转移目标示例） ----------
+  - id: deepseek-chat-backup
+    display_name: "DeepSeek 客服（备用）"
+    provider: deepseek
+    backend:
+      base_url: https://api.deepseek.com/v1
+      model: deepseek-chat
+      api_key_env: XUANDUN_MODEL_DEEPSEEK_CHAT_BACKUP_KEY
+    security:
+      input_check: true
+      output_check: false
+      strict_output_check: false
+      policy: balanced
+    timeout_seconds: 60
+    enabled: true
+
+  # ---------- OpenAI GPT-4o ----------
+  - id: gpt-4o
+    display_name: "GPT-4o（数据分析）"
+    provider: openai
+    backend:
+      base_url: https://api.openai.com/v1
+      model: gpt-4o
+      # 密钥环境变量：XUANDUN_MODEL_GPT_4O_KEY
+      api_key_env: XUANDUN_MODEL_GPT_4O_KEY
+    security:
+      input_check: true
+      output_check: false
+      strict_output_check: false
+      policy: strict               # 数据分析场景需严格
+    fallback: gpt-4o-mini
+    timeout_seconds: 120
+    enabled: true
+
+  # ---------- GPT-4o-mini（故障转移目标） ----------
+  - id: gpt-4o-mini
+    display_name: "GPT-4o-mini（备用）"
+    provider: openai
+    backend:
+      base_url: https://api.openai.com/v1
+      model: gpt-4o-mini
+      api_key_env: XUANDUN_MODEL_GPT_4O_MINI_KEY
+    security:
+      input_check: true
+      output_check: false
+      strict_output_check: false
+      policy: balanced
+    timeout_seconds: 60
+    enabled: true
+
+  # ---------- 本地私有部署示例 ----------
+  # - id: internal-llama
+  #   display_name: "内网 Llama（数据分析私有）"
+  #   provider: llama
+  #   backend:
+  #     base_url: http://10.0.0.20:8080/v1
+  #     model: llama-3.1-70b
+  #     api_key_env: XUANDUN_MODEL_INTERNAL_LLAMA_KEY
+  #   security:
+  #     input_check: true
+  #     output_check: true           # 私有化模型开启输出检测
+  #     strict_output_check: false
+  #     policy: permissive
+  #   timeout_seconds: 120
+  #   enabled: true
+
+# 路由规则 — 按优先级降序匹配，首个匹配生效
+# 匹配语义（A-10）：
+#   =value    精确匹配
+#   =*prefix  前缀通配（如 =*claude 匹配 claude-3-opus, claude-3-sonnet）
+routes:
+  - match:
+      model: =deepseek-chat         # = 精确匹配
+    target_model_id: deepseek-chat
+    priority: 100
+
+  - match:
+      model: =gpt-4o
+    target_model_id: gpt-4o
+    priority: 100
+
+  - match:
+      model: =gpt-4o-mini
+    target_model_id: gpt-4o-mini
+    priority: 100
+
+  # 前缀通配示例（Sprint 2b 支持，Sprint 3 扩展 header 匹配）
+  # - match:
+  #     model: =*claude               # =* 前缀通配
+  #   target_model_id: claude-3-opus
+  #   priority: 150
+
+# 兜底路由：无匹配规则时使用（必须为 enabled 模型）
+default_model_id: deepseek-chat
