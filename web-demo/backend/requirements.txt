@@ -1,6 +1,8 @@
-# 道体·玄盾 Web Demo 后端依赖
+﻿# 道体·玄盾 Web Demo 后端依赖
+# 注意：daoti-xuandun 核心算法在 Docker 部署时从源码安装（见 Dockerfile）
+# 本地开发时可通过 pip install daoti-xuandun==1.2.3 从 PyPI 安装
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.0
-# 核心算法 SDK（通过 PyPI 安装，不暴露源码）
-daoti-xuandun==1.2.3
+# 核心算法 SDK（Docker 部署时由 Dockerfile 从源码安装，本地开发可取消注释）
+# daoti-xuandun==1.2.3

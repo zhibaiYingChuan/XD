@@ -1,0 +1,21 @@
+﻿# Render 后端服务配置文件
+# 部署 Web Demo 后端到 Render：https://render.com
+# 使用方式：在 Render Dashboard 连接 GitHub 仓库，选择 "Blueprint" 类型部署
+
+services:
+  - type: web
+    name: xuandun-demo-api
+    env: docker
+    region: singapore
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: PORT
+        value: "8000"
+      - key: PYTHONUNBUFFERED
+        value: "1"
