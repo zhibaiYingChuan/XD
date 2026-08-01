@@ -168,7 +168,7 @@ hcse_test_*.py
 hcse_resilience_tester/
 
 # 临时截图和页面快照
-pages/
+/pages/
 poc/
 dashboard_screenshot.png
 
