@@ -122,7 +122,7 @@ jobs:
         shell: bash
         run: |
           cd artifacts
-          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) -exec sha256sum {} \; | sed 's|  \./|  |' > checksums-sha256.txt
+          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) -exec sha256sum {} \; | sed 's|  \./[^ ]*/|  |' > checksums-sha256.txt
           echo "=== SHA256 Checksums ==="
           cat checksums-sha256.txt
 
