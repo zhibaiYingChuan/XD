@@ -296,7 +296,7 @@ def _get_shield(mode: str) -> XuanDun:
 def health():
     # S2a-T09: 标准化健康检查端点，供 Docker/K8s healthcheck 与桌面端探活使用
     # 返回字段：status(ok/degraded/down) / version / uptime(秒) / models_count(当前纳管模型数)
-    # 注意：sync_version.py 依赖本行 "status":"ok","version":"1.2.3" 模式做版本同步，保持单行
+    # 注意：sync_version.py 依赖本行 "status":"ok","version":"1.3.0" 模式做版本同步，保持单行
     return jsonify({"status": "ok", "version": "1.2.3", "uptime": int(time.time() - _start_time), "models_count": 1})
 
 
