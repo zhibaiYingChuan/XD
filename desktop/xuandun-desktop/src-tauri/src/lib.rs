@@ -44,6 +44,13 @@ fn setup_log(msg: &str) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // PB-10 修复：第二个实例启动时聚焦主窗口，防止多实例状态不一致
+            let _ = app.get_webview_window("main").map(|w| {
+                let _ = w.show();
+                let _ = w.set_focus();
+            });
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -74,7 +81,11 @@ pub fn run() {
 
             let database = db::Database::open(&db_path)
                 .map_err(|e| {
-                    let msg = format!("Failed to open database: {}", e);
+                    // GAP-07 修复：DB 打开失败时提供可操作的修复路径，而非直接 exit(1)
+                    let msg = format!(
+                        "数据库打开失败：{}\n\n数据库路径：{}\n\n修复建议：\n1. 检查磁盘空间是否充足\n2. 检查文件权限（右键→属性→安全）\n3. 删除损坏的数据库文件后重启（注意：历史日志将丢失）\n4. 以管理员身份运行应用",
+                        e, db_path.display()
+                    );
                     setup_log(&msg);
                     msg
                 })?;
@@ -135,6 +146,7 @@ pub fn run() {
             commands::get_learning_status,
             commands::switch_learning_mode,
             commands::get_learning_details,
+            commands::get_dual_layer_stats,
             commands::set_emergency_bypass,
             commands::get_emergency_bypass,
             commands::set_gray_deploy_ratio,

@@ -171,13 +171,23 @@ let currentLang: Lang = 'zh';
 
 export function setLanguage(lang: Lang) {
   currentLang = lang;
-  localStorage.setItem('xuandun-lang', lang);
+  // G-16 修复：localStorage 写入异常防护
+  try {
+    localStorage.setItem('xuandun-lang', lang);
+  } catch {
+    // 隐私模式或存储禁用时静默降级
+  }
 }
 
 export function getLanguage(): Lang {
-  const saved = localStorage.getItem('xuandun-lang');
-  if (saved === 'en' || saved === 'zh') {
-    currentLang = saved;
+  // G-16 修复：localStorage 读取异常防护
+  try {
+    const saved = localStorage.getItem('xuandun-lang');
+    if (saved === 'en' || saved === 'zh') {
+      currentLang = saved;
+    }
+  } catch {
+    // 读取失败时使用默认语言
   }
   return currentLang;
 }

@@ -96,6 +96,13 @@ pub async fn send_protect_request(engine_url: &str, text: &str, session: &str, m
     let url = format!("{}/protect", engine_url);
     let body = serde_json::json!({ "text": text, "session": session, "mode": mode });
     let resp = HTTP_CLIENT.post(&url).json(&body).send().await.map_err(|e| format!("Engine request failed: {}", e))?;
+    // P1修复：必须检查HTTP状态码，否则引擎返回500时会尝试解析错误响应为JSON导致解析失败
+    let status = resp.status();
+    if !status.is_success() {
+        let status_code = status.as_u16();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Engine returned HTTP {}: {}", status_code, body_text));
+    }
     let result: serde_json::Value = resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))?;
     let allowed = result["allowed"].as_bool().unwrap_or(false);
     Ok(ProtectResult {
@@ -124,6 +131,12 @@ pub async fn engine_get(engine_url: &str, path: &str) -> Result<serde_json::Valu
     let url = format!("{}{}", engine_url, path);
     let resp = HTTP_CLIENT.get(&url).send().await
         .map_err(|e| format!("Engine GET failed: {}", e))?;
+    // P1修复：必须检查HTTP状态码，避免解析错误响应为JSON
+    let status = resp.status();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Engine GET {} returned HTTP {}: {}", path, status.as_u16(), body_text));
+    }
     resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))
 }
 
@@ -131,6 +144,12 @@ pub async fn engine_post(engine_url: &str, path: &str, body: serde_json::Value) 
     let url = format!("{}{}", engine_url, path);
     let resp = HTTP_CLIENT.post(&url).json(&body).send().await
         .map_err(|e| format!("Engine POST failed: {}", e))?;
+    // P1修复：必须检查HTTP状态码，避免解析错误响应为JSON
+    let status = resp.status();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Engine POST {} returned HTTP {}: {}", path, status.as_u16(), body_text));
+    }
     resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))
 }
 
@@ -140,6 +159,32 @@ pub async fn check_engine_health(engine_url: &str) -> bool {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+/// P1修复：warmup 专用请求函数，使用更长超时（30秒），复用连接池
+pub async fn send_warmup_request(
+    engine_url: &str,
+    safe_texts: &[String],
+    attack_texts: &[String],
+) -> Result<serde_json::Value, String> {
+    let url = format!("{}/warmup", engine_url);
+    let body = serde_json::json!({
+        "safe_texts": safe_texts,
+        "attack_texts": attack_texts,
+    });
+    let resp = HTTP_CLIENT.post(&url)
+        .json(&body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Warmup request failed: {}", e))?;
+    // P1修复：必须检查HTTP状态码
+    let status = resp.status();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Engine warmup returned HTTP {}: {}", status.as_u16(), body_text));
+    }
+    resp.json().await.map_err(|e| format!("Warmup response parse failed: {}", e))
 }
 
 pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
@@ -153,11 +198,36 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
+    // P0-1 修复：在尝试启动 sidecar 之前，先检测是否有外部 Flask 引擎已在运行
+    // 场景：用户/开发环境已手动启动 python engine_flask.py 监听 18765
+    // 此时 sidecar 路径可能不存在（os error 2），但引擎实际可用
+    if !is_running && check_engine_health(&engine_url).await {
+        let state = app.state::<StdMutex<EngineState>>();
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.running = true;
+        s.healthy = true;
+        s.started_at = Some(Instant::now());
+        s.startup_error = None;
+        log_engine("Detected externally running engine (Flask already listening on engine_url)");
+        return Ok(());
+    }
+
     if is_running {
         let _ = stop_engine(app);
     }
 
-    start_engine_sidecar(app)?;
+    // P0-1 修复：sidecar 启动失败不应直接阻断，回退到等待外部引擎
+    if let Err(e) = start_engine_sidecar(app) {
+        log_engine(&format!("start_engine_sidecar failed (will wait for external engine): {}", e));
+        // 不立即返回错误，继续进入健康检查循环，等待外部引擎就绪
+        // 将错误记入 startup_error 但不阻断（允许用户手动启动引擎后恢复）
+        {
+            let state = app.state::<StdMutex<EngineState>>();
+            if let Ok(mut s) = state.lock() {
+                s.startup_error = Some(format!("Sidecar 启动失败：{}。请手动启动引擎（python engine_flask.py）或检查可执行文件路径。", e));
+            };
+        }
+    }
 
     // 渐进式健康检查：Nuitka onefile 134MB 自解压需要较长时间
     // 阶段1：前10秒，每500ms检查一次（快速响应）
@@ -169,11 +239,12 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
             s.running = true;
             s.healthy = true;
             s.started_at = Some(Instant::now());
+            s.startup_error = None;
             log_engine("Engine health check passed (phase 1)");
             return Ok(());
         }
     }
-    // 阶段2：10-60秒，每1秒检查一次（等待自解压完成）
+    // 阶段2：10-60秒，每1秒检查一次（等待自解压完成或外部引擎启动）
     for i in 0..50 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if check_engine_health(&engine_url).await {
@@ -182,6 +253,7 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
             s.running = true;
             s.healthy = true;
             s.started_at = Some(Instant::now());
+            s.startup_error = None;
             log_engine(&format!("Engine health check passed (phase 2, attempt {})", i + 1));
             return Ok(());
         }
@@ -278,6 +350,8 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
 
         if let Some(path) = find_engine_path(app) {
             log_engine(&format!("Spawning engine: {}", path.display()));
+            // P1修复：stdout/stderr 都必须被读取，否则管道缓冲区满时子进程会挂起
+            // 引擎通过HTTP API通信，stdout/stderr 仅用于诊断日志
             let mut child = Command::new(&path)
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
@@ -291,12 +365,25 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
                 })?;
             let pid = child.id();
 
+            // P1修复：在独立线程中读取 stdout 输出到日志（防止管道阻塞导致引擎挂起）
+            if let Some(stdout) = child.stdout.take() {
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(stdout);
+                    for line in reader.lines().take(100) {
+                        if let Ok(line) = line {
+                            log_engine(&format!("engine stdout: {}", line));
+                        }
+                    }
+                });
+            }
+
             // 在独立线程中读取 stderr 输出到日志（帮助诊断引擎崩溃）
             if let Some(stderr) = child.stderr.take() {
                 std::thread::spawn(move || {
                     use std::io::BufRead;
                     let reader = std::io::BufReader::new(stderr);
-                    for line in reader.lines().take(50) {
+                    for line in reader.lines().take(100) {
                         if let Ok(line) = line {
                             log_engine(&format!("engine stderr: {}", line));
                         }
@@ -455,7 +542,9 @@ pub async fn monitor_engine_health(app: &AppHandle) {
                 if check_engine_health(&engine_url).await {
                     eprintln!("[XuanDun] Engine restarted successfully");
                     consecutive_failures = 0;
+                    // P0修复：重启成功后必须设置 running=true，否则所有依赖 is_running 的命令失效
                     if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                        s.running = true;
                         s.healthy = true;
                         s.started_at = Some(Instant::now());
                     }

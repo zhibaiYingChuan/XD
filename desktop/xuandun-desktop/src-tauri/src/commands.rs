@@ -3,7 +3,7 @@ use tauri::{Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use std::sync::Mutex;
 
-use crate::engine::{EngineState, send_protect_request, sync_mode_to_engine, restart_engine as engine_restart, stop_engine as engine_stop, safe_preview, engine_get, engine_post};
+use crate::engine::{EngineState, send_protect_request, send_warmup_request, sync_mode_to_engine, restart_engine as engine_restart, stop_engine as engine_stop, safe_preview, engine_get, engine_post};
 use crate::db::Database;
 
 #[derive(Serialize)]
@@ -16,6 +16,10 @@ pub struct StatusResponse {
     pub total_blocked: u64,
     pub block_rate: f64,
     pub startup_error: Option<String>,
+    // 学习状态字段（从 Flask /status 补充，与前端 TS StatusResponse 对齐）
+    pub learning_mode: Option<String>,
+    pub learning_progress: Option<f64>,
+    pub sample_count: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -57,16 +61,41 @@ pub struct WarmupRequest {
 
 #[tauri::command]
 pub async fn get_status(state: State<'_, Mutex<EngineState>>) -> Result<StatusResponse, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
+    let (s_running, s_healthy, s_mode, s_uptime, s_total_req, s_total_blk, s_block_rate, s_startup_err, engine_url) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (
+            s.running, s.healthy, s.mode.clone(), s.uptime_secs(),
+            s.total_requests, s.total_blocked, s.block_rate(),
+            s.startup_error.clone(), s.get_engine_url(),
+        )
+    };
+
+    // 学习状态字段从 Flask /status 补充（与前端 TS StatusResponse 对齐）
+    let (learning_mode, learning_progress, sample_count) = if s_running {
+        match engine_get(&engine_url, "/status").await {
+            Ok(v) => (
+                v.get("learning_mode").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                v.get("learning_progress").and_then(|x| x.as_f64()),
+                v.get("sample_count").and_then(|x| x.as_u64()),
+            ),
+            Err(_) => (None, None, None),
+        }
+    } else {
+        (None, None, None)
+    };
+
     Ok(StatusResponse {
-        running: s.running,
-        healthy: s.healthy,
-        mode: s.mode.clone(),
-        uptime: s.uptime_secs(),
-        total_requests: s.total_requests,
-        total_blocked: s.total_blocked,
-        block_rate: s.block_rate(),
-        startup_error: s.startup_error.clone(),
+        running: s_running,
+        healthy: s_healthy,
+        mode: s_mode,
+        uptime: s_uptime,
+        total_requests: s_total_req,
+        total_blocked: s_total_blk,
+        block_rate: s_block_rate,
+        startup_error: s_startup_err,
+        learning_mode,
+        learning_progress,
+        sample_count,
     })
 }
 
@@ -83,9 +112,14 @@ pub async fn protect(
     };
 
     if !is_running {
+        // R-01 修复：引擎未运行分支补充审计记录，与 Err 分支保持审计一致性
+        if let Err(e) = db.insert_audit("fallback", "engine_not_running") {
+            eprintln!("[xuandun] insert_audit(fallback/not_running) failed: {}", e);
+        }
+        // G-14 修复：引擎未运行时使用 FALLBACK 而非 BLOCKED，避免前端误展示为"已拦截"
         return Ok(ProtectResponse {
             allowed: false,
-            trust_level: "BLOCKED".to_string(),
+            trust_level: "FALLBACK".to_string(),
             reject_stage: Some("engine_not_running".to_string()),
             domain_distance: None,
             timing_distance: None,
@@ -155,9 +189,10 @@ pub async fn protect(
             if let Err(audit_err) = db.insert_audit("fallback", "engine_unavailable") {
                 eprintln!("[xuandun] insert_audit(fallback) failed: {}", audit_err);
             }
+            // G-14 修复：引擎不可达时使用 FALLBACK 而非 BLOCKED，避免前端误展示为"已拦截"
             Ok(ProtectResponse {
                 allowed: false,
-                trust_level: "BLOCKED".to_string(),
+                trust_level: "FALLBACK".to_string(),
                 reject_stage: Some("engine_unavailable".to_string()),
                 domain_distance: None,
                 timing_distance: None,
@@ -183,8 +218,13 @@ pub async fn set_mode(
         let s = state.lock().map_err(|e| e.to_string())?;
         s.get_engine_url()
     };
+    // GAP-05 修复：安全产品模式同步失败必须返回错误，避免前端误认为模式已切换
     if let Err(e) = sync_mode_to_engine(&engine_url, &mode).await {
         eprintln!("[xuandun] sync_mode_to_engine failed: {}", e);
+        // 仍然保存到 DB 和审计日志，但返回错误让前端知道引擎未同步
+        let _ = db.set_config("mode", &mode);
+        let _ = db.insert_audit("mode_change", &format!("{} (engine sync failed: {})", mode, e));
+        return Err(format!("防护模式已保存但引擎同步失败：{}。请检查引擎是否正常运行。", e));
     }
     if let Err(e) = db.set_config("mode", &mode) {
         eprintln!("[xuandun] set_config(mode) failed: {}", e);
@@ -255,27 +295,18 @@ pub async fn warmup(
     state: State<'_, Mutex<EngineState>>,
     req: WarmupRequest,
 ) -> Result<serde_json::Value, String> {
-    let engine_url = {
+    // P1修复：检查引擎运行状态，而非仅检查 engine_url 是否为空
+    let (engine_url, is_running) = {
         let s = state.lock().map_err(|e| e.to_string())?;
-        s.get_engine_url()
+        (s.get_engine_url(), s.running)
     };
-    if engine_url.is_empty() {
+    if !is_running {
         return Err("Engine not running".to_string());
     }
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/warmup", engine_url))
-        .json(&serde_json::json!({
-            "safe_texts": req.safe_texts,
-            "attack_texts": req.attack_texts,
-        }))
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("Warmup request failed: {}", e))?;
+    // P1修复：复用全局 HTTP_CLIENT 连接池，检查HTTP状态码
+    let result = send_warmup_request(&engine_url, &req.safe_texts, &req.attack_texts).await?;
 
-    let result: serde_json::Value = resp.json().await.map_err(|e| format!("Parse response failed: {}", e))?;
     if let Err(e) = app.state::<Database>().insert_audit("warmup", &format!("safe={}, attack={}", req.safe_texts.len(), req.attack_texts.len())) {
         eprintln!("[xuandun] insert_audit(warmup) failed: {}", e);
     }
@@ -374,6 +405,33 @@ pub async fn get_learning_details(state: State<'_, Mutex<EngineState>>) -> Resul
     engine_get(&engine_url, "/learning/details").await
 }
 
+// ── 双层架构（外门/内门）指标查询 ──
+
+#[tauri::command]
+pub async fn get_dual_layer_stats(state: State<'_, Mutex<EngineState>>) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        // 引擎未运行时返回空状态，保持前端字段完整性
+        return Ok(serde_json::json!({
+            "enabled": false,
+            "outer_gate": {
+                "total": 0, "rejects": 0, "passes": 0, "forwards": 0,
+                "reject_rate": 0.0, "pass_rate": 0.0, "forward_rate": 0.0,
+                "avg_latency_ms": 0.0,
+                "learned_attack_count": 0, "learned_safe_count": 0
+            },
+            "inner_gate": {
+                "total": 0, "rejects": 0, "passes": 0, "learning_events": 0,
+                "reject_rate": 0.0, "avg_latency_ms": 0.0
+            }
+        }));
+    }
+    engine_get(&engine_url, "/dual-layer/stats").await
+}
+
 // ── 企业级运维：逃生通道 + 灰度部署 ──
 
 #[tauri::command]
@@ -399,7 +457,8 @@ pub async fn get_emergency_bypass(state: State<'_, Mutex<EngineState>>) -> Resul
         (s.get_engine_url(), s.running)
     };
     if !is_running {
-        return Ok(serde_json::json!({ "emergency_bypass": false }));
+        // 字段对齐前端 EmergencyBypassState 接口
+        return Ok(serde_json::json!({ "enabled": false }));
     }
     engine_get(&engine_url, "/emergency/bypass").await
 }
@@ -427,7 +486,8 @@ pub async fn get_gray_deploy_ratio(state: State<'_, Mutex<EngineState>>) -> Resu
         (s.get_engine_url(), s.running)
     };
     if !is_running {
-        return Ok(serde_json::json!({ "gray_deploy_ratio": 1.0 }));
+        // 字段对齐前端 GrayDeployState 接口
+        return Ok(serde_json::json!({ "ratio": 1.0 }));
     }
     engine_get(&engine_url, "/gray/deploy").await
 }
@@ -574,31 +634,65 @@ fn attack_category_name_cn(key: &str) -> &'static str {
     }
 }
 
+/// HTML 实体转义，防止 XSS 攻击。
+/// 对所有插入 HTML 的用户输入必须调用此函数。
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            '/' => out.push_str("&#x2f;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// 按字符边界安全截断字符串，避免中文字符被字节切片切断导致 panic。
+/// 返回截断后的字符串（不含省略号），调用方按需追加 "..."。
+fn safe_truncate_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 fn render_report_html(data: &crate::db::ReportData, report_type: &str, start: &str, end: &str) -> String {
     let type_label = match report_type { "weekly" => "周报", "monthly" => "月报", _ => "自定义报告" };
     let now = chrono::Utc::now().to_rfc3339();
 
     let cat_rows: String = data.categories.iter().take(10).map(|c| {
         let pct = if data.total_blocked > 0 { c.count as f64 / data.total_blocked as f64 * 100.0 } else { 0.0 };
-        format!("<tr><td>{}</td><td>{}</td><td>{:.1}%</td></tr>", attack_category_name_cn(&c.category), c.count, pct)
+        format!("<tr><td>{}</td><td>{}</td><td>{:.1}%</td></tr>", html_escape(attack_category_name_cn(&c.category)), c.count, pct)
     }).collect::<Vec<_>>().join("");
     let cat_rows = if cat_rows.is_empty() { "<tr><td colspan=\"3\">无攻击记录</td></tr>".to_string() } else { cat_rows };
 
     let sample_rows: String = data.samples.iter().map(|s| {
         let cat = s.attack_category.as_deref().map(attack_category_name_cn).unwrap_or("未知");
         let stage = s.reject_stage.as_deref().unwrap_or("--");
-        let text = if s.text_preview.len() > 50 { &s.text_preview[..50] } else { &s.text_preview };
-        format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", text, cat, stage)
+        // 安全截断：按字符边界，避免中文切片 panic
+        let truncated = safe_truncate_chars(&s.text_preview, 50);
+        let text_display = if s.text_preview.chars().count() > 50 {
+            format!("{}...", html_escape(&truncated))
+        } else {
+            html_escape(&truncated)
+        };
+        format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", text_display, html_escape(cat), html_escape(stage))
     }).collect::<Vec<_>>().join("");
     let sample_rows = if sample_rows.is_empty() { "<tr><td colspan=\"3\">无拦截样本</td></tr>".to_string() } else { sample_rows };
 
     let cat_bars: String = data.categories.iter().take(6).map(|c| {
         let pct = if data.total_blocked > 0 { c.count as f64 / data.total_blocked as f64 * 100.0 } else { 0.0 };
-        format!("<div style=\"margin:4px 0\"><span style=\"display:inline-block;width:120px\">{}</span><div style=\"display:inline-block;width:200px;height:16px;background:#e0e0e0;border-radius:4px\"><div style=\"width:{:.0}%;height:100%;background:#4ecdc4;border-radius:4px\"></div></div><span style=\"margin-left:8px\">{} ({:.1}%)</span></div>", attack_category_name_cn(&c.category), pct, c.count, pct)
+        format!("<div style=\"margin:4px 0\"><span style=\"display:inline-block;width:120px\">{}</span><div style=\"display:inline-block;width:200px;height:16px;background:#e0e0e0;border-radius:4px\"><div style=\"width:{:.0}%;height:100%;background:#4ecdc4;border-radius:4px\"></div></div><span style=\"margin-left:8px\">{} ({:.1}%)</span></div>", html_escape(attack_category_name_cn(&c.category)), pct, c.count, pct)
     }).collect::<Vec<_>>().join("");
 
+    // 安全截断日期字符串，避免边界 panic
+    let start_date = safe_truncate_chars(start, 10);
+    let end_date = safe_truncate_chars(end, 10);
+
     format!("<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><title>道体·玄盾 安全{type_label}</title><style>body{{font-family:sans-serif;max-width:900px;margin:0 auto;padding:20px;color:#333}}h1{{color:#4ecdc4;border-bottom:2px solid #4ecdc4;padding-bottom:8px}}h2{{color:#45b7d1;margin-top:24px}}table{{border-collapse:collapse;width:100%;margin:12px 0}}th,td{{border:1px solid #ddd;padding:8px;font-size:13px;text-align:left}}th{{background:#f5f5f5}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}}.item{{background:#f9f9f9;padding:12px;border-radius:8px;text-align:center}}.val{{font-size:24px;font-weight:700;color:#4ecdc4}}.lbl{{font-size:12px;color:#999}}.footer{{margin-top:32px;padding-top:12px;border-top:1px solid #ddd;font-size:12px;color:#999}}</style></head><body><h1>道体·玄盾 安全{type_label}</h1><p>报告周期：{} 至 {} | 生成时间：{}</p><h2>1. 概要摘要</h2><div class=\"grid\"><div class=\"item\"><div class=\"val\">{}</div><div class=\"lbl\">总请求数</div></div><div class=\"item\"><div class=\"val\" style=\"color:#ff6b6b\">{}</div><div class=\"lbl\">拦截次数</div></div><div class=\"item\"><div class=\"val\">{:.1}%</div><div class=\"lbl\">拦截率</div></div><div class=\"item\"><div class=\"val\">{}</div><div class=\"lbl\">放行次数</div></div></div><h2>2. 攻击类型分布</h2>{}<table><thead><tr><th>攻击类型</th><th>拦截量</th><th>占比</th></tr></thead><tbody>{}</tbody></table><h2>3. 代表性拦截样本</h2><table><thead><tr><th>文本摘要</th><th>攻击分类</th><th>拦截阶段</th></tr></thead><tbody>{}</tbody></table><div class=\"footer\"><p>本报告由道体·玄盾自动生成 | SPDX-License-Identifier: DaoTi-Research-1.0</p></div></body></html>",
-        &start[..10], &end[..10], &now,
+        html_escape(&start_date), html_escape(&end_date), html_escape(&now),
         data.total_requests, data.total_blocked, data.block_rate, data.total_allowed,
         cat_bars, cat_rows, sample_rows)
 }
@@ -673,7 +767,11 @@ pub async fn save_notifier_config(
         }
     }
     let body = serde_json::json!({ "channels": channels });
-    let _ = engine_post(&engine_url, "/notifiers/config", body).await;
+    // GAP-04 修复：不再吞掉 engine_post 错误，DB 成功但引擎未同步会导致配置不一致
+    if let Err(e) = engine_post(&engine_url, "/notifiers/config", body).await {
+        eprintln!("[xuandun] save_notifier_config: engine_post failed (DB saved but engine not synced): {}", e);
+        return Err(format!("通知配置已保存到数据库，但引擎同步失败：{}。请重启引擎或检查引擎状态。", e));
+    }
     Ok(())
 }
 

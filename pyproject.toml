@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daoti-xuandun"
-version = "1.2.1"
+version = "1.3.0"
 description = "道体·玄盾 - 轻量级AI运行时安全网关"
 readme = "README.md"
 authors = [{ name = "Small Loong" }]
@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 
 [project.urls]
 Homepage = "https://github.com/zhibaiYingChuan/XD"
@@ -30,6 +30,17 @@ Repository = "https://github.com/zhibaiYingChuan/XD.git"
 [project.optional-dependencies]
 torch = ["torch>=2.0.0"]
 engine = ["flask>=3.0", "waitress>=3.0"]
+# Sprint 2b: 反向代理网关依赖（FastAPI + uvicorn + httpx 流式透传）
+# POC 结论：waitress 同步 WSGI 无法透传 SSE（hop-by-hop header 限制），
+# 必须使用 FastAPI + uvicorn + httpx.AsyncClient(stream=True) 异步方案
+gateway = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx[http2]>=0.27",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "watchdog>=3.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

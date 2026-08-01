@@ -358,6 +358,12 @@ class XuanDun:
             return {"emergency_bypass": False, "gray_deploy_ratio": 1.0}
         return self.domain_awareness.get_bypass_stats()
 
+    def get_dual_layer_stats(self) -> dict:
+        """返回双层架构（外门/内门）的分层指标。"""
+        if self.domain_awareness is None:
+            return {"enabled": False, "outer_gate": {}, "inner_gate": {}}
+        return self.domain_awareness.get_dual_layer_stats()
+
     def recommend_config(self, output_format: str = "dict") -> Union[dict, str]:
         """基于当前域档案自动推荐配置参数。
 

@@ -1,11 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
-import { api, LearningStatus } from '../services/tauriApi';
+import { api, LearningStatus, formatTrustLevel } from '../services/tauriApi';
+// 设计系统规范：图标统一使用 lucide-react，strokeWidth=1.5，禁止 emoji
+import {
+  CheckCircle, AlertTriangle, BarChart3, Phone, Search,
+  ClipboardList, Shield,
+} from 'lucide-react';
+import { ConfirmModal, useConfirmModal } from '../components/ConfirmModal';
 
 export default function LearningStatusPage() {
   const [status, setStatus] = useState<LearningStatus | null>(null);
   const [details, setDetails] = useState<any>(null);
   const [switching, setSwitching] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const { modalProps: confirmModalProps, confirm } = useConfirmModal();
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -25,13 +32,25 @@ export default function LearningStatusPage() {
   }, [fetchStatus]);
 
   const handleSwitch = async (target: string) => {
+    // P1-07 修复：观察模式下样本不足时切换到保护模式，强制二次确认
+    if (target === 'protecting' && status && status.mode === 'observing' &&
+        status.sample_count < status.min_samples_for_switch) {
+      const confirmed = await confirm(
+        `当前样本数不足（${status.sample_count}/${status.min_samples_for_switch}）。\n\n` +
+        '提前切换到保护模式可能导致：\n' +
+        '• 误报率升高（正常请求被误拦截）\n' +
+        '• 防护规则不完整\n\n' +
+        '建议继续观察模式直到学习完成。确定要强制切换吗？'
+      );
+      if (!confirmed) return;
+    }
     setSwitching(true);
     try {
       await api.switchLearningMode(target);
       setMessage({ type: 'success', text: `已切换到${target === 'protecting' ? '保护' : '观察'}模式` });
       await fetchStatus();
     } catch {
-      setMessage({ type: 'error', text: '切换失败' });
+      setMessage({ type: 'error', text: '模式切换失败，请确认引擎正常运行后重试' });
     } finally {
       setSwitching(false);
       setTimeout(() => setMessage(null), 3000);
@@ -49,19 +68,25 @@ export default function LearningStatusPage() {
     <div className="page learning-status-page">
       {message && (
         <div className={`alert-banner ${message.type === 'success' ? 'alert-success' : 'alert-danger'}`}>
-          <span className="alert-icon">{message.type === 'success' ? '✅' : '⚠️'}</span>
+          <span className="alert-icon">
+            {message.type === 'success' ? <CheckCircle size={16} strokeWidth={1.5} /> : <AlertTriangle size={16} strokeWidth={1.5} />}
+          </span>
           <span>{message.text}</span>
         </div>
       )}
 
       <div className="card">
         <div className="card-header">
-          <h3>📊 学习状态</h3>
+          <h3><BarChart3 size={18} strokeWidth={1.5} className="h3-icon" />学习状态</h3>
         </div>
         <div className="card-body">
           <div className="learning-mode-display">
             <span className={`mode-badge ${isObserving ? 'mode-observing' : 'mode-protecting'}`}>
-              {isObserving ? '🟡 观察模式（学习中）' : '🛡️ 保护模式'}
+              {isObserving ? (
+                <><span className="status-dot dot-observing" /> 观察模式（学习中）</>
+              ) : (
+                <><Shield size={16} strokeWidth={1.5} style={{ verticalAlign: 'middle' }} /> 保护模式</>
+              )}
             </span>
           </div>
 
@@ -82,7 +107,7 @@ export default function LearningStatusPage() {
                 {progress < 100 ? (
                   <span>还需约 {Math.ceil((status.min_samples_for_switch - status.sample_count) / 10)} 分钟（按当前流量估算）</span>
                 ) : (
-                  <span>✅ 学习完成，已自动切换到保护模式</span>
+                  <span><CheckCircle size={16} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 6 }} />学习完成，已自动切换到保护模式</span>
                 )}
               </div>
             </>
@@ -90,14 +115,14 @@ export default function LearningStatusPage() {
 
           <div className="learning-prototypes-grid">
             <div className="prototype-card">
-              <div className="prototype-icon">🟢</div>
+              <div className="prototype-icon"><span className="status-dot dot-online" style={{ width: 16, height: 16 }} /></div>
               <div className="prototype-info">
                 <div className="prototype-label">安全原型</div>
                 <div className="prototype-value">{status.safe_prototypes}</div>
               </div>
             </div>
             <div className="prototype-card">
-              <div className="prototype-icon">🔴</div>
+              <div className="prototype-icon"><span className="status-dot dot-offline" style={{ width: 16, height: 16 }} /></div>
               <div className="prototype-info">
                 <div className="prototype-label">攻击原型</div>
                 <div className="prototype-value">{status.attack_prototypes}</div>
@@ -107,14 +132,14 @@ export default function LearningStatusPage() {
               </div>
             </div>
             <div className="prototype-card">
-              <div className="prototype-icon">📞</div>
+              <div className="prototype-icon"><Phone size={22} strokeWidth={1.5} /></div>
               <div className="prototype-info">
                 <div className="prototype-label">总调用数</div>
                 <div className="prototype-value">{status.call_count}</div>
               </div>
             </div>
             <div className="prototype-card">
-              <div className="prototype-icon">🔍</div>
+              <div className="prototype-icon"><Search size={22} strokeWidth={1.5} /></div>
               <div className="prototype-info">
                 <div className="prototype-label">模拟拦截</div>
                 <div className="prototype-value">{status.would_block_count}</div>
@@ -149,7 +174,7 @@ export default function LearningStatusPage() {
       {details && details.prototype_examples && Object.keys(details.prototype_examples).length > 0 && (
         <div className="card">
           <div className="card-header">
-            <h3>📋 原型典型输入示例</h3>
+            <h3><ClipboardList size={18} strokeWidth={1.5} className="h3-icon" />原型典型输入示例</h3>
             <span className="card-subtitle">每个安全原型对应的最近输入样本（用于理解学习到的语言模式）</span>
           </div>
           <div className="card-body">
@@ -180,7 +205,7 @@ export default function LearningStatusPage() {
       {isObserving && status.would_block_preview && status.would_block_preview.length > 0 && (
         <div className="card">
           <div className="card-header">
-            <h3>🔍 模拟拦截预览</h3>
+            <h3><Search size={18} strokeWidth={1.5} className="h3-icon" />模拟拦截预览</h3>
             <span className="card-subtitle">观察模式下，这些请求如果开启保护会被拦截</span>
           </div>
           <div className="card-body">
@@ -198,7 +223,7 @@ export default function LearningStatusPage() {
                   <tr key={i}>
                     <td className="mono">{item.timestamp}</td>
                     <td className="text-preview">{item.text_preview}</td>
-                    <td><span className={`trust-badge trust-${item.trust_level.toLowerCase()}`}>{item.trust_level}</span></td>
+                    <td><span className={`trust-badge trust-${(item.trust_level || 'unknown').toLowerCase()}`}>{formatTrustLevel(item.trust_level)}</span></td>
                     <td className="mono">{item.distance}</td>
                   </tr>
                 ))}
@@ -219,23 +244,25 @@ export default function LearningStatusPage() {
               onClick={() => handleSwitch('observing')}
               disabled={switching || status.mode === 'observing'}
             >
-              🟡 切换到观察模式
+              <span className="status-dot dot-observing" style={{ marginRight: 6 }} /> {switching ? '切换中...' : '切换到观察模式'}
             </button>
             <button
               className={`btn ${status.mode === 'protecting' ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => handleSwitch('protecting')}
               disabled={switching || status.mode === 'protecting'}
             >
-              🛡️ 切换到保护模式
+              <Shield size={16} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 6 }} /> {switching ? '切换中...' : '切换到保护模式'}
             </button>
           </div>
           {isObserving && status.sample_count < status.min_samples_for_switch && (
             <div className="mode-switch-warning">
-              ⚠️ 样本不足（{status.sample_count}/{status.min_samples_for_switch}），提前切换到保护模式可能导致误报率升高
+              <AlertTriangle size={16} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+              样本不足（{status.sample_count}/{status.min_samples_for_switch}），提前切换到保护模式可能导致误报率升高
             </div>
           )}
         </div>
       </div>
+      <ConfirmModal {...confirmModalProps} />
     </div>
   );
 }

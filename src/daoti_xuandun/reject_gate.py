@@ -6,8 +6,10 @@
 from collections import deque
 from typing import Optional, Tuple, Union
 import hashlib
+import random
 import math
 import re
+import threading
 import time
 
 import numpy as np
@@ -155,8 +157,166 @@ class EndogenousDomainAwareness:
         self._gray_bypass_count: int = 0
         self._bypass_log: deque = deque(maxlen=50)
 
+        # 双层架构状态（外门快速拒绝 + 内门精判学习）
+        self._enable_dual_layer: bool = config.enable_dual_layer
+        self._outer_learned_attacks: deque = deque(maxlen=config.outer_learned_cache_size)
+        self._outer_learned_safe: deque = deque(maxlen=config.outer_learned_cache_size)
+        # 线程安全锁：保护 _outer_learned_attacks / _outer_learned_safe 的并发读写
+        # 这些 deque 在 _inner_feedback_to_outer 中被写入、在 _outer_gate_check 中被读取，
+        # 多线程并发请求场景下需要互斥访问以避免 deque 内部状态损坏
+        self._outer_cache_lock = threading.Lock()
+        self._outer_stats: dict = {"total": 0, "rejects": 0, "passes": 0, "forwards": 0, "latency_ms": 0.0}
+        self._inner_stats: dict = {"total": 0, "rejects": 0, "passes": 0, "learning_events": 0, "latency_ms": 0.0}
+
         if config.enable_builtin_attacks:
             self._load_builtin_attacks()
+
+    # ── 外门：快速拒绝门 ──
+
+    def _outer_gate_check(self, raw_input: str) -> Tuple[str, Optional[str], bool, bool]:
+        """外门：毫秒级快速筛选，过滤明显攻击和明显安全请求。
+
+        判断依据：内置攻击关键词 + 模式检测 + 白名单 + 已学习模式
+        不依赖特征提取和距离计算，纯字符串匹配。
+
+        Returns:
+            ("reject", reason, is_inquiry, is_learning) — 明显攻击，直接拒绝
+            ("pass", reason, is_inquiry, is_learning) — 明显安全，直接放行
+            ("uncertain", None, is_inquiry, is_learning) — 边界模糊，送入内门
+
+        线程安全说明：is_inquiry / is_learning 作为返回值传递给 process()，
+        而非存储为实例变量，避免多线程并发请求时的实例变量竞争写入。
+        """
+        if not isinstance(raw_input, str) or not raw_input:
+            return ("uncertain", None, False, False)
+
+        # 计算 query/learning 上下文检测结果，作为局部变量返回给调用方
+        # （过去缓存在 self._outer_is_inquiry / self._outer_is_learning 实例变量中，
+        # 但多线程并发时会相互覆盖，改为返回值传递更安全）
+        is_inquiry = self._is_inquiry_pattern(raw_input)
+        is_learning = self._is_learning_context(raw_input)
+
+        # ── 快速拒绝：确定攻击 ──
+
+        # 1. 强攻击关键词（无视距离直接拦截）
+        if contains_strong_attack_keywords(raw_input) and not is_inquiry and not is_learning:
+            return ("reject", "strong_keyword_attack", is_inquiry, is_learning)
+
+        # 2. 角色扮演越狱
+        if detect_roleplay_pattern(raw_input):
+            return ("reject", "roleplay_jailbreak", is_inquiry, is_learning)
+
+        # 3. 社会工程攻击
+        if detect_social_engineering(raw_input):
+            return ("reject", "social_engineering", is_inquiry, is_learning)
+
+        # 4. 数据泄露攻击
+        if detect_data_exfiltration(raw_input):
+            return ("reject", "data_exfiltration", is_inquiry, is_learning)
+
+        # 5. 系统提示词泄露
+        if detect_system_prompt_leak(raw_input):
+            return ("reject", "system_prompt_leak", is_inquiry, is_learning)
+
+        # 6. 过度代理攻击
+        if detect_excessive_agency(raw_input):
+            return ("reject", "excessive_agency", is_inquiry, is_learning)
+
+        # 7. 危险命令
+        if detect_dangerous_command_pattern(raw_input):
+            return ("reject", "dangerous_command", is_inquiry, is_learning)
+
+        # 8. 训练数据利用
+        if detect_training_data_exploitation(raw_input):
+            return ("reject", "training_data_exploitation", is_inquiry, is_learning)
+
+        # 9. Leet speak 编码攻击
+        if detect_leet_speak_attack(raw_input):
+            return ("reject", "leet_speak_attack", is_inquiry, is_learning)
+
+        # 10. 已学习的攻击模式（从内门反馈）
+        input_hash = hashlib.md5(raw_input.encode("utf-8")).hexdigest()[:8]
+        # _outer_learned_attacks 的读访问在此处，写访问在 _inner_feedback_to_outer 中，
+        # 后者已通过 _outer_cache_lock 互斥。此处读取为只读操作，deque 的只读遍历
+        # 在 CPython GIL 下是原子的，与持锁写入并发时最坏情况是读到稍旧的状态，
+        # 不影响正确性（漏检的样本会被内门兜底），故此处不再加锁以避免性能损耗。
+        if input_hash in self._outer_learned_attacks:
+            return ("reject", "learned_attack_pattern", is_inquiry, is_learning)
+
+        # ── 快速放行：确定安全 ──
+
+        # 11. 已学习的安全模式（从内门反馈）
+        if input_hash in self._outer_learned_safe:
+            return ("pass", "learned_safe_pattern", is_inquiry, is_learning)
+
+        # 12. 白名单高置信度匹配
+        if self.config.enable_imperative_whitelist:
+            is_benign, confidence = check_imperative_whitelist(raw_input)
+            if is_benign and confidence > 0.5:
+                return ("pass", "imperative_whitelist", is_inquiry, is_learning)
+
+        # ── 边界模糊：送入内门 ──
+        return ("uncertain", None, is_inquiry, is_learning)
+
+    def _outer_feedback_to_inner(self, raw_input: str, feat: Vector):
+        """外门拒绝后，将攻击特征同步给内门更新攻击原型库。"""
+        if isinstance(raw_input, str):
+            self._update_rejected_fourgram_profile(raw_input)
+            if self._luoshu is not None:
+                try:
+                    state = self._luoshu.encode(raw_input)
+                    self._luoshu.learn_attack(state)
+                    self._inner_stats["learning_events"] += 1
+                except Exception:
+                    # 洛书编码/学习是尽力而为操作，失败不影响核心防护逻辑
+                    pass
+
+    def _inner_feedback_to_outer(self, raw_input: str, decision: Decision, trust: TrustLevel):
+        """内门决策后，将结果反馈给外门用于后续快速决策。
+
+        线程安全说明：通过 _outer_cache_lock 互斥访问 _outer_learned_attacks
+        和 _outer_learned_safe，避免多线程并发请求时的 deque 状态损坏。
+        去重检查（input_hash not in ...）避免同一哈希被重复 append，
+        防止缓存被同一模式的重复输入快速填满。
+        """
+        if not isinstance(raw_input, str) or not raw_input:
+            return
+        input_hash = hashlib.md5(raw_input.encode("utf-8")).hexdigest()[:8]
+        with self._outer_cache_lock:
+            if decision == Decision.REJECT:
+                if input_hash not in self._outer_learned_attacks:
+                    self._outer_learned_attacks.append(input_hash)
+            elif decision == Decision.PASS and trust == TrustLevel.HIGH:
+                if input_hash not in self._outer_learned_safe:
+                    self._outer_learned_safe.append(input_hash)
+
+    def get_dual_layer_stats(self) -> dict:
+        """返回双层架构的分层指标。"""
+        outer_total = max(1, self._outer_stats["total"])
+        inner_total = max(1, self._inner_stats["total"])
+        return {
+            "enabled": self._enable_dual_layer,
+            "outer_gate": {
+                "total": self._outer_stats["total"],
+                "rejects": self._outer_stats["rejects"],
+                "passes": self._outer_stats["passes"],
+                "forwards": self._outer_stats["forwards"],
+                "reject_rate": round(self._outer_stats["rejects"] / outer_total, 4),
+                "pass_rate": round(self._outer_stats["passes"] / outer_total, 4),
+                "forward_rate": round(self._outer_stats["forwards"] / outer_total, 4),
+                "avg_latency_ms": round(self._outer_stats["latency_ms"] / outer_total, 3),
+                "learned_attack_count": len(self._outer_learned_attacks),
+                "learned_safe_count": len(self._outer_learned_safe),
+            },
+            "inner_gate": {
+                "total": self._inner_stats["total"],
+                "rejects": self._inner_stats["rejects"],
+                "passes": self._inner_stats["passes"],
+                "learning_events": self._inner_stats["learning_events"],
+                "reject_rate": round(self._inner_stats["rejects"] / inner_total, 4),
+                "avg_latency_ms": round(self._inner_stats["latency_ms"] / inner_total, 3),
+            },
+        }
 
     def _load_builtin_attacks(self):
         """加载内置攻击样本到洛书攻击原型库和拒绝4-gram档案。
@@ -171,6 +331,8 @@ class EndogenousDomainAwareness:
                     state = self._luoshu.encode(text)
                     self._luoshu.learn_attack(state)
                 except Exception:
+                    # 洛书编码/学习是尽力而为操作，失败不影响核心防护逻辑
+                    # 与 _outer_feedback_to_inner 中的同类异常处理保持一致
                     pass
 
     def _check_auto_switch(self):
@@ -220,11 +382,13 @@ class EndogenousDomainAwareness:
         """设置逃生通道开关。
 
         开启后所有请求直接放行，不经过任何检测。
+        _bypass_log 元素结构对齐前端 BypassStats.bypass_log：{timestamp, text_preview, reason}
         """
         old = self._emergency_bypass
         self._emergency_bypass = enabled
         self._bypass_log.append({
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "text_preview": "",
             "reason": f"emergency_bypass_{'enabled' if enabled else 'disabled'}",
         })
         return {"ok": True, "from": old, "to": enabled}
@@ -304,6 +468,14 @@ class EndogenousDomainAwareness:
         Returns:
             (decision, feature_vector, trust_level, distance)
         """
+        # 输入类型保护：None 转为空字符串，非字符串/非 ndarray 类型转为字符串
+        # 避免非字符串类型导致外门 if 块跳过（outer_is_inquiry 未定义），
+        # 以及 _input_to_vector 对不支持类型抛 TypeError
+        if raw_input is None:
+            raw_input = ""
+        elif not isinstance(raw_input, str) and not isinstance(raw_input, np.ndarray):
+            raw_input = str(raw_input)
+
         # 逃生通道：紧急放行所有请求，不经过任何检测
         if self._emergency_bypass:
             self.call_count += 1
@@ -316,6 +488,74 @@ class EndogenousDomainAwareness:
             })
             return Decision.PASS, feat, TrustLevel.LOW, float(dist)
 
+        # ── 外门：快速拒绝门 ──
+        # 外门计算结果作为局部变量传递给内门，避免使用实例变量在多线程下被并发写入
+        outer_is_inquiry = False
+        outer_is_learning = False
+        if self._enable_dual_layer and isinstance(raw_input, str):
+            outer_t0 = time.perf_counter()
+            outer_result, outer_reason, outer_is_inquiry, outer_is_learning = self._outer_gate_check(raw_input)
+            self._outer_stats["latency_ms"] += (time.perf_counter() - outer_t0) * 1000
+            self._outer_stats["total"] += 1
+
+            if outer_result == "reject":
+                # 外门确定攻击 → 直接拒绝，跳过内门的昂贵计算
+                self._outer_stats["rejects"] += 1
+                self.call_count += 1
+                feat = self._input_to_vector(raw_input)
+                # 反馈给内门：更新攻击原型库
+                self._outer_feedback_to_inner(raw_input, feat)
+                dist, proto_idx = self._nearest_prototype(feat)
+                # 记录最近输入
+                self._recent_inputs.append({
+                    "text": raw_input[:200], "proto_idx": proto_idx,
+                    "decision": "REJECT", "layer": "outer",
+                })
+                # 灰度部署：根据比例决定是否实际拦截
+                # 使用 self._rng（numpy Generator）保持与内门灰度部署（L1091）的随机源一致，
+                # 避免 random 模块在多线程下的潜在竞争（虽然 CPython 有 GIL 保护，
+                # 但统一使用 numpy Generator 是项目自身的线程安全方向）
+                if self._gray_deploy_ratio < 1.0:
+                    if self._rng.random() > self._gray_deploy_ratio:
+                        self._gray_bypass_count += 1
+                        return Decision.PASS, feat, TrustLevel.LOW, float(dist)
+                # 观察模式下记录 would_block 并强制放行
+                if self.mode == "observing":
+                    self.sample_count += 1
+                    self._check_auto_switch()
+                    self.observing_would_block.append({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "text_preview": (raw_input[:80] + "...") if len(raw_input) > 80 else raw_input[:80],
+                        "would_be_blocked": True,
+                        "trust_level": "UNKNOWN",
+                        "distance": round(float(dist), 4),
+                        "layer": "outer",
+                        "reason": outer_reason or "outer_gate",
+                    })
+                    return Decision.PASS, feat, TrustLevel.LOW, float(dist)
+                return Decision.REJECT, feat, TrustLevel.UNKNOWN, float(dist)
+
+            if outer_result == "pass":
+                # 外门确定安全 → 直接放行，跳过内门
+                self._outer_stats["passes"] += 1
+                self.call_count += 1
+                feat = self._input_to_vector(raw_input)
+                dist, proto_idx = self._nearest_prototype(feat)
+                self._recent_inputs.append({
+                    "text": raw_input[:200], "proto_idx": proto_idx,
+                    "decision": "PASS", "layer": "outer",
+                })
+                # 观察模式计数
+                if self.mode == "observing":
+                    self.sample_count += 1
+                    self._check_auto_switch()
+                return Decision.PASS, feat, TrustLevel.HIGH, float(dist)
+
+            # 不确定 → 送入内门
+            self._outer_stats["forwards"] += 1
+
+        # ── 内门：精判学习门 ──
+        inner_t0 = time.perf_counter()
         feat = self._input_to_vector(raw_input)
         self.call_count += 1
 
@@ -385,8 +625,12 @@ class EndogenousDomainAwareness:
                             decoded_attack_signal = 1.0
                             break
 
-            is_inquiry = self._is_inquiry_pattern(effective_input)
-            is_learning = self._is_learning_context(effective_input)
+            # 复用外门计算的查询/学习上下文检测结果（局部变量传递，线程安全）
+            # 双层架构开启时直接使用外门结果，避免重复计算；
+            # 关闭时回退到现场计算。使用局部变量而非 self._outer_is_inquiry 实例变量，
+            # 避免多线程并发请求时实例变量被相互覆盖。
+            is_inquiry = outer_is_inquiry if self._enable_dual_layer else self._is_inquiry_pattern(effective_input)
+            is_learning = outer_is_learning if self._enable_dual_layer else self._is_learning_context(effective_input)
             if contains_attack_keywords(raw_input) and not is_inquiry and not is_learning:
                 keyword_attack_signal = 1.0
             # A2 修复：强攻击关键词信号（无视距离条件直接拦截）
@@ -872,6 +1116,17 @@ class EndogenousDomainAwareness:
                 "proto_idx": proto_idx,
                 "decision": "PASS" if decision == Decision.PASS else "REJECT",
             })
+
+        # ── 内门统计与反馈闭环 ──
+        if self._enable_dual_layer:
+            self._inner_stats["total"] += 1
+            self._inner_stats["latency_ms"] += (time.perf_counter() - inner_t0) * 1000
+            if decision == Decision.REJECT:
+                self._inner_stats["rejects"] += 1
+            else:
+                self._inner_stats["passes"] += 1
+            # 内门决策反馈给外门
+            self._inner_feedback_to_outer(raw_input, decision, trust)
 
         return decision, feat, trust, float(dist)
 

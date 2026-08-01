@@ -149,6 +149,10 @@ class XuanDunConfig:
     emergency_bypass: bool = False           # 逃生通道：开启后所有请求直接放行，不经过任何检测
     gray_deploy_ratio: float = 1.0           # 灰度部署比例：0.0~1.0，表示实际拦截的请求比例（1.0=全量拦截）
 
+    # 双层架构（外门快速拒绝 + 内门精判学习）
+    enable_dual_layer: bool = True           # 启用双层架构：外门先快速筛选，不确定的送入内门深度分析
+    outer_learned_cache_size: int = 500      # 外门学习缓存大小（从内门反馈的攻击/安全模式哈希数）
+
     # 预处理管道（可选，不影响核心架构）
     enable_decode_preprocess: bool = True   # 启用 Base64/Hex 解码预处理，检测编码攻击
     enable_unicode_normalize: bool = True   # 启用 Unicode 正规化，降低混淆良性误拒

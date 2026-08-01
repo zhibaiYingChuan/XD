@@ -1,37 +1,148 @@
 :root {
-  --bg-primary: #0B0E14;
-  --bg-secondary: #151A24;
-  --bg-card: #1C2330;
-  --bg-hover: rgba(255, 255, 255, 0.04);
-  --border: rgba(255, 255, 255, 0.06);
-  --border-color: rgba(255, 255, 255, 0.06);
-  --border-light: rgba(255, 255, 255, 0.12);
-  --text-primary: #E8EDF2;
-  --text-secondary: #A0ABB8;
-  --text-muted: #6B7A8F;
-  --accent: #2B5FD7;
-  --accent-hover: #3B7AFF;
-  --accent-pressed: #1A4ABA;
-  --accent-glow: rgba(43, 95, 215, 0.15);
-  --danger: #E54D4D;
-  --danger-glow: rgba(229, 77, 77, 0.3);
-  --danger-bg: rgba(229, 77, 77, 0.08);
-  --success: #00D4AA;
-  --success-glow: rgba(0, 212, 170, 0.3);
-  --success-bg: rgba(0, 212, 170, 0.08);
-  --warning: #F5A623;
-  --warning-glow: rgba(245, 166, 35, 0.3);
-  --warning-bg: rgba(245, 166, 35, 0.08);
-  --info: #6B7A8F;
+  /* ============================================================
+     道体·玄盾 UI 设计系统 - Design Tokens
+     深色为体，亮色为用 · 阴阳国风
+     ============================================================ */
+
+  /* 品牌主色 - 道体蓝 */
+  --dt-primary: #2B5FD7;
+  --dt-primary-hover: #3B7AFF;
+  --dt-primary-active: #1A4ABA;
+  --dt-primary-fg: #FFFFFF;
+  --dt-primary-50: rgba(43, 95, 215, 0.08);
+  --dt-primary-100: rgba(43, 95, 215, 0.12);
+  --dt-primary-200: rgba(43, 95, 215, 0.2);
+
+  /* 辅助色 - 玄盾青 */
+  --dt-teal: #00D4AA;
+  --dt-teal-hover: #00F0C0;
+  --dt-teal-active: #00B894;
+  --dt-teal-50: rgba(0, 212, 170, 0.08);
+  --dt-teal-100: rgba(0, 212, 170, 0.15);
+
+  /* 状态色 */
+  --dt-success: #00D4AA;
+  --dt-success-50: rgba(0, 212, 170, 0.08);
+  --dt-success-100: rgba(0, 212, 170, 0.15);
+  --dt-warning: #F5A623;
+  --dt-warning-50: rgba(245, 166, 35, 0.08);
+  --dt-warning-100: rgba(245, 166, 35, 0.15);
+  --dt-danger: #E54D4D;
+  --dt-danger-hover: #FF6B6B;
+  --dt-danger-active: #C0392B;
+  --dt-danger-50: rgba(229, 77, 77, 0.08);
+  --dt-danger-100: rgba(229, 77, 77, 0.15);
+  --dt-info: #6B7A8F;
+  --dt-info-50: rgba(107, 122, 143, 0.08);
+  --dt-info-100: rgba(107, 122, 143, 0.15);
+
+  /* 深色背景 */
+  --dt-bg-primary: #0B0E14;
+  --dt-bg-panel: #151A24;
+  --dt-bg-card: #1C2330;
+  --dt-bg-input: #1C2330;
+  --dt-bg-hover: rgba(255, 255, 255, 0.04);
+  --dt-bg-active: rgba(255, 255, 255, 0.06);
+
+  /* 文字 */
+  --dt-text-primary: #E8EDF2;
+  --dt-text-secondary: #A0ABB8;
+  --dt-text-tertiary: #6B7A8F;
+  --dt-text-disabled: rgba(232, 237, 242, 0.4);
+
+  /* 边框 */
+  --dt-border: rgba(255, 255, 255, 0.06);
+  --dt-border-strong: rgba(255, 255, 255, 0.08);
+  --dt-divider: rgba(255, 255, 255, 0.04);
+
+  /* 渐变 */
+  --dt-gradient-primary: linear-gradient(135deg, #2B5FD7 0%, #00D4AA 100%);
+  --dt-gradient-yin: linear-gradient(180deg, #151A24 0%, #0B0E14 100%);
+  --dt-gradient-yang: linear-gradient(135deg, rgba(43, 95, 215, 0.3) 0%, rgba(0, 212, 170, 0.2) 100%);
+
+  /* 圆角 */
+  --dt-radius-sm: 4px;
+  --dt-radius-md: 6px;
+  --dt-radius-lg: 8px;
+  --dt-radius-xl: 12px;
+  --dt-radius-2xl: 16px;
+  --dt-radius-full: 9999px;
+
+  /* 阴影 */
+  --dt-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --dt-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --dt-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.6);
+  --dt-shadow-glow-primary: 0 0 0 3px rgba(43, 95, 215, 0.15);
+  --dt-shadow-glow-success: 0 0 0 3px rgba(0, 212, 170, 0.15);
+  --dt-shadow-glow-danger: 0 0 0 3px rgba(229, 77, 77, 0.15);
+
+  /* 布局 */
+  --dt-sidebar-width: 240px;
+  --dt-sidebar-width-collapsed: 64px;
+  --dt-content-max-width: 1440px;
+  --dt-header-height: 56px;
+  --dt-page-padding: 24px;
+  --dt-card-gap: 16px;
+
+  /* 字体 */
+  --dt-font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Inter', 'SF Pro Display', sans-serif;
+  --dt-font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace;
+
+  /* 动效 */
+  --dt-transition-fast: 100ms ease-in;
+  --dt-transition-normal: 150ms ease-out;
+  --dt-transition-slow: 200ms ease-out;
+  --dt-transition-slide: 250ms ease-in-out;
+
+  /* 间距系统 - 8px网格 */
+  --dt-space-1: 4px;
+  --dt-space-2: 8px;
+  --dt-space-3: 12px;
+  --dt-space-4: 16px;
+  --dt-space-5: 24px;
+  --dt-space-6: 32px;
+  --dt-space-7: 48px;
+  --dt-space-8: 64px;
+
+  /* ============================================================
+     兼容性别名 - 旧变量映射到新设计系统
+     保持现有页面正常工作
+     ============================================================ */
+  --bg-primary: var(--dt-bg-primary);
+  --bg-secondary: var(--dt-bg-panel);
+  --bg-card: var(--dt-bg-card);
+  --bg-hover: var(--dt-bg-hover);
+  --border: var(--dt-border);
+  --border-color: var(--dt-border);
+  --border-light: var(--dt-border-strong);
+  --text-primary: var(--dt-text-primary);
+  --text-secondary: var(--dt-text-secondary);
+  --text-muted: var(--dt-text-tertiary);
+  --accent: var(--dt-primary);
+  --accent-hover: var(--dt-primary-hover);
+  --accent-pressed: var(--dt-primary-active);
+  --accent-glow: var(--dt-primary-100);
+  --danger: var(--dt-danger);
+  --danger-glow: var(--dt-danger-100);
+  --danger-bg: var(--dt-danger-50);
+  --success: var(--dt-success);
+  --success-glow: var(--dt-success-100);
+  --success-bg: var(--dt-success-50);
+  --warning: var(--dt-warning);
+  --warning-glow: var(--dt-warning-100);
+  --warning-bg: var(--dt-warning-50);
+  --info: var(--dt-info);
   --highlight: #FF6B35;
-  --sidebar-width: 240px;
-  --sidebar-collapsed: 64px;
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-full: 9999px;
-  --font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Inter', 'SF Pro Display', sans-serif;
-  --font-family-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --sidebar-width: var(--dt-sidebar-width);
+  --sidebar-collapsed: var(--dt-sidebar-width-collapsed);
+  --radius-sm: var(--dt-radius-sm);    /* 4px - tag */
+  --radius-md: var(--dt-radius-md);    /* 6px - button-sm */
+  --radius-lg: var(--dt-radius-lg);    /* 8px - button */
+  --radius-xl: var(--dt-radius-xl);    /* 12px - card */
+  --radius-2xl: var(--dt-radius-2xl);  /* 16px - modal */
+  --radius-full: var(--dt-radius-full);
+  --font-family: var(--dt-font-family);
+  --font-family-mono: var(--dt-font-mono);
 }
 
 * {
@@ -205,9 +316,11 @@ body {
   animation: pulse 2s infinite;
 }
 
+/* P0修复：合并animation到设计系统版本，删除L1166重复定义 */
 .dot-offline {
   background: var(--danger);
   box-shadow: 0 0 8px var(--danger-glow);
+  animation: pulse 1s infinite;
 }
 
 @keyframes pulse {
@@ -282,6 +395,11 @@ body {
   font-weight: 600;
 }
 
+.h3-icon {
+  vertical-align: middle;
+  margin-right: 8px;
+}
+
 .card-body {
   padding: 20px 24px;
 }
@@ -298,7 +416,7 @@ body {
   color: var(--text-secondary);
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--dt-bg-hover);
 }
 
 .data-table td {
@@ -357,6 +475,13 @@ body {
   background: var(--danger-bg);
   color: var(--danger);
   border: 1px solid var(--danger);
+}
+
+/* L1-G 修复：fallback 信任等级样式，区分"引擎不可达"与正常拦截 */
+.trust-fallback {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border: 1px solid var(--warning);
 }
 
 .result-tag {
@@ -598,7 +723,7 @@ body {
 .mode-card-active {
   border-color: var(--accent) !important;
   box-shadow: 0 0 12px var(--accent-glow);
-  background: rgba(59, 130, 246, 0.05);
+  background: var(--dt-primary-50);
 }
 
 .mode-card-title {
@@ -1035,6 +1160,36 @@ body {
   box-shadow: 0 0 6px var(--success-glow);
 }
 
+/* P0-06：引擎离线状态栏样式（P0修复：改用设计系统变量） */
+.status-bar-offline {
+  background: var(--dt-danger-50);
+  border-bottom: 1px solid var(--dt-danger);
+}
+
+/* P0-09：紧急逃生状态栏样式（最高优先级警告，橙色脉冲） */
+.status-bar-emergency {
+  background: var(--dt-warning-100);
+  border-bottom: 2px solid var(--dt-warning);
+  animation: emergency-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes emergency-pulse {
+  0%, 100% {
+    background: var(--dt-warning-100);
+    box-shadow: 0 0 0 0 var(--dt-warning-100);
+  }
+  50% {
+    background: var(--dt-warning-50);
+    box-shadow: 0 0 12px 0 var(--dt-warning-100);
+  }
+}
+
+.dot-emergency {
+  background: var(--dt-warning);
+  box-shadow: 0 0 8px var(--dt-warning-glow);
+  animation: pulse 1s infinite;
+}
+
 .status-bar-mode {
   font-weight: 600;
   color: var(--text-primary);
@@ -1114,7 +1269,7 @@ body {
 .learning-progress-bar-large {
   width: 100%;
   height: 28px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--dt-bg-active);
   border-radius: var(--radius-md);
   overflow: hidden;
   position: relative;
@@ -1281,7 +1436,7 @@ body {
 .sim-mode-active {
   border-color: var(--accent) !important;
   box-shadow: 0 0 12px var(--accent-glow);
-  background: rgba(59, 130, 246, 0.05);
+  background: var(--dt-primary-50);
 }
 
 .sim-mode-icon {
@@ -2120,12 +2275,12 @@ body {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: rgba(255, 193, 7, 0.12);
-  border: 1px solid rgba(255, 193, 7, 0.3);
+  background: var(--dt-warning-50);
+  border: 1px solid var(--dt-warning-100);
   border-radius: 8px;
   margin-bottom: 16px;
   font-size: 0.85rem;
-  color: #ffc107;
+  color: var(--dt-warning);
 }
 .wizard-badge-icon {
   font-size: 1rem;
@@ -2332,5 +2487,966 @@ body {
 
 .toggle-sm {
   transform: scale(0.85);
+}
+
+/* ============================================================
+   新 UI 设计系统 - 工具类与组件样式
+   深色主题 + 国风设计
+   ============================================================ */
+
+/* 篆刻风格装饰线 - 页面标题 */
+.dt-title-decoration {
+  position: relative;
+  display: inline-block;
+}
+.dt-title-decoration::after {
+  content: '';
+  position: absolute;
+  bottom: -6px;
+  left: 0;
+  width: 33%;
+  height: 2px;
+  background: var(--dt-primary);
+  opacity: 0.6;
+  border-radius: 1px;
+}
+
+/* 太极迷你图标 */
+.dt-taiji-mini {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(to right, var(--dt-bg-card) 50%, var(--dt-primary) 50%);
+  position: relative;
+  flex-shrink: 0;
+}
+.dt-taiji-mini::before,
+.dt-taiji-mini::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.dt-taiji-mini::before {
+  top: 0;
+  background: var(--dt-bg-card);
+}
+.dt-taiji-mini::after {
+  bottom: 0;
+  background: var(--dt-primary);
+}
+
+/* ==================== 更新的侧边栏样式 ==================== */
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--dt-border);
+  flex-shrink: 0;
+}
+
+.sidebar-logo-img {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--dt-radius-md);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.sidebar-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sidebar-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--dt-text-primary);
+  line-height: 1.2;
+}
+
+.sidebar-subtitle {
+  font-size: 11px;
+  color: var(--dt-text-tertiary);
+  line-height: 1.2;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 12px;
+  flex: 1;
+  overflow-y: auto;
+}
+.sidebar-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: var(--dt-radius-md);
+  text-decoration: none;
+  color: var(--dt-text-secondary);
+  transition: var(--dt-transition-normal);
+  cursor: pointer;
+  position: relative;
+  font-size: 14px;
+}
+
+.nav-item:hover {
+  color: var(--dt-text-primary);
+  background: var(--dt-bg-hover);
+}
+
+.nav-item-active {
+  color: var(--dt-primary);
+  background: var(--dt-primary-50);
+  font-weight: 500;
+}
+
+.nav-item-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  height: 20px;
+  background: var(--dt-primary);
+  border-radius: 0 2px 2px 0;
+}
+
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.nav-label {
+  font-size: 14px;
+  font-weight: inherit;
+}
+
+.sidebar-footer {
+  padding: 12px;
+  border-top: 1px solid var(--dt-border);
+  flex-shrink: 0;
+}
+
+.sidebar-version {
+  font-size: 11px;
+  color: var(--dt-text-tertiary);
+  padding: 0 8px;
+}
+
+/* ==================== 通用工具类 ==================== */
+.dt-flex { display: flex; }
+.dt-flex-col { display: flex; flex-direction: column; }
+.dt-items-center { align-items: center; }
+.dt-items-start { align-items: flex-start; }
+.dt-justify-between { justify-content: space-between; }
+.dt-justify-center { justify-content: center; }
+.dt-flex-1 { flex: 1; }
+.dt-flex-shrink-0 { flex-shrink: 0; }
+.dt-gap-1 { gap: 4px; }
+.dt-gap-2 { gap: 8px; }
+.dt-gap-3 { gap: 12px; }
+.dt-gap-4 { gap: 16px; }
+.dt-gap-6 { gap: 24px; }
+
+.dt-mt-2 { margin-top: 8px; }
+.dt-mt-3 { margin-top: 12px; }
+.dt-mt-4 { margin-top: 16px; }
+.dt-mt-6 { margin-top: 24px; }
+.dt-mt-8 { margin-top: 32px; }
+.dt-mb-2 { margin-bottom: 8px; }
+.dt-mb-3 { margin-bottom: 12px; }
+.dt-mb-4 { margin-bottom: 16px; }
+.dt-mb-6 { margin-bottom: 24px; }
+.dt-mb-8 { margin-bottom: 32px; }
+
+.dt-text-xs { font-size: 12px; }
+.dt-text-sm { font-size: 13px; }
+.dt-text-base { font-size: 14px; }
+.dt-text-lg { font-size: 18px; }
+.dt-text-xl { font-size: 20px; }
+.dt-text-2xl { font-size: 24px; }
+.dt-font-medium { font-weight: 500; }
+.dt-font-semibold { font-weight: 600; }
+.dt-font-bold { font-weight: 700; }
+.dt-font-mono { font-family: var(--dt-font-mono); }
+.dt-tabular-nums { font-variant-numeric: tabular-nums; }
+
+.dt-text-primary { color: var(--dt-text-primary); }
+.dt-text-secondary { color: var(--dt-text-secondary); }
+.dt-text-tertiary { color: var(--dt-text-tertiary); }
+.dt-text-success { color: var(--dt-success); }
+.dt-text-warning { color: var(--dt-warning); }
+.dt-text-danger { color: var(--dt-danger); }
+.dt-text-teal { color: var(--dt-teal); }
+.dt-text-info { color: var(--dt-info); }
+
+.dt-bg-panel { background-color: var(--dt-bg-panel); }
+.dt-bg-card { background-color: var(--dt-bg-card); }
+.dt-bg-primary { background-color: var(--dt-bg-primary); }
+
+.dt-rounded-sm { border-radius: var(--dt-radius-sm); }
+.dt-rounded-md { border-radius: var(--dt-radius-md); }
+.dt-rounded-lg { border-radius: var(--dt-radius-lg); }
+.dt-rounded-xl { border-radius: var(--dt-radius-xl); }
+.dt-rounded-full { border-radius: var(--dt-radius-full); }
+
+.dt-border { border: 1px solid var(--dt-border); }
+.dt-border-strong { border: 1px solid var(--dt-border-strong); }
+.dt-border-b { border-bottom: 1px solid var(--dt-border); }
+.dt-border-t { border-top: 1px solid var(--dt-border); }
+
+.dt-p-4 { padding: 16px; }
+.dt-p-5 { padding: 20px; }
+.dt-p-6 { padding: 24px; }
+.dt-px-6 { padding-left: 24px; padding-right: 24px; }
+.dt-py-5 { padding-top: 20px; padding-bottom: 20px; }
+.dt-py-6 { padding-top: 24px; padding-bottom: 24px; }
+
+.dt-relative { position: relative; }
+.dt-absolute { position: absolute; }
+.dt-overflow-hidden { overflow: hidden; }
+
+.dt-leading-relaxed { line-height: 1.6; }
+.dt-tracking-widest { letter-spacing: 0.15em; }
+.dt-line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ==================== 阴阳门状态页面 ==================== */
+.yinyang-page {
+  padding: 24px;
+  max-width: var(--dt-content-max-width);
+  margin: 0 auto;
+}
+
+.yinyang-page-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--dt-text-primary);
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+
+.yinyang-page-subtitle {
+  font-size: 13px;
+  color: var(--dt-text-secondary);
+}
+
+.yinyang-divider-row {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.yinyang-divider-line {
+  height: 1px;
+  flex: 1;
+}
+
+.yinyang-divider-text {
+  font-size: 12px;
+  font-family: var(--dt-font-mono);
+  letter-spacing: 0.15em;
+  color: var(--dt-text-tertiary);
+  white-space: nowrap;
+}
+
+/* 阴阳门卡片网格 */
+.yinyang-cards-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+  margin-bottom: 32px;
+  align-items: stretch;
+}
+
+@media (min-width: 1024px) {
+  .yinyang-cards-grid {
+    grid-template-columns: 1fr auto 1fr;
+  }
+}
+
+.yinyang-gate-card {
+  position: relative;
+  border-radius: var(--dt-radius-xl);
+  padding: 24px;
+  background: var(--dt-bg-panel);
+  border: 1px solid var(--dt-border-strong);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.yinyang-gate-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.yinyang-gate-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.yinyang-gate-card-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--dt-text-primary);
+}
+
+.yinyang-gate-card-subtitle {
+  font-size: 12px;
+  color: var(--dt-text-tertiary);
+}
+
+.yinyang-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--dt-radius-md);
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid;
+  flex-shrink: 0;
+}
+
+.yinyang-status-badge.success {
+  background: var(--dt-success-50);
+  border-color: var(--dt-success-100);
+  color: var(--dt-success);
+}
+
+.yinyang-status-badge.teal {
+  background: var(--dt-teal-50);
+  border-color: var(--dt-teal-100);
+  color: var(--dt-teal);
+}
+
+.yinyang-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: pulse 2s infinite;
+}
+
+.yinyang-status-dot.success { background: var(--dt-success); }
+.yinyang-status-dot.teal { background: var(--dt-teal); }
+
+.yinyang-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin-top: 24px;
+  margin-bottom: 24px;
+}
+
+.yinyang-metric-card {
+  padding: 16px;
+  border-radius: var(--dt-radius-lg);
+  background: var(--dt-bg-card);
+  border: 1px solid var(--dt-border);
+}
+
+.yinyang-metric-label {
+  font-size: 12px;
+  color: var(--dt-text-tertiary);
+  margin-bottom: 6px;
+}
+
+.yinyang-metric-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--dt-text-primary);
+  font-family: var(--dt-font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.yinyang-metric-value.primary { color: var(--dt-primary); }
+.yinyang-metric-value.teal { color: var(--dt-teal); }
+.yinyang-metric-value.danger { color: var(--dt-danger); }
+
+.yinyang-metric-unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--dt-text-tertiary);
+  margin-left: 2px;
+}
+
+.yinyang-gate-footer {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--dt-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--dt-text-tertiary);
+}
+
+/* 中间太极图标 */
+.yinyang-taiji-center {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 0;
+}
+
+@media (min-width: 1024px) {
+  .yinyang-taiji-center {
+    display: flex;
+  }
+}
+
+.yinyang-taiji-vertical-text {
+  font-size: 12px;
+  color: var(--dt-text-tertiary);
+  letter-spacing: 0.15em;
+  writing-mode: vertical-rl;
+  margin: 16px 0;
+}
+
+.yinyang-taiji-svg {
+  width: 48px;
+  height: 48px;
+  animation: dt-spin-slow 20s linear infinite;
+}
+
+@keyframes dt-spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .yinyang-taiji-svg { animation: none; }
+  .yinyang-status-dot { animation: none; }
+}
+
+/* 反馈闭环时间线 */
+.yinyang-feedback-card {
+  background: var(--dt-bg-panel);
+  border: 1px solid var(--dt-border);
+  border-radius: var(--dt-radius-xl);
+  overflow: hidden;
+  margin-bottom: 32px;
+}
+
+.yinyang-feedback-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--dt-border);
+}
+
+.yinyang-feedback-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.yinyang-feedback-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--dt-text-primary);
+}
+
+.yinyang-feedback-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--dt-radius-md);
+  font-size: 12px;
+  background: var(--dt-primary-50);
+  color: var(--dt-primary);
+  border: 1px solid var(--dt-primary-100);
+}
+
+.yinyang-feedback-subtitle {
+  font-size: 13px;
+  color: var(--dt-text-tertiary);
+}
+
+.yinyang-feedback-body {
+  padding: 20px 24px;
+  position: relative;
+}
+
+.yinyang-timeline-line {
+  position: absolute;
+  left: 120px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(to bottom, var(--dt-primary-100), var(--dt-teal-100));
+}
+
+.yinyang-timeline-item {
+  position: relative;
+  display: flex;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.yinyang-timeline-item:last-child {
+  margin-bottom: 0;
+}
+
+.yinyang-timeline-time {
+  width: 100px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.yinyang-timeline-source {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.yinyang-timeline-source.primary { color: var(--dt-primary); }
+.yinyang-timeline-source.teal { color: var(--dt-teal); }
+
+.yinyang-timeline-timestamp {
+  font-size: 10px;
+  color: var(--dt-text-tertiary);
+  margin-top: 2px;
+}
+
+.yinyang-timeline-dot-wrapper {
+  position: relative;
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+.yinyang-timeline-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--dt-bg-panel);
+  margin-left: -5px;
+  margin-top: 6px;
+}
+
+.yinyang-timeline-dot.primary { background: var(--dt-primary); }
+.yinyang-timeline-dot.teal { background: var(--dt-teal); }
+
+.yinyang-timeline-content {
+  flex: 1;
+  min-width: 0;
+  background: var(--dt-bg-card);
+  border-radius: var(--dt-radius-lg);
+  padding: 16px;
+  border: 1px solid var(--dt-border);
+}
+
+.yinyang-timeline-content-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.yinyang-timeline-content-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--dt-text-primary);
+}
+
+.yinyang-timeline-count-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--dt-radius-md);
+  font-size: 12px;
+}
+
+.yinyang-timeline-count-badge.primary {
+  background: var(--dt-primary-50);
+  color: var(--dt-primary);
+}
+
+.yinyang-timeline-count-badge.teal {
+  background: var(--dt-teal-50);
+  color: var(--dt-teal);
+}
+
+.yinyang-timeline-count-badge.danger {
+  background: var(--dt-danger-50);
+  color: var(--dt-danger);
+}
+
+.yinyang-timeline-count-badge.warning {
+  background: var(--dt-warning-50);
+  color: var(--dt-warning);
+}
+
+.yinyang-timeline-content-desc {
+  font-size: 12px;
+  color: var(--dt-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.5;
+}
+
+/* 双层架构原理说明 */
+.yinyang-principle-card {
+  background: var(--dt-bg-panel);
+  border: 1px solid var(--dt-border);
+  border-radius: var(--dt-radius-xl);
+  overflow: hidden;
+}
+
+.yinyang-principle-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--dt-border);
+}
+
+.yinyang-principle-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.yinyang-principle-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--dt-text-primary);
+}
+
+.yinyang-principle-subtitle {
+  font-size: 13px;
+  color: var(--dt-text-tertiary);
+}
+
+.yinyang-principle-grid {
+  padding: 24px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+@media (min-width: 768px) {
+  .yinyang-principle-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.yinyang-principle-item {
+  padding: 20px;
+  border-radius: var(--dt-radius-lg);
+  background: var(--dt-bg-card);
+  border: 1px solid var(--dt-border);
+}
+
+.yinyang-principle-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.yinyang-principle-icon-box {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--dt-radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.yinyang-principle-icon-box.primary {
+  background: var(--dt-primary-50);
+  border: 1px solid var(--dt-primary-100);
+  color: var(--dt-primary);
+}
+
+.yinyang-principle-icon-box.teal {
+  background: var(--dt-teal-50);
+  border: 1px solid var(--dt-teal-100);
+  color: var(--dt-teal);
+}
+
+.yinyang-principle-icon-box.gradient {
+  background: var(--dt-gradient-primary);
+  opacity: 0.9;
+  color: white;
+}
+
+.yinyang-principle-item-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--dt-text-primary);
+}
+
+.yinyang-principle-item-desc {
+  font-size: 12px;
+  color: var(--dt-text-secondary);
+  line-height: 1.6;
+}
+
+/* 阴阳门加载状态 */
+.yinyang-loading {
+  padding: 60px 24px;
+  text-align: center;
+  color: var(--dt-text-secondary);
+  font-size: 14px;
+}
+
+.yinyang-empty-state {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--dt-text-tertiary);
+  font-size: 13px;
+}
+
+/* ============================================================
+   Sprint7 首屏视觉冲击力增强
+   ============================================================ */
+
+/* 品牌英雄区 */
+.hero-brand-section {
+  position: relative;
+  overflow: hidden;
+  padding: 32px 28px;
+  margin-bottom: 24px;
+  border-radius: var(--dt-radius-2xl);
+  background: linear-gradient(135deg, rgba(43, 95, 215, 0.08) 0%, rgba(0, 212, 170, 0.05) 100%);
+  border: 1px solid var(--dt-border);
+}
+
+/* 太极动态背景 */
+.hero-taiji-bg {
+  position: absolute;
+  right: -60px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 280px;
+  height: 280px;
+  opacity: 0.06;
+  animation: taiji-rotate 30s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes taiji-rotate {
+  from { transform: translateY(-50%) rotate(0deg); }
+  to { transform: translateY(-50%) rotate(360deg); }
+}
+
+.hero-brand-content {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-brand-title {
+  font-size: 26px;
+  font-weight: 700;
+  background: var(--dt-gradient-primary);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 8px;
+}
+
+.hero-brand-subtitle {
+  font-size: 14px;
+  color: var(--dt-text-secondary);
+  max-width: 600px;
+  line-height: 1.6;
+}
+
+.hero-brand-tags {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.hero-brand-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--dt-radius-full);
+  font-size: 11px;
+  font-weight: 500;
+  background: rgba(43, 95, 215, 0.1);
+  color: var(--dt-primary-hover);
+}
+
+/* 核心数据卡片增强 */
+.stat-card-enhanced {
+  background: var(--dt-bg-card);
+  border: 1px solid var(--dt-border);
+  border-radius: var(--dt-radius-xl);
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: transform var(--dt-transition-normal), box-shadow var(--dt-transition-normal);
+}
+
+.stat-card-enhanced:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--dt-shadow-lg);
+}
+
+.stat-card-enhanced::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--dt-gradient-primary);
+  opacity: 0;
+  transition: opacity var(--dt-transition-normal);
+}
+
+.stat-card-enhanced:hover::before {
+  opacity: 1;
+}
+
+.stat-card-enhanced .stat-icon {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  opacity: 0.3;
+}
+
+/* 骨架屏 */
+.skeleton {
+  background: linear-gradient(90deg, var(--dt-bg-card) 25%, var(--dt-bg-hover) 50%, var(--dt-bg-card) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s ease-in-out infinite;
+  border-radius: var(--dt-radius-md);
+}
+
+@keyframes skeleton-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.skeleton-text {
+  height: 14px;
+  margin-bottom: 8px;
+  border-radius: var(--dt-radius-sm);
+}
+
+.skeleton-text:last-child {
+  width: 60%;
+}
+
+/* 引导插画空状态 */
+.empty-state-enhanced {
+  text-align: center;
+  padding: 48px 24px;
+}
+
+.empty-state-enhanced-icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  background: rgba(43, 95, 215, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dt-primary);
+}
+
+.empty-state-enhanced-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dt-text-primary);
+  margin-bottom: 6px;
+}
+
+.empty-state-enhanced-desc {
+  font-size: 13px;
+  color: var(--dt-text-tertiary);
+  margin-bottom: 16px;
+}
+
+/* 微交互动画 */
+.btn {
+  transition: all var(--dt-transition-fast);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+/* 页面切换淡入 */
+.page-fade-in {
+  animation: page-fade-in var(--dt-transition-slow);
+}
+
+@keyframes page-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 数据更新闪烁 */
+.data-update-flash {
+  animation: data-flash 0.6s ease-out;
+}
+
+@keyframes data-flash {
+  0% { background-color: rgba(43, 95, 215, 0.15); }
+  100% { background-color: transparent; }
+}
+
+/* 阴阳门实时攻击流动画 */
+.attack-flow-line {
+  stroke-dasharray: 5, 5;
+  animation: flow-dash 1s linear infinite;
+}
+
+@keyframes flow-dash {
+  to { stroke-dashoffset: -10; }
+}
+
+/* 太极脉冲 */
+.taiji-pulse {
+  animation: taiji-pulse-anim 3s ease-in-out infinite;
+}
+
+@keyframes taiji-pulse-anim {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.03); }
 }
 

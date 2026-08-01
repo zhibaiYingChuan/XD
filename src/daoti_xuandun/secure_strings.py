@@ -20,8 +20,19 @@ def _get_key() -> bytes:
     if _KEY is None:
         key_str = os.environ.get("XUANDUN_DEV_KEY")
         if not key_str:
+            # 生产环境强制要求密钥，拒绝 fallback
+            if os.environ.get("XUANDUN_REQUIRE_SECURE_KEY") == "1":
+                raise RuntimeError(
+                    "XUANDUN_DEV_KEY not set and XUANDUN_REQUIRE_SECURE_KEY=1. "
+                    "Refusing to use insecure fallback key in production. "
+                    "Please set XUANDUN_DEV_KEY environment variable or generate "
+                    "_key_generated.py via build_engine.py."
+                )
             import sys
-            sys.stderr.write("[XuanDun] WARNING: XUANDUN_DEV_KEY not set, using insecure fallback key\n")
+            sys.stderr.write(
+                "[XuanDun] WARNING: XUANDUN_DEV_KEY not set, using insecure fallback key. "
+                "DO NOT use in production. Set XUANDUN_DEV_KEY or XUANDUN_REQUIRE_SECURE_KEY=1.\n"
+            )
             key_str = "dev-fallback-key-do-not-use-in-production"
         _KEY = key_str.encode("utf-8").ljust(32, b"\x00")[:32]
     return _KEY

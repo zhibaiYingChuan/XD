@@ -119,6 +119,19 @@ export interface AttackCategoryStat {
   blocked: number;
 }
 
+/**
+ * RealtimeMetrics — 双源设计说明
+ *
+ * 数据来源：Rust 命令 `get_realtime_metrics` 直接从本地 EngineState 计算，
+ * 不调用 Flask `/metrics/realtime` 端点。
+ * - uptime_secs/mode/healthy：仅 Rust 维护（基于引擎心跳、模式状态、健康检查）
+ * - qps：Rust 实时计算 = total_requests / uptime
+ * - total_requests/total_blocked/block_rate：Rust 本地累计
+ *
+ * Flask `/metrics/realtime` 是独立指标端点（含 p50/p95/p99_latency_ms 分位数延迟），
+ * 未被 Tauri 前端使用，仅供独立监控工具或调试访问。
+ * 设计如此：避免前端实时指标依赖网络往返，保证 UI 响应速度。
+ */
 export interface RealtimeMetrics {
   total_requests: number;
   total_blocked: number;
@@ -137,6 +150,51 @@ export interface PeriodStats {
 export interface ComparisonStats {
   current: PeriodStats;
   baseline: PeriodStats;
+}
+
+export interface DualLayerStats {
+  enabled: boolean;
+  outer_gate: {
+    total: number;
+    rejects: number;
+    passes: number;
+    forwards: number;
+    reject_rate: number;
+    pass_rate: number;
+    forward_rate: number;
+    avg_latency_ms: number;
+    learned_attack_count: number;
+    learned_safe_count: number;
+  };
+  inner_gate: {
+    total: number;
+    rejects: number;
+    passes: number;
+    learning_events: number;
+    reject_rate: number;
+    avg_latency_ms: number;
+  };
+}
+
+// ── 企业级运维：逃生通道 + 灰度部署 ──
+
+export interface EmergencyBypassState {
+  enabled: boolean;
+}
+
+export interface GrayDeployState {
+  ratio: number;
+}
+
+export interface BypassStats {
+  emergency_bypass: boolean;
+  gray_deploy_ratio: number;
+  gray_bypass_count: number;
+  bypass_log: Array<{
+    timestamp: string;
+    text_preview: string;
+    reason: string;
+  }>;
 }
 
 export interface ReportSummary {
@@ -160,61 +218,194 @@ export interface HashChainReport {
   verified_entries: number;
   broken_links: [number, string][];
   chain_intact: boolean;
+  /** Rust 额外返回的旧版哈希条目数（v1 -> v2 迁移统计），前端可选展示 */
+  legacy_entries?: number;
 }
 
 import { invoke } from '@tauri-apps/api/core';
 
+// ── P0-04 修复：invoke 超时包装器 ──
+// 所有 invoke 调用必须经过超时包装，防止 Rust 后端挂起导致 UI 永久冻结。
+
+/** 超时错误类型，调用方可通过 instanceof 或 name 识别 */
+export class InvokeTimeoutError extends Error {
+  readonly command: string;
+  readonly timeoutMs: number;
+  constructor(command: string, timeoutMs: number) {
+    super(`操作超时: ${command} (${timeoutMs}ms 无响应)`);
+    this.name = 'InvokeTimeoutError';
+    this.command = command;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** 超时分档（毫秒）—— 按操作类型选择 */
+export const TIMEOUT = {
+  FAST: 5_000,      // 快速操作：状态查询、配置读写（5秒）
+  NORMAL: 15_000,   // 普通操作：引擎控制、报告生成（15秒）
+  SLOW: 60_000,     // 长操作：模拟测试、预热（60秒）
+} as const;
+
+/**
+ * 带超时的 invoke 包装器。
+ * 超时后抛出 InvokeTimeoutError，调用方应通过 try-catch 捕获并在 UI 显示兜底提示。
+ *
+ * P0-01 修复：Tauri bridge 未注入兜底检测。
+ * 在浏览器环境或 release 模式 custom-protocol 失效时，window.__TAURI_INTERNALS__ 为 undefined，
+ * 此时所有 invoke 调用会抛出模糊错误。这里提前检测并提供可操作的提示，
+ * 避免应用永远显示"加载中..."导致用户无感知。
+ *
+ * @param command Tauri 命令名
+ * @param args 命令参数
+ * @param timeoutMs 超时毫秒数（默认 NORMAL 15s）
+ */
+function invokeWithTimeout<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  timeoutMs: number = TIMEOUT.NORMAL,
+): Promise<T> {
+  // P0-01 修复：Tauri bridge 环境检测
+  // 浏览器环境（开发调试、误访问 localhost:1420）或 release 模式 custom-protocol 失效时
+  // window.__TAURI_INTERNALS__ 不存在，invoke 会抛出模糊错误
+  if (typeof window === 'undefined' ||
+      !(window as any).__TAURI_INTERNALS__ ||
+      typeof (window as any).__TAURI_INTERNALS__.invoke !== 'function') {
+    return Promise.reject(new Error(
+      'Tauri 桥接未就绪：请在玄盾桌面应用中打开本页面（而非浏览器）。' +
+      '若已在桌面应用中看到此提示，请检查应用是否损坏或联系支持。'
+    ));
+  }
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new InvokeTimeoutError(command, timeoutMs)), timeoutMs);
+  });
+  return Promise.race([
+    invoke<T>(command, args),
+    timeoutPromise,
+  ]) as Promise<T>;
+}
+
+/**
+ * 判断当前是否运行在 Tauri 桌面环境中（P0-01 辅助）。
+ * 用于 UI 层在桥接缺失时显示全局降级提示，而非各页面分别报错。
+ */
+export function isTauriBridgeAvailable(): boolean {
+  return typeof window !== 'undefined' &&
+    Boolean((window as any).__TAURI_INTERNALS__) &&
+    typeof (window as any).__TAURI_INTERNALS__.invoke === 'function';
+}
+
+/**
+ * 格式化 invoke 错误为用户可读的提示信息（P0-05 辅助 + NEW-P0-02 增强）。
+ * 调用方在 catch 块中使用：showMessage('error', formatInvokeError(e, '测试告警'))
+ *
+ * NEW-P0-02 增强：识别常见 Tauri/Rust 错误模式，映射为用户可理解的修复指引
+ */
+export function formatInvokeError(e: unknown, action: string): string {
+  if (e instanceof InvokeTimeoutError) {
+    // R15 修复：超时后底层 Promise 仍可能正在执行，提示用户不要立即重试
+    return `${action}超时。该操作可能仍在后台执行，请等待 30 秒后再重试。如果持续超时，请检查引擎是否正常运行。`;
+  }
+  if (e instanceof Error) {
+    const msg = e.message || e.toString();
+    // NEW-P0-02：识别常见错误模式，提供可操作的修复指引
+    if (/missing required key/i.test(msg)) {
+      return `${action}失败：配置参数缺失，请重启应用或联系技术支持。`;
+    }
+    if (/command not found/i.test(msg)) {
+      return `${action}失败：应用版本不兼容，请检查更新或重新安装。`;
+    }
+    if (/os error 2|系统找不到指定的文件/i.test(msg)) {
+      return `${action}失败：引擎可执行文件缺失，请重新安装或手动启动引擎。`;
+    }
+    if (/engine not running/i.test(msg)) {
+      return `${action}失败：引擎未运行，请在设置页面重启引擎或手动启动。`;
+    }
+    return `${action}失败: ${msg}`;
+  }
+  return `${action}失败: ${String(e)}`;
+}
+
+/**
+ * 信任等级中文映射（P1修复：将后端枚举值映射为用户友好的中文显示）。
+ * 后端返回的 trust_level 是枚举值（UNKNOWN/HIGH/MEDIUM/LOW等），
+ * 前端需统一映射为中文，避免直接显示英文枚举。
+ */
+const TRUST_LEVEL_MAP: Record<string, string> = {
+  UNKNOWN: '未知',
+  HIGH: '高信任',
+  MEDIUM: '中信任',
+  LOW: '低信任',
+  FALLBACK: '降级',
+  TEST: '测试',
+};
+
+export function formatTrustLevel(level: string | null | undefined): string {
+  if (!level) return '—';
+  return TRUST_LEVEL_MAP[level.toUpperCase()] || level;
+}
+
 export const api = {
-  getStatus: () => invoke<StatusResponse>('get_status'),
+  getStatus: () => invokeWithTimeout<StatusResponse>('get_status', undefined, TIMEOUT.FAST),
   protect: (text: string, session: string = 'default', mode: string = 'balanced') =>
-    invoke<ProtectResponse>('protect', { req: { text, session, mode } }),
-  setMode: (mode: string) => invoke<void>('set_mode', { mode }),
-  discoverAgents: () => invoke<AgentInfo[]>('discover_agents'),
+    invokeWithTimeout<ProtectResponse>('protect', { req: { text, session, mode } }, TIMEOUT.NORMAL),
+  setMode: (mode: string) => invokeWithTimeout<void>('set_mode', { mode }, TIMEOUT.FAST),
+  discoverAgents: () => invokeWithTimeout<AgentInfo[]>('discover_agents', undefined, TIMEOUT.FAST),
   getLogs: (filterAllowed?: boolean, limit?: number, offset?: number) =>
-    invoke<LogResponse>('get_logs', { filterAllowed, limit, offset }),
-  getConfig: (key: string) => invoke<string | null>('get_config', { key }),
-  setConfig: (key: string, value: string) => invoke<void>('set_config', { key, value }),
-  restartEngine: () => invoke<void>('restart_engine'),
-  stopEngine: () => invoke<void>('stop_engine'),
+    invokeWithTimeout<LogResponse>('get_logs', { filterAllowed, limit, offset }, TIMEOUT.FAST),
+  getConfig: (key: string) => invokeWithTimeout<string | null>('get_config', { key }, TIMEOUT.FAST),
+  setConfig: (key: string, value: string) => invokeWithTimeout<void>('set_config', { key, value }, TIMEOUT.FAST),
+  restartEngine: () => invokeWithTimeout<void>('restart_engine', undefined, TIMEOUT.SLOW),
+  stopEngine: () => invokeWithTimeout<void>('stop_engine', undefined, TIMEOUT.SLOW),
   warmup: (safeTexts: string[], attackTexts: string[]) =>
-    invoke<any>('warmup', { req: { safeTexts, attackTexts } }),
-  verifyAudit: () => invoke<HashChainReport>('verify_audit'),
-  storeSecretKey: (key: string) => invoke<void>('store_secret_key', { key }),
-  getSecretKey: () => invoke<string>('get_secret_key'),
-  deleteSecretKey: () => invoke<void>('delete_secret_key'),
-  hasSecretKey: () => invoke<boolean>('has_secret_key'),
-  createSnapshot: (label: string) => invoke<number>('create_snapshot', { label }),
-  listSnapshots: () => invoke<[number, string, string][]>('list_snapshots'),
-  restoreSnapshot: (snapshotId: number) => invoke<void>('restore_snapshot', { snapshotId }),
-  startProxy: (port: number) => invoke<void>('start_proxy_cmd', { port }),
-  stopProxy: () => invoke<void>('stop_proxy_cmd'),
-  isProxyRunning: () => invoke<boolean>('is_proxy_running_cmd'),
-  getLearningStatus: () => invoke<LearningStatus>('get_learning_status'),
-  switchLearningMode: (mode: string) => invoke<any>('switch_learning_mode', { mode }),
-  getLearningDetails: () => invoke<any>('get_learning_details'),
+    invokeWithTimeout<any>('warmup', { req: { safeTexts, attackTexts } }, TIMEOUT.SLOW),
+  verifyAudit: () => invokeWithTimeout<HashChainReport>('verify_audit', undefined, TIMEOUT.NORMAL),
+  storeSecretKey: (key: string) => invokeWithTimeout<void>('store_secret_key', { key }, TIMEOUT.FAST),
+  getSecretKey: () => invokeWithTimeout<string>('get_secret_key', undefined, TIMEOUT.FAST),
+  deleteSecretKey: () => invokeWithTimeout<void>('delete_secret_key', undefined, TIMEOUT.FAST),
+  hasSecretKey: () => invokeWithTimeout<boolean>('has_secret_key', undefined, TIMEOUT.FAST),
+  createSnapshot: (label: string) => invokeWithTimeout<number>('create_snapshot', { label }, TIMEOUT.NORMAL),
+  listSnapshots: () => invokeWithTimeout<[number, string, string][]>('list_snapshots', undefined, TIMEOUT.FAST),
+  restoreSnapshot: (snapshotId: number) => invokeWithTimeout<void>('restore_snapshot', { snapshotId }, TIMEOUT.NORMAL),
+  startProxy: (port: number) => invokeWithTimeout<void>('start_proxy_cmd', { port }, TIMEOUT.FAST),
+  stopProxy: () => invokeWithTimeout<void>('stop_proxy_cmd', undefined, TIMEOUT.FAST),
+  isProxyRunning: () => invokeWithTimeout<boolean>('is_proxy_running_cmd', undefined, TIMEOUT.FAST),
+  getLearningStatus: () => invokeWithTimeout<LearningStatus>('get_learning_status', undefined, TIMEOUT.FAST),
+  switchLearningMode: (mode: string) => invokeWithTimeout<any>('switch_learning_mode', { mode }, TIMEOUT.NORMAL),
+  getLearningDetails: () => invokeWithTimeout<any>('get_learning_details', undefined, TIMEOUT.FAST),
   runSimulation: (mode: string, categories?: string[], customTexts?: string[]) =>
-    invoke<SimulationReport>('run_simulation', { mode, categories, customTexts }),
+    invokeWithTimeout<SimulationReport>('run_simulation', { mode, categories, customTexts }, TIMEOUT.SLOW),
   sendNotification: (title: string, body: string) =>
-    invoke<void>('send_notification', { title, body }),
+    invokeWithTimeout<void>('send_notification', { title, body }, TIMEOUT.FAST),
   getTrendStats: (granularity: string, start: string, end: string) =>
-    invoke<TrendStatsResponse>('get_trend_stats', { granularity, start, end }),
+    invokeWithTimeout<TrendStatsResponse>('get_trend_stats', { granularity, start, end }, TIMEOUT.NORMAL),
   getAttackDistribution: (start: string, end: string) =>
-    invoke<AttackCategoryStat[]>('get_attack_distribution', { start, end }),
-  getRealtimeMetrics: () => invoke<RealtimeMetrics>('get_realtime_metrics'),
+    invokeWithTimeout<AttackCategoryStat[]>('get_attack_distribution', { start, end }, TIMEOUT.NORMAL),
+  getRealtimeMetrics: () => invokeWithTimeout<RealtimeMetrics>('get_realtime_metrics', undefined, TIMEOUT.FAST),
   getComparisonStats: (currentStart: string, currentEnd: string, baselineStart: string, baselineEnd: string) =>
-    invoke<ComparisonStats>('get_comparison_stats', { currentStart, currentEnd, baselineStart, baselineEnd }),
+    invokeWithTimeout<ComparisonStats>('get_comparison_stats', { currentStart, currentEnd, baselineStart, baselineEnd }, TIMEOUT.NORMAL),
   generateReport: (reportType: string, start: string, end: string) =>
-    invoke<number>('generate_report', { reportType, start, end }),
+    invokeWithTimeout<number>('generate_report', { reportType, start, end }, TIMEOUT.NORMAL),
   listReports: (limit?: number) =>
-    invoke<ReportSummary[]>('list_reports', { limit }),
+    invokeWithTimeout<ReportSummary[]>('list_reports', { limit }, TIMEOUT.FAST),
   getReport: (reportId: number) =>
-    invoke<any>('get_report', { reportId }),
+    invokeWithTimeout<any>('get_report', { reportId }, TIMEOUT.NORMAL),
   deleteReport: (reportId: number) =>
-    invoke<void>('delete_report', { reportId }),
+    invokeWithTimeout<void>('delete_report', { reportId }, TIMEOUT.NORMAL),
   saveNotifierConfig: (channel: string, config: any) =>
-    invoke<void>('save_notifier_config', { channel, config }),
+    invokeWithTimeout<void>('save_notifier_config', { channel, config }, TIMEOUT.FAST),
   getNotifierConfig: (channel: string) =>
-    invoke<any | null>('get_notifier_config', { channel }),
+    invokeWithTimeout<any | null>('get_notifier_config', { channel }, TIMEOUT.FAST),
   testNotifier: (channel: string, config: any) =>
-    invoke<any>('test_notifier', { channel, config }),
+    invokeWithTimeout<any>('test_notifier', { channel, config }, TIMEOUT.SLOW),
+  getDualLayerStats: () => invokeWithTimeout<DualLayerStats>('get_dual_layer_stats', undefined, TIMEOUT.FAST),
+  // ── 企业级运维：逃生通道 + 灰度部署 ──
+  setEmergencyBypass: (enabled: boolean) =>
+    invokeWithTimeout<EmergencyBypassState>('set_emergency_bypass', { enabled }, TIMEOUT.FAST),
+  getEmergencyBypass: () =>
+    invokeWithTimeout<EmergencyBypassState>('get_emergency_bypass', undefined, TIMEOUT.FAST),
+  setGrayDeployRatio: (ratio: number) =>
+    invokeWithTimeout<GrayDeployState>('set_gray_deploy_ratio', { ratio }, TIMEOUT.FAST),
+  getGrayDeployRatio: () =>
+    invokeWithTimeout<GrayDeployState>('get_gray_deploy_ratio', undefined, TIMEOUT.FAST),
+  getBypassStats: () => invokeWithTimeout<BypassStats>('get_bypass_stats', undefined, TIMEOUT.FAST),
 };

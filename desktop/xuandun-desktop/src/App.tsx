@@ -11,6 +11,7 @@ import LearningStatusPage from './pages/LearningStatus';
 import Simulation from './pages/Simulation';
 import Reports from './pages/Reports';
 import Wizard from './pages/Wizard';
+import YinYangGate from './pages/YinYangGate';
 import { api } from './services/tauriApi';
 import './App.css';
 
@@ -18,6 +19,25 @@ function AppContent() {
   const [showWizard, setShowWizard] = useState(false);
   const [checking, setChecking] = useState(true);
   const prevLearningMode = useRef<string | null>(null);
+
+  // P2-01 修复：全局错误处理器，捕获未处理的异常和Promise拒绝
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      console.error('[全局错误]', event.message, event.error);
+      // 阻止默认的错误输出（避免控制台噪声）
+      event.preventDefault();
+    };
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      console.error('[未处理Promise拒绝]', event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, []);
 
   const checkWizard = useCallback(async () => {
     try {
@@ -88,6 +108,7 @@ function AppContent() {
           <Route path="/learning" element={<LearningStatusPage />} />
           <Route path="/simulation" element={<Simulation />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/yinyang" element={<YinYangGate />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>

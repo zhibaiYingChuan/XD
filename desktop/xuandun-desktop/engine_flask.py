@@ -294,7 +294,10 @@ def _get_shield(mode: str) -> XuanDun:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "1.2.3"})
+    # S2a-T09: 标准化健康检查端点，供 Docker/K8s healthcheck 与桌面端探活使用
+    # 返回字段：status(ok/degraded/down) / version / uptime(秒) / models_count(当前纳管模型数)
+    # 注意：sync_version.py 依赖本行 "status":"ok","version":"1.2.3" 模式做版本同步，保持单行
+    return jsonify({"status": "ok", "version": "1.2.3", "uptime": int(time.time() - _start_time), "models_count": 1})
 
 
 @app.route("/status", methods=["GET"])
@@ -341,7 +344,7 @@ def learning_status():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("learning_status error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": type(e).__name__}), 500
 
 
 @app.route("/mode/switch", methods=["POST", "OPTIONS"])
@@ -367,7 +370,7 @@ def switch_learning_mode():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("switch_mode error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": type(e).__name__}), 500
 
 
 @app.route("/learning/details", methods=["GET"])
@@ -380,7 +383,7 @@ def learning_details():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("learning_details error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": type(e).__name__}), 500
 
 
 # ── 企业级运维：逃生通道 + 灰度部署 ──
@@ -404,15 +407,16 @@ def emergency_bypass():
             result = shield.set_emergency_bypass(enabled)
             logger.warning("Emergency bypass %s: %s",
                            "ENABLED" if enabled else "DISABLED", result)
-            resp = jsonify(result)
+            # 返回字段对齐前端 EmergencyBypassState 接口（{ enabled: boolean }）
+            resp = jsonify({"enabled": shield.get_emergency_bypass()})
         else:
             resp = jsonify({
-                "emergency_bypass": shield.get_emergency_bypass(),
+                "enabled": shield.get_emergency_bypass(),
             })
         return _attach_cors(resp)
     except Exception as e:
         logger.error("emergency_bypass error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": type(e).__name__}), 500
 
 
 @app.route("/gray/deploy", methods=["GET", "POST", "OPTIONS"])
@@ -433,15 +437,16 @@ def gray_deploy():
             ratio = float(data.get("ratio", 1.0))
             result = shield.set_gray_deploy_ratio(ratio)
             logger.info("Gray deploy ratio set: %s", result)
-            resp = jsonify(result)
+            # 返回字段对齐前端 GrayDeployState 接口（{ ratio: number }）
+            resp = jsonify({"ratio": shield.get_gray_deploy_ratio()})
         else:
             resp = jsonify({
-                "gray_deploy_ratio": shield.get_gray_deploy_ratio(),
+                "ratio": shield.get_gray_deploy_ratio(),
             })
         return _attach_cors(resp)
     except Exception as e:
         logger.error("gray_deploy error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": type(e).__name__}), 500
 
 
 @app.route("/bypass/stats", methods=["GET"])
@@ -454,7 +459,20 @@ def bypass_stats():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("bypass_stats error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": type(e).__name__}), 500
+
+
+@app.route("/dual-layer/stats", methods=["GET"])
+def dual_layer_stats():
+    """返回双层架构（外门/内门）的分层指标。"""
+    try:
+        shield = _get_shield(_default_mode)
+        stats = shield.get_dual_layer_stats()
+        resp = jsonify(stats)
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("dual_layer_stats error: %s", e)
+        return jsonify({"error": type(e).__name__}), 500
 
 
 @app.route("/learning/snapshot", methods=["GET"])
@@ -583,7 +601,7 @@ def dispatch_alert():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("Alert dispatch error: %s", e, exc_info=True)
-        resp = jsonify({"status": "error", "message": str(e)})
+        resp = jsonify({"status": "error", "message": type(e).__name__})
         return _attach_cors(resp)
 
 
@@ -893,7 +911,15 @@ def main():
         logger.info("Using waitress production WSGI server")
         serve(app, host=args.host, port=args.port, threads=4)
     except ImportError:
-        logger.warning("waitress not available, falling back to Flask development server")
+        # 生产环境强制要求 waitress，拒绝 fallback 到 Flask 开发服务器
+        if os.environ.get("XUANDUN_REQUIRE_WAITRESS") == "1":
+            logger.error(
+                "waitress not available but XUANDUN_REQUIRE_WAITRESS=1. "
+                "Refusing to start with insecure Flask development server. "
+                "Please install waitress: pip install waitress"
+            )
+            sys.exit(1)
+        logger.warning("waitress not available, falling back to Flask development server (NOT for production)")
         app.run(host=args.host, port=args.port, threaded=True, debug=False)
 
 

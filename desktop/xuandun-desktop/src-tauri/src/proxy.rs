@@ -86,7 +86,9 @@ async fn handle_proxy_connection(
         .unwrap_or("");
 
     if first_line.starts_with("CONNECT ") {
-        handle_connect_tunnel(client, first_line).await
+        // P1修复：HTTPS CONNECT 隧道必须进行域名级审计
+        // 由于 HTTPS 流量加密，无法检测内容，但必须记录审计日志并发出警告
+        handle_connect_tunnel(client, first_line, app).await
     } else {
         handle_http_request(client, raw, app).await
     }
@@ -95,6 +97,7 @@ async fn handle_proxy_connection(
 async fn handle_connect_tunnel(
     mut client: tokio::net::TcpStream,
     first_line: &str,
+    app: &AppHandle,
 ) -> Result<(), String> {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -108,6 +111,27 @@ async fn handle_connect_tunnel(
     } else {
         (host_port.to_string(), 443)
     };
+
+    // P1修复：对 LLM API 域名的 HTTPS 隧道进行审计记录和警告通知
+    let is_llm_domain = LLM_DOMAINS.iter().any(|d| host == *d || host.ends_with(&format!(".{}", d)));
+    if is_llm_domain {
+        eprintln!("[XuanDun] WARNING: HTTPS tunnel to LLM API {} - content not inspected (encrypted)", host);
+        // 记录审计日志（通过数据库）
+        if let Ok(db_path) = get_db_path(app) {
+            if let Ok(db) = crate::db::Database::open(&db_path) {
+                let _ = db.insert_audit("https_tunnel_uninspected", &format!("{}:{}", host, port));
+            }
+        }
+        // 发出桌面通知
+        let _ = app.notification()
+            .builder()
+            .title("道体·玄盾 - HTTPS隧道警告")
+            .body(&format!(
+                "检测到发往 {} 的 HTTPS 隧道请求，流量已加密无法检测内容。建议配置应用使用 HTTP 代理或 SDK 模式以获得完整防护。",
+                host
+            ))
+            .show();
+    }
 
     let mut server = tokio::net::TcpStream::connect(format!("{}:{}", host, port))
         .await
@@ -124,6 +148,14 @@ async fn handle_connect_tunnel(
 
     let _ = tokio::try_join!(client_to_server, server_to_client);
     Ok(())
+}
+
+/// 辅助函数：获取数据库路径
+fn get_db_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    Ok(app_data_dir.join("xuandun.db"))
 }
 
 async fn handle_http_request(

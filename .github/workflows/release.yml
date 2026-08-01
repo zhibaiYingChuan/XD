@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 on:
   push:
@@ -26,28 +26,28 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # B-03 修复：harden-runner 出网过滤（安全加固）
-            - name: Harden Runner
+      - name: Harden Runner
         uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde # v2.9.1
         with:
           egress-policy: audit
 
-            - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Verify version consistency (SSOT gate)
         working-directory: desktop/xuandun-desktop
         run: python sync_version.py --check
 
-            - name: Setup Python 3.11
+      - name: Setup Python 3.11
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11'
 
-            - name: Setup Node 24
+      - name: Setup Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: '24'
 
-            - name: Setup Rust stable
+      - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
 
       - name: Install Python dependencies
@@ -86,7 +86,7 @@ jobs:
           done
 
       # WB-19 修复：if-no-files-found 从 warn 改为 error，防止空资产上传
-            - name: Upload artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: xuandun-${{ matrix.target }}
@@ -105,7 +105,13 @@ jobs:
     permissions:
       contents: write
     steps:
-            - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      # P1 修复：release job 也需要 harden-runner 安全加固
+      - name: Harden Runner
+        uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde # v2.9.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           path: artifacts
 
@@ -118,7 +124,7 @@ jobs:
           echo "=== SHA256 Checksums ==="
           cat checksums-sha256.txt
 
-            - name: Create GitHub Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true

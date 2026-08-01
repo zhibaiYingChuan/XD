@@ -1,32 +1,81 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import StatusBar from './StatusBar';
 import { useState, useEffect } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
+import { open as openUrl } from '@tauri-apps/plugin-shell';
+import {
+  LayoutDashboard,
+  ShieldCheck,
+  Bot,
+  FileText,
+  GraduationCap,
+  FlaskConical,
+  BarChart3,
+  Settings,
+  HelpCircle,
+} from 'lucide-react';
 
+// 太极图标（lucide-react 无此图标，用自定义 SVG）
+const YinYangIcon = ({ size = 18, strokeWidth = 1.5 }: { size?: number; strokeWidth?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 2a10 10 0 0 1 0 20 5 5 0 0 1 0-10 5 5 0 0 0 0-10z" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="7" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="17" r="1.5" fill="none" stroke="currentColor" />
+  </svg>
+);
+
+// P0修复：补全所有已注册路由的导航入口，确保功能可发现性
 const navItems = [
-  { to: '/', icon: '📊', label: '仪表盘' },
-  { to: '/detect', icon: '🔍', label: '安全检测' },
-  { to: '/agents', icon: '🤖', label: 'Agent' },
-  { to: '/logs', icon: '📋', label: '日志' },
-  { to: '/learning', icon: '🎓', label: '学习状态' },
-  { to: '/simulation', icon: '🧪', label: '模拟测试' },
-  { to: '/reports', icon: '📄', label: '安全报告' },
-  { to: '/settings', icon: '⚙️', label: '设置' },
+  { to: '/', icon: <LayoutDashboard size={18} strokeWidth={1.5} />, label: '概览' },
+  { to: '/detect', icon: <ShieldCheck size={18} strokeWidth={1.5} />, label: '安全检测' },
+  { to: '/agents', icon: <Bot size={18} strokeWidth={1.5} />, label: 'Agent发现' },
+  { to: '/logs', icon: <FileText size={18} strokeWidth={1.5} />, label: '安全日志' },
+  { to: '/learning', icon: <GraduationCap size={18} strokeWidth={1.5} />, label: '学习状态' },
+  { to: '/yinyang', icon: <YinYangIcon size={18} strokeWidth={1.5} />, label: '阴阳门状态' },
+  { to: '/simulation', icon: <FlaskConical size={18} strokeWidth={1.5} />, label: '模拟测试' },
+  { to: '/reports', icon: <BarChart3 size={18} strokeWidth={1.5} />, label: '安全报告' },
+  { to: '/settings', icon: <Settings size={18} strokeWidth={1.5} />, label: '系统设置' },
 ];
 
 export default function Layout() {
   const [version, setVersion] = useState('');
+  // P1-18 修复：帮助中心点击反馈状态
+  const [helpToast, setHelpToast] = useState<string | null>(null);
+  // Sprint7 微交互：页面切换动画，使用 location.pathname 作为 key 触发重新挂载
+  const location = useLocation();
   useEffect(() => {
     getVersion()
       .then(v => setVersion(`v${v}`))
       .catch(() => setVersion('v1.0.0'));
   }, []);
+
+  // PB-01 修复：帮助中心点击打开用户指南文档
+  const handleHelpClick = (e: { preventDefault: () => void }) => {
+    e.preventDefault();
+    openUrl('https://github.com/zhibaiYingChuan/XD/blob/main/docs/%E7%94%A8%E6%88%B7%E6%8C%87%E5%8D%97.md').catch(() => {
+      // Tauri bridge 不可用时降级为 toast 提示
+      setHelpToast('无法打开浏览器，请手动访问：github.com/zhibaiYingChuan/XD/blob/main/docs/用户指南.md');
+      setTimeout(() => setHelpToast(null), 5000);
+    });
+  };
+
   return (
     <div className="app-layout">
-      <aside className="sidebar">
+      <aside
+        className="sidebar"
+        style={{
+          width: 'var(--dt-sidebar-width)',
+          backgroundColor: 'var(--dt-bg-panel)',
+          borderRight: '1px solid var(--dt-border)',
+        }}
+      >
         <div className="sidebar-logo">
-          <span className="shield-icon">🛡️</span>
-          <span className="sidebar-title">玄盾</span>
+          <img src="/logo.jpg" alt="道体·玄盾 Logo" className="sidebar-logo-img" />
+          <div className="sidebar-title-group">
+            <span className="sidebar-title">道体·玄盾</span>
+            <span className="sidebar-subtitle">安全运维控制台</span>
+          </div>
         </div>
         <nav className="sidebar-nav">
           {navItems.map((item) => (
@@ -44,13 +93,33 @@ export default function Layout() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span className="sidebar-version">{version}</span>
+          <a href="#" className="nav-item" onClick={handleHelpClick}>
+            <span className="nav-icon">
+              <HelpCircle size={18} strokeWidth={1.5} />
+            </span>
+            <span className="nav-label">帮助中心</span>
+          </a>
+          {version && <div className="sidebar-version">{version}</div>}
         </div>
       </aside>
       <main className="main-content">
         <StatusBar />
-        <Outlet />
+        {/* Sprint7 微交互：页面切换淡入动画 */}
+        <div key={location.pathname} className="page-fade-in">
+          <Outlet />
+        </div>
       </main>
+      {/* P1-18 修复：帮助中心点击 toast 提示，告知用户文档状态 */}
+      {helpToast && (
+        <div className="help-toast" style={{
+          position: 'fixed', bottom: '16px', left: '50%', transform: 'translateX(-50%)',
+          padding: '8px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)',
+          borderRadius: '6px', boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 1000,
+          fontSize: '0.9em', color: 'var(--text-primary)',
+        }}>
+          {helpToast}
+        </div>
+      )}
     </div>
   );
 }

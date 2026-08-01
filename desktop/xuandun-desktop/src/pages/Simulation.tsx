@@ -1,5 +1,16 @@
-import { useState } from 'react';
-import { api, SimulationReport } from '../services/tauriApi';
+import { useState, useRef } from 'react';
+import { api, SimulationReport, formatInvokeError } from '../services/tauriApi';
+// 设计系统规范：图标统一使用 lucide-react，strokeWidth=1.5，禁止 emoji
+import {
+  Zap, FlaskConical, Edit, AlertTriangle, FileText, Check, X,
+  Play, Loader2, type LucideIcon,
+} from 'lucide-react';
+
+const ICON_MAP: Record<string, LucideIcon> = {
+  zap: Zap,
+  flask: FlaskConical,
+  edit: Edit,
+};
 
 const downloadFile = (content: string, filename: string, mime: string) => {
   const blob = new Blob([content], { type: mime });
@@ -12,6 +23,10 @@ const downloadFile = (content: string, filename: string, mime: string) => {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
+
+// P1-15 修复：自定义测试文本限制单条长度和总条数，防止 IPC 卡顿或后端 OOM
+const MAX_CUSTOM_TEXT_LENGTH = 5000;
+const MAX_CUSTOM_TEXT_COUNT = 100;
 
 const buildMarkdownReport = (r: SimulationReport): string => {
   const lines: string[] = [];
@@ -51,10 +66,15 @@ export default function Simulation() {
   const [mode, setMode] = useState<'quick' | 'full' | 'custom'>('quick');
   const [customText, setCustomText] = useState('');
   const [running, setRunning] = useState(false);
+  // P1-03 修复：useRef 同步守卫，防止 React 异步状态导致的重复点击引发并发 runSimulation
+  const runningRef = useRef(false);
   const [report, setReport] = useState<SimulationReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleRun = async () => {
+    // P1-03 修复：同步守卫，立即拒绝重复点击，不依赖 React 异步状态
+    if (runningRef.current) return;
+    runningRef.current = true;
     setRunning(true);
     setError(null);
     setReport(null);
@@ -65,15 +85,32 @@ export default function Simulation() {
         if (customTexts.length === 0) {
           setError('请输入至少一条测试文本');
           setRunning(false);
+          runningRef.current = false;
+          return;
+        }
+        // P1-15 修复：校验总条数，避免超多条数导致 IPC 卡顿或后端 OOM
+        if (customTexts.length > MAX_CUSTOM_TEXT_COUNT) {
+          setError(`测试文本不能超过 ${MAX_CUSTOM_TEXT_COUNT} 条，当前 ${customTexts.length} 条`);
+          setRunning(false);
+          runningRef.current = false;
+          return;
+        }
+        // P1-15 修复：校验单条文本长度，避免超长文本导致 IPC 卡顿
+        const tooLongIdx = customTexts.findIndex(t => t.length > MAX_CUSTOM_TEXT_LENGTH);
+        if (tooLongIdx >= 0) {
+          setError(`第 ${tooLongIdx + 1} 条文本超过 ${MAX_CUSTOM_TEXT_LENGTH} 字符，请精简后重试`);
+          setRunning(false);
+          runningRef.current = false;
           return;
         }
       }
       const result = await api.runSimulation(mode, undefined, customTexts);
       setReport(result);
-    } catch (e: any) {
-      setError(`测试失败: ${e}`);
+    } catch (e) {
+      setError(formatInvokeError(e, '测试'));
     } finally {
       setRunning(false);
+      runningRef.current = false;
     }
   };
 
@@ -90,38 +127,42 @@ export default function Simulation() {
   };
 
   const modes = [
-    { key: 'quick' as const, label: '快速验证', desc: '运行代表性样本（每类2条+5条良性），约15秒完成', icon: '⚡' },
-    { key: 'full' as const, label: '全面测试', desc: '运行全部200+攻击样本+30条良性样本，生成完整报告', icon: '🧪' },
-    { key: 'custom' as const, label: '自定义测试', desc: '手动输入攻击文本进行针对性测试', icon: '✏️' },
+    { key: 'quick' as const, label: '快速验证', desc: '运行代表性样本（每类2条+5条良性），约15秒完成', icon: 'zap' as const },
+    { key: 'full' as const, label: '全面测试', desc: '运行全部200+攻击样本+30条良性样本，生成完整报告', icon: 'flask' as const },
+    { key: 'custom' as const, label: '自定义测试', desc: '手动输入攻击文本进行针对性测试', icon: 'edit' as const },
   ];
 
   return (
     <div className="page simulation-page">
       {error && (
         <div className="alert-banner alert-danger">
-          <span className="alert-icon">⚠️</span>
+          <span className="alert-icon"><AlertTriangle size={16} strokeWidth={1.5} /></span>
           <span>{error}</span>
         </div>
       )}
 
       <div className="card">
         <div className="card-header">
-          <h3>🧪 模拟测试</h3>
+          <h3><FlaskConical size={18} strokeWidth={1.5} className="h3-icon" />模拟测试</h3>
           <span className="card-subtitle">使用内置攻击样本库测试玄盾的防护能力</span>
         </div>
         <div className="card-body">
           <div className="sim-mode-cards">
-            {modes.map((m) => (
-              <div
-                key={m.key}
-                className={`sim-mode-card ${mode === m.key ? 'sim-mode-active' : ''}`}
-                onClick={() => setMode(m.key)}
-              >
-                <div className="sim-mode-icon">{m.icon}</div>
-                <div className="sim-mode-title">{m.label}</div>
-                <div className="sim-mode-desc">{m.desc}</div>
-              </div>
-            ))}
+            {modes.map((m) => {
+              // P0修复：添加fallback图标，防止ICON_MAP中不存在的key导致崩溃
+              const Icon = ICON_MAP[m.icon] || AlertTriangle;
+              return (
+                <div
+                  key={m.key}
+                  className={`sim-mode-card ${mode === m.key ? 'sim-mode-active' : ''}`}
+                  onClick={() => setMode(m.key)}
+                >
+                  <div className="sim-mode-icon"><Icon size={22} strokeWidth={1.5} /></div>
+                  <div className="sim-mode-title">{m.label}</div>
+                  <div className="sim-mode-desc">{m.desc}</div>
+                </div>
+              );
+            })}
           </div>
 
           {mode === 'custom' && (
@@ -143,7 +184,11 @@ export default function Simulation() {
               onClick={handleRun}
               disabled={running}
             >
-              {running ? '⏳ 测试运行中...' : '▶️ 运行测试'}
+              {running ? (
+                <><Loader2 size={16} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 6, animation: 'spin 0.8s linear infinite' }} />测试运行中...</>
+              ) : (
+                <><Play size={16} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 6 }} />运行测试</>
+              )}
             </button>
           </div>
         </div>
@@ -161,8 +206,8 @@ export default function Simulation() {
                   {report.total_samples} 样本 · {report.elapsed_seconds}秒
                 </span>
                 <div className="export-buttons">
-                  <button className="btn btn-secondary btn-sm" onClick={handleExportJSON}>📄 导出JSON</button>
-                  <button className="btn btn-secondary btn-sm" onClick={handleExportMarkdown}>📝 导出Markdown</button>
+                  <button className="btn btn-secondary btn-sm" onClick={handleExportJSON}><FileText size={14} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 4 }} />导出JSON</button>
+                  <button className="btn btn-secondary btn-sm" onClick={handleExportMarkdown}><FileText size={14} strokeWidth={1.5} style={{ verticalAlign: 'middle', marginRight: 4 }} />导出Markdown</button>
                 </div>
               </div>
             </div>
@@ -274,8 +319,8 @@ export default function Simulation() {
                         <td>{d.expected === 'attack' ? '攻击' : d.expected === 'benign' ? '良性' : '未知'}</td>
                         <td>{d.allowed ? '放行' : '拦截'}</td>
                         <td>
-                          {d.correct === true && <span style={{ color: 'var(--success)' }}>✓</span>}
-                          {d.correct === false && <span style={{ color: 'var(--danger)' }}>✗</span>}
+                          {d.correct === true && <span style={{ color: 'var(--success)' }}><Check size={16} strokeWidth={1.5} /></span>}
+                          {d.correct === false && <span style={{ color: 'var(--danger)' }}><X size={16} strokeWidth={1.5} /></span>}
                           {d.correct === null && <span style={{ color: 'var(--text-secondary)' }}>—</span>}
                         </td>
                         <td className="mono">{d.latency_ms}ms</td>

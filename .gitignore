@@ -71,6 +71,23 @@ docs/
 !docs/benchmarks.md
 !docs/用户指南.md
 !docs/企业评估工具包迭代计划.md
+!docs/产品迭代规划.md
+!docs/部署指南.md
+!docs/灰度验证方案.md
+!docs/端到端验证清单.md
+!docs/UI规范.md
+!docs/benchmark_honest_statement.md
+!docs/模拟测试.md
+!docs/Demo演示脚本.md
+# 审计报告白名单（比赛评审需要）
+!docs/pdca_sprint6_report.md
+!docs/双层架构审计报告.md
+!docs/hcse_resilience_sprint4.md
+!docs/hcse_resilience_sprint5.md
+!docs/interaction_audit_sprint4.md
+!docs/interaction_audit_sprint5.md
+!docs/release_compliance_sprint4.md
+!docs/product_audit_sprint4.md
 
 # Root-level internal planning docs (Chinese)
 6.5计划.md
@@ -109,3 +126,61 @@ learning_snapshot.json
 
 # Local design assets (not part of source)
 xdlogo.jpg
+
+# === Sprint7 发布合规补充规则 ===
+
+# Node modules (全局，防止任何子项目污染)
+node_modules/
+
+# Rust target (全局，防止任何子项目污染)
+target/
+
+# 压缩包产物
+*.zip
+
+# CDP 测试脚本（本地测试工具，不公开）
+cdp_*.py
+cdp_*.json
+cdp_*/
+cdp-test-artifacts/
+cdp_round2_artifacts/
+cdp_sprint4_artifacts/
+cdp_sprint5_artifacts/
+cdp_test/
+
+# 临时日志文件
+*_log.txt
+*_log2.txt
+*_log3.txt
+cargo_*.txt
+tauri_dev_log.txt
+test_output.txt
+ui_automation_log.txt
+e2e_round11_log.txt
+
+# 临时报告生成脚本
+gen_report*.py
+write_client.py
+_run_nuitka.py
+
+# HCSE 测试脚本（本地测试工具）
+hcse_test_*.py
+hcse_resilience_tester/
+
+# 临时截图和页面快照
+pages/
+poc/
+dashboard_screenshot.png
+
+# 临时解压目录
+daoti-xuandun/
+xd-sdk.zip
+
+# Nuitka 崩溃报告
+desktop/xuandun-desktop/nuitka-crash-report.xml
+
+# 临时资产
+assets/image_*.jpg
+
+# 中文临时规划文档（本地内部，不公开）
+《*.md

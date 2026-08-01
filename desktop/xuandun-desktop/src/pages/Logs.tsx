@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { api, LogEntry, LearningStatus } from '../services/tauriApi';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { GraduationCap, AlertTriangle, RefreshCw } from 'lucide-react';
+import { api, LogEntry, LearningStatus, formatInvokeError, formatTrustLevel } from '../services/tauriApi';
 
 const PAGE_SIZE = 20;
 
@@ -13,10 +14,18 @@ export default function Logs() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const [learning, setLearning] = useState<LearningStatus | null>(null);
+  // P1-06 修复：加载错误状态，区分"加载失败"和"无数据"
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // P1-05 修复：请求序列号，防止快速翻页产生竞态导致旧请求覆盖新数据
+  const requestIdRef = useRef(0);
+  // GAP-S5-06 修复：mountedRef 守卫，组件卸载后不再 setState（与 Dashboard 一致）
+  const mountedRef = useRef(true);
 
   const fetchLearning = useCallback(async () => {
     try {
       const l = await api.getLearningStatus();
+      // GAP-S5-06 修复：卸载后不更新 state
+      if (!mountedRef.current) return;
       setLearning(l);
     } catch {
       // ignore
@@ -24,9 +33,13 @@ export default function Logs() {
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     fetchLearning();
     const interval = setInterval(fetchLearning, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(interval);
+    };
   }, [fetchLearning]);
 
   useEffect(() => {
@@ -35,13 +48,18 @@ export default function Logs() {
   }, [searchText]);
 
   const fetchLogs = useCallback(async () => {
+    // P1-05 修复：每次请求递增序列号，仅最新请求的结果会更新 state
+    const requestId = ++requestIdRef.current;
     setLoading(true);
+    setLoadError(null);
     try {
       const filterAllowed = filter === 'all' ? undefined : filter === 'allowed';
       const hasClientFilter = rejectStageFilter !== 'all' || debouncedSearch.trim() !== '';
 
       if (hasClientFilter) {
         const res = await api.getLogs(filterAllowed, 10000, 0);
+        // P1-05 修复：竞态守卫，丢弃过时请求的结果
+        if (requestId !== requestIdRef.current) return;
         let filtered = res.entries;
         if (rejectStageFilter !== 'all') {
           filtered = filtered.filter(e => e.reject_stage === rejectStageFilter);
@@ -57,13 +75,22 @@ export default function Logs() {
         setTotal(filtered.length);
       } else {
         const res = await api.getLogs(filterAllowed, PAGE_SIZE, offset);
+        // P1-05 修复：竞态守卫
+        if (requestId !== requestIdRef.current) return;
         setEntries(res.entries);
         setTotal(res.total);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      // P1-06 修复：不再静默吞错，记录错误状态供 UI 显示
+      if (requestId !== requestIdRef.current) return;
+      setLoadError(formatInvokeError(e, '加载日志'));
+      // 不清空 entries，保留上次成功的数据（避免空白闪烁）
     } finally {
-      setLoading(false);
+      // P1-05 修复：仅最新请求才更新 loading 状态
+      // GAP-S5-06 修复：组件卸载后不更新 state
+      if (requestId === requestIdRef.current && mountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [filter, offset, rejectStageFilter, debouncedSearch]);
 
@@ -93,7 +120,7 @@ export default function Logs() {
     <div className="page logs-page">
       {learning && learning.mode === 'observing' && (
         <div className="alert-banner alert-warning observing-banner">
-          <span className="alert-icon">🎓</span>
+          <GraduationCap size={18} strokeWidth={1.5} className="alert-icon" />
           <span>
             当前为<strong>观察模式</strong>，所有请求均已放行。
             观察期间检测到 <strong>{learning.would_block_count}</strong> 条潜在攻击（如开启保护将被拦截），
@@ -153,9 +180,22 @@ export default function Logs() {
             />
           </div>
 
+          {/* P1-06 修复：加载失败时显示错误提示和重试按钮，区分"加载失败"和"无数据" */}
+          {loadError && (
+            <div className="alert-banner alert-danger" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertTriangle size={18} strokeWidth={1.5} />
+                <span>{loadError}</span>
+              </span>
+              <button className="btn btn-sm btn-secondary" onClick={() => fetchLogs()}>
+                <RefreshCw size={14} strokeWidth={1.5} /> 重试
+              </button>
+            </div>
+          )}
+
           {loading && entries.length === 0 ? (
             <div className="empty-state">加载中...</div>
-          ) : entries.length === 0 ? (
+          ) : !loadError && entries.length === 0 ? (
             <div className="empty-state">暂无日志记录</div>
           ) : (
             <table className="data-table">
@@ -179,7 +219,7 @@ export default function Logs() {
                         {entry.allowed ? '放行' : '拦截'}
                       </span>
                     </td>
-                    <td><span className={`trust-badge trust-${(entry.trust_level || 'unknown').toLowerCase()}`}>{entry.trust_level || '—'}</span></td>
+                    <td><span className={`trust-badge trust-${(entry.trust_level || 'unknown').toLowerCase()}`}>{formatTrustLevel(entry.trust_level)}</span></td>
                     <td>{entry.reject_stage ?? '--'}</td>
                     <td className="mono" style={{ fontSize: '0.8em' }}>{entry.session_id ?? '--'}</td>
                   </tr>
