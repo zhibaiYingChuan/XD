@@ -17,7 +17,7 @@ const navItems = [
 ];
 
 // 应用版本号
-const APP_VERSION = 'v1.2.3';
+const APP_VERSION = 'v1.3.0';
 
 // 太极 Logo SVG 组件（道体·玄盾品牌标识）
 function TaijiLogo({ size = 40 }: { size?: number }) {

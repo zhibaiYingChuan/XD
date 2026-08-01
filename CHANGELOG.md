@@ -2,6 +2,92 @@
 
 本项目变更遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.3.0] - 2026-08-02
+
+### 新增
+
+#### Web Demo 全栈演示
+- 独立 Web Demo 目录（`web-demo/`），React + FastAPI 全栈架构
+- 双层阴阳架构可视化页面（TaijiFlowDiagram + CompareMode + LearningEvolution）
+- 安全检测、模拟测试、学习状态等 5 个路由页面
+- Netlify 前端 + Render 后端部署配置（`netlify.toml` + `render.yaml` + `Dockerfile`）
+
+#### UI/UX 全面优化（Sprint6）
+- 太极动态背景增强首屏视觉冲击力
+- 骨架屏 + 空状态插画 + 微交互动画覆盖 9 个页面
+- Dashboard 趋势图、攻击类型分布、实时监控指标网格
+- 安全报告页面（HTML 生成/预览/删除）
+
+#### 发布合规体系（HCSE）
+- GitHub Actions 全部 pin full SHA（10 个 Actions）
+- harden-runner 出网过滤覆盖所有 job（audit 模式）
+- SHA256 校验和生成 + verify job 验证链
+- 治理文件补充：SECURITY.md / CODEOWNERS / PR 模板 / NOTICE
+
+### 修复
+
+#### Sprint6 PDCA 循环（13 项修复）
+- **P1**: Settings 快照恢复超时 → 捕获异常显示友好错误
+- **P1**: 模式切换事务性 → 任一失败回滚全部，引擎 DB 一致
+- **P1**: Logs mountedRef 守卫 → 卸载后不再 setState
+- **P1**: ErrorBoundary reload Bridge 轮询 → 等待 Bridge 注入
+- **P1**: rv_monitor.py sum 计算 → 直接相加避免 float 变换错误
+- **P2**: 8 项前端交互盲点修复（ConfirmModal 队列化、超时兜底等）
+
+#### 版本号一致性修复
+- 同步 6 处版本号到 1.3.0（pyproject.toml/Cargo.toml/package.json/tauri.conf.json/engine_flask.py/README.md）
+- 新增 `sync_version.py --check` 门禁（SSOT 一致性验证）
+
+### 变更
+- 版本号从 1.2.1 升级到 1.3.0
+- 双许可证确认：核心算法 = 道体研究许可证 v1.0，外围 = Apache 2.0
+- 完整图标集（Win/Mac/Linux/Android/iOS 全平台）
+- 企业评估工具包迭代计划文档
+
+---
+
+## [1.2.3] - 2026-07-31
+
+### 修复
+
+#### Sprint5 交互韧性修复
+- 向导跳过机制统一为 DB config（wizard_completed），消除 localStorage 双套不一致
+- 代理模式流量检测增强（HTTPS 隧道元数据记录）
+- 哈希链审计日志 v1→v2 迁移支持
+- 桌面通知频率限制（5 秒冷却）
+
+#### 核心引擎稳定性
+- RLock 线程安全加固（xuandun.py 全局锁）
+- deque 并发写锁修复（H1/H2 高危竞态）
+- 实例变量竞态消除（双层架构审计十轮收敛）
+
+### 变更
+- 版本号从 1.2.2 升级到 1.2.3
+- 性能基准测试更新（213+129 全 A+）
+
+---
+
+## [1.2.2] - 2026-07-20
+
+### 修复
+
+#### Sprint4 桌面端 CDP 诊断修复（9 项 P0）
+- **CSP 根因修复**：`tauri.conf.json` 添加 `http://ipc.localhost` 到 `connect-src`，修复 Tauri 2.x IPC 通信被 CSP 阻止导致页面空白
+- **ConfirmModal 并发 Promise 永挂**：`ConfirmModal.tsx` 队列化改造，多线程 confirm 不再死锁
+- **restartEngine 超时不匹配**：`tauriApi.ts` 前端超时从 15s 提升到 60s，匹配后端 `ensure_engine_running` 最长执行时间
+- **Tauri bridge 未注入时的降级处理**：各页面添加 Bridge 未就绪检测
+- **向导跳过持久化**：统一使用 DB config（wizard_completed），消除双套问题
+- **引擎健康检查超时**：尾部日志只读最近行，避免大文件读取超时
+- **模式切换失败不吞错误**：`set_mode`/`sync_mode_to_engine` 失败返回错误而非仅 eprintln
+- **代理二进制请求体修复**：`proxy.rs` raw bytes 转发，避免 UTF-8 替换损坏
+- **Dashboard 图标缺失**：导入 Activity/ShieldCheck 图标
+
+### 变更
+- 版本号从 1.2.1 升级到 1.2.2
+- CDP 测试端口明确为 9224（LRC Desktop 占用 9222）
+
+---
+
 ## [1.2.1] - 2026-07-11
 
 ### 修复

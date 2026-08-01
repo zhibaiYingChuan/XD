@@ -112,6 +112,8 @@ export default function Settings() {
   const [proxyPort, setProxyPort] = useState(18765);
   // P1-09 修复：端口输入框使用字符串 state，允许临时空值，blur 时校验
   const [proxyPortInput, setProxyPortInput] = useState('18765');
+  // P1-09 修复：端口校验错误状态
+  const [proxyPortError, setProxyPortError] = useState<string | null>(null);
   const [proxyStarting, setProxyStarting] = useState(false);
   const [proxyStopping, setProxyStopping] = useState(false);
   const [emergencyBypass, setEmergencyBypass] = useState(false);
@@ -429,15 +431,22 @@ export default function Settings() {
   };
 
   // P0修复：代理服务启停处理
-  // P1-09 修复：端口输入校验，允许临时空值，blur 时 clamp 到 [1024, 65535]
+  // P1-09 修复：端口输入校验，允许临时空值，实时校验端口范围 1-65535
   const handlePortChange = (value: string) => {
     if (value === '') {
       setProxyPortInput('');
+      setProxyPortError(null);
       return;
     }
     const num = parseInt(value);
     if (isNaN(num)) return;
     setProxyPortInput(String(num));
+    // 实时校验端口范围
+    if (num < 1 || num > 65535) {
+      setProxyPortError('端口范围：1-65535');
+    } else {
+      setProxyPortError(null);
+    }
   };
 
   const handlePortBlur = () => {
@@ -445,14 +454,27 @@ export default function Settings() {
     if (isNaN(num)) {
       setProxyPortInput('18765');
       setProxyPort(18765);
+      setProxyPortError(null);
       return;
     }
-    const clamped = Math.max(1024, Math.min(65535, num));
-    setProxyPortInput(String(clamped));
-    setProxyPort(clamped);
+    if (num < 1 || num > 65535) {
+      setProxyPortError('端口范围：1-65535');
+      return;
+    }
+    setProxyPortInput(String(num));
+    setProxyPort(num);
+    setProxyPortError(null);
   };
 
   const handleStartProxy = async () => {
+    // P1-09 修复：启动前校验端口合法性
+    const portNum = parseInt(proxyPortInput);
+    if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+      setProxyPortError('端口范围：1-65535');
+      return;
+    }
+    setProxyPort(portNum);
+    setProxyPortError(null);
     setProxyStarting(true);
     try {
       await api.startProxy(proxyPort);
@@ -490,10 +512,7 @@ export default function Settings() {
     // 仅在"启用"时弹出二次确认；关闭逃生恢复正常防护无需确认
     if (enabled) {
       const confirmed = await confirm(
-        '确定要启用紧急逃生吗？\n\n' +
-        '警告：启用后所有 AI 请求将绕过阴阳门检测直接放行，无任何安全防护。\n' +
-        '此操作会立即生效，建议仅在引擎故障或误报严重时临时使用。\n\n' +
-        '点击"确定"启用紧急逃生，点击"取消"保持正常防护。'
+        '开启紧急逃生通道将临时放行所有请求，是否继续？'
       );
       if (!confirmed) {
         // 用户取消，toggle 视觉状态由 React 自动回滚（因未调用 setEmergencyBypass）
@@ -724,12 +743,12 @@ export default function Settings() {
                 <>
                   <input
                     type="number"
-                    className="form-input"
+                    className={`form-input${proxyPortError ? ' input-error' : ''}`}
                     style={{ width: '80px' }}
                     value={proxyPortInput}
                     onChange={(e) => handlePortChange(e.target.value)}
                     onBlur={handlePortBlur}
-                    min={1024}
+                    min={1}
                     max={65535}
                     disabled={proxyStarting}
                   />
@@ -743,6 +762,11 @@ export default function Settings() {
                 </button>
               )}
             </div>
+            {proxyPortError && (
+              <div style={{ color: 'var(--danger)', fontSize: '0.8em', marginTop: '4px' }}>
+                {proxyPortError}
+              </div>
+            )}
           </div>
           <div style={{ marginTop: '8px', fontSize: '0.85em', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <Lightbulb size={16} strokeWidth={1.5} />

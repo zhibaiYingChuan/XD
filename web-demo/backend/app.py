@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="道体·玄盾 Web Demo",
     description="活性防护 LLM 防火墙 — 演示用 API 服务",
-    version="1.2.3",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -135,7 +135,7 @@ async def health():
     """健康检查"""
     return {
         "status": "ok",
-        "version": "1.2.3",
+        "version": "1.3.0",
         "uptime": int(time.time() - _START_TIME),
         "shield_ready": _shield is not None,
     }

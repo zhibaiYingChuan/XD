@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, StatusResponse, LogEntry, LearningStatus, TrendPoint, AttackCategoryStat, RealtimeMetrics, ComparisonStats, formatTrustLevel } from '../services/tauriApi';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import OnboardingWizard from '../components/OnboardingWizard';
+import { ConfirmModal, useConfirmModal } from '../components/ConfirmModal';
 import {
   Plug, Package, FlaskConical, AlertTriangle, Zap, Rocket,
   ClipboardList, CheckCircle, XCircle, GraduationCap, Lightbulb,
@@ -107,6 +108,7 @@ interface HistoryPoint {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { modalProps: confirmModalProps, confirm } = useConfirmModal();
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [recentBlocked, setRecentBlocked] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -368,7 +370,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {showWizard && (!status || status.total_requests === 0) && (
+      {showWizard && (
         <OnboardingWizard
           totalRequests={status?.total_requests ?? 0}
           engineRunning={status?.running ?? false}
@@ -385,6 +387,18 @@ export default function Dashboard() {
         <div className="onboarding-connected-banner">
           <CheckCircle size={20} strokeWidth={1.5} className="onboarding-connected-icon" />
           <span>玄盾已接入流量，正在保护您的 AI 应用</span>
+          <button
+            className="btn btn-sm btn-secondary"
+            style={{ marginLeft: 'auto' }}
+            onClick={async () => {
+              const confirmed = await confirm(
+                '系统已接入流量，重新运行向导可能影响当前配置，是否继续？'
+              );
+              if (confirmed) setShowWizard(true);
+            }}
+          >
+            启动向导
+          </button>
         </div>
       )}
 
@@ -667,6 +681,7 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+      <ConfirmModal {...confirmModalProps} />
     </div>
   );
 }
