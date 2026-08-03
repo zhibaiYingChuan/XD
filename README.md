@@ -4,17 +4,17 @@
 
 道体·玄盾是一个基于"拒绝门理论 + 洛书映射器 + 动态阴阳壳"架构的 LLM 输入检测系统。它不依赖静态规则或签名，而是通过域距离、结构异常、4-gram 统计三重检测，结合在线学习持续增强防御能力。
 
-> ⚠️ **安全声明**：本系统为**活性防护**产品，防御能力随在线学习持续增强。文档中引用的"100%攻击拒绝率"等数据仅反映对**内部基准测试集（213攻击+129良性样本，37类攻击探针）**的统计表现，**不承诺对未知攻击的绝对防御**。实际效果取决于部署环境、预热样本质量和在线学习积累。**安全是过程，不是终点。**
+> ⚠️ **安全声明**：本系统为**活性防护**产品，防御能力随在线学习持续增强。文档中引用的测试数据仅反映对\*\*内部基准测试集（213攻击+129良性样本，37类攻击探针）\*\*的统计表现，**不承诺对未知攻击的绝对防御**。实际效果取决于部署环境、预热样本质量和在线学习积累。**安全是过程，不是终点。**
 
 ## 核心特性
 
 - **三重检测引擎**：域距离 + 结构/二进制异常 + 4-gram 统计
 - **原创理论架构**：拒绝门理论 + 洛书符号映射器 + 动态阴阳壳
 - **活性防护架构**：观察→学习→自动切换，零配置接入，自动学习正常语言模式后开启保护
-- **内置攻击样本库**：200+ 条攻击样本覆盖 OWASP LLM Top 10 六大类，系统启动即知"什么是坏"
+- **内置攻击样本库**：36 条攻击种子覆盖 OWASP LLM Top 10 六大类（基准测试套件含 213 条攻击样本 + 129 条良性样本），系统启动即知"什么是坏"
 - **模拟测试模块**：内置攻击样本库测试防护能力，生成拦截率/误报率/漏报率报告
 - **活性在线学习**：从通过的请求中自动学习，防御能力随使用持续增强
-- **反逆向保护**：Nuitka 编译 + 三端 anti_debug + 编译期 key 注入 + 阈值加密
+- **反逆向保护**：Nuitka 编译 + 三端 anti\_debug + 编译期 key 注入 + 阈值加密
 - **三端桌面应用**：Windows / macOS (Apple Silicon) / Linux
 - **会话隔离**：不同会话施加特定置换，设计目标为汉明距离 > 50%（实际值取决于输入与运行时状态）
 
@@ -26,19 +26,19 @@
 
 前往 [Releases](https://github.com/zhibaiYingChuan/XD/releases) 下载对应平台的安装包：
 
-| 平台 | 安装包 | 说明 |
-|------|--------|------|
-| Windows x64 | `XuanDun_1.3.0_x64-setup.exe` | NSIS 安装程序，支持中英文 |
-| macOS (Apple Silicon) | `XuanDun_1.3.0_aarch64.dmg` | M1/M2/M3 芯片 |
-| Linux x64 | `XuanDun_1.3.0_amd64.AppImage` | 便携版，无需安装 |
-| Linux x64 | `XuanDun_1.3.0_amd64.deb` | Debian/Ubuntu 包管理 |
+| 平台                    | 安装包                            | 说明                |
+| --------------------- | ------------------------------ | ----------------- |
+| Windows x64           | `XuanDun_1.3.1_x64-setup.exe`  | NSIS 安装程序，支持中英文   |
+| macOS (Apple Silicon) | `XuanDun_1.3.1_aarch64.dmg`    | M1/M2/M3 芯片       |
+| Linux x64             | `XuanDun_1.3.1_amd64.AppImage` | 便携版，无需安装          |
+| Linux x64             | `XuanDun_1.3.1_amd64.deb`      | Debian/Ubuntu 包管理 |
 
 > **macOS 用户注意**：DMG 未签名（待 Apple Developer ID 申请后签名），首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。仅提供 Apple Silicon (M1/M2/M3+) 原生版本，Intel Mac 用户建议升级至 Apple Silicon 设备。
 
 ### Python SDK（开发者集成）
 
 ```bash
-pip install daoti-xuandun==1.3.0
+pip install daoti-xuandun==1.3.1
 ```
 
 ### B端企业部署
@@ -148,13 +148,13 @@ shield = XuanDun(mode="low_false_positive")
 
 ## 场景化配置速查表
 
-| 应用场景 | 推荐 mode | 预期误报风险 |
-|---------|-----------|-------------|
-| 医疗病历分析 | `high_security` | 医学术语可能误判（提供更多样本可缓解） |
-| 金融客服 | `high_security` + `enable_timing_check=True` | 合法重复查询可能被时序校验告警 |
-| 教育/学术问答 | `balanced` | 安全研究问题可能被误拒 |
-| 代码生成助手 | `high_security` | 代码注释中的攻击示例可能被拦截 |
-| 内部工具/个人助理 | `low_false_positive` | 极少误判，但防护较弱 |
+| 应用场景      | 推荐 mode                                      | 预期误报风险              |
+| --------- | -------------------------------------------- | ------------------- |
+| 医疗病历分析    | `high_security`                              | 医学术语可能误判（提供更多样本可缓解） |
+| 金融客服      | `high_security` + `enable_timing_check=True` | 合法重复查询可能被时序校验告警     |
+| 教育/学术问答   | `balanced`                                   | 安全研究问题可能被误拒         |
+| 代码生成助手    | `high_security`                              | 代码注释中的攻击示例可能被拦截     |
+| 内部工具/个人助理 | `low_false_positive`                         | 极少误判，但防护较弱          |
 
 详细场景配置示例见 [docs/白皮书.md](docs/白皮书.md)。
 
@@ -175,6 +175,7 @@ shield = XuanDun(mode="low_false_positive")
 ```
 
 核心组件：
+
 - **洛书映射器** (`luoshu_mapper.py`)：将任意输入映射到64卦原型空间，通过原型距离判断"域内/域外/攻击"
 - **动态阴阳壳** (`dynamic_shell.py`)：状态依赖权重演化 + 混沌非零偏置，任何输入都产生高熵输出
 - **拒绝门** (`reject_gate.py`)：三重检测融合决策，支持四级防御层级（BASIC/STANDARD/STRICT/PARANOID）
@@ -183,16 +184,16 @@ shield = XuanDun(mode="low_false_positive")
 
 ## 性能基准
 
-### 实测数据（balanced 模式，默认冷启动，2026-07-09）
+### 实测数据（balanced 模式，保护模式，2026-08-03 重测）
 
-| 基准套件 | 攻击拒绝率 | 良性接纳率 | 攻击样本 | 良性样本 | 评级 |
-|---------|-----------|-----------|---------|---------|------|
-| **OWASP LLM Top 10** | 100.0% | 100.0% | 80 | 48 | A+ |
-| **raucle-bench 兼容** | 100.0% | 100.0% | 40 | 20 | A+ |
-| **内部扩展** | 100.0% | 100.0% | 93 | 61 | A+ |
-| **合计** | **100.0%** | **100.0%** | **213** | **129** | **A+** |
+| 基准套件                 | 攻击拒绝率     | 良性接纳率     | 攻击样本    | 良性样本    | 评级    |
+| -------------------- | --------- | --------- | ------- | ------- | ----- |
+| **OWASP LLM Top 10** | 86.2%     | 100.0%    | 80      | 48      | B     |
+| **raucle-bench 兼容**  | 100.0%    | 100.0%    | 40      | 20      | A+    |
+| **内部扩展**             | 97.9%     | 91.8%     | 93      | 61      | A+    |
+| **合计**               | **93.4%** | **96.9%** | **213** | **129** | **A** |
 
-> ⚠️ **诚实声明**：上述测试套件在开发期间用于回归验证，100% 反映对已知攻击模式的完整覆盖，**不代表对未知攻击的绝对防御能力**。详细报告与局限性说明见 [docs/benchmarks.md](docs/benchmarks.md)。
+> ⚠️ **诚实声明**：上述数据基于 v1.3.1 代码于 2026-08-03 重新运行，测试时禁用观察模式以获得真实检测数据。OWASP 套件中 11 条漏检主要为"提问式信息提取"和"资源消耗"类攻击——这是符号级检测的已知理论边界。详细报告与漏检明细见 [docs/benchmark\_honest\_statement.md](docs/benchmark_honest_statement.md)。
 
 ### 反馈回灌验证（活性防护闭环）
 
@@ -200,14 +201,14 @@ shield = XuanDun(mode="low_false_positive")
 
 ### 硬件配置推荐
 
-| 部署规模 | 硬件规格 | STANDARD层级预期性能 | 内存占用 |
-|---------|---------|----------------------|----------|
-| 个人开发/测试 | 1核2G | 延迟~10ms，QPS~50 | <300MB |
-| 中小型API | 2核4G | 延迟~7ms，QPS~100 | <500MB |
-| 生产环境 | 4核8G | 延迟~6ms，QPS~160 | <1GB |
-| 高并发 | 8核16G+ | 延迟~5ms，QPS~400+ | <2GB |
+| 部署规模    | 硬件规格   | STANDARD层级预期性能    | 内存占用   |
+| ------- | ------ | ----------------- | ------ |
+| 个人开发/测试 | 1核2G   | 延迟\~2ms，QPS\~200  | <300MB |
+| 中小型API  | 2核4G   | 延迟\~1.7ms，QPS\~400  | <500MB |
+| 生产环境    | 4核8G   | 延迟\~1.7ms，QPS\~577  | <1GB   |
+| 高并发     | 8核16G+ | 延迟\~1.7ms，QPS\~728+ | <2GB   |
 
-详细报告见 [docs/benchmarks.md](docs/benchmarks.md)。
+> 以上数据基于 v1.3.1 于 2026-08-03 实测（Windows 10 / 6 核 CPU / Python 3.12），单线程 500 请求 balanced 模式。并发测试在 100 并发下达到 728 QPS（0 错误），60 秒持续吞吐 421 QPS。详细报告见 [docs/benchmarks.md](docs/benchmarks.md)。
 
 ## 双许可证说明
 
@@ -231,6 +232,7 @@ shield = XuanDun(mode="low_false_positive")
 - `desktop/xuandun-desktop/build_engine.py` — Nuitka 编译脚本
 
 **核心限制**：
+
 - ✅ 允许：使用、复制、分发仓库资产
 - ✅ 允许：用于 LLM 输入检测（包括商业应用）
 - ❌ 禁止：逆向工程、反编译、重建架构源码
@@ -239,7 +241,7 @@ shield = XuanDun(mode="low_false_positive")
 
 ### 外围代码 — Apache 2.0
 
-Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE_CODE](LICENSE_CODE)（Apache License 2.0）约束。
+Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE\_CODE](LICENSE_CODE)（Apache License 2.0）约束。
 
 详见 [NOTICE](NOTICE)。
 
@@ -311,7 +313,7 @@ from daoti_xuandun import XuanDunConfig, DefenseLevel
 # BASIC — 内部低风险场景（防御最弱，延迟最低）
 config = XuanDunConfig.for_level(DefenseLevel.BASIC)
 
-# STANDARD — 生产环境推荐（基准测试实测 100% 攻击拒绝率，延迟~6ms）
+# STANDARD — 生产环境推荐（基准测试实测 93.4% 攻击拒绝率，延迟~1.7ms）
 config = XuanDunConfig.for_level(DefenseLevel.STANDARD)
 
 # STRICT — 高安全场景（更严格的结构异常检测，延迟~7ms）
@@ -343,6 +345,7 @@ async def chat(message: str):
 欢迎提交 Issue 和 PR！
 
 **注意**：
+
 - 外围代码（Rust/TS/文档/配置）修改：直接提交 PR，遵循 Apache 2.0
 - 核心算法修改：需签署 CLA（Contributor License Agreement），请联系作者
 - 请勿在 PR 中暴露核心算法的设计意图注释或原始类名
@@ -363,9 +366,9 @@ async def chat(message: str):
 ## 联系方式
 
 - **作者**：独立研究者，知白
-- **Email**：spring60@vip.qq.com
+- **Email**：<spring60@vip.qq.com>
 - **Website**：sfang.cc
-- **Repository**：https://github.com/zhibaiYingChuan/XD
+- **Repository**：<https://github.com/zhibaiYingChuan/XD>
 
 ## 常见问题
 
@@ -378,13 +381,14 @@ async def chat(message: str):
 观察模式是玄盾的初始模式——接入后不拦截任何请求，只旁听并记录所有对话，自动学习环境中的"正常"语言模式。观察模式下会记录"如果开启保护，哪些请求会被拦截"的模拟拦截日志，运维人员可提前预览防护效果。积累足够样本后自动切换到保护模式。
 
 **Q: 如何降低误报？**
+
 - 使用 `mode="low_false_positive"` 或 `balanced`
 - 向 `warmup_safe` 中添加更多您的合法输入样本
 - 调用 `shield.explain_debug(result)` 理解每条误判的具体原因
 
 **Q: 系统能防御所有攻击吗？**
 
-不能。基准测试显示对**测试集中的已知攻击模式**拒绝率达到100%，但对从未见过的、与正常文本无统计差异的攻击可能漏过（此时系统会将其纳入混沌期孵化，多次出现后会自动学习并阻止）。**安全是过程，不是终点**。
+不能。基准测试显示对**测试集中的已知攻击模式**拒绝率达到 93.4%（raucle-bench 套件 100%，OWASP 套件 86.2%），但对从未见过的、与正常文本无统计差异的攻击可能漏过（此时系统会将其纳入混沌期孵化，多次出现后会自动学习并阻止）。**安全是过程，不是终点**。
 
 **Q: 核心算法为什么不开源？**
 
@@ -395,3 +399,4 @@ async def chat(message: str):
 - 核心算法：[道体研究许可证 v1.0](LICENSE)
 - 外围代码：[Apache License 2.0](LICENSE_CODE)
 - 声明：[NOTICE](NOTICE)
+

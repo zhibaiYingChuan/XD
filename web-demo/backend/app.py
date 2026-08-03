@@ -43,6 +43,12 @@ async def lifespan(app: FastAPI):
     logger.info("Web Demo 启动中：初始化玄盾实例...")
     # 使用 balanced 模式，启用双层架构和内置攻击样本
     _shield = XuanDun(mode="balanced", auto_warmup=True)
+    # P0拦截演示修复：默认observing观察模式只记录不拦截，演示页必须切到protecting真正执行拦截
+    try:
+        _shield.switch_mode("protecting")
+        logger.info("已切换为 protecting 模式，拦截功能已启用")
+    except Exception as e:
+        logger.warning(f"切换protecting模式失败（降级为observing）: {e}")
     logger.info("玄盾实例初始化完成，双层架构已启用")
     yield
     logger.info("Web Demo 关闭")
@@ -51,7 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="道体·玄盾 Web Demo",
     description="活性防护 LLM 防火墙 — 演示用 API 服务",
-    version="1.3.0",
+    version="1.3.1",
     lifespan=lifespan,
 )
 
@@ -135,7 +141,7 @@ async def health():
     """健康检查"""
     return {
         "status": "ok",
-        "version": "1.3.0",
+        "version": "1.3.1",
         "uptime": int(time.time() - _START_TIME),
         "shield_ready": _shield is not None,
     }
@@ -151,7 +157,7 @@ async def protect(req: ProtectRequest):
         return {
             "allowed": result.allowed,
             "trust_level": result.trust_level,
-            "reason": result.reason,
+            "reason": result.reject_stage,
             "latency_ms": getattr(result, "latency_ms", None),
             "dual_layer": _shield.get_dual_layer_stats(),
         }
@@ -207,7 +213,7 @@ async def demo_batch(req: DemoAttackRequest):
                 "text": text[:60] + ("..." if len(text) > 60 else ""),
                 "allowed": result.allowed,
                 "trust_level": result.trust_level,
-                "reason": result.reason,
+                "reason": result.reject_stage,
             })
         return {
             "attack_type": req.attack_type,
@@ -236,7 +242,7 @@ async def demo_safe():
             "text": text[:60] + ("..." if len(text) > 60 else ""),
             "allowed": result.allowed,
             "trust_level": result.trust_level,
-            "reason": result.reason,
+            "reason": result.reject_stage,
         })
     return {
         "total": len(results),
@@ -261,7 +267,7 @@ async def demo_showcase():
                     "type": attack_type,
                     "text": text[:60] + ("..." if len(text) > 60 else ""),
                     "allowed": result.allowed,
-                    "reason": result.reason,
+                    "reason": result.reject_stage,
                 })
         # 安全样本
         safe_results = []
@@ -270,7 +276,7 @@ async def demo_showcase():
             safe_results.append({
                 "text": text[:60] + ("..." if len(text) > 60 else ""),
                 "allowed": result.allowed,
-                "reason": result.reason,
+                "reason": result.reject_stage,
             })
         return {
             "attacks": {
@@ -332,7 +338,7 @@ async def demo_compare(req: CompareRequest):
                 "type": attack_type,
                 "text": text[:60] + ("..." if len(text) > 60 else ""),
                 "allowed": result.allowed,
-                "reason": result.reason,
+                "reason": result.reject_stage,
             })
 
         # 记录调用后的统计数据

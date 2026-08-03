@@ -1,12 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { api, LearningStatus } from '../services/tauriApi';
 // 设计系统规范：图标统一使用 lucide-react，strokeWidth=1.5，禁止 emoji
-import { AlertTriangle, ShieldOff, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ShieldOff, RefreshCw, WifiOff } from 'lucide-react';
 
 export default function StatusBar() {
   const [status, setStatus] = useState<LearningStatus | null>(null);
   // P0-06 修复：引擎离线检测与全局提示
   const [engineOffline, setEngineOffline] = useState(false);
+  // Cycle1-交互P0 系统断网横幅：浏览器级navigator.onLine + online/offline事件监听
+  // 比Rust API轮询更快（0ms vs 3s+2次失败），用户拔网线/WiFi断开时立即显示红色断网条
+  const [networkOffline, setNetworkOffline] = useState<boolean>(
+    () => (typeof navigator !== 'undefined' && navigator.onLine === false),
+  );
   // P0-09 修复：紧急逃生全局广播状态
   const [emergencyBypass, setEmergencyBypass] = useState(false);
   // GAP-S5-05 修复：记录最后成功连接时间，长时间离线时显示
@@ -26,6 +31,20 @@ export default function StatusBar() {
     return () => window.removeEventListener('xuandun:engine-restarting', handleRestarting as EventListener);
   }, []);
 
+  // Cycle1-交互P0 系统断网横幅：立即响应浏览器级online/offline事件，比API轮询快3-6s
+  // 优先级低于紧急逃生、引擎重启（断网+重启同时出现时仍先显示重启），高于引擎离线
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setNetworkOffline(false);
+    const handleOffline = () => setNetworkOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout>;
     let emergencyTimeoutId: ReturnType<typeof setTimeout>;
@@ -33,25 +52,36 @@ export default function StatusBar() {
 
     const fetchStatus = async () => {
       try {
-        const s = await api.getLearningStatus();
+        // GAP-L5-01 修复：双源状态矛盾 — 优先用 Rust getStatus 判断引擎在线状态
+        // getStatus 走 Rust 本地命令，不依赖 Flask(18765)，避免 Flask 500 误报离线
+        const rustStatus = await api.getStatus();
         if (!isMounted) return;
-        setStatus(s);
-        // 成功时清除离线状态，重置失败计数
-        failCountRef.current = 0;
-        setEngineOffline(false);
-        // GAP-S5-05 修复：记录最后成功连接时间
-        setLastSuccessTime(new Date());
-        // 正常时 3 秒轮询
+        if (rustStatus.running && rustStatus.healthy) {
+          setEngineOffline(false);
+          failCountRef.current = 0;
+          setLastSuccessTime(new Date());
+          // 学习状态用 Flask API 获取详情（Flask 不可用时降级显示基础状态）
+          try {
+            const s = await api.getLearningStatus();
+            if (!isMounted) return;
+            setStatus(s);
+          } catch {
+            // Flask 学习状态不可用，不影响在线判定
+          }
+        } else {
+          failCountRef.current += 1;
+          if (failCountRef.current >= 2) {
+            setEngineOffline(true);
+          }
+        }
         timeoutId = setTimeout(fetchStatus, 3000);
       } catch (e) {
         if (!isMounted) return;
-        // 连续失败 2 次才标记离线，避免单次超时误报
+        // Rust getStatus 也失败时才标记离线
         failCountRef.current += 1;
         if (failCountRef.current >= 2) {
           setEngineOffline(true);
         }
-        // B-05 修复：离线时指数退避，减少无效请求
-        // 退避序列：3s → 6s → 12s → 24s → 48s → 60s（封顶）
         const backoff = Math.min(3000 * Math.pow(2, failCountRef.current - 1), 60000);
         timeoutId = setTimeout(fetchStatus, backoff);
       }
@@ -94,6 +124,24 @@ export default function StatusBar() {
           </span>
           <span className="status-bar-progress-text">
             所有 AI 请求绕过阴阳门检测直接放行。请前往「系统设置」关闭紧急逃生以恢复防护。
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // Cycle1-交互P0 系统断网横幅：立即显示（优先级：紧急逃生 > 引擎重启 > 系统断网 > 引擎离线）
+  if (networkOffline) {
+    return (
+      <div className="status-bar status-bar-offline" role="alert" aria-live="assertive">
+        <div className="status-bar-left">
+          <span className="status-bar-dot dot-offline"></span>
+          <span className="status-bar-mode" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <WifiOff size={16} strokeWidth={1.5} /> 网络连接已断开
+          </span>
+          <span className="status-bar-progress-text">
+            检测到本机网络不可用（navigator.onLine=false），所有外部 API 请求将失败。
+            请检查 WiFi / 网线连接后，前往「系统设置」手动重启引擎。
           </span>
         </div>
       </div>

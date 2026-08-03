@@ -6,35 +6,20 @@ import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
   LayoutDashboard,
   ShieldCheck,
-  Bot,
   FileText,
-  GraduationCap,
-  FlaskConical,
-  BarChart3,
   Settings,
   HelpCircle,
 } from 'lucide-react';
 
-// 太极图标（lucide-react 无此图标，用自定义 SVG）
-const YinYangIcon = ({ size = 18, strokeWidth = 1.5 }: { size?: number; strokeWidth?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 2a10 10 0 0 1 0 20 5 5 0 0 1 0-10 5 5 0 0 0 0-10z" fill="currentColor" stroke="none" />
-    <circle cx="12" cy="7" r="1.5" fill="currentColor" stroke="none" />
-    <circle cx="12" cy="17" r="1.5" fill="none" stroke="currentColor" />
-  </svg>
-);
-
-// P0修复：补全所有已注册路由的导航入口，确保功能可发现性
+// K3-企业精简版：导航从9项→4项（按"用户任务"而非"代码模块"组织）
+// 1. 实时监控 = 仪表盘 + 日志入口
+// 2. 安全检测 = 检测页面
+// 3. 系统设置 = 黑白名单、防御等级、逃生通道
+// 其他页面（阴阳门、报表、模拟、学习、Agent）全部移除导航入口或降级为Settings卡片
 const navItems = [
-  { to: '/', icon: <LayoutDashboard size={18} strokeWidth={1.5} />, label: '概览' },
+  { to: '/', icon: <LayoutDashboard size={18} strokeWidth={1.5} />, label: '实时监控' },
   { to: '/detect', icon: <ShieldCheck size={18} strokeWidth={1.5} />, label: '安全检测' },
-  { to: '/agents', icon: <Bot size={18} strokeWidth={1.5} />, label: 'Agent发现' },
-  { to: '/logs', icon: <FileText size={18} strokeWidth={1.5} />, label: '安全日志' },
-  { to: '/learning', icon: <GraduationCap size={18} strokeWidth={1.5} />, label: '学习状态' },
-  { to: '/yinyang', icon: <YinYangIcon size={18} strokeWidth={1.5} />, label: '阴阳门状态' },
-  { to: '/simulation', icon: <FlaskConical size={18} strokeWidth={1.5} />, label: '模拟测试' },
-  { to: '/reports', icon: <BarChart3 size={18} strokeWidth={1.5} />, label: '安全报告' },
+  { to: '/logs', icon: <FileText size={18} strokeWidth={1.5} />, label: '拦截日志' },
   { to: '/settings', icon: <Settings size={18} strokeWidth={1.5} />, label: '系统设置' },
 ];
 
@@ -74,7 +59,7 @@ export default function Layout() {
           <img src="/logo.jpg" alt="道体·玄盾 Logo" className="sidebar-logo-img" />
           <div className="sidebar-title-group">
             <span className="sidebar-title">道体·玄盾</span>
-            <span className="sidebar-subtitle">安全运维控制台</span>
+            <span className="sidebar-subtitle">模型防火墙控制台</span>
           </div>
         </div>
         <nav className="sidebar-nav">

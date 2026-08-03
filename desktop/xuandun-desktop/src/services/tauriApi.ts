@@ -32,41 +32,6 @@ export interface LearningStatus {
   call_count: number;
 }
 
-export interface SimulationReport {
-  mode: string;
-  timestamp: string;
-  elapsed_seconds: number;
-  total_samples: number;
-  attack_total: number;
-  attack_blocked: number;
-  benign_total: number;
-  benign_blocked: number;
-  block_rate: number;
-  false_positive_rate: number;
-  miss_rate: number;
-  accuracy: number;
-  avg_latency_ms: number;
-  category_stats: Record<string, {
-    name: string;
-    total: number;
-    blocked: number;
-    passed: number;
-    block_rate: number;
-  }>;
-  details: Array<{
-    category_key: string;
-    category_name: string;
-    text_preview: string;
-    expected: string;
-    actual: string;
-    allowed: boolean;
-    correct: boolean | null;
-    latency_ms: number;
-    trust_level: string | null;
-    domain_distance: number | null;
-  }>;
-}
-
 export interface ProtectResponse {
   allowed: boolean;
   trust_level: string;
@@ -76,15 +41,6 @@ export interface ProtectResponse {
   attack_category: string | null;
   latency_ms: number | null;
   fallback: boolean;
-}
-
-export interface AgentInfo {
-  name: string;
-  process_name: string;
-  pid: number | null;
-  running: boolean;
-  installed: boolean;
-  policy_mode: string | null;
 }
 
 export interface LogEntry {
@@ -197,17 +153,6 @@ export interface BypassStats {
   }>;
 }
 
-export interface ReportSummary {
-  id: number;
-  generated_at: string;
-  report_type: string;
-  period_start: string;
-  period_end: string;
-  format: string;
-  summary: string | null;
-  created_by: string | null;
-}
-
 export interface LogResponse {
   entries: LogEntry[];
   total: number;
@@ -241,9 +186,17 @@ export class InvokeTimeoutError extends Error {
 
 /** 超时分档（毫秒）—— 按操作类型选择 */
 export const TIMEOUT = {
-  FAST: 5_000,      // 快速操作：状态查询、配置读写（5秒）
-  NORMAL: 15_000,   // 普通操作：引擎控制、报告生成（15秒）
-  SLOW: 60_000,     // 长操作：模拟测试、预热（60秒）
+  FAST: 5_000,          // 快速操作：状态查询、配置读写（5秒）
+  NORMAL: 15_000,       // 普通操作：模式切换、报告生成（15秒）
+  SLOW: 60_000,         // 长操作：模拟测试、预热（60秒）
+  // P0-1 FM-L2-01 修复：restart_engine = stop(快) + sleep(1s) + ensure_engine_running(最坏60s) ≈ 61s
+  // 前端超时预留34s冗余（保证Rust端先返回Err，而不是前端先抛InvokeTimeoutError导致永久waiting）
+  RESTART_ENGINE: 95_000,
+  // P0-5 FM-L4-03 修复：protect冷启动最坏28s（拒绝门四元组/KMeans初始化），
+  // 前端15s NORMAL 会假超时截断调用，独立配置 35s 既不卡死也不截断
+  PROTECT_COLD: 35_000,
+  // IPC noop 心跳用短超时，快速识别桥接是否还活着
+  NOOP_HEARTBEAT: 3_000,
 } as const;
 
 /**
@@ -346,16 +299,32 @@ export function formatTrustLevel(level: string | null | undefined): string {
 
 export const api = {
   getStatus: () => invokeWithTimeout<StatusResponse>('get_status', undefined, TIMEOUT.FAST),
-  protect: (text: string, session: string = 'default', mode: string = 'balanced') =>
-    invokeWithTimeout<ProtectResponse>('protect', { req: { text, session, mode } }, TIMEOUT.NORMAL),
+  // Sprint1-P0-5: protect冷启动假超时修复——首次调用需初始化拒绝门四元组/KMeans（最坏28s），
+  // 使用独立的PROTECT_COLD=35s超时，避免NORMAL=15s假截断
+  protect: (text: string, session: string = 'default', mode: string = 'balanced') => {
+    // Cycle1-L5-2 修复：HCSE超时真实性测试注入点。
+    // CDP测试通过设置window.__HCSE_HANG_PROTECT=true模拟后端protect永不返回的场景，
+    // 返回一个永久pending的Promise，让前端35s setTimeout的InvokeTimeoutError真实触发，
+    // 从而验证Detect.tsx第80行的超时分支（否则永远不触发，超时分支形同虚设）
+    if (typeof window !== 'undefined' &&
+        (window as any).__HCSE_HANG_PROTECT === true) {
+      return new Promise<ProtectResponse>(() => {
+        // 故意不调用resolve/reject，模拟"卡死"——35秒后由invokeWithTimeout外层Promise.race触发超时
+      });
+    }
+    return invokeWithTimeout<ProtectResponse>('protect', { req: { text, session, mode } }, TIMEOUT.PROTECT_COLD);
+  },
   setMode: (mode: string) => invokeWithTimeout<void>('set_mode', { mode }, TIMEOUT.FAST),
-  discoverAgents: () => invokeWithTimeout<AgentInfo[]>('discover_agents', undefined, TIMEOUT.FAST),
   getLogs: (filterAllowed?: boolean, limit?: number, offset?: number) =>
     invokeWithTimeout<LogResponse>('get_logs', { filterAllowed, limit, offset }, TIMEOUT.FAST),
   getConfig: (key: string) => invokeWithTimeout<string | null>('get_config', { key }, TIMEOUT.FAST),
   setConfig: (key: string, value: string) => invokeWithTimeout<void>('set_config', { key, value }, TIMEOUT.FAST),
-  restartEngine: () => invokeWithTimeout<void>('restart_engine', undefined, TIMEOUT.SLOW),
+  // Sprint1-P0-1: restartEngine永不返回修复——stop(快)+sleep+ensure_running(最坏60s)≈61s，
+  // 前端预留34s冗余，使用RESTART_ENGINE=95s，保证Rust端先返回Err而不是前端先抛超时
+  restartEngine: () => invokeWithTimeout<void>('restart_engine', undefined, TIMEOUT.RESTART_ENGINE),
   stopEngine: () => invokeWithTimeout<void>('stop_engine', undefined, TIMEOUT.SLOW),
+  // Sprint1-P0-7: IPC析构散落报错修复——3s快速noop心跳，10s定时检测桥接是否还活着
+  heartbeatNoop: () => invokeWithTimeout<{ ok: boolean; ts: number }>('noop_heartbeat', undefined, TIMEOUT.NOOP_HEARTBEAT),
   warmup: (safeTexts: string[], attackTexts: string[]) =>
     invokeWithTimeout<any>('warmup', { req: { safeTexts, attackTexts } }, TIMEOUT.SLOW),
   verifyAudit: () => invokeWithTimeout<HashChainReport>('verify_audit', undefined, TIMEOUT.NORMAL),
@@ -370,10 +339,8 @@ export const api = {
   stopProxy: () => invokeWithTimeout<void>('stop_proxy_cmd', undefined, TIMEOUT.FAST),
   isProxyRunning: () => invokeWithTimeout<boolean>('is_proxy_running_cmd', undefined, TIMEOUT.FAST),
   getLearningStatus: () => invokeWithTimeout<LearningStatus>('get_learning_status', undefined, TIMEOUT.FAST),
-  switchLearningMode: (mode: string) => invokeWithTimeout<any>('switch_learning_mode', { mode }, TIMEOUT.NORMAL),
-  getLearningDetails: () => invokeWithTimeout<any>('get_learning_details', undefined, TIMEOUT.FAST),
-  runSimulation: (mode: string, categories?: string[], customTexts?: string[]) =>
-    invokeWithTimeout<SimulationReport>('run_simulation', { mode, categories, customTexts }, TIMEOUT.SLOW),
+  // Cycle1洁净度：已删除switchLearningMode（UI移除手动切换，防止运维误触，仅配置文件/API Key控制）
+  // Cycle1洁净度：已删除getLearningDetails / runSimulation（独立页面删除，仅保留CLI脚本）
   sendNotification: (title: string, body: string) =>
     invokeWithTimeout<void>('send_notification', { title, body }, TIMEOUT.FAST),
   getTrendStats: (granularity: string, start: string, end: string) =>
@@ -383,14 +350,7 @@ export const api = {
   getRealtimeMetrics: () => invokeWithTimeout<RealtimeMetrics>('get_realtime_metrics', undefined, TIMEOUT.FAST),
   getComparisonStats: (currentStart: string, currentEnd: string, baselineStart: string, baselineEnd: string) =>
     invokeWithTimeout<ComparisonStats>('get_comparison_stats', { currentStart, currentEnd, baselineStart, baselineEnd }, TIMEOUT.NORMAL),
-  generateReport: (reportType: string, start: string, end: string) =>
-    invokeWithTimeout<number>('generate_report', { reportType, start, end }, TIMEOUT.NORMAL),
-  listReports: (limit?: number) =>
-    invokeWithTimeout<ReportSummary[]>('list_reports', { limit }, TIMEOUT.FAST),
-  getReport: (reportId: number) =>
-    invokeWithTimeout<any>('get_report', { reportId }, TIMEOUT.NORMAL),
-  deleteReport: (reportId: number) =>
-    invokeWithTimeout<void>('delete_report', { reportId }, TIMEOUT.NORMAL),
+  // Cycle1洁净度：已删除generateReport/listReports/getReport/deleteReport（Reports独立页面删除，完整报表走notifiers邮件推送）
   saveNotifierConfig: (channel: string, config: any) =>
     invokeWithTimeout<void>('save_notifier_config', { channel, config }, TIMEOUT.FAST),
   getNotifierConfig: (channel: string) =>

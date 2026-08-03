@@ -118,13 +118,18 @@ export default function Logs() {
 
   return (
     <div className="page logs-page">
+      {/* P0-4 修复：每页唯一 H1，符合 WCAG AA 规范 §3.3/§3.4 */}
+      <div className="page-header">
+        <h1 className="page-title">防护日志</h1>
+      </div>
       {learning && learning.mode === 'observing' && (
         <div className="alert-banner alert-warning observing-banner">
           <GraduationCap size={18} strokeWidth={1.5} className="alert-icon" />
           <span>
             当前为<strong>观察模式</strong>，所有请求均已放行。
             观察期间检测到 <strong>{learning.would_block_count}</strong> 条潜在攻击（如开启保护将被拦截），
-            <a href="#/learning" className="banner-link">查看模拟拦截详情 →</a>
+            {/* K1-企业精简版：learning路由已移除，详情跳转至Settings的活性防护卡片 */}
+            <a href="#/settings" className="banner-link">查看系统设置 → 活性防护模式</a>
           </span>
         </div>
       )}

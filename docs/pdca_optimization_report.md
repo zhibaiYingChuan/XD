@@ -100,6 +100,34 @@
 |------|--------|------|------|
 | Desktop Dashboard显示v1.2.3 | P2 | 旧版release exe编译产物，代码已更新到1.3.0 | 下个tag发布时自动修复 |
 | CDP端口9224未生效 | P2 | 桌面端实际绑定到9222而非9224 | 需排查Tauri WebView2端口映射逻辑 |
+| IPC模式切换mode=None | P2 | set_mode后立即get_status未反映变更 | 时序问题，非功能bug |
+
+### 4.4 第二轮PDCA循环（交互韧性审计后修复）
+
+#### Web Demo Bug修复（3项）
+
+| ID | Bug | 修复 | 验证 |
+|----|-----|------|------|
+| WEB-01 | 后端 `/api/protect` 500: `ProtectResult`无`reason`属性 | `result.reason` → `result.reject_stage`（6处） | 回归测试 PASS |
+| WEB-02 | 前端vite.config.ts `base: '/xd/'`导致资源404 | `base: '/xd/'` → `base: '/'` | browser_use 5/5 PASS |
+| WEB-03 | main.tsx `BrowserRouter basename="/xd"`路由错误 | 移除`basename="/xd"` | 路由导航正常 |
+
+#### 交互韧性P0盲点修复（3项）
+
+| ID | 盲点 | 修复文件 | 修复内容 |
+|----|------|---------|---------|
+| GAP-L5-01 | 双源状态矛盾：StatusBar用Flask API(500误报离线)，Dashboard用Rust API(显示在线) | StatusBar.tsx | 改用`api.getStatus()`(Rust)判断在线，`getLearningStatus()`(Flask)仅获取学习详情 |
+| GAP-L4-01 | protect空文本语义混淆：空文本被当作"引擎不可达"返回fallback | commands.rs | 添加`if req.text.trim().is_empty() { return Err("检测文本不能为空") }` |
+| GAP-L3-01 | Settings企业运维卡片`catch { /* ignore */ }`静默吞错 | Settings.tsx | 新增`opsLoadError`状态，catch中setError，UI显示错误提示 |
+
+#### 回归测试结果
+
+| 测试 | 结果 | 详情 |
+|------|------|------|
+| Web Demo后端API | 7/7 PASS | health/protect/showcase/compare全部200 |
+| Web Demo前端 | 5/5 PASS | 首页/检测/阴阳门/模拟/学习全部渲染正常 |
+| 桌面端CDP | 19/21 PASS | 2个已知FAIL（版本号+IPC时序） |
+| 回归测试脚本 | 7/7 PASS | 全部通过 |
 
 ---
 
@@ -116,17 +144,25 @@
 | P1-01 | 紧急逃生开关二次确认 | CDP测试确认 | ✅ 已关闭 |
 | P1-04 | Dashboard向导按钮已接入状态确认 | CDP测试确认 | ✅ 已关闭 |
 | P1-09 | Settings端口校验1-65535 | CDP测试确认 | ✅ 已关闭 |
+| WEB-01 | 后端protect API 500: result.reason→result.reject_stage | 回归测试 | ✅ 已关闭 |
+| WEB-02 | 前端vite base:/xd/→/ 资源404修复 | browser_use 5/5 | ✅ 已关闭 |
+| WEB-03 | BrowserRouter basename="/xd"移除 | 路由导航正常 | ✅ 已关闭 |
+| GAP-L5-01 | StatusBar双源状态矛盾（Flask 500误报离线） | 代码修复+CDP验证 | ✅ 已关闭 |
+| GAP-L4-01 | protect空文本语义混淆（Rust防御性校验） | 代码修复 | ✅ 已关闭 |
+| GAP-L3-01 | Settings企业运维卡片静默吞错 | 代码修复 | ✅ 已关闭 |
 
 ### 5.2 进入下一循环的待办项
 
 | 优先级 | 项 | 目标版本 |
 |-------|----|---------|
-| P0 | Web Demo实际部署（Render+Netlify） | 评审前 |
-| P1 | Desktop端release exe rebuild（含v1.3.0版本号） | v1.3.1 |
+| P0 | Desktop端release exe rebuild（含v1.3.0版本号+GAP-L5/L4/L3修复） | 评审前 |
+| P0 | Web Demo部署到用户自有服务器 | 评审前 |
 | P1 | SLSA Level 1升级（attest-build-provenance） | v1.3.1 |
+| P1 | F-03紧急逃生乐观更新窗口期改悲观更新 | v1.3.1 |
 | P2 | 排查CDP端口9224映射问题 | v1.3.1 |
 | P2 | Actions SHA pin全量加固 | v1.3.1 |
 | P2 | 单元测试补充（ConfirmModal队列化/Rust基础测试） | Sprint7 |
+| P2 | 交互审计18项Gap修复（GAP-L1/L2/L3/L4级） | Sprint7 |
 
 ### 5.3 前10个最可能被评审问到的问题
 

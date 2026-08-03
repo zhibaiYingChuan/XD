@@ -11,6 +11,7 @@ import math
 import re
 import threading
 import time
+import unicodedata
 
 import numpy as np
 
@@ -165,6 +166,16 @@ class EndogenousDomainAwareness:
         # 这些 deque 在 _inner_feedback_to_outer 中被写入、在 _outer_gate_check 中被读取，
         # 多线程并发请求场景下需要互斥访问以避免 deque 内部状态损坏
         self._outer_cache_lock = threading.Lock()
+        # 原型状态锁（可重入）：保护 self.prototypes / self.prototype_hit_counts 的并发读写，
+        # 避免 Flask threaded=True + waitress 多线程下的向量损坏、KeyError 与索引越界（P0-2 / P1-4）。
+        # 选用 RLock：_spawn_prototype 内部会调用 _merge_prototypes，且 _nearest_prototype
+        # 会被已持有该锁的学习更新路径调用，可重入锁可避免自死锁。
+        self._state_lock = threading.RLock()
+        # 原型结构代际号：每次 spawn/merge/seed 改变原型索引布局后自增，
+        # 用于使其他线程持有的陈旧 proto_idx 失效，防止写错原型向量（P1-1）。
+        self._prototypes_generation: int = 0
+        # 重复输入缓存锁：保护 _repetition_cache 的并发读-改-写（P0-3）。
+        self._repetition_lock = threading.Lock()
         self._outer_stats: dict = {"total": 0, "rejects": 0, "passes": 0, "forwards": 0, "latency_ms": 0.0}
         self._inner_stats: dict = {"total": 0, "rejects": 0, "passes": 0, "learning_events": 0, "latency_ms": 0.0}
 
@@ -457,6 +468,104 @@ class EndogenousDomainAwareness:
             "recent_input_count": len(self._recent_inputs),
         }
 
+    def _is_natural_language_text(self, text: str) -> bool:
+        """判定输入是否为合法自然语言文本（CJK/英文/数字+标点空格为主），豁免二进制异常惩罚。
+
+        设计意图（戳破中文UTF-8系统性误报的根因）：
+        ─────────────────────────────────────────────────────────────
+        binary_anomaly 的 novel_trigram KL散度和字节熵惩罚，是为检测
+        Base64/Hex/二进制混淆攻击设计的。但合法中文/英日文等多字节UTF-8文本，
+        在出厂训练域（英文主导）下 novel_trigram_mass 很高，会被误判
+        为"二进制模式异常"（binary>=0.5），在MEDIUM区域触发 x0.25/x0.2
+        的极端阈值惩罚，造成 30%+ 的系统性误报。
+
+        本函数通过三个纯统计信号做"合法自然语言"预判定，命中则豁免
+        binary_anomaly>=0.5 的 MEDIUM 区域极端阈值惩罚，但不影响
+        fused_anomaly 中的正常权重贡献（保留敏感性）：
+        ① ≥config.natural_lang_printable_ratio_threshold 字符是 CJK/英数/标点/空格制表换行
+          (从原写死0.90移入config，纯JSON、德文长句等语域可随时调整)
+        ② Shannon 字节熵在 [config.natural_lang_entropy_low,
+                              config.natural_lang_entropy_high] 区间
+          (从原写死[2.5,6.8]移入config，无空格德文章、编程注释等可放宽)
+        ③ 无异常控制字符序列 或 空字节
+
+        安全设计（不降低攻击检测率）：
+        - 攻击即使是中文描述的越狱，也会包含强关键词（roleplay/social_engineering/
+          data_exfiltration 等 B1~B8 组合检测），不依赖 binary_anomaly 判定
+        - Base64/hex/编码混淆攻击本身会被①或②直接排除，不会被判为自然语言
+        """
+        if not isinstance(text, str) or len(text) < 5:
+            return False
+        text_len = len(text)
+        if text_len == 0:
+            return False
+        cfg = self.config
+
+        # ① 可打印自然语言字符占比（CJK/英数/标点/空格制表换行）
+        # 阈值：config.natural_lang_printable_ratio_threshold（原0.90写死，现可调）
+        printable_threshold = float(getattr(
+            cfg, "natural_lang_printable_ratio_threshold", 0.90
+        ))
+        # 性能优化：快速路径用 ord 整数范围判断覆盖 90%+ 常见字符
+        # （CJK/英数/标点/空格制表换行），仅对未命中字符才调用
+        # unicodedata.category 作为 fallback，避免对每个字符都做 Unicode 查表
+        normal = 0
+        for ch in text:
+            o = ord(ch)
+            if (
+                0x4E00 <= o <= 0x9FFF   # CJK 统一汉字
+                or 0x3400 <= o <= 0x4DBF  # CJK 扩展A
+                or 0x3040 <= o <= 0x30FF  # 日文假名
+                or 0xAC00 <= o <= 0xD7AF  # 韩文音节
+                or 0x0020 <= o <= 0x007E  # 基本拉丁可打印（英数、常用标点）
+                or 0x00A0 <= o <= 0x024F  # 拉丁扩展（欧洲语言）
+                or 0x1E00 <= o <= 0x1EFF  # 拉丁扩展附加
+                or 0x2000 <= o <= 0x206F  # 通用标点
+                or 0x2070 <= o <= 0x218F  # 上标下标/数字形式/字母符号
+                or 0x2190 <= o <= 0x21FF  # 箭头
+                or 0x2200 <= o <= 0x22FF  # 数学运算
+                or 0x2500 <= o <= 0x259F  # 盒画/块元素
+                or 0x25A0 <= o <= 0x25FF  # 几何形状
+                or 0x2600 <= o <= 0x26FF  # 杂项符号
+                or 0x3000 <= o <= 0x303F  # CJK符号和标点
+                or 0xFF00 <= o <= 0xFFEF  # 全角形式/半角形式
+                or o in (9, 10, 13)       # \t\n\r（整数比较比字符串查找快）
+            ):
+                normal += 1
+            else:
+                # 仅对快速路径未命中的字符调用 unicodedata.category 作为 fallback
+                # 允许 Unicode 类别为标点(P)/符号(S)/标记(M)的字符（避免漏判稀有标点）
+                cat = unicodedata.category(ch)
+                if cat[0] in "PMS":
+                    normal += 1
+        if (normal / text_len) < printable_threshold:
+            return False
+
+        # ② Shannon 字节熵（原2.5~6.8写死 → 从config读取，支持纯JSON/德文等语域放宽）
+        entropy_low = float(getattr(cfg, "natural_lang_entropy_low", 2.5))
+        entropy_high = float(getattr(cfg, "natural_lang_entropy_high", 6.8))
+        data = text.encode("utf-8")
+        n = len(data)
+        if n < 8:
+            return True
+        byte_counts = np.zeros(256, dtype=np.float32)
+        for b in data:
+            byte_counts[b] += 1
+        probs = byte_counts / n
+        probs_pos = probs[probs > 0]
+        entropy = -float(np.sum(probs_pos * np.log2(probs_pos)))
+        if entropy < entropy_low or entropy > entropy_high:
+            return False
+
+        # ③ 排除异常控制字符 / 空字节（这些出现在自然语言文本中极罕见）
+        ctrl_count = sum(1 for b in data if b < 32 and b not in (9, 10, 13))
+        if ctrl_count > 0:
+            return False
+        if data.count(0) > 0:
+            return False
+
+        return True
+
     def process(
         self, raw_input: Union[str, Vector], session_id: str = ""
     ) -> Tuple[Decision, Optional[Vector], TrustLevel, float]:
@@ -567,7 +676,11 @@ class EndogenousDomainAwareness:
                 "decision_reason": None,
             }
 
-        dist, proto_idx = self._nearest_prototype(feat)
+        # 在同一锁内获取最近原型索引与当前代际号，保证二者一致（P1-1）：
+        # 之后若发生 spawn/merge，代际号自增，学习更新阶段即可据此判定 proto_idx 是否仍有效。
+        with self._state_lock:
+            dist, proto_idx = self._nearest_prototype(feat)
+            proto_gen = self._prototypes_generation
 
         self.distance_history.append(dist)
 
@@ -781,18 +894,34 @@ class EndogenousDomainAwareness:
         if isinstance(raw_input, str) and len(raw_input) > 0:
             input_key = int(hashlib.md5(raw_input.encode('utf-8')).hexdigest()[:8], 16) & 0xFFFF
         if input_key is not None:
-            if input_key in self._repetition_cache:
-                count, _ = self._repetition_cache[input_key]
-                self._repetition_cache[input_key] = (count + 1, dist)
-                if count >= 3 and raw_structural_anomaly < 0.2:
-                    repetition_boost = min(0.3, count * 0.05)
-                    dist = max(0.0, dist - repetition_boost)
-            else:
-                self._repetition_cache[input_key] = (1, dist)
-            if len(self._repetition_cache) > 1000:
-                keys = list(self._repetition_cache.keys())
-                for k in keys[:500]:
-                    del self._repetition_cache[k]
+            # 重复缓存为共享状态，多线程并发读-改-写需加锁，
+            # 避免 count 丢失与 dict 迭代过程中被并发变更（P0-3）
+            with self._repetition_lock:
+                if input_key in self._repetition_cache:
+                    count, _ = self._repetition_cache[input_key]
+                    self._repetition_cache[input_key] = (count + 1, dist)
+                    if count >= 3 and raw_structural_anomaly < 0.2:
+                        repetition_boost = min(0.3, count * 0.05)
+                        dist = max(0.0, dist - repetition_boost)
+                else:
+                    self._repetition_cache[input_key] = (1, dist)
+                if len(self._repetition_cache) > 1000:
+                    keys = list(self._repetition_cache.keys())
+                    for k in keys[:500]:
+                        del self._repetition_cache[k]
+
+        # ── 合法自然语言豁免：CJK/英文等多字节UTF-8文本被binary_anomaly误伤时，
+        #    豁免 MEDIUM 区域的极端阈值惩罚（x0.25 / x0.2），但保留 fused_anomaly 正常权重。
+        is_natural_lang_text = False
+        if isinstance(raw_input, str):
+            is_natural_lang_text = self._is_natural_language_text(raw_input)
+        # 原始"binary_anomaly>=0.5 且 非查询/非学习"模式，若命中自然语言则视为关闭惩罚
+        _binary_penalty_active = (
+            binary_anomaly >= 0.5
+            and not is_inquiry
+            and not is_learning
+            and not is_natural_lang_text
+        )
 
         if dist <= domain_threshold * 0.6:
             trust = TrustLevel.HIGH
@@ -800,7 +929,7 @@ class EndogenousDomainAwareness:
         elif dist <= domain_threshold * 1.8:
             cold_start_factor = 0.85 if len(self._accepted_distances) < 10 else 1.0
             medium_anomaly_threshold = self.config.structural_anomaly_threshold * 0.8 * cold_start_factor
-            if binary_anomaly >= 0.5 and not is_inquiry and not is_learning:
+            if _binary_penalty_active:
                 medium_anomaly_threshold *= 0.25
             if novel_trigram_ratio > 0.5:
                 if is_inquiry or is_learning:
@@ -808,7 +937,7 @@ class EndogenousDomainAwareness:
                 else:
                     medium_anomaly_threshold += 0.05
             if fourgram_signal < -0.1:
-                if binary_anomaly >= 0.5 and not is_inquiry and not is_learning:
+                if _binary_penalty_active:
                     pass
                 elif is_learning:
                     medium_anomaly_threshold += min(0.25, abs(fourgram_signal) * 1.2)
@@ -817,11 +946,11 @@ class EndogenousDomainAwareness:
                 else:
                     medium_anomaly_threshold += min(0.15, abs(fourgram_signal) * 0.8)
             elif fourgram_signal < -0.05:
-                if not (binary_anomaly >= 0.5 and not is_inquiry and not is_learning):
+                if not _binary_penalty_active:
                     medium_anomaly_threshold += abs(fourgram_signal) * 1.2
             if fused_anomaly > medium_anomaly_threshold:
                 reject_threshold = self.config.structural_anomaly_threshold
-                if binary_anomaly >= 0.5 and not is_inquiry and not is_learning:
+                if _binary_penalty_active:
                     reject_threshold *= 0.2
                 if fourgram_signal > 0.15:
                     reject_reduction = min(0.10, fourgram_signal * 0.3)
@@ -1016,7 +1145,25 @@ class EndogenousDomainAwareness:
                     state = self._luoshu.encode(raw_input)
                     self._luoshu.learn_safe(state)
         elif decision == Decision.REJECT and isinstance(raw_input, str) and trust == TrustLevel.UNKNOWN:
-            self._update_rejected_fourgram_profile(raw_input)
+            # ── 自证预言抑制：只有真正命中攻击关键词/信号的 REJECT，才写入拒绝四元组档案。
+            #    防止"误报→喂饱rejected统计→更多误报"正反馈循环（根因修复idx>200出现的fourgram=+0.6）
+            has_true_attack_signal = (
+                keyword_attack_signal > 0.0
+                or strong_keyword_attack_signal > 0.0
+                or roleplay_signal > 0.0
+                or social_engineering_signal > 0.0
+                or data_exfiltration_signal > 0.0
+                or system_prompt_leak_signal > 0.0
+                or excessive_agency_signal > 0.0
+                or dangerous_command_signal > 0.0
+                or training_data_exploitation_signal > 0.0
+                or decoded_attack_signal > 0.0
+                or leet_speak_attack_signal > 0.0
+                or self._luoshu_veto
+                or (self._luoshu is not None and luoshu_attack_dist < 0.30)
+            )
+            if has_true_attack_signal:
+                self._update_rejected_fourgram_profile(raw_input)
             if self._luoshu is not None:
                 if luoshu_attack_dist < 1.0 or luoshu_safe_dist < 1.0:
                     self._luoshu.learn_attack(luoshu_state)
@@ -1025,14 +1172,51 @@ class EndogenousDomainAwareness:
                     self._luoshu.learn_attack(state)
 
         if trust in (TrustLevel.HIGH, TrustLevel.MEDIUM) and len(self.prototypes) > 0:
-            lr = self.config.prototype_learning_rate
-            self.prototypes[proto_idx] = (1 - lr) * self.prototypes[proto_idx] + lr * feat
-            self.prototypes[proto_idx] = self._normalize(self.prototypes[proto_idx])
+            # 学习更新：在原型状态锁内执行，并校验 proto_idx 仍有效（P0-2 / P1-1）。
+            # 若获取 proto_idx 后发生过 spawn/merge，代际号将不一致，此时跳过本次更新，
+            # 避免向已失效的索引写入（导致写错原型向量或 IndexError）。
+            with self._state_lock:
+                if proto_gen == self._prototypes_generation and 0 <= proto_idx < len(self.prototypes):
+                    lr = self.config.prototype_learning_rate
+                    self.prototypes[proto_idx] = (1 - lr) * self.prototypes[proto_idx] + lr * feat
+                    self.prototypes[proto_idx] = self._normalize(self.prototypes[proto_idx])
 
         if self._should_spawn_prototype():
             self._spawn_prototype()
 
         if debug_info is not None:
+            # ── 新增：关键信号值快照（供离线误报诊断）──
+            debug_info["fused_anomaly"] = float(fused_anomaly)
+            debug_info["structural_anomaly_raw"] = float(structural_anomaly)
+            debug_info["binary_anomaly"] = float(binary_anomaly)
+            debug_info["fourgram_signal"] = float(fourgram_signal)
+            debug_info["novel_trigram_ratio"] = float(novel_trigram_ratio)
+            debug_info["_domain_threshold"] = float(domain_threshold)
+            debug_info["_reject_boundary"] = float(reject_boundary)
+            debug_info["_distance_to_safe"] = float(dist)
+            debug_info["_is_inquiry"] = bool(is_inquiry)
+            debug_info["_is_learning"] = bool(is_learning)
+            try:
+                debug_info["_is_natural_lang_text"] = bool(is_natural_lang_text)
+            except NameError:
+                pass
+            try:
+                debug_info["_binary_penalty_active"] = bool(_binary_penalty_active)
+            except NameError:
+                pass
+            try:
+                debug_info["medium_anomaly_threshold"] = float(medium_anomaly_threshold)
+            except NameError:
+                pass
+            try:
+                debug_info["reject_threshold_used"] = float(reject_threshold)
+            except NameError:
+                pass
+            try:
+                debug_info["effective_threshold_low"] = float(effective_threshold)
+            except NameError:
+                pass
+
             if dist <= domain_threshold * 0.6:
                 debug_info["domain_familiarity"] = "high"
                 debug_info["decision_reason"] = "input_matches_known_domain"
@@ -1131,36 +1315,41 @@ class EndogenousDomainAwareness:
         return decision, feat, trust, float(dist)
 
     def _nearest_prototype(self, feat: np.ndarray) -> Tuple[float, int]:
-        """查找最近原型，返回(距离, 原型索引)。"""
-        if len(self.prototypes) == 0:
-            return 2.0, -1
+        """查找最近原型，返回(距离, 原型索引)。
 
-        feat_norm = self._normalize(feat)
+        线程安全：通过 _state_lock 保护 prototypes 读取与 prototype_hit_counts 自增，
+        避免并发 spawn/merge 导致的索引越界与向量损坏（P0-2 / P1-4）。
+        """
+        with self._state_lock:
+            if len(self.prototypes) == 0:
+                return 2.0, -1
 
-        if self._proj_matrix is not None:
-            proj_feat = feat_norm @ self._proj_matrix
-            proj_feat = self._normalize(proj_feat)
-            current_version = len(self.prototypes)
-            if self._proj_protos_cache is None or self._proj_protos_version != current_version:
-                proj_protos = self.prototypes @ self._proj_matrix
-                proj_norms = np.linalg.norm(proj_protos, axis=1, keepdims=True) + 1e-12
-                self._proj_protos_cache = proj_protos / proj_norms
-                self._proj_protos_version = current_version
-            sim = self._proj_protos_cache @ proj_feat
-        else:
-            sim = self.prototypes @ feat_norm
+            feat_norm = self._normalize(feat)
 
-        best_idx = int(np.argmax(sim))
-        if 0 <= best_idx < len(self.prototype_hit_counts):
-            self.prototype_hit_counts[best_idx] += 1
-        best_sim = float(sim[best_idx])
-        dist = 1.0 - best_sim
+            if self._proj_matrix is not None:
+                proj_feat = feat_norm @ self._proj_matrix
+                proj_feat = self._normalize(proj_feat)
+                current_version = len(self.prototypes)
+                if self._proj_protos_cache is None or self._proj_protos_version != current_version:
+                    proj_protos = self.prototypes @ self._proj_matrix
+                    proj_norms = np.linalg.norm(proj_protos, axis=1, keepdims=True) + 1e-12
+                    self._proj_protos_cache = proj_protos / proj_norms
+                    self._proj_protos_version = current_version
+                sim = self._proj_protos_cache @ proj_feat
+            else:
+                sim = self.prototypes @ feat_norm
 
-        noise_std = self.config.prototype_distance_noise
-        if noise_std > 0:
-            dist += self._rng.normal(0, noise_std)
+            best_idx = int(np.argmax(sim))
+            if 0 <= best_idx < len(self.prototype_hit_counts):
+                self.prototype_hit_counts[best_idx] += 1
+            best_sim = float(sim[best_idx])
+            dist = 1.0 - best_sim
 
-        return float(max(0.0, dist)), best_idx
+            noise_std = self.config.prototype_distance_noise
+            if noise_std > 0:
+                dist += self._rng.normal(0, noise_std)
+
+            return float(max(0.0, dist)), best_idx
 
     def _init_projection(self) -> Optional[np.ndarray]:
         """初始化高维随机投影矩阵，模糊原型空间边界。"""
@@ -1412,11 +1601,32 @@ class EndogenousDomainAwareness:
 
         滑动窗口增强：当文本较长时，良性上下文可能稀释攻击密度。
         滑动窗口在局部区域查找攻击模式，取全局和局部的最大攻击密度。
+
+        冷启动稳健性（修复系统性误报根因）：
+        ────────────────────────────────────────────────────────────
+          出厂 warmup 只有 8 条攻击短种子 + 25 条安全短句子。
+          样本量严重不足时，统计分布完全失真：
+            - 常见英文 4-gram 在 domain_profile 中出现率为 0 → 被误标"罕见"
+            - 常见英文 4-gram 在 rejected_profile 中存在（攻击种子也用正常英文）
+            → 任何正常英文都会触发 fourgram_signal=+0.6（顶格上限）
+          因此引入双门槛：
+            ① 拒绝样本数 ≥ cfg.fourgram_min_rejected_samples（默认 50）
+            ② 域内已学习字符 4-gram 种类数 ≥ 500
+          否则直接返回 0，等统计数据具有可信度后再启用。
         """
         if not text or not self._domain_char_fourgram_profile or len(text) < 4:
             return 0.0
 
         if not self._rejected_fourgram_profile:
+            return 0.0
+
+        # ── 冷启动双门槛（修复系统性误报根因） ──
+        cfg = self.config
+        min_rejected = int(getattr(cfg, "fourgram_min_rejected_samples", 50))
+        if self._rejected_fourgram_count < min_rejected:
+            return 0.0
+        # 域内 4-gram 种类数太少，同样关闭（常见英文组合会被误判为罕见）
+        if len(self._domain_char_fourgram_profile) < 500:
             return 0.0
 
         input_fourgrams = {}
@@ -1953,90 +2163,103 @@ class EndogenousDomainAwareness:
 
         若候选向量过于分散（高方差），说明它们来自不同语义域，
         不应合并为一个原型，此时选择与现有原型均值距离最远的候选。
+
+        线程安全：在 _state_lock 内修改 prototypes / prototype_hit_counts，
+        并自增 _prototypes_generation 使其他线程持有的陈旧 proto_idx 失效（P0-2 / P1-1）。
         """
-        candidates = np.array(list(self.chaos_nursery), dtype=np.float32)
-        self.chaos_nursery.clear()
+        with self._state_lock:
+            candidates = np.array(list(self.chaos_nursery), dtype=np.float32)
+            self.chaos_nursery.clear()
 
-        if len(candidates) < 2:
-            return
+            if len(candidates) < 2:
+                return
 
-        centroid = np.mean(candidates, axis=0)
-        centroid = self._normalize(centroid)
-        similarities = np.dot(candidates, centroid)
-        mean_sim = float(np.mean(similarities))
-        if mean_sim < 0.3:
-            return
+            centroid = np.mean(candidates, axis=0)
+            centroid = self._normalize(centroid)
+            similarities = np.dot(candidates, centroid)
+            mean_sim = float(np.mean(similarities))
+            if mean_sim < 0.3:
+                return
 
-        if len(self.prototypes) == 0:
-            new_proto = np.mean(candidates, axis=0)
-        else:
-            best_dist = -1.0
-            best_idx = 0
-            proto_mean = np.mean(self.prototypes, axis=0)
-            proto_mean = self._normalize(proto_mean)
-            for i in range(len(candidates)):
-                d = 1.0 - float(np.dot(self._normalize(candidates[i]), proto_mean))
-                if d > best_dist:
-                    best_dist = d
-                    best_idx = i
-            new_proto = candidates[best_idx].copy()
+            if len(self.prototypes) == 0:
+                new_proto = np.mean(candidates, axis=0)
+            else:
+                best_dist = -1.0
+                best_idx = 0
+                proto_mean = np.mean(self.prototypes, axis=0)
+                proto_mean = self._normalize(proto_mean)
+                for i in range(len(candidates)):
+                    d = 1.0 - float(np.dot(self._normalize(candidates[i]), proto_mean))
+                    if d > best_dist:
+                        best_dist = d
+                        best_idx = i
+                new_proto = candidates[best_idx].copy()
 
-        new_proto = self._normalize(new_proto)
-        self.prototypes = np.vstack([self.prototypes, new_proto.reshape(1, -1)])
-        self.prototype_hit_counts = np.append(self.prototype_hit_counts, 0)
+            new_proto = self._normalize(new_proto)
+            self.prototypes = np.vstack([self.prototypes, new_proto.reshape(1, -1)])
+            self.prototype_hit_counts = np.append(self.prototype_hit_counts, 0)
+            # 原型集合发生结构性变更，自增代际号使陈旧 proto_idx 失效（P1-1）
+            self._prototypes_generation += 1
 
-        if len(self.prototypes) > self.config.prototype_max_size:
-            self._merge_prototypes()
+            if len(self.prototypes) > self.config.prototype_max_size:
+                self._merge_prototypes()
 
     def _merge_prototypes(self):
         """合并过于相似的原型，保护低频原型不被淘汰。
 
         合并策略：优先合并最相似的一对，但保护命中次数最少的前10%原型
         （这些可能是新孵化的小众域原型，不应被高频原型吞噬）。
+
+        线程安全：在 _state_lock 内执行（_spawn_prototype 通过 RLock 可重入调用）；
+        合并/删除会改变原型索引布局，结束后自增代际号使陈旧 proto_idx 失效（P1-1）。
         """
-        if len(self.prototypes) <= self.config.prototype_max_size:
-            return
+        with self._state_lock:
+            if len(self.prototypes) <= self.config.prototype_max_size:
+                return
 
-        merge_threshold = 0.85
-        protected_count = max(1, len(self.prototypes) // 10)
-        if len(self.prototype_hit_counts) == len(self.prototypes):
-            protected_indices = set(np.argsort(self.prototype_hit_counts)[:protected_count])
-        else:
-            protected_indices = set()
+            merge_threshold = 0.85
+            protected_count = max(1, len(self.prototypes) // 10)
+            if len(self.prototype_hit_counts) == len(self.prototypes):
+                protected_indices = set(np.argsort(self.prototype_hit_counts)[:protected_count])
+            else:
+                protected_indices = set()
 
-        while len(self.prototypes) > self.config.prototype_max_size:
-            sim_matrix = self.prototypes @ self.prototypes.T
-            np.fill_diagonal(sim_matrix, -1.0)
+            while len(self.prototypes) > self.config.prototype_max_size:
+                sim_matrix = self.prototypes @ self.prototypes.T
+                np.fill_diagonal(sim_matrix, -1.0)
 
-            for p in protected_indices:
-                sim_matrix[p, :] = -1.0
-                sim_matrix[:, p] = -1.0
+                for p in protected_indices:
+                    sim_matrix[p, :] = -1.0
+                    sim_matrix[:, p] = -1.0
 
-            i, j = np.unravel_index(np.argmax(sim_matrix), sim_matrix.shape)
-            best_sim = float(sim_matrix[i, j])
+                i, j = np.unravel_index(np.argmax(sim_matrix), sim_matrix.shape)
+                best_sim = float(sim_matrix[i, j])
 
-            if best_sim < merge_threshold:
-                candidates = []
-                for idx in range(len(self.prototypes)):
-                    if idx not in protected_indices:
-                        max_sim = float(np.max(np.delete(sim_matrix[idx], idx)))
-                        candidates.append((idx, max_sim))
+                if best_sim < merge_threshold:
+                    candidates = []
+                    for idx in range(len(self.prototypes)):
+                        if idx not in protected_indices:
+                            max_sim = float(np.max(np.delete(sim_matrix[idx], idx)))
+                            candidates.append((idx, max_sim))
 
-                candidates.sort(key=lambda x: x[1], reverse=True)
-                keep = min(self.config.prototype_max_size, len(self.prototypes))
-                keep_indices = sorted(list(protected_indices) + [c[0] for c in candidates[:keep - len(protected_indices)]])
-                keep_indices = keep_indices[:keep]
-                self.prototypes = self.prototypes[keep_indices]
-                self.prototype_hit_counts = self.prototype_hit_counts[keep_indices]
-                break
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+                    keep = min(self.config.prototype_max_size, len(self.prototypes))
+                    keep_indices = sorted(list(protected_indices) + [c[0] for c in candidates[:keep - len(protected_indices)]])
+                    keep_indices = keep_indices[:keep]
+                    self.prototypes = self.prototypes[keep_indices]
+                    self.prototype_hit_counts = self.prototype_hit_counts[keep_indices]
+                    break
 
-            merged = self._normalize(self.prototypes[i] + self.prototypes[j])
-            merged_hits = self.prototype_hit_counts[i] + self.prototype_hit_counts[j]
-            self.prototypes[i] = merged
-            self.prototype_hit_counts[i] = merged_hits
-            self.prototypes = np.delete(self.prototypes, j, axis=0)
-            self.prototype_hit_counts = np.delete(self.prototype_hit_counts, j)
-            protected_indices = {p - 1 if p > j else p for p in protected_indices if p != j}
+                merged = self._normalize(self.prototypes[i] + self.prototypes[j])
+                merged_hits = self.prototype_hit_counts[i] + self.prototype_hit_counts[j]
+                self.prototypes[i] = merged
+                self.prototype_hit_counts[i] = merged_hits
+                self.prototypes = np.delete(self.prototypes, j, axis=0)
+                self.prototype_hit_counts = np.delete(self.prototype_hit_counts, j)
+                protected_indices = {p - 1 if p > j else p for p in protected_indices if p != j}
+
+            # 索引布局已改变，自增代际号使陈旧 proto_idx 失效（P1-1）
+            self._prototypes_generation += 1
 
     @staticmethod
     def _normalize(v: np.ndarray) -> np.ndarray:
@@ -2363,14 +2586,21 @@ class EndogenousDomainAwareness:
         raise TypeError(f"Unsupported input type: {type(raw_input)}")
 
     def seed_prototype(self, text: str):
-        """播种初始安全域原型。"""
+        """播种初始安全域原型。
+
+        线程安全：通过 _state_lock 保护 prototypes / prototype_hit_counts 的写入，
+        并自增代际号使陈旧 proto_idx 失效（P0-2 / P1-1）。
+        """
         feat = self._input_to_vector(text)
         feat = self._normalize(feat)
-        if len(self.prototypes) == 0:
-            self.prototypes = feat.reshape(1, -1)
-        else:
-            self.prototypes = np.vstack([self.prototypes, feat.reshape(1, -1)])
-        self.prototype_hit_counts = np.append(self.prototype_hit_counts, 0)
+        with self._state_lock:
+            if len(self.prototypes) == 0:
+                self.prototypes = feat.reshape(1, -1)
+            else:
+                self.prototypes = np.vstack([self.prototypes, feat.reshape(1, -1)])
+            self.prototype_hit_counts = np.append(self.prototype_hit_counts, 0)
+            # 原型集合发生结构性变更，自增代际号使陈旧 proto_idx 失效（P1-1）
+            self._prototypes_generation += 1
         self._update_domain_char_profile(text)
 
     def _update_domain_char_profile(self, text: str):

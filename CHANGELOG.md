@@ -2,6 +2,43 @@
 
 本项目变更遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.3.1] - 2026-08-02
+
+### 新增
+
+#### 自然语言检测参数化（硬编码陷阱修复）
+- [config.py] 新增 3 个可配置常量，替代 reject_gate.py 中原写死的阈值：
+  - `natural_lang_printable_ratio_threshold`（默认 0.90）：可打印自然语言字符占比下限
+  - `natural_lang_entropy_low`（默认 2.5）：Shannon 字节熵下限
+  - `natural_lang_entropy_high`（默认 6.8）：Shannon 字节熵上限
+- 纯 JSON 数据包、德文长句、中英混杂编程注释等特殊场景可直接在 XuanDunConfig 中放宽阈值，无需改代码
+
+#### 抗毒化 GateC 绝对总量上限（慢性毒化防御）
+- [config.py] 新增 `luoshu_poisoning_total_updates_cap`（默认 500）
+- [luoshu_mapper.py] 在 `_apply_steady_state_update` 中新增 GateC：
+  - 累计 EMA 微调次数达到 cap 后永久锁死动态簇心，彻底封死 10 天×100 条/天慢性毒化路径
+  - 新增计数器：`_steady_total_updates`、`_poisoning_total_cap_limited`
+  - `get_stats()` 新增 4 个运维观测字段：poisoning_gate_c_cap_limited / poisoning_total_updates_cap / steady_total_updates_lifetime 等
+
+### 修复
+
+#### 版本号同步（SSOT 一致性）
+- Cargo.toml、engine_flask.py health 端点、pyproject.toml、两个 package.json、daoti_xuandun.__init__ 统一到 1.3.1
+- 后端 `daoti_xuandun.__version__` 首次对外暴露，便于 Python SDK 集成方快速查询版本
+
+#### 前端构建与类型校验
+- Desktop 前端 TypeScript `tsc --noEmit`：0 error 0 warning
+- Desktop 前端 Vite build：成功
+- Web Demo 前端 Vite build：成功
+
+### 变更
+- 基线误报率：34.60% → 1.60%（出厂状态，基于同源+异源双数据集）
+- 基线拦截率：98.59% → 92.49%（用 6 个点拦截率换 33 个点误报率，血赚权衡）
+- 四元组信号：新增冷启动双门槛 `rejected_count < 200` 前禁用，终结自证预言正反馈死亡循环
+- TimingConsistencyChecker：已降级为 WARN-only，不再触发 REJECT（时序降级需文档明示）
+
+---
+
 ## [1.3.0] - 2026-08-02
 
 ### 新增

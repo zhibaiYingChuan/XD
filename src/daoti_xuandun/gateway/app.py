@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="玄盾 AI 安全网关",
     description="多模型 AI 安全网关 — 反向代理模式（Sprint 2b MVP）",
-    version="1.3.0",
+    version="1.3.1",
     lifespan=lifespan,
 )
 
@@ -157,7 +157,7 @@ async def health() -> dict[str, Any]:
 
     return {
         "status": status,
-        "version": "1.3.0",
+        "version": "1.3.1",
         "uptime": int(time.time() - _START_TIME),
         "models_count": models_count,
     }

@@ -104,6 +104,42 @@ class XuanDunConfig:
     luoshu_confidence_borderline_attack: float = 0.35  # 攻击距离在此区间时降低语言特征权重
     luoshu_confidence_borderline_weight: float = 0.5   # 边界区域语言特征权重
 
+    # 洛书三阶段自适应学习策略（出厂→影子缓冲→稳态微调）
+    # — 出厂阶段(A)：仅使用静态 benign_v1.npy，不做任何在线写入
+    # — 影子缓冲阶段(B)：前 N 条用户流量写入 Shadow Buffer，仅用于计算领域偏移校正查询向量
+    # — 稳态阶段(C)：达到阈值后，以低学习率对动态簇心做 EMA 微调
+    luoshu_shadow_buffer_offset_ratio: float = 0.3   # B阶段 领域偏移校正倍率（原写死0.3，现可外部调参）
+    luoshu_shadow_buffer_capacity: int = 200          # Shadow Buffer 最大容量（deque maxlen）
+    luoshu_shadow_update_every: int = 10              # B阶段 每收到多少条就重算一次领域偏移
+    luoshu_shadow_min_for_shift: int = 50             # B阶段 Shadow Buffer 至少累积多少条才首次启用校正
+    luoshu_phase_c_start_count: int = 1000            # 累计学习样本 ≥ 此值 进入稳态 C 阶段
+    luoshu_steady_state_learning_rate: float = 0.01   # C阶段 EMA 微调学习率（极低防抖动）
+    # 抗毒化（Anti-Poisoning）保护：
+    #   要加入动态安全原型的向量，若与已有攻击原型的最近距离 < 此阈值，视为“伪装良性毒化样本”，拒绝学习
+    #   0.0 = 关闭  →  1.0 = 任何近邻都拒绝  →  推荐 0.80~0.92 之间
+    luoshu_poisoning_similarity_threshold: float = 0.88
+    # 四元组攻击相似度冷启动门槛
+    # 出厂 warmup 只有 8 条攻击短种子 + 25 条安全句子，统计严重失真
+    # 拒绝样本 < 此值 或 域内 4-gram 种类数 < 500 时禁用 fourgram_signal，防系统性误报
+    # 同时需配合"仅真攻击信号触发才更新 rejected_fourgram_profile"机制，防止正反馈循环
+    fourgram_min_rejected_samples: int = 200
+
+    # ── 合法自然语言豁免边界参数（原写死在_is_natural_language_text中的硬编码）──
+    #   防止纯JSON数据包、德文长句、中英混杂编程注释等跳出[2.5,6.8]区间导致豁免失效
+    #   出厂默认值针对中文+英文优化，其他语域可在部署时调整
+    natural_lang_printable_ratio_threshold: float = 0.90  # 可打印自然语言字符占比 ≥ 此值才判定为自然语言
+    natural_lang_entropy_low: float = 2.5                # Shannon字节熵下限（低于此值视为：全重复字符/压缩前报文）
+    natural_lang_entropy_high: float = 6.8               # Shannon字节熵上限（高于此值视为：Base64/Hex/加密编码）
+
+    # 抗毒化保护：稳态EMA微调 总更新次数绝对上限
+    #   脉冲式攻击（1000条×1天）由 _steady_updates_in_window 防住
+    #   慢性式攻击（100条×10天×3个簇心/天 = 30天后毒化成功）由此绝对上限防住
+    #   默认 500 次：出厂 50 静态簇心 × 10 次/簇心的微调余量，用完后永久锁死动态簇心不再接受在线学习
+    luoshu_poisoning_total_updates_cap: int = 500
+
+    # 抗毒化保护：单个稳态周期（T=100条）内最多允许更新多少个原型簇心，防止批量注入短期覆盖全局
+    luoshu_poisoning_max_updates_per_hundred: int = 3
+
     # 时序一致性校验
     enable_timing_check: bool = True
     max_window_size: int = 32
@@ -169,6 +205,9 @@ class XuanDunConfig:
                 self.shell_key = env_key.encode("utf-8")
             else:
                 import sys
+                # P1-1 修复：生产环境强制要求安全密钥，禁止使用 fallback key
+                if os.environ.get('XUANDUN_REQUIRE_SECURE_KEY', '') == '1':
+                    raise RuntimeError("Production environment requires secure key, but fallback shell_key is being used")
                 sys.stderr.write("[XuanDun] WARNING: XUANDUN_SHELL_KEY not set, using insecure fallback key\n")
                 self.shell_key = b"daoti_xuandun_16"
         if self.mapping_key is None:
@@ -177,6 +216,9 @@ class XuanDunConfig:
                 self.mapping_key = env_key.encode("utf-8")
             else:
                 import sys
+                # P1-1 修复：生产环境强制要求安全密钥，禁止使用 fallback key
+                if os.environ.get('XUANDUN_REQUIRE_SECURE_KEY', '') == '1':
+                    raise RuntimeError("Production environment requires secure key, but fallback mapping_key is being used")
                 sys.stderr.write("[XuanDun] WARNING: XUANDUN_MAPPING_KEY not set, using insecure fallback key\n")
                 self.mapping_key = b"ancient_map_16b!"
 

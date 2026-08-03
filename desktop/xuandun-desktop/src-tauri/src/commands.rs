@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+// Tauri 2.x: emit方法定义在Emitter trait中，必须显式导入
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use std::sync::Mutex;
 
@@ -106,6 +107,11 @@ pub async fn protect(
     db: State<'_, Database>,
     req: ProtectRequest,
 ) -> Result<ProtectResponse, String> {
+    // GAP-L4-01 修复：空文本防御性校验，避免空文本被误判为"引擎不可达"
+    if req.text.trim().is_empty() {
+        return Err("检测文本不能为空".to_string());
+    }
+
     let (engine_url, is_running) = {
         let s = state.lock().map_err(|e| e.to_string())?;
         (s.get_engine_url(), s.running)
@@ -133,6 +139,9 @@ pub async fn protect(
 
     match result {
         Ok(r) => {
+            // Sprint1-P0-6: SQLite损坏黑洞修复——insert_log失败不再仅eprintln吞掉，
+            // 派发xuandun:db_corrupt全局事件到前端，显示顶层红色横幅告知用户
+            // 数据库损坏（可能需要重启/重装），避免日志静默丢失
             if let Err(e) = db.insert_log(
                 safe_preview(&req.text, 50),
                 r.allowed,
@@ -144,6 +153,12 @@ pub async fn protect(
                 r.domain_distance,
             ) {
                 eprintln!("[xuandun] insert_log failed: {}", e);
+                let err_msg = format!("insert_log: {}", e);
+                let _ = app.emit("xuandun:db_corrupt", serde_json::json!({
+                    "operation": "insert_log",
+                    "error": err_msg,
+                    "hint": "本地数据库可能损坏，建议重启应用或重置数据目录"
+                }));
             }
             {
                 let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -155,8 +170,15 @@ pub async fn protect(
                     .title("道体·玄盾 - 攻击拦截")
                     .body(&format!("检测到恶意输入，信任等级: {}", r.trust_level))
                     .show();
+                // Sprint1-P0-6: 同样对insert_audit失败派发DB_CORRUPT
                 if let Err(e) = db.insert_audit("block", &format!("trust_level={}", r.trust_level)) {
                     eprintln!("[xuandun] insert_audit(block) failed: {}", e);
+                    let err_msg = format!("insert_audit: {}", e);
+                    let _ = app.emit("xuandun:db_corrupt", serde_json::json!({
+                        "operation": "insert_audit",
+                        "error": err_msg,
+                        "hint": "本地数据库可能损坏，建议重启应用或重置数据目录"
+                    }));
                 }
                 let alert_body = serde_json::json!({
                     "event_type": "block",
@@ -170,7 +192,10 @@ pub async fn protect(
                 });
                 let alert_engine_url = engine_url.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = engine_post(&alert_engine_url, "/alert/dispatch", alert_body).await;
+                    // P1-6 修复：fire-and-forget 不再静默吞错，记录失败日志便于排障
+                    if let Err(e) = engine_post(&alert_engine_url, "/alert/dispatch", alert_body).await {
+                        eprintln!("[XuanDun] alert dispatch failed: {}", e);
+                    }
                 });
             }
             Ok(ProtectResponse {
@@ -233,11 +258,6 @@ pub async fn set_mode(
         eprintln!("[xuandun] insert_audit(mode_change) failed: {}", e);
     }
     Ok(())
-}
-
-#[tauri::command]
-pub async fn discover_agents() -> Result<Vec<crate::agent_discovery::AgentInfo>, String> {
-    crate::agent_discovery::discover().await
 }
 
 #[tauri::command]
@@ -413,8 +433,8 @@ pub async fn get_dual_layer_stats(state: State<'_, Mutex<EngineState>>) -> Resul
         let s = state.lock().map_err(|e| e.to_string())?;
         (s.get_engine_url(), s.running)
     };
+    // 引擎未运行时返回空状态，保持前端字段完整性
     if !is_running {
-        // 引擎未运行时返回空状态，保持前端字段完整性
         return Ok(serde_json::json!({
             "enabled": false,
             "outer_gate": {
@@ -429,7 +449,47 @@ pub async fn get_dual_layer_stats(state: State<'_, Mutex<EngineState>>) -> Resul
             }
         }));
     }
-    engine_get(&engine_url, "/dual-layer/stats").await
+
+    // 尝试调用引擎的/dual-layer/stats端点
+    // 引擎exe（v1.2.3）可能不支持此端点，404时从/status提取基本信息
+    match engine_get(&engine_url, "/dual-layer/stats").await {
+        Ok(data) => Ok(data),
+        Err(_) => {
+            // 引擎不支持/dual-layer/stats，从/status提取信息组装默认状态
+            let status = engine_get(&engine_url, "/status").await.unwrap_or(serde_json::json!({}));
+            let total_requests = status.get("total_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total_blocked = status.get("total_blocked").and_then(|v| v.as_u64()).unwrap_or(0);
+            let block_rate = status.get("block_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let learning_mode = status.get("learning_mode").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+            Ok(serde_json::json!({
+                "enabled": true,
+                "note": "引擎版本不支持/dual-layer/stats端点，以下为从/status提取的汇总数据",
+                "engine_version": status.get("version").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                "learning_mode": learning_mode,
+                "outer_gate": {
+                    "total": total_requests,
+                    "rejects": total_blocked,
+                    "passes": total_requests.saturating_sub(total_blocked),
+                    "forwards": total_requests.saturating_sub(total_blocked),
+                    "reject_rate": block_rate,
+                    "pass_rate": if total_requests > 0 { 1.0 - block_rate } else { 0.0 },
+                    "forward_rate": if total_requests > 0 { 1.0 - block_rate } else { 0.0 },
+                    "avg_latency_ms": 0.0,
+                    "learned_attack_count": 0,
+                    "learned_safe_count": status.get("sample_count").and_then(|v| v.as_u64()).unwrap_or(0)
+                },
+                "inner_gate": {
+                    "total": total_requests,
+                    "rejects": total_blocked,
+                    "passes": total_requests.saturating_sub(total_blocked),
+                    "learning_events": 0,
+                    "reject_rate": block_rate,
+                    "avg_latency_ms": 0.0
+                }
+            }))
+        }
+    }
 }
 
 // ── 企业级运维：逃生通道 + 灰度部署 ──
@@ -802,4 +862,15 @@ pub async fn test_notifier(
     };
     let body = serde_json::json!({ "channel": channel, "config": config });
     engine_post(&engine_url, "/notifiers/test", body).await
+}
+
+// Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令
+// 前端每10s调用一次，3s超时快速失败。用于快速检测Tauri IPC桥接是否仍然存活，
+// 避免桥接析构后各组件散落报错无法统一处理。返回ok=true + 当前时间戳
+#[tauri::command]
+pub fn noop_heartbeat() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "ok": true,
+        "ts": chrono::Utc::now().timestamp_millis()
+    }))
 }

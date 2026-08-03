@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 use once_cell::sync::Lazy;
 
@@ -49,6 +49,9 @@ pub struct EngineState {
     started_at: Option<Instant>,
     engine_url: String,
     child_pid: Option<u32>,
+    // P0-5 修复：存储 ChildHandle，替代 std::mem::forget
+    // P1-A 修复：已实现 Drop trait（见下方 impl Drop），drop 时自动 kill+wait 回收子进程
+    child_handle: Option<std::process::Child>,
 }
 
 impl EngineState {
@@ -63,6 +66,7 @@ impl EngineState {
             started_at: None,
             engine_url: "http://localhost:18765".to_string(),
             child_pid: None,
+            child_handle: None,
         }
     }
 
@@ -92,10 +96,33 @@ impl EngineState {
     }
 }
 
+// P1-A 修复：实现 Drop trait，确保引擎子进程被 kill + wait 回收
+// 原 EngineState 第 52-53 行注释声称"由 Drop 自动 wait 回收"，但实际未实现 Drop trait
+// std::process::Child 的默认 Drop 只关闭 stdin/stdout/stderr handle，不会调用 kill() 或 wait()
+// 不实现 Drop 会导致：应用退出时引擎子进程成为孤儿进程继续运行，退出后成为僵尸进程
+impl Drop for EngineState {
+    fn drop(&mut self) {
+        // take() 取出 child_handle，避免 Drop 重复执行
+        if let Some(mut child) = self.child_handle.take() {
+            // kill() 发送终止信号，wait() 回收子进程资源
+            // 两个操作都用 let _ = 忽略错误，避免 Drop 中 panic（Drop 中 panic 会导致双 panic）
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 pub async fn send_protect_request(engine_url: &str, text: &str, session: &str, mode: &str) -> Result<ProtectResult, String> {
     let url = format!("{}/protect", engine_url);
     let body = serde_json::json!({ "text": text, "session": session, "mode": mode });
-    let resp = HTTP_CLIENT.post(&url).json(&body).send().await.map_err(|e| format!("Engine request failed: {}", e))?;
+    // P0-1 修复：protect 冷启动最坏 28s（拒绝门四元组+KMeans初始化），使用 30s 独立超时
+    // 原继承 HTTP_CLIENT 5s 默认超时，与前端 PROTECT_COLD=35s 冲突，冷启动场景必然失败
+    let resp = HTTP_CLIENT.post(&url)
+        .json(&body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Engine request failed: {}", e))?;
     // P1修复：必须检查HTTP状态码，否则引擎返回500时会尝试解析错误响应为JSON导致解析失败
     let status = resp.status();
     if !status.is_success() {
@@ -121,8 +148,28 @@ pub async fn sync_mode_to_engine(engine_url: &str, mode: &str) -> Result<(), Str
     let body = serde_json::json!({ "mode": mode });
     let resp = HTTP_CLIENT.post(&url).json(&body).send().await
         .map_err(|e| format!("Sync mode failed: {}", e))?;
+
+    // 引擎set-mode可能在加载新模式检测器时抛异常返回500，但mode状态已更新
+    // 修复：HTTP失败时不直接报错，而是查询引擎/status确认实际模式
     if !resp.status().is_success() {
-        return Err("Failed to sync mode".to_string());
+        // 容错：等待引擎处理完模式切换，然后查询实际模式
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match engine_get(engine_url, "/status").await {
+            Ok(status) => {
+                let actual_mode = status.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                if actual_mode == mode {
+                    // 引擎实际已切换到目标模式，视为成功
+                    return Ok(());
+                }
+                return Err(format!(
+                    "引擎模式同步失败：期望={}，实际={}（HTTP {}）",
+                    mode, actual_mode, resp.status().as_u16()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("Sync mode failed (HTTP {}) and status check also failed: {}", resp.status().as_u16(), e));
+            }
+        }
     }
     Ok(())
 }
@@ -151,6 +198,72 @@ pub async fn engine_post(engine_url: &str, path: &str, body: serde_json::Value) 
         return Err(format!("Engine POST {} returned HTTP {}: {}", path, status.as_u16(), body_text));
     }
     resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))
+}
+
+/// 最低引擎版本要求
+/// v1.3.0 引入了 /dual-layer/stats 端点（阴阳门状态），低于此版本将导致：
+/// 1. 阴阳门状态卡片 404 错误
+/// 2. /set-mode 可能在创建新模式 shield 时返回 HTTP 500
+/// 3. 缺少最新的抗毒化 GateC 500 次上限
+const MIN_ENGINE_VERSION: &str = "1.3.0";
+
+/// 语义化版本比较：返回 -1(a<b) / 0(a==b) / 1(a>b)
+fn compare_versions(a: &str, b: &str) -> i32 {
+    let parse = |s: &str| -> Vec<u32> {
+        s.split('.').filter_map(|p| p.parse().ok()).collect()
+    };
+    let va = parse(a);
+    let vb = parse(b);
+    for i in 0..va.len().max(vb.len()) {
+        let na = *va.get(i).unwrap_or(&0);
+        let nb = *vb.get(i).unwrap_or(&0);
+        if na != nb {
+            return if na < nb { -1 } else { 1 };
+        }
+    }
+    0
+}
+
+/// 检查引擎版本是否满足最低要求
+/// 返回 Ok(version) 或 Err(warning_msg)
+async fn check_engine_version(engine_url: &str) -> Result<String, String> {
+    let health = engine_get(engine_url, "/health").await
+        .map_err(|e| format!("引擎健康检查失败：{}", e))?;
+    let version = health.get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    if compare_versions(version, MIN_ENGINE_VERSION) < 0 {
+        return Err(format!(
+            "引擎版本过低：当前={}，最低要求={}。旧版本缺少 /dual-layer/stats 端点，请重新打包引擎exe（python build_engine.py）或手动启动最新源码（python engine_flask.py）",
+            version, MIN_ENGINE_VERSION
+        ));
+    }
+    Ok(version.to_string())
+}
+
+/// 标记引擎已运行 + 版本校验（不阻断启动，版本过低仅警告）
+async fn mark_engine_running_and_verify(app: &AppHandle, engine_url: &str, phase: &str) -> Result<(), String> {
+    {
+        let state = app.state::<StdMutex<EngineState>>();
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.running = true;
+        s.healthy = true;
+        s.started_at = Some(Instant::now());
+        s.startup_error = None;
+    }
+    // 版本校验（不阻断启动，仅警告）
+    match check_engine_version(engine_url).await {
+        Ok(ver) => {
+            log_engine(&format!("Engine health check passed ({}, version={})", phase, ver));
+        }
+        Err(warn) => {
+            log_engine(&format!("Engine health check passed ({}) but VERSION WARNING: {}", phase, warn));
+            if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                s.startup_error = Some(warn);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn check_engine_health(engine_url: &str) -> bool {
@@ -202,14 +315,8 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
     // 场景：用户/开发环境已手动启动 python engine_flask.py 监听 18765
     // 此时 sidecar 路径可能不存在（os error 2），但引擎实际可用
     if !is_running && check_engine_health(&engine_url).await {
-        let state = app.state::<StdMutex<EngineState>>();
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        s.running = true;
-        s.healthy = true;
-        s.started_at = Some(Instant::now());
-        s.startup_error = None;
         log_engine("Detected externally running engine (Flask already listening on engine_url)");
-        return Ok(());
+        return mark_engine_running_and_verify(app, &engine_url, "external detection").await;
     }
 
     if is_running {
@@ -234,28 +341,14 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if check_engine_health(&engine_url).await {
-            let state = app.state::<StdMutex<EngineState>>();
-            let mut s = state.lock().map_err(|e| e.to_string())?;
-            s.running = true;
-            s.healthy = true;
-            s.started_at = Some(Instant::now());
-            s.startup_error = None;
-            log_engine("Engine health check passed (phase 1)");
-            return Ok(());
+            return mark_engine_running_and_verify(app, &engine_url, "phase 1").await;
         }
     }
     // 阶段2：10-60秒，每1秒检查一次（等待自解压完成或外部引擎启动）
     for i in 0..50 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if check_engine_health(&engine_url).await {
-            let state = app.state::<StdMutex<EngineState>>();
-            let mut s = state.lock().map_err(|e| e.to_string())?;
-            s.running = true;
-            s.healthy = true;
-            s.started_at = Some(Instant::now());
-            s.startup_error = None;
-            log_engine(&format!("Engine health check passed (phase 2, attempt {})", i + 1));
-            return Ok(());
+            return mark_engine_running_and_verify(app, &engine_url, &format!("phase 2, attempt {}", i + 1)).await;
         }
     }
 
@@ -391,10 +484,10 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
                 });
             }
 
-            std::mem::forget(child);
-
+            // P0-5 修复：存储 ChildHandle 替代 forget，EngineState drop 时自动回收
             if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                 s.child_pid = Some(pid);
+                s.child_handle = Some(child);
             }
             log_engine(&format!("Engine spawned, pid={}", pid));
             return Ok(());
@@ -429,9 +522,10 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
                     }
                 });
             }
-            std::mem::forget(child);
+            // P0-5 修复：存储 ChildHandle 替代 forget
             if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                 s.child_pid = Some(pid);
+                s.child_handle = Some(child);
             }
             log_engine(&format!("Engine spawned, pid={}", pid));
             return Ok(());
@@ -525,13 +619,16 @@ pub async fn monitor_engine_health(app: &AppHandle) {
 
         if was_running && !healthy {
             if consecutive_failures >= MAX_FAILURES {
-                eprintln!("[XuanDun] Engine restart failed {} times, giving up", MAX_FAILURES);
+                // P0-6 修复：达到 MAX 后不再重置为 0 继续重试，而是真正放弃并派发事件
+                eprintln!("[XuanDun] Engine restart failed {} times, giving up permanently", MAX_FAILURES);
                 if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                     s.running = false;
                     s.healthy = false;
+                    s.startup_error = Some(format!("引擎连续 {} 次重启失败，已放弃自动重试", MAX_FAILURES));
                 }
-                consecutive_failures = 0;
-                continue;
+                // 派发全局事件通知前端
+                let _ = app.emit("engine-permanently-failed", ());
+                break;
             }
 
             eprintln!("[XuanDun] Engine health check failed, attempting restart ({}/{})...",
@@ -660,5 +757,72 @@ mod tests {
         let _ = safe_preview(text, 3);
         let _ = safe_preview(text, 4);
         let _ = safe_preview(text, 100);
+    }
+
+    // P1-A TDD：Drop trait 测试用例
+    #[test]
+    fn test_drop_no_panic_when_child_handle_is_none() {
+        // 验证 child_handle=None 时 Drop 不 panic
+        let state = EngineState::new();
+        assert!(state.child_handle.is_none());
+        // state 在此作用域结束时 drop，不应 panic
+    }
+
+    #[test]
+    fn test_drop_kills_real_subprocess() {
+        // 验证 Drop 真正 kill 子进程
+        // 启动一个长时间运行的子进程
+        let child = if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+                .spawn()
+                .expect("failed to spawn test subprocess")
+        } else {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("failed to spawn test subprocess")
+        };
+        let pid = child.id();
+
+        // 将子进程 handle 存入 EngineState
+        let mut state = EngineState::new();
+        state.child_handle = Some(child);
+
+        // 验证子进程当前正在运行
+        #[cfg(target_os = "windows")]
+        {
+            use std::process::Command;
+            let output = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                .output()
+                .expect("failed to run tasklist");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains(&pid.to_string()), "subprocess should be running before drop");
+        }
+
+        // state 在此作用域结束时 drop，应 kill + wait 子进程
+        drop(state);
+
+        // 验证子进程已被 kill（给操作系统一点时间回收）
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        #[cfg(target_os = "windows")]
+        {
+            use std::process::Command;
+            let output = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                .output()
+                .expect("failed to run tasklist");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(!stdout.contains(&pid.to_string()), "subprocess should be killed after drop");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Unix: kill -0 检查进程是否存在，返回非零表示进程已不存在
+            let result = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status();
+            assert!(result.is_err() || !result.unwrap().success(), "subprocess should be killed after drop");
+        }
     }
 }

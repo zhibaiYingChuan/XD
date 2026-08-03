@@ -24,7 +24,7 @@
   /* 文字 */
   --text-primary: #E8EDF2;
   --text-secondary: #A0ABB8;
-  --text-tertiary: #6B7A8F;
+  --text-tertiary: #8B9DBD; /* P0-6 修复：同步桌面端，4.8:1 WCAG AA 达标（原 #6B7A8F 仅 3.2:1） */
 
   /* 边框 */
   --border: rgba(255, 255, 255, 0.06);
@@ -377,36 +377,43 @@ button {
   color: var(--text-tertiary);
 }
 
-/* 首页英雄区 */
-.hero {
-  text-align: center;
-  padding: 60px 24px 40px;
+/* P0-3/P0-4 补充：页面标题样式（同步桌面端 .page-header/.page-title） */
+.page-header {
+  margin-bottom: 16px;
+}
+.page-title {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
   position: relative;
-  overflow: hidden;
+  padding-bottom: 10px;
+  margin-bottom: 0;
 }
-
-.hero-title {
-  font-size: 36px;
-  font-weight: 700;
-  background: var(--gradient-primary);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  margin-bottom: 12px;
-}
-
-.hero-subtitle {
-  font-size: 16px;
-  color: var(--text-secondary);
-  max-width: 600px;
-  margin: 0 auto 24px;
-}
-
-.hero-taiji {
+.page-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
   width: 120px;
-  height: 120px;
-  margin: 0 auto 24px;
+  height: 2px;
+  background: var(--gradient-primary);
+  opacity: 0.15;
 }
+
+/* P0-5 补充：屏幕阅读器专用隐藏文本（WCAG 4.1.2） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* P0-3 修复：已删除 hero/hero-title/hero-subtitle/hero-taiji 样式（与桌面端同步清理） */
 
 /* ============ P1 UI/UX 优化 ============ */
 
@@ -530,19 +537,6 @@ button {
   .grid-2, .grid-3, .grid-4 {
     grid-template-columns: 1fr;
   }
-  .hero {
-    padding: 32px 16px 24px;
-  }
-  .hero-title {
-    font-size: 28px;
-  }
-  .hero-subtitle {
-    font-size: 14px;
-  }
-  .hero-taiji {
-    width: 80px;
-    height: 80px;
-  }
   .card {
     padding: 16px;
   }
@@ -554,13 +548,6 @@ button {
 @media (max-width: 480px) {
   .main-content {
     padding: 12px;
-  }
-  .hero-title {
-    font-size: 22px;
-  }
-  .hero-taiji {
-    width: 64px;
-    height: 64px;
   }
   .btn {
     padding: 8px 16px;

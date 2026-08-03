@@ -66,7 +66,8 @@ full_output.txt
 archive/
 
 # Internal development docs (not for public release)
-docs/
+# P1-7+P1-8 修复：使用 docs/* 而非 docs/，使下方白名单 !docs/xxx.md 能正常生效
+docs/*
 !docs/白皮书.md
 !docs/benchmarks.md
 !docs/用户指南.md
@@ -87,6 +88,8 @@ docs/
 !docs/interaction_audit_sprint4.md
 !docs/interaction_audit_sprint5.md
 !docs/release_compliance_sprint4.md
+# P1-7+P1-8 修复：HCSE 治理文件白名单（发布协议必须跟踪）
+!docs/HCSE_RELEASE_PROTOCOL.md
 !docs/product_audit_sprint4.md
 # 优化方案与状态报告（比赛评审需要）
 !docs/project_status_report_v1.3.0.md
@@ -125,6 +128,8 @@ tests/
 
 # Local temporary verification scripts (not for public release)
 _verify_examples.py
+_*.py
+_stress_test.py
 
 # Runtime runtime artifacts
 learning_snapshot.json

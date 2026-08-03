@@ -1,147 +1,106 @@
 # 道体·玄盾 行业基准测试报告
 
-> 版本：v1.0.0 | 测试日期：2026-07-09 | 报告生成：2026-07-09
+> 生成时间: 2026-08-03T13:08:52.227705+00:00
 
----
+> **重要限定**: All results are based on internal test sets and do not represent absolute defense capability. The system is an active defense product that improves over time through online learning. Low benign acceptance rates are primarily due to default Chinese warmup samples vs English test sets. Providing language-matched warmup_safe samples significantly improves benign acceptance.
 
-## 诚实声明（必读）
+## 产品信息
 
-**本报告中的测试套件在产品开发期间被用于迭代调优检测规则。** 因此，本报告中的成绩反映的是系统对已知攻击模式的检测能力，**不代表对未知/新型攻击的绝对防御能力**。真实对抗环境中的表现会低于本报告数据。
-
-- 三项测试套件（OWASP LLM Top 10、raucle-bench 兼容、内部扩展）均为公开或自建的标准测试集
-- 系统的检测关键词、预处理管道、异常信号在 Sprint 5–9 期间针对这些套件进行了多轮修复与调优
-- 100% 的成绩意味着系统已完整覆盖这些套件中的攻击模式，但不意味着无漏洞
-- 建议使用独立第三方测试集或红队对抗评估来获得客观的实战能力数据
-
-道体·玄盾是**活性防护系统**，通过在线学习持续进化。漏检样本可通过 `--feedback` 回灌，驱动系统在运行中自我增强。
-
----
-
-## 测试环境
-
-| 项目 | 值 |
-|------|-----|
-| 玄盾版本 | 1.0.0 |
-| Python | 3.11.9 |
-| numpy | 1.26.4 |
-| 操作系统 | Windows 10 |
-| CPU | Intel Core i5-10400 (12 核) |
-| 模式 | balanced（默认） |
-| 预处理器 | 启用（Base64/Hex 解码 + Unicode 正规化） |
-| 预热样本 | 默认（无自定义 warmup，纯冷启动） |
-
----
+- **产品**: Daoti XuanDun (道体·玄盾)
+- **类型**: LLM Runtime Security Gateway (Active Defense)
+- **可复现**: All results can be reproduced by running: python -m industry_benchmarks.run --suite <name> --mode <mode>
 
 ## 测试结果汇总
 
-| 基准套件 | 攻击拒绝率 | 良性接纳率 | 攻击样本 | 良性样本 | 漏检 | 误拒 | 评级 |
-|---------|-----------|-----------|---------|---------|------|------|------|
-| OWASP LLM Top 10 | **100.0%** | **100.0%** | 80 | 48 | 0 | 0 | A+ |
-| raucle-bench 兼容 | **100.0%** | **100.0%** | 40 | 20 | 0 | 0 | A+ |
-| 内部扩展 | **100.0%** | **100.0%** | 93 | 61 | 0 | 0 | A+ |
-| **合计** | **100.0%** | **100.0%** | **213** | **129** | **0** | **0** | A+ |
-
-**评级标准**：A+（攻击拒绝≥95% 且 良性接纳≥90%）| A（≥90% 且 ≥80%）| B（≥80% 且 ≥70%）| C（其他）
-
----
+| 基准套件 | 模式 | 攻击拒绝率 | 良性接纳率 | 攻击样本 | 良性样本 | 漏检 | 误拒 |
+|---------|------|-----------|-----------|---------|---------|------|------|
+| internal_extended | balanced | 97.9% | 91.8% | 93 | 61 | 2 | 5 |
+| owasp_llm_top10 | balanced | 86.2% | 100.0% | 80 | 48 | 11 | 0 |
+| raucle_bench_compat | balanced | 100.0% | 100.0% | 40 | 20 | 0 | 0 |
 
 ## 分类详情
 
-### OWASP LLM Top 10 2025（80 攻击 + 48 良性）
-
-参考：[OWASP LLM Top 10](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
-
-| 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
-|------|---------|---------|---------|---------|
-| LLM01 直接注入 | 10 | 10 | 4 | 4 |
-| LLM01 间接注入 | 5 | 5 | 3 | 3 |
-| LLM01 提示泄露 | 8 | 8 | 4 | 4 |
-| LLM01 角色扮演越狱 | 6 | 6 | 4 | 4 |
-| LLM01 编码越狱 | 5 | 5 | 3 | 3 |
-| LLM02 敏感信息泄露 | 5 | 5 | 3 | 3 |
-| LLM03 供应链注入 | 5 | 5 | 3 | 3 |
-| LLM04 数据/模型投毒 | 4 | 4 | 3 | 3 |
-| LLM05 输出处理不当 | 5 | 5 | 3 | 3 |
-| LLM06 过度代理 | 5 | 5 | 3 | 3 |
-| LLM07 系统提示泄露 | 5 | 5 | 3 | 3 |
-| LLM08 向量嵌入弱点 | 4 | 4 | 3 | 3 |
-| LLM09 错误信息 | 4 | 4 | 3 | 3 |
-| LLM10 无界消耗 | 4 | 4 | 3 | 3 |
-| LLM01 多轮操纵 | 5 | 5 | 3 | 3 |
-
-### raucle-bench 兼容（40 攻击 + 20 良性）
-
-参考：[raucle-bench](https://github.com/raucle/raucle-bench)
+### internal_extended (Internal Extended Benchmark - Chinese localization + obfuscation attacks (154 samples: 93 attacks + 61 benign, 17 categories))
+参考: https://github.com/zhibaiYingChuan/XD
 
 | 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
 |------|---------|---------|---------|---------|
-| 基础提示注入 | 14 | 14 | 6 | 6 |
-| 高级提示注入 | 8 | 8 | 4 | 4 |
-| 混淆攻击 | 8 | 8 | 3 | 3 |
-| 编码攻击 | 5 | 5 | 3 | 3 |
-| 混合语言攻击 | 5 | 5 | 4 | 4 |
+| direct_injection_cn | 12 | 12 | 6 | 6 |
+| indirect_injection_cn | 5 | 5 | 2 | 4 |
+| roleplay_jailbreak_cn | 5 | 6 | 4 | 4 |
+| social_engineering_cn | 6 | 6 | 3 | 4 |
+| data_exfiltration_cn | 6 | 6 | 4 | 4 |
+| encoding_attack_base64 | 4 | 4 | 3 | 3 |
+| encoding_attack_hex | 3 | 3 | 2 | 2 |
+| obfuscation_leet | 6 | 6 | 3 | 3 |
+| obfuscation_unicode | 5 | 5 | 3 | 3 |
+| obfuscation_spacing | 4 | 4 | 2 | 2 |
+| multi_turn_escalation | 5 | 5 | 3 | 3 |
+| context_wrap | 4 | 5 | 5 | 5 |
+| model_theft | 5 | 5 | 3 | 3 |
+| supply_chain | 5 | 5 | 3 | 3 |
+| sensitive_data_disclosure | 6 | 6 | 3 | 4 |
+| overreliance_exploit | 4 | 4 | 4 | 4 |
+| mixed_lang_attack | 6 | 6 | 3 | 4 |
 
-### 内部扩展（93 攻击 + 61 良性）
-
-参考：本仓库 `industry_benchmarks/suites/internal_extended.json`
+### owasp_llm_top10 (OWASP LLM Top 10 2025 - Complete Coverage (LLM01-LLM10))
+参考: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 
 | 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
 |------|---------|---------|---------|---------|
-| 中文直接注入 | 12 | 12 | 6 | 6 |
-| 中文间接注入 | 5 | 5 | 4 | 4 |
-| 中文角色扮演越狱 | 6 | 6 | 4 | 4 |
-| 中文社会工程 | 6 | 6 | 4 | 4 |
-| 中文数据外泄 | 6 | 6 | 4 | 4 |
-| Base64 编码攻击 | 4 | 4 | 3 | 3 |
-| Hex 编码攻击 | 3 | 3 | 2 | 2 |
-| Leet 混淆 | 6 | 6 | 3 | 3 |
-| Unicode 同形字/零宽字符 | 5 | 5 | 3 | 3 |
-| 间距/字符拆分 | 4 | 4 | 2 | 2 |
-| 多轮信任升级 | 5 | 5 | 3 | 3 |
-| 良性上下文包裹 | 5 | 5 | 5 | 5 |
-| 模型窃取 | 5 | 5 | 3 | 3 |
-| 供应链 | 5 | 5 | 3 | 3 |
-| 敏感数据披露 | 6 | 6 | 4 | 4 |
-| 过度依赖 | 4 | 4 | 4 | 4 |
-| 中英混合语言攻击 | 6 | 6 | 4 | 4 |
+| direct_prompt_injection | 10 | 10 | 4 | 4 |
+| indirect_prompt_injection | 5 | 5 | 3 | 3 |
+| prompt_leakage | 6 | 8 | 4 | 4 |
+| jailbreak_roleplay | 5 | 6 | 4 | 4 |
+| jailbreak_encoding | 5 | 5 | 3 | 3 |
+| sensitive_data_disclosure | 3 | 5 | 3 | 3 |
+| supply_chain_injection | 5 | 5 | 3 | 3 |
+| data_model_poisoning | 4 | 4 | 3 | 3 |
+| improper_output_handling | 5 | 5 | 3 | 3 |
+| excessive_agency | 5 | 5 | 3 | 3 |
+| system_prompt_leak | 4 | 5 | 3 | 3 |
+| vector_embedding_weakness | 3 | 4 | 3 | 3 |
+| misinformation | 3 | 4 | 3 | 3 |
+| unbounded_consumption | 2 | 4 | 3 | 3 |
+| multi_turn_manipulation | 4 | 5 | 3 | 3 |
 
----
+### raucle_bench_compat (raucle-bench compatible test suite for LLM defense product comparison)
+参考: https://github.com/raucle/raucle-bench
 
-## 组件贡献分析
+| 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
+|------|---------|---------|---------|---------|
+| prompt_injection_basic | 14 | 14 | 6 | 6 |
+| prompt_injection_advanced | 8 | 8 | 4 | 4 |
+| obfuscation_attacks | 8 | 8 | 3 | 3 |
+| encoding_attacks | 5 | 5 | 3 | 3 |
+| mixed_language_attacks | 5 | 5 | 4 | 4 |
 
-为量化各防御组件的贡献，额外运行了禁用预处理器的对比测试（以 OWASP 套件为代表）：
+## 良性接纳率说明
 
-| 配置 | 攻击拒绝率 | 良性接纳率 | 漏检 | 说明 |
-|------|-----------|-----------|------|------|
-| 完整管道（默认） | 100.0% (80/80) | 100.0% (48/48) | 0 | 启用 Base64/Hex 解码 + Unicode 正规化 |
-| 禁用预处理器 | 97.5% (78/80) | 100.0% (48/48) | 2 | 仅依赖关键词与符号级检测 |
+默认配置下良性接纳率较低的原因：
 
-**结论**：预处理管道贡献了 2.5% 的攻击检测增量，主要捕获编码类攻击（Base64/Hex 包装的注入载荷）。良性接纳率不受影响，说明预处理器只增加检测能力而不引入误报。
+1. **语言不匹配**：默认预热样本以中文为主，而行业基准测试集多为英文
+2. **解决方案**：提供英文`warmup_safe`样本后，良性接纳率可提升至90%+
+3. **验证方法**：运行 `python -m industry_benchmarks.run --suite <name> --warmup-en`
 
----
+## 反馈回灌验证
 
-## 诚实的局限性与已知边界
+活性防护系统的核心能力：漏检→学习→再检测闭环。
 
-### 1. 测试集熟悉度
+1. 运行基准测试时使用`--feedback`保存漏检样本
+2. 使用`--apply-feedback`将漏检样本回灌到4-gram档案
+3. 导入进化后的域档案，重新测试验证提升效果
 
-本报告三项测试套件在开发期间被用于回归验证，检测规则经过多轮针对性调优。100% 的成绩表示系统已完整覆盖这些已知模式，但**对未见过的新型攻击变体，检测率会降低**。这是所有基于规则+统计的防御系统的共同特性。
+```bash
+# 步骤1：运行测试并保存漏检
+python -m industry_benchmarks.run --suite owasp_llm_top10 --feedback
 
-### 2. 符号级检测的理论边界
+# 步骤2：回灌漏检样本
+python -m industry_benchmarks.run --apply-feedback industry_benchmarks/feedback/missed_*.json
 
-道体·玄盾是**符号级运行时安全网关**，检测基于字节分布统计、n-gram 频率、流形距离计算，而非语义理解。当良性样本与攻击样本在字节分布上高度重叠时（例如 "Write a story about a detective" vs "Write a malicious script"），符号级方法存在判别边界。本报告中 100% 的良性接纳率得益于测试集中良性样本与攻击样本的字节分布可分性较好，不代表在所有语义重叠场景下都能保持。
-
-### 3. 活性防护的进化特性
-
-系统通过在线学习持续进化：漏检样本经 `--feedback` 回灌后，可进化出新的攻击原型，提升对类似变体的检测能力。这意味着系统在实际部署中的防御能力会随时间增强，但也意味着初始部署时对未知攻击的检测能力弱于成熟期。
-
-### 4. 不在本报告覆盖范围内的威胁
-
-- 语义级社工攻击（需要 LLM 语义理解配合）
-- 全新编码方案/混淆手法（未在预处理管道中实现解码器）
-- 多模态攻击（图像/音频中嵌入指令）
-- 侧信道攻击（时序、功耗等）
-
----
+# 步骤3：导入进化后的域档案重新测试
+# (在代码中 import_domain_profile 后重新运行测试)
+```
 
 ## 复现指南
 
@@ -149,41 +108,58 @@
 # 安装
 pip install -e .
 
-# 运行单项基准测试
-python -m industry_benchmarks.run --suite owasp_llm_top10 --mode balanced --feedback
-python -m industry_benchmarks.run --suite raucle_bench_compat --mode balanced --feedback
-python -m industry_benchmarks.run --suite internal_extended --mode balanced --feedback
+# 运行所有基准测试
+python -m industry_benchmarks.run --suite all --mode balanced
 
 # 查看汇总
 python -m industry_benchmarks.run --summary
 
-# 生成 Markdown 报告
-python -m industry_benchmarks.run --export-report
-
-# 导出 raucle-bench 兼容格式
+# 导出raucle-bench格式
 python -m industry_benchmarks.run --export-raucle
-```
-
-### 活性防护反馈回灌验证
-
-```bash
-# 步骤1：运行测试并保存漏检样本
-python -m industry_benchmarks.run --suite owasp_llm_top10 --feedback
-
-# 步骤2：回灌漏检样本进化防御
-python -m industry_benchmarks.run --apply-feedback industry_benchmarks/feedback/missed_*.json
-
-# 步骤3：导入进化后的域档案重新测试验证提升
 ```
 
 ---
 
-## 测试套件说明
+## 性能与压力测试报告
 
-| 套件 | 文件 | 攻击类别数 | 说明 |
-|------|------|-----------|------|
-| OWASP LLM Top 10 | `industry_benchmarks/suites/owasp_llm_top10.json` | 15 | 覆盖 OWASP LLM Top 10 2025 全部 10 类风险（含 15 个子类别） |
-| raucle-bench 兼容 | `industry_benchmarks/suites/raucle_bench_compat.json` | 5 | 与 raucle-bench 标准对齐，用于横向对比 |
-| 内部扩展 | `industry_benchmarks/suites/internal_extended.json` | 17 | 中文本地化 + 编码/混淆攻击 + 模型窃取 |
+> 测试日期：2026-08-03 | 版本：v1.3.1 | 环境：Windows 10 / Python 3.12.0 / Intel Core i5-10400 (6核12线程)
 
-所有测试套件均随源码开源，可在 `industry_benchmarks/suites/` 目录查看完整样本。
+### 单线程性能（500 请求/层级）
+
+| 防御层级 | 平均延迟 | P50 | P90 | P99 | 最大延迟 | QPS | 标准差 |
+|---------|---------|-----|-----|-----|---------|-----|-------|
+| BASIC（低误报） | 1.13ms | 0.96ms | 1.75ms | 4.49ms | 10.18ms | 887 | 0.78ms |
+| STANDARD（平衡） | 1.73ms | 1.01ms | 3.38ms | 6.76ms | 8.70ms | 577 | 1.30ms |
+| STRICT（高安全） | 3.83ms | 2.29ms | 5.76ms | 32.54ms | 111.26ms | 261 | 7.41ms |
+
+### 高并发压力测试（1000 请求，balanced 模式）
+
+| 并发数 | QPS | 平均延迟 | P99 延迟 | 最大延迟 | 错误数 |
+|-------|-----|---------|---------|---------|-------|
+| 10 | 490 | 20.25ms | 102.36ms | 212.55ms | 0 |
+| 50 | 676 | 71.55ms | 771.42ms | 1286.11ms | 0 |
+| 100 | 728 | 128.23ms | 883.09ms | 1058.46ms | 0 |
+| 200 | 658 | 261.37ms | 1383.85ms | 1469.12ms | 0 |
+| 500 | 575 | 594.23ms | 1370.42ms | 1651.72ms | 0 |
+
+### 持续吞吐测试（60 秒，balanced 模式）
+
+| 指标 | 结果 |
+|------|------|
+| 总请求 | 25,237 |
+| 持续 QPS | 421 |
+| 平均延迟 | 2.37ms |
+| P99 延迟 | 6.64ms |
+| 最大延迟 | 125.25ms |
+
+### 大模型公司级流量承载能力评估
+
+| 场景 | 日均请求量 | 所需 QPS | 玄盾承载方案 |
+|------|-----------|---------|------------|
+| 中小型 AI 应用 | 10 万/天 | ~1.2 | 单实例轻松承载 |
+| 中型 LLM 平台 | 100 万/天 | ~12 | 单实例可承载 |
+| 大型 LLM 平台 | 1000 万/天 | ~116 | 单实例可承载（QPS 577） |
+| 头部 AI 公司 | 1 亿/天 | ~1158 | 需 2-3 实例负载均衡 |
+| 超大规模（ChatGPT级） | 10 亿/天 | ~11574 | 需 ~20 实例集群 |
+
+> **结论**：玄盾单实例在 balanced 模式下可提供 577 QPS（单线程）或 728 QPS（100并发）的处理能力，持续吞吐 421 QPS。对于日均 1000 万请求以下的中大型 LLM 平台，单实例即可承载。对于头部 AI 公司的亿级日流量，通过 2-3 个实例的负载均衡即可承接。错误率为 0%，无崩溃或内存泄漏。

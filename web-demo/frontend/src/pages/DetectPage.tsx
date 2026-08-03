@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, KeyboardEvent } from 'react';
 import { api, ProtectResult } from '../api';
 import {
-  Shield, Zap, Brain, CheckCircle, XCircle, AlertTriangle,
+  Shield, Zap, Brain, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Swords, ShieldCheck, History, Loader2,
 } from 'lucide-react';
 
@@ -197,9 +197,18 @@ export default function DetectPage() {
       {/* 错误提示 */}
       {error && (
         <div className="card result-pulse" style={{ borderColor: 'var(--danger)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--danger)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--danger)', marginBottom: '12px' }}>
             <AlertTriangle size={16} strokeWidth={1.5} />
-            <span>{error}</span>
+            <span style={{ fontWeight: 500 }}>检测失败</span>
+          </div>
+          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px', lineHeight: 1.6 }}>{error}</div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => handleDetect()} disabled={loading || !text.trim()}>
+              <RefreshCw size={14} strokeWidth={1.5} /> 重试
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setError(null)}>
+              关闭
+            </button>
           </div>
         </div>
       )}

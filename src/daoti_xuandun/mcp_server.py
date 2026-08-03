@@ -92,7 +92,7 @@ def _handle_initialize(params: dict) -> dict:
         },
         "serverInfo": {
             "name": "xuandun-mcp-server",
-            "version": "1.0.0",
+            "version": "1.3.1",
         },
     }
 

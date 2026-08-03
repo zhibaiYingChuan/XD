@@ -17,7 +17,7 @@ const navItems = [
 ];
 
 // 应用版本号
-const APP_VERSION = 'v1.3.0';
+const APP_VERSION = 'v1.3.1';
 
 // 太极 Logo SVG 组件（道体·玄盾品牌标识）
 function TaijiLogo({ size = 40 }: { size?: number }) {
@@ -117,7 +117,6 @@ export default function App() {
           <TaijiLogo size={40} />
           <div>
             <div className="sidebar-title">道体·玄盾</div>
-            <div className="sidebar-subtitle">活性防护 LLM 防火墙</div>
           </div>
         </div>
         <nav className="sidebar-nav">

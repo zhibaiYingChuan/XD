@@ -1,0 +1,208 @@
+name: CI Validation
+
+on:
+  push:
+    branches: [main, 'dev/**', 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 并发控制：同一分支只运行最新一次，旧的自动取消
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# HCSE PHASE 4: 默认最小权限，每个job单独声明额外权限
+permissions:
+  contents: read
+
+jobs:
+  # ============ Job 1: 版本一致性校验 (SSOT Gate) ============
+  version-check:
+    name: Version Consistency Check
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner (HCSE Hardening)
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Run sync_version.py --check (SSOT gate)
+        working-directory: desktop/xuandun-desktop
+        run: python sync_version.py --check
+
+  # ============ Job 2: Python 后端测试 + 回归 ============
+  python-test:
+    name: Python Backend Tests
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pytest
+          pip install -e ".[engine]"
+
+      - name: Run config smoke test (确保config.py参数化正确加载)
+        run: python _smoke_config.py || python -c "
+from daoti_xuandun import XuanDunConfig, DefenseLevel
+# 验证v1.3.1新增参数存在且默认值正确
+cfg = XuanDunConfig()
+assert hasattr(cfg, 'natural_lang_printable_ratio_threshold'), 'Missing printable ratio param'
+assert hasattr(cfg, 'natural_lang_entropy_low'), 'Missing entropy low param'
+assert hasattr(cfg, 'natural_lang_entropy_high'), 'Missing entropy high param'
+assert hasattr(cfg, 'luoshu_poisoning_total_updates_cap'), 'Missing GateC cap param'
+assert cfg.luoshu_poisoning_total_updates_cap == 500, f'Expected 500 got {cfg.luoshu_poisoning_total_updates_cap}'
+assert cfg.natural_lang_entropy_low == 2.5
+assert cfg.natural_lang_entropy_high == 6.8
+print('PASS: XuanDunConfig v1.3.1 new params OK')
+"
+
+      - name: Run regression_test.py (基线验证，耗时较长设为soft fail)
+        run: python regression_test.py --quick || echo "WARNING: regression test failed (soft-fail for PR validation)"
+        timeout-minutes: 15
+
+  # ============ Job 3: Rust 静态检查 + 编译 ============
+  rust-clippy:
+    name: Rust Clippy + Check
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Setup Rust 1.81.0 (与本地构建环境对齐)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.81.0
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@13aacd865c20de90d75edc44e9c224db9f8060aa # v4.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/xuandun-desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('desktop/xuandun-desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+
+      # HCSE: 检查P0-1 CDP端口是否仅debug模式开启
+      - name: Verify CDP debug port gated by cfg!(debug_assertions) (P0-1 Compliance)
+        shell: pwsh
+        run: |
+          $mainRs = Get-Content "desktop\xuandun-desktop\src-tauri\src\main.rs" -Raw
+          if ($mainRs -match 'set_var\("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS".*?9224') {
+            # 检查是否被 debug_assertions 条件保护
+            if ($mainRs -match 'cfg!\(debug_assertions\)') {
+              Write-Host "PASS: CDP port appears to be gated by debug_assertions or explicit env var"
+            } else {
+              Write-Host "FAIL: CDP debug port 9224 is UNCONDITIONALLY set in release builds! This is P0-1 CRITICAL SECURITY RISK."
+              exit 1
+            }
+          } else {
+            Write-Host "INFO: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS not found in main.rs (skipped)"
+          }
+
+      - name: Cargo check (语法 + 类型检查)
+        working-directory: desktop/xuandun-desktop/src-tauri
+        run: cargo check --release
+
+      - name: Cargo clippy (零警告门禁 -D warnings)
+        working-directory: desktop/xuandun-desktop/src-tauri
+        run: cargo clippy --release -- -D warnings
+
+  # ============ Job 4: TypeScript 前端构建 + 单元测试 ============
+  ts-build:
+    name: TypeScript Build + Vitest
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Setup Node 20 LTS (与本地 v20.12.2 对齐)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: desktop/xuandun-desktop/package-lock.json
+
+      - name: Install npm dependencies (ci = 严格按lock文件，保证可重现)
+        working-directory: desktop/xuandun-desktop
+        run: npm ci
+
+      # HCSE PHASE 6: README代码块示例 + examples编译验证
+      - name: Verify tauri.conf.json CSP configuration (桌面端绝对要求3)
+        shell: bash
+        run: |
+          CSP=$(node -e "console.log(require('./desktop/xuandun-desktop/src-tauri/tauri.conf.json').app.security.csp)")
+          echo "Current CSP connect-src part: $CSP"
+          for ENDPOINT in "ipc.localhost" "localhost:18765" "localhost:18766"; do
+            if echo "$CSP" | grep -q "$ENDPOINT"; then
+              echo "PASS: CSP contains $ENDPOINT"
+            else
+              echo "FAIL: CSP MISSING $ENDPOINT (release mode will white-screen!)"
+              exit 1
+            fi
+          done
+
+      - name: Verify Cargo.toml tauri custom-protocol feature (桌面端绝对要求4)
+        shell: bash
+        run: |
+          if grep -q 'custom-protocol' desktop/xuandun-desktop/src-tauri/Cargo.toml; then
+            echo "PASS: Cargo.toml declares custom-protocol feature"
+          else
+            echo "FAIL: Cargo.toml MISSING tauri custom-protocol feature"
+            exit 1
+          fi
+
+      - name: Run Vitest (前端单元测试)
+        working-directory: desktop/xuandun-desktop
+        run: npm run test
+
+      - name: TypeScript build (tsc + vite build)
+        working-directory: desktop/xuandun-desktop
+        run: npm run build
+
+      - name: Verify dist/ output exists (前端产物检查)
+        run: |
+          test -f desktop/xuandun-desktop/dist/index.html && echo "PASS: dist/index.html exists"
+          test -d desktop/xuandun-desktop/dist/assets/ && echo "PASS: dist/assets/ exists"

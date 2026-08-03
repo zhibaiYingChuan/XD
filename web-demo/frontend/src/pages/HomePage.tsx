@@ -28,29 +28,10 @@ export default function HomePage() {
 
   return (
     <div className="fade-in">
-      {/* 英雄区 */}
-      <div className="hero">
-        <div className="hero-taiji taiji-spin">
-          <svg viewBox="0 0 100 100" width="100%" height="100%">
-            <defs>
-              <linearGradient id="heroGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#2B5FD7" />
-                <stop offset="100%" stopColor="#00D4AA" />
-              </linearGradient>
-            </defs>
-            <circle cx="50" cy="50" r="48" fill="none" stroke="url(#heroGrad)" strokeWidth="2" />
-            <path d="M50 2 A48 48 0 0 1 50 98 A24 24 0 0 0 50 50 A24 24 0 0 1 50 2" fill="url(#heroGrad)" opacity="0.9" />
-            <path d="M50 2 A48 48 0 0 0 50 98 A24 24 0 0 1 50 50 A24 24 0 0 0 50 2" fill="#0B0E14" opacity="0.9" />
-            <circle cx="50" cy="26" r="6" fill="#0B0E14" />
-            <circle cx="50" cy="74" r="6" fill="#00D4AA" />
-          </svg>
-        </div>
-        <h1 className="hero-title">道体·玄盾</h1>
-        <p className="hero-subtitle">
-          活性防护 LLM 防火墙 — 基于拒绝门理论 + 洛书映射器 + 动态阴阳壳架构，
-          为 AI 应用提供数据驱动的动态安全防护
-        </p>
-        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
+      {/* P0-3 修复：已删除 hero 区 JSX，与桌面端同步清理，改用 page-header 风格 */}
+      <div className="page-header" style={{ textAlign: 'center', padding: '24px 0' }}>
+        <h1 className="page-title">道体·玄盾</h1>
+        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap', marginTop: '16px' }}>
           <Link to="/yinyang" className="btn btn-primary">
             <Play size={16} strokeWidth={1.5} /> 一键演示双层架构
           </Link>
@@ -94,7 +75,7 @@ export default function HomePage() {
             <h3 style={{ fontSize: '15px', fontWeight: 600 }}>阳门 · 快速拒绝</h3>
           </div>
           <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            毫秒级响应，基于规则和已学习模式快速筛选已知攻击。外显于表，动而生阳，以快制快。
+            基于规则和已学习模式快速筛选已知攻击。外显于表，动而生阳，以快制快。
           </p>
         </div>
         <div className="card">

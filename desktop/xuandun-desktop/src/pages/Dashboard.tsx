@@ -1,69 +1,87 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { api, StatusResponse, LogEntry, LearningStatus, TrendPoint, AttackCategoryStat, RealtimeMetrics, ComparisonStats, formatTrustLevel } from '../services/tauriApi';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
-import OnboardingWizard from '../components/OnboardingWizard';
-import { ConfirmModal, useConfirmModal } from '../components/ConfirmModal';
+// 设计系统规范 v2.0：仪表盘图表统一使用克制的深色主题（品牌色+状态色+国风辅助色），禁用高饱和糖果色
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell } from 'recharts';
 import {
-  Plug, Package, FlaskConical, AlertTriangle, Zap, Rocket,
-  ClipboardList, CheckCircle, XCircle, GraduationCap, Lightbulb,
-  Activity, ShieldCheck,
-  type LucideIcon,
+  AlertTriangle, Zap,
+  GraduationCap, Activity, ShieldCheck,
+  TrendingUp, TrendingDown,
 } from 'lucide-react';
 
-// 设计系统规范：图标统一使用lucide-react，strokeWidth=1.5，禁止emoji
-const ICON_MAP: Record<string, LucideIcon> = {
-  plug: Plug,
-  package: Package,
-  flask: FlaskConical,
-  alert: AlertTriangle,
-  zap: Zap,
-  rocket: Rocket,
-  clipboard: ClipboardList,
-  check: CheckCircle,
-  xcircle: XCircle,
-  graduate: GraduationCap,
-  lightbulb: Lightbulb,
+// 设计系统规范 v2.0 §2：图表色板（克制的深色主题，状态色唯一性）
+// 请求=道体蓝、拦截=朱砂红、安全=玄盾青、警告=琥珀金、中性=水墨灰/信息灰
+const CHART = {
+  request: '#2B5FD7',        // 道体蓝（请求/通过）
+  danger: '#E54D4D',         // 朱砂红（拦截/危险）
+  success: '#00D4AA',        // 玄盾青（安全）
+  warning: '#F5A623',        // 琥珀金（警告）
+  info: '#6B7A8F',           // 信息灰（中性/不可用）
+  ink: '#8B9DBD',            // 水墨灰（次要/基线对比）
+  grid: 'rgba(255,255,255,0.06)',   // 规范§2.4 分割线
+  axis: '#A0ABB8',           // 规范§2.4 次级文本（坐标轴刻度）
+  tickLabel: '#E8EDF2',      // 规范§2.4 主要文本（tooltip数值）
+  tooltipBg: '#1C2330',      // 规范§2.4 卡片背景（tooltip底）
+  tooltipBorder: 'rgba(255,255,255,0.08)', // 规范§7.2 输入框边框
+} as const;
+
+// 攻击类型环形图：品牌主色+国风辅助色（规范§2.5 国风辅助色使用比例≤5%，克制不刺眼）
+const PIE_COLORS = [
+  '#2B5FD7', '#00D4AA', '#F5A623', '#D4A853',
+  '#4A7BBF', '#8B9DBD', '#C44A4A', '#6B7A8F',
+];
+
+// 信任等级柱状图：高信任=朱砂红（受检严格）、中信任=琥珀、低信任=玄盾青、其余=信息灰
+const trustBarColor = (name: string): string => {
+  if (name.includes('高')) return CHART.danger;
+  if (name.includes('中')) return CHART.warning;
+  if (name.includes('低')) return CHART.success;
+  return CHART.info;
 };
 
-const ONBOARDING_GUIDES = [
-  {
-    id: 'proxy',
-    icon: 'plug',
-    title: '配置 AI 工具代理',
-    desc: '将玄盾设为 Claude Desktop / Cursor 等 AI 工具的安全代理',
-    steps: [
-      '打开 AI 工具的设置页面，找到网络/代理配置项',
-      '将 HTTP 代理地址设为 127.0.0.1:18765',
-      '或使用 MCP Server 模式：在 Claude Desktop 配置中添加 xuandun_protect 工具',
-      '配置完成后，所有 AI 请求将自动经过玄盾检测',
-    ],
-  },
-  {
-    id: 'sdk',
-    icon: 'package',
-    title: 'SDK 集成到你的服务',
-    desc: '使用 Python SDK 将玄盾集成到 FastAPI / Flask 等应用',
-    steps: [
-      '安装 SDK：pip install daoti-xuandun==1.2.3',
-      '在代码中引入：from daoti_xuandun import XuanDun',
-      '创建实例：shield = XuanDun()  # 默认启用观察模式',
-      '调用检测：result = shield.protect("用户输入")',
-    ],
-  },
-  {
-    id: 'test',
-    icon: 'flask',
-    title: '运行模拟测试',
-    desc: '使用内置 200+ 攻击样本验证防护效果',
-    steps: [
-      '在左侧导航栏点击"模拟测试"',
-      '选择"快速验证"模式，点击"运行测试"',
-      '15 秒内生成拦截率/误报率报告',
-      '确认防护效果后即可正式接入',
-    ],
-  },
-];
+// 设计系统规范 §3.4/§8.2：深色主题自定义Tooltip
+// 背景=卡片色#1C2330、边框=rgba(255,255,255,0.08)、数值=Mono等宽、名称=次级文本
+function DarkTooltip({ active, payload, label }: any) {
+  if (!active || !payload || payload.length === 0) return null;
+  return (
+    <div style={{
+      background: CHART.tooltipBg,
+      border: `1px solid ${CHART.tooltipBorder}`,
+      borderRadius: 8,
+      padding: '10px 14px',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+      fontSize: 12,
+      lineHeight: '20px',
+    }}>
+      {label !== undefined && (
+        <div style={{ color: CHART.tickLabel, fontWeight: 500, marginBottom: 4 }}>{label}</div>
+      )}
+      {payload.map((p: any, i: number) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color || p.payload?.fill || CHART.info, flexShrink: 0 }} />
+          <span style={{ color: CHART.axis }}>{p.name}</span>
+          <span style={{ color: CHART.tickLabel, fontFamily: 'var(--font-family-mono, JetBrains Mono, monospace)' }}>
+            {typeof p.value === 'number' ? p.value.toLocaleString() : p.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 设计系统规范 §8.2：KPI 卡片趋势箭头
+// 正向=玄盾青、负向=朱砂红；invert=true 用于拦截类指标（上涨=风险上升=负向）
+function TrendBadge({ value, invert = false }: { value: number | null; invert?: boolean }) {
+  if (value === null || !isFinite(value) || Math.abs(value) < 0.01) return null;
+  const up = value >= 0;
+  const good = invert ? !up : up;
+  const Icon = up ? TrendingUp : TrendingDown;
+  return (
+    <span className={`stat-trend ${good ? 'trend-good' : 'trend-bad'}`}>
+      <Icon size={12} strokeWidth={2} />
+      {Math.abs(value).toFixed(1)}%
+    </span>
+  );
+}
 
 const TIME_RANGES = [
   { key: '1h', label: '1小时', hours: 1 },
@@ -71,8 +89,6 @@ const TIME_RANGES = [
   { key: '7d', label: '7天', hours: 24 * 7 },
   { key: '30d', label: '30天', hours: 24 * 30 },
 ];
-
-const PIE_COLORS = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#f9ca24', '#6c5ce7', '#a29bfe', '#fd79a8', '#00cec9'];
 
 const ATTACK_CATEGORY_NAMES: Record<string, string> = {
   direct_prompt_injection: '直接提示注入',
@@ -82,6 +98,12 @@ const ATTACK_CATEGORY_NAMES: Record<string, string> = {
   agent_attack: 'Agent攻击',
   data_leakage: '数据泄露',
   other: '其他',
+};
+
+// 环比变化百分比（base 为 0 或无数据时返回 null）
+const pctChange = (cur: number, base: number): number | null => {
+  if (!isFinite(cur) || !isFinite(base) || base === 0) return null;
+  return ((cur - base) / base) * 100;
 };
 
 function isoTimeAgo(hours: number): string {
@@ -107,8 +129,6 @@ interface HistoryPoint {
 }
 
 export default function Dashboard() {
-  const navigate = useNavigate();
-  const { modalProps: confirmModalProps, confirm } = useConfirmModal();
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [recentBlocked, setRecentBlocked] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -122,9 +142,6 @@ export default function Dashboard() {
   const [comparison, setComparison] = useState<ComparisonStats | null>(null);
   // P1-12 修复：趋势数据独立 loading 状态，时间范围切换时仅刷新趋势图表
   const [trendLoading, setTrendLoading] = useState(false);
-  // GAP-06 修复：统一使用 DB config 检查向导完成状态，移除 localStorage 双套机制
-  // 初始设为 false，useEffect 中异步从 DB 读取，避免与 App.tsx 的 wizard_completed 检查冲突
-  const [showWizard, setShowWizard] = useState(false);
   const prevRequests = useRef(0);
   const prevBlocked = useRef(0);
   const fetchingRef = useRef(false);
@@ -135,6 +152,9 @@ export default function Dashboard() {
   const statusSnapshotRef = useRef<StatusResponse | null>(null);
   // R-04 修复：mountedRef 守卫，防止组件卸载后幽灵轮询
   const mountedRef = useRef(true);
+  // P1-5 修复：趋势/实时指标请求序列号，防止快速切换或轮询产生竞态导致旧请求覆盖新数据
+  const trendRequestIdRef = useRef(0);
+  const realtimeRequestIdRef = useRef(0);
 
   const fetchStatus = useCallback(async () => {
     if (fetchingRef.current) return;
@@ -204,11 +224,15 @@ export default function Dashboard() {
     const rangeCfg = TIME_RANGES.find(r => r.key === range) ?? TIME_RANGES[1];
     const start = isoTimeAgo(rangeCfg.hours);
     const end = isoNow();
+    // P1-5 修复：每次请求递增序列号，仅最新请求的结果会更新 state
+    const requestId = ++trendRequestIdRef.current;
     try {
       const [trend, dist] = await Promise.all([
         api.getTrendStats(range, start, end),
         api.getAttackDistribution(start, end),
       ]);
+      // P1-5 修复：竞态守卫，丢弃过时请求的结果
+      if (requestId !== trendRequestIdRef.current) return;
       setTrendData(trend.points);
       setAttackDist(dist);
     } catch {
@@ -217,8 +241,12 @@ export default function Dashboard() {
   }, []);
 
   const fetchRealtimeMetrics = useCallback(async () => {
+    // P1-5 修复：每次请求递增序列号，仅最新请求的结果会更新 state
+    const requestId = ++realtimeRequestIdRef.current;
     try {
       const m = await api.getRealtimeMetrics();
+      // P1-5 修复：竞态守卫，丢弃过时请求的结果
+      if (requestId !== realtimeRequestIdRef.current) return;
       setRealtimeMetrics(m);
     } catch {
       // ignore
@@ -246,12 +274,6 @@ export default function Dashboard() {
     fetchRealtimeMetrics();
     // P1-12 修复：timeRange 已拆分到独立 useEffect，此处不再调用 fetchTrendAndDist
     fetchComparison();
-    // GAP-06 修复：异步从 DB 读取向导完成状态，统一使用 wizard_completed 配置
-    api.getConfig('wizard_completed').then((completed) => {
-      if (mountedRef.current && completed !== 'true') {
-        setShowWizard(true);
-      }
-    }).catch(() => { /* ignore */ });
 
     // G-12 修复：使用 setTimeout 递归实现指数退避，替代固定 setInterval
     // 失败时间隔翻倍（2s→4s→8s→16s→30s），成功时重置为 2s
@@ -296,6 +318,34 @@ export default function Dashboard() {
       : '0.00'
     : '--';
 
+  // 周度对比（本周 vs 上周）：KPI 卡片趋势箭头
+  const reqTrend = comparison ? pctChange(comparison.current.total_requests, comparison.baseline.total_requests) : null;
+  const blkTrend = comparison ? pctChange(comparison.current.total_blocked, comparison.baseline.total_blocked) : null;
+
+  // 时间轴刻度：1h/24h 显示 HH:mm，7d/30d 显示 MM-DD（规范§3.3 数字格式）
+  const formatTickTime = (t: string) =>
+    timeRange === '1h' || timeRange === '24h' ? t.slice(11, 16) : t.slice(5, 10);
+  const trendSeries = trendData.map(p => ({
+    time: formatTickTime(p.time),
+    requests: p.total_requests,
+    blocked: p.total_blocked,
+  }));
+
+  // 攻击类型环形图数据
+  const pieData = attackDist.map(d => ({
+    name: ATTACK_CATEGORY_NAMES[d.category] || d.category,
+    value: d.blocked,
+  }));
+  const totalBlockedInRange = pieData.reduce((s, d) => s + d.value, 0);
+
+  // 周度对比柱状图：本周=道体蓝/朱砂红、上周=水墨灰（基线对比）
+  const weekData = comparison ? [
+    { name: '本周请求', value: comparison.current.total_requests, color: CHART.request },
+    { name: '上周请求', value: comparison.baseline.total_requests, color: CHART.ink },
+    { name: '本周拦截', value: comparison.current.total_blocked, color: CHART.danger },
+    { name: '上周拦截', value: comparison.baseline.total_blocked, color: CHART.ink },
+  ] : [];
+
   return (
     <div className="page dashboard-page">
       {error && (
@@ -312,95 +362,10 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Sprint7 首屏视觉冲击力：品牌英雄区 + 太极动态背景 */}
-      <div className="hero-brand-section page-fade-in">
-        <div className="hero-taiji-bg">
-          <svg viewBox="0 0 100 100" width="100%" height="100%">
-            <circle cx="50" cy="50" r="48" fill="none" stroke="var(--dt-primary)" strokeWidth="1" />
-            <path d="M50 2 A48 48 0 0 1 50 98 A24 24 0 0 0 50 50 A24 24 0 0 1 50 2" fill="var(--dt-primary)" />
-            <path d="M50 2 A48 48 0 0 0 50 98 A24 24 0 0 1 50 50 A24 24 0 0 0 50 2" fill="var(--dt-bg-primary)" />
-            <circle cx="50" cy="26" r="6" fill="var(--dt-bg-primary)" />
-            <circle cx="50" cy="74" r="6" fill="var(--dt-primary)" />
-          </svg>
-        </div>
-        <div className="hero-brand-content">
-          <h1 className="hero-brand-title">道体·玄盾</h1>
-          <p className="hero-brand-subtitle">
-            活性防护 LLM 防火墙 — 基于拒绝门理论 + 洛书映射器 + 动态阴阳壳架构，
-            为 AI 应用提供数据驱动的动态安全防护
-          </p>
-          <div className="hero-brand-tags">
-            <span className="hero-brand-tag">☯ 双层阴阳架构</span>
-            <span className="hero-brand-tag">活性在线学习</span>
-            <span className="hero-brand-tag">OWASP LLM Top 10</span>
-            <span className="hero-brand-tag">毫秒级响应</span>
-          </div>
-        </div>
+      {/* 设计系统规范 §3.3/§3.4：页面唯一 H1，左对齐 + 极淡装饰线 */}
+      <div className="page-header">
+        <h1 className="page-title">安全总览</h1>
       </div>
-
-      {status && status.running && status.total_requests === 0 && (
-        <div className="onboarding-banner">
-          <div className="onboarding-banner-header">
-            <Rocket size={20} strokeWidth={1.5} className="onboarding-banner-icon" />
-            <div className="onboarding-banner-text">
-              <div className="onboarding-banner-title">玄盾已就绪，但尚未检测到任何流量</div>
-              <div className="onboarding-banner-desc">
-                玄盾需要接入 AI 工具的流量才能发挥保护作用。建议使用接入向导完成配置。
-              </div>
-            </div>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={() => setShowWizard(true)}
-            >
-              启动接入向导
-            </button>
-          </div>
-          <div className="onboarding-guides-grid">
-            {ONBOARDING_GUIDES.map((g) => {
-              const Icon = ICON_MAP[g.icon] ?? Plug;
-              return (
-                <div key={g.id} className="onboarding-guide-card" onClick={() => setShowWizard(true)}>
-                  <div className="onboarding-guide-icon"><Icon size={22} strokeWidth={1.5} /></div>
-                  <div className="onboarding-guide-title">{g.title}</div>
-                  <div className="onboarding-guide-desc">{g.desc}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {showWizard && (
-        <OnboardingWizard
-          totalRequests={status?.total_requests ?? 0}
-          engineRunning={status?.running ?? false}
-          onSkip={() => {
-            // GAP-06 修复：统一使用 DB config，移除 localStorage 双套机制
-            api.setConfig('wizard_completed', 'true').catch(() => { /* ignore */ });
-            setShowWizard(false);
-          }}
-          onNavigate={(path) => navigate(path)}
-        />
-      )}
-
-      {status && status.running && status.total_requests > 0 && (
-        <div className="onboarding-connected-banner">
-          <CheckCircle size={20} strokeWidth={1.5} className="onboarding-connected-icon" />
-          <span>玄盾已接入流量，正在保护您的 AI 应用</span>
-          <button
-            className="btn btn-sm btn-secondary"
-            style={{ marginLeft: 'auto' }}
-            onClick={async () => {
-              const confirmed = await confirm(
-                '系统已接入流量，重新运行向导可能影响当前配置，是否继续？'
-              );
-              if (confirmed) setShowWizard(true);
-            }}
-          >
-            启动向导
-          </button>
-        </div>
-      )}
 
       <div className="status-card-row">
         <div className={`status-hero-card ${status?.running ? 'online' : 'offline'}`}>
@@ -455,114 +420,157 @@ export default function Dashboard() {
               style={{ width: `${Math.round(learning.learning_progress * 100)}%` }}
             ></div>
           </div>
-          <a href="#/learning" className="learning-banner-link">查看详情 →</a>
+          {/* K3-移除learning路由，详情跳转至Settings的活性防护卡片 */}
+          <a href="#/settings" className="learning-banner-link">查看详情 →</a>
         </div>
       )}
 
+      {/* 设计系统规范 §8.2：核心 KPI 卡片（数字 Mono 等宽 + 环比趋势箭头） */}
       <div className="stats-grid">
         <div className="stat-card">
           <div className="stat-label">总请求数</div>
-          <div className="stat-value">{status?.total_requests ?? '--'}</div>
+          <div className="stat-value">{status?.total_requests?.toLocaleString() ?? '--'}</div>
+          {reqTrend !== null && <TrendBadge value={reqTrend} />}
         </div>
         <div className="stat-card">
           <div className="stat-label">拦截次数</div>
-          <div className="stat-value highlight">{status?.total_blocked ?? '--'}</div>
+          <div className="stat-value highlight">{status?.total_blocked?.toLocaleString() ?? '--'}</div>
+          {blkTrend !== null && <TrendBadge value={blkTrend} invert />}
         </div>
         <div className="stat-card">
           <div className="stat-label">拦截率</div>
           <div className="stat-value">{status ? `${(status.block_rate * 100).toFixed(1)}%` : '--'}</div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">QPS</div>
+          <div className="stat-label">实时 QPS</div>
           <div className="stat-value">{qps}</div>
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-header">
-          <h3>请求趋势</h3>
-          <div className="time-range-selector">
-            {TIME_RANGES.map(r => (
-              <button
-                key={r.key}
-                className={`time-range-btn ${timeRange === r.key ? 'active' : ''}`}
-                onClick={() => setTimeRange(r.key)}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="card-body">
-          {/* P1-12 修复：切换时间范围时显示 loading 占位符，避免显示旧数据 */}
-          {trendLoading ? (
-            <div style={{ padding: '20px' }}>
-              <div className="skeleton skeleton-text" style={{ width: '100%', height: '180px' }}></div>
-            </div>
-          ) : trendData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={trendData.map(p => ({ time: p.time.slice(11, 16), requests: p.total_requests, blocked: p.total_blocked, rate: p.block_rate }))}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color, #333)" />
-                <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
-                <YAxis tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
-                <Tooltip />
-                <Area type="monotone" dataKey="requests" stroke="var(--accent)" fill="var(--accent-glow)" name="请求" />
-                <Area type="monotone" dataKey="blocked" stroke="var(--danger)" fill="var(--danger-bg)" name="拦截" />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : history.length >= 2 ? (
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={history}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color, #333)" />
-                <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
-                <YAxis tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
-                <Tooltip />
-                <Area type="monotone" dataKey="requests" stroke="var(--accent)" fill="var(--accent-glow)" name="请求" />
-                <Area type="monotone" dataKey="blocked" stroke="var(--danger)" fill="var(--danger-bg)" name="拦截" />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="empty-state-enhanced">
-              <div className="empty-state-enhanced-icon">
-                <Activity size={28} strokeWidth={1.5} />
-              </div>
-              <div className="empty-state-enhanced-title">数据采集中</div>
-              <div className="empty-state-enhanced-desc">玄盾正在收集流量数据，请稍候...</div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {attackDist.length > 0 && (
+      {/* 设计系统规范 §8.2：趋势面积图（宽）+ 攻击类型环形图（窄）双栏布局 */}
+      <div className="dashboard-chart-row">
         <div className="card">
           <div className="card-header">
-            <h3>攻击类型分布</h3>
+            <h3>请求与拦截趋势</h3>
+            <div className="time-range-selector">
+              {TIME_RANGES.map(r => (
+                <button
+                  key={r.key}
+                  className={`time-range-btn ${timeRange === r.key ? 'active' : ''}`}
+                  onClick={() => setTimeRange(r.key)}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="card-body attack-dist-container">
-            <div className="attack-dist-pie">
+          <div className="card-body">
+            {/* P1-12 修复：切换时间范围时显示 loading 占位符，避免显示旧数据 */}
+            {trendLoading ? (
+              <div style={{ padding: '20px' }}>
+                <div className="skeleton skeleton-text" style={{ width: '100%', height: '200px' }}></div>
+              </div>
+            ) : trendData.length > 0 ? (
               <ResponsiveContainer width="100%" height={220}>
-                <PieChart>
-                  <Pie data={attackDist.map(d => ({ name: ATTACK_CATEGORY_NAMES[d.category] || d.category, value: d.blocked }))} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={(entry: any) => `${entry.name}: ${entry.value}`}>
-                    {attackDist.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
+                <AreaChart data={trendSeries}>
+                  <defs>
+                    {/* 请求=道体蓝渐变、拦截=朱砂红渐变（规范§1.1 流动的线条、渐变过渡） */}
+                    <linearGradient id="gradRequests" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={CHART.request} stopOpacity={0.30} />
+                      <stop offset="100%" stopColor={CHART.request} stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="gradBlocked" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={CHART.danger} stopOpacity={0.30} />
+                      <stop offset="100%" stopColor={CHART.danger} stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
+                  <XAxis dataKey="time" tick={{ fontSize: 11, fill: CHART.axis }} axisLine={{ stroke: CHART.grid }} tickLine={false} minTickGap={24} />
+                  <YAxis tick={{ fontSize: 11, fill: CHART.axis }} axisLine={false} tickLine={false} width={48} />
+                  <Tooltip content={<DarkTooltip />} />
+                  <Area type="monotone" dataKey="requests" name="请求" stroke={CHART.request} strokeWidth={2} fill="url(#gradRequests)" />
+                  <Area type="monotone" dataKey="blocked" name="拦截" stroke={CHART.danger} strokeWidth={2} fill="url(#gradBlocked)" />
+                </AreaChart>
               </ResponsiveContainer>
-            </div>
-            <div className="attack-dist-radar">
+            ) : history.length >= 2 ? (
               <ResponsiveContainer width="100%" height={220}>
-                <RadarChart data={attackDist.map(d => ({ category: ATTACK_CATEGORY_NAMES[d.category] || d.category, count: d.blocked }))}>
-                  <PolarGrid />
-                  <PolarAngleAxis dataKey="category" tick={{ fontSize: 10 }} />
-                  <PolarRadiusAxis tick={{ fontSize: 9 }} />
-                  <Radar dataKey="count" stroke="var(--accent)" fill="var(--accent)" fillOpacity={0.5} />
-                  <Tooltip />
-                </RadarChart>
+                <AreaChart data={history}>
+                  <defs>
+                    <linearGradient id="gradRequests" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={CHART.request} stopOpacity={0.30} />
+                      <stop offset="100%" stopColor={CHART.request} stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="gradBlocked" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={CHART.danger} stopOpacity={0.30} />
+                      <stop offset="100%" stopColor={CHART.danger} stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
+                  <XAxis dataKey="time" tick={{ fontSize: 11, fill: CHART.axis }} tickFormatter={(t: string) => t.slice(0, 5)} axisLine={{ stroke: CHART.grid }} tickLine={false} minTickGap={24} />
+                  <YAxis tick={{ fontSize: 11, fill: CHART.axis }} axisLine={false} tickLine={false} width={48} />
+                  <Tooltip content={<DarkTooltip />} />
+                  <Area type="monotone" dataKey="requests" name="请求" stroke={CHART.request} strokeWidth={2} fill="url(#gradRequests)" />
+                  <Area type="monotone" dataKey="blocked" name="拦截" stroke={CHART.danger} strokeWidth={2} fill="url(#gradBlocked)" />
+                </AreaChart>
               </ResponsiveContainer>
-            </div>
+            ) : (
+              <div className="empty-state-enhanced">
+                <div className="empty-state-enhanced-icon">
+                  <Activity size={28} strokeWidth={1.5} />
+                </div>
+                <div className="empty-state-enhanced-title">数据采集中</div>
+                <div className="empty-state-enhanced-desc">玄盾正在收集流量数据，请稍候...</div>
+              </div>
+            )}
           </div>
         </div>
-      )}
+
+        {attackDist.length > 0 && (
+          <div className="card">
+            <div className="card-header">
+              <h3>攻击类型分布</h3>
+            </div>
+            <div className="card-body attack-dist-body">
+              {/* 环形图：中心显示总拦截数（规范§8.2），色板克制 */}
+              <ResponsiveContainer width="100%" height={200}>
+                <PieChart>
+                  <Pie
+                    data={pieData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={52}
+                    outerRadius={80}
+                    paddingAngle={2}
+                    cornerRadius={4}
+                    stroke="none"
+                  >
+                    {pieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip content={<DarkTooltip />} />
+                  <text x="50%" y="47%" textAnchor="middle" dominantBaseline="middle" fill={CHART.tickLabel} className="pie-center-value">
+                    {totalBlockedInRange.toLocaleString()}
+                  </text>
+                  <text x="50%" y="61%" textAnchor="middle" dominantBaseline="middle" fill={CHART.axis} className="pie-center-label">
+                    总拦截
+                  </text>
+                </PieChart>
+              </ResponsiveContainer>
+              {/* 图例：名称 + Mono 数量（克制不刺眼） */}
+              <div className="chart-legend">
+                {pieData.slice(0, 6).map((d, i) => (
+                  <div className="chart-legend-item" key={d.name}>
+                    <span className="chart-legend-dot" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                    <span className="chart-legend-name">{d.name}</span>
+                    <span className="chart-legend-value">{d.value.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {comparison && (
         <div className="card">
@@ -570,18 +578,15 @@ export default function Dashboard() {
             <h3>周度对比（本周 vs 上周）</h3>
           </div>
           <div className="card-body">
-            <ResponsiveContainer width="100%" height={180}>
-              <BarChart data={[
-                { name: '本周请求', value: comparison.current.total_requests },
-                { name: '上周请求', value: comparison.baseline.total_requests },
-                { name: '本周拦截', value: comparison.current.total_blocked },
-                { name: '上周拦截', value: comparison.baseline.total_blocked },
-              ]}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color, #333)" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="var(--text-secondary, #999)" />
-                <YAxis tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
-                <Tooltip />
-                <Bar dataKey="value" fill="var(--accent)" name="数量" radius={[4, 4, 0, 0]} />
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={weekData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: CHART.axis }} axisLine={{ stroke: CHART.grid }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: CHART.axis }} axisLine={false} tickLine={false} width={48} />
+                <Tooltip content={<DarkTooltip />} />
+                <Bar dataKey="value" name="数量" radius={[4, 4, 0, 0]} barSize={36}>
+                  {weekData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -600,11 +605,11 @@ export default function Dashboard() {
             </div>
             <div className="realtime-metric-item">
               <div className="realtime-metric-label">累计请求</div>
-              <div className="realtime-metric-value">{realtimeMetrics.total_requests}</div>
+              <div className="realtime-metric-value">{realtimeMetrics.total_requests.toLocaleString()}</div>
             </div>
             <div className="realtime-metric-item">
               <div className="realtime-metric-label">累计拦截</div>
-              <div className="realtime-metric-value highlight">{realtimeMetrics.total_blocked}</div>
+              <div className="realtime-metric-value highlight">{realtimeMetrics.total_blocked.toLocaleString()}</div>
             </div>
             <div className="realtime-metric-item">
               <div className="realtime-metric-label">拦截率</div>
@@ -631,13 +636,15 @@ export default function Dashboard() {
             <h3>信任等级分布</h3>
           </div>
           <div className="card-body">
-            <ResponsiveContainer width="100%" height={180}>
+            <ResponsiveContainer width="100%" height={200}>
               <BarChart data={trustDist}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color, #333)" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="var(--text-secondary, #999)" />
-                <YAxis tick={{ fontSize: 10 }} stroke="var(--text-secondary, #999)" />
-                <Tooltip />
-                <Bar dataKey="count" fill="var(--accent)" name="数量" radius={[4, 4, 0, 0]} />
+                <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: CHART.axis }} axisLine={{ stroke: CHART.grid }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: CHART.axis }} axisLine={false} tickLine={false} width={48} />
+                <Tooltip content={<DarkTooltip />} />
+                <Bar dataKey="count" name="数量" radius={[4, 4, 0, 0]} barSize={28}>
+                  {trustDist.map((d, i) => <Cell key={i} fill={trustBarColor(d.name)} />)}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -681,7 +688,6 @@ export default function Dashboard() {
           )}
         </div>
       </div>
-      <ConfirmModal {...confirmModalProps} />
     </div>
   );
 }

@@ -4,7 +4,6 @@ mod commands;
 mod db;
 mod engine;
 mod tray;
-mod agent_discovery;
 mod proxy;
 mod keyring;
 
@@ -125,7 +124,6 @@ pub fn run() {
             commands::get_status,
             commands::protect,
             commands::set_mode,
-            commands::discover_agents,
             commands::get_logs,
             commands::start_proxy_cmd,
             commands::stop_proxy_cmd,
@@ -144,27 +142,22 @@ pub fn run() {
             commands::list_snapshots,
             commands::restore_snapshot,
             commands::get_learning_status,
-            commands::switch_learning_mode,
-            commands::get_learning_details,
             commands::get_dual_layer_stats,
             commands::set_emergency_bypass,
             commands::get_emergency_bypass,
             commands::set_gray_deploy_ratio,
             commands::get_gray_deploy_ratio,
             commands::get_bypass_stats,
-            commands::run_simulation,
             commands::send_notification,
             commands::get_trend_stats,
             commands::get_attack_distribution,
             commands::get_realtime_metrics,
             commands::get_comparison_stats,
-            commands::generate_report,
-            commands::list_reports,
-            commands::get_report,
-            commands::delete_report,
             commands::save_notifier_config,
             commands::get_notifier_config,
             commands::test_notifier,
+            // Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令注册
+            commands::noop_heartbeat,
         ])
         .build(tauri::generate_context!());
 
