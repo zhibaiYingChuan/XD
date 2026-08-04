@@ -84,13 +84,11 @@ impl Database {
                 let name: String = row.get(1)?;
                 Ok(name)
             }).map_err(|e| e.to_string())?;
-            let mut found = false;
-            for row in rows {
-                if let Ok(name) = row {
-                    if name == "hash_version" { found = true; break; }
-                }
-            }
-            found
+            // 收集到 Vec 避免 filter_map 临时值与 stmt 的生命周期冲突
+            #[allow(clippy::unnecessary_filter_map)]
+            let names: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+            names.iter().any(|name| name == "hash_version")
+
         };
 
         if !has_hash_version {
@@ -112,13 +110,10 @@ impl Database {
                 let name: String = row.get(1)?;
                 Ok(name)
             }).map_err(|e| e.to_string())?;
-            let mut found = false;
-            for row in rows {
-                if let Ok(name) = row {
-                    if name == "attack_category" { found = true; break; }
-                }
-            }
-            found
+            // 收集到 Vec 避免 filter_map 临时值与 stmt 的生命周期冲突
+            #[allow(clippy::unnecessary_filter_map)]
+            let names: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+            names.iter().any(|name| name == "attack_category")
         };
         if !has_attack_category {
             conn.execute_batch("
@@ -180,6 +175,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_log(&self, text_preview: &str, allowed: bool, trust_level: &str, reject_stage: Option<&str>, session_id: Option<&str>, attack_category: Option<&str>, latency_ms: Option<f64>, domain_distance: Option<f64>) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let timestamp = chrono::Utc::now().to_rfc3339();
@@ -348,6 +344,7 @@ impl Database {
             "SELECT id, prev_hash, hash, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, hash_version FROM logs ORDER BY id ASC"
         ).map_err(|e| e.to_string())?;
 
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(i64, String, String, String, String, bool, String, Option<String>, Option<String>, i64)> = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -463,6 +460,7 @@ impl Database {
     }
 
     /// 插入报告记录
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_report(&self, report_type: &str, period_start: &str, period_end: &str, format: &str, content: &[u8], summary: Option<&str>, created_by: Option<&str>) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let timestamp = chrono::Utc::now().to_rfc3339();

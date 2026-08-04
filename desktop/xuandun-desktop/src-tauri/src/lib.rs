@@ -1,3 +1,6 @@
+// Tauri 命令通过 IPC 从 JS 调用，编译器无法静态追踪调用链，因此允许 dead_code
+#![allow(dead_code)]
+
 use tauri::Manager;
 
 mod commands;
@@ -17,7 +20,7 @@ pub fn show_message_box(title: &str, body: &str) {
         extern "system" {
             fn MessageBoxA(hwnd: *mut std::ffi::c_void, text: *const i8, caption: *const i8, utype: u32) -> i32;
         }
-        MessageBoxA(std::ptr::null_mut(), body_c.as_ptr() as *const i8, title_c.as_ptr() as *const i8, 0x10);
+        MessageBoxA(std::ptr::null_mut(), body_c.as_ptr(), title_c.as_ptr(), 0x10);
     }
 }
 
@@ -29,7 +32,7 @@ pub fn show_message_box(title: &str, body: &str) {
 fn setup_log(msg: &str) {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir());
+        .unwrap_or_else(std::env::temp_dir);
     let dir = base.join("com.daoti.xuandun-desktop");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("crash.log");

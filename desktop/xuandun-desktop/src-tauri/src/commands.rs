@@ -168,7 +168,7 @@ pub async fn protect(
                 let _ = app.notification()
                     .builder()
                     .title("道体·玄盾 - 攻击拦截")
-                    .body(&format!("检测到恶意输入，信任等级: {}", r.trust_level))
+                    .body(format!("检测到恶意输入，信任等级: {}", r.trust_level))
                     .show();
                 // Sprint1-P0-6: 同样对insert_audit失败派发DB_CORRUPT
                 if let Err(e) = db.insert_audit("block", &format!("trust_level={}", r.trust_level)) {

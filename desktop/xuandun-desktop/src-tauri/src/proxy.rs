@@ -126,7 +126,7 @@ async fn handle_connect_tunnel(
         let _ = app.notification()
             .builder()
             .title("道体·玄盾 - HTTPS隧道警告")
-            .body(&format!(
+            .body(format!(
                 "检测到发往 {} 的 HTTPS 隧道请求，流量已加密无法检测内容。建议配置应用使用 HTTP 代理或 SDK 模式以获得完整防护。",
                 host
             ))
@@ -211,7 +211,7 @@ async fn handle_http_request(
                     let _ = app.notification()
                         .builder()
                         .title("道体·玄盾 - 攻击拦截")
-                        .body(&format!("拦截发往 {} 的恶意请求，信任等级: {}", host, r.trust_level))
+                        .body(format!("拦截发往 {} 的恶意请求，信任等级: {}", host, r.trust_level))
                         .show();
                     return Ok(());
                 }
@@ -263,12 +263,9 @@ async fn handle_http_request(
 }
 
 fn find_header_end(raw: &[u8]) -> Option<usize> {
-    for i in 0..raw.len().saturating_sub(3) {
-        if raw[i] == b'\r' && raw[i + 1] == b'\n' && raw[i + 2] == b'\r' && raw[i + 3] == b'\n' {
-            return Some(i);
-        }
-    }
-    None
+    (0..raw.len().saturating_sub(3)).find(|&i| {
+        raw[i] == b'\r' && raw[i + 1] == b'\n' && raw[i + 2] == b'\r' && raw[i + 3] == b'\n'
+    })
 }
 
 fn rewrite_headers(headers_str: &str, host: &str, path: &str) -> String {

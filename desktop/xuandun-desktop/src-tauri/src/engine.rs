@@ -366,7 +366,7 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
 fn log_engine(msg: &str) {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir());
+        .unwrap_or_else(std::env::temp_dir);
     let dir = base.join("com.daoti.xuandun-desktop");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("engine.log");
@@ -463,10 +463,8 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
                 std::thread::spawn(move || {
                     use std::io::BufRead;
                     let reader = std::io::BufReader::new(stdout);
-                    for line in reader.lines().take(100) {
-                        if let Ok(line) = line {
+                    for line in reader.lines().take(100).filter_map(|r| r.ok()) {
                             log_engine(&format!("engine stdout: {}", line));
-                        }
                     }
                 });
             }
@@ -476,10 +474,8 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
                 std::thread::spawn(move || {
                     use std::io::BufRead;
                     let reader = std::io::BufReader::new(stderr);
-                    for line in reader.lines().take(100) {
-                        if let Ok(line) = line {
+                    for line in reader.lines().take(100).filter_map(|r| r.ok()) {
                             log_engine(&format!("engine stderr: {}", line));
-                        }
                     }
                 });
             }

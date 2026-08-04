@@ -7,7 +7,7 @@ use std::path::PathBuf;
 fn crash_log_path() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir());
+        .unwrap_or_else(std::env::temp_dir);
     let dir = base.join("com.daoti.xuandun-desktop");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("crash.log")
