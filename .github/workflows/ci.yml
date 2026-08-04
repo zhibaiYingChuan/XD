@@ -107,10 +107,10 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Setup Rust 1.94.0 (与本地构建环境对齐)
+      - name: Setup Rust 1.81.0 (与本地构建环境对齐)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.94.0
+          toolchain: 1.81.0
           components: rustfmt, clippy
 
       - name: Cache Cargo registry
@@ -139,6 +139,21 @@ jobs:
             }
           } else {
             Write-Host "INFO: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS not found in main.rs (skipped)"
+          }
+
+      # 根源修复：tauri::generate_context!() 编译时要求 frontendDist ("../dist") 路径存在，
+      # 但 Rust job 与 TypeScript build job 并行运行，dist 尚未构建。
+      # 创建占位 dist 目录满足编译期检查，后续 ts-build job 会覆盖真实 dist。
+      - name: Create placeholder dist/ for tauri::generate_context!()
+        shell: pwsh
+        run: |
+          $distDir = "desktop\xuandun-desktop\dist"
+          if (-not (Test-Path $distDir)) {
+            New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+            Set-Content -Path "$distDir\index.html" -Value "<html><body><!-- placeholder for CI --></body></html>"
+            Write-Host "Created placeholder dist/index.html"
+          } else {
+            Write-Host "dist/ already exists, skipping"
           }
 
       - name: Cargo check (语法 + 类型检查)
