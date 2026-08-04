@@ -114,7 +114,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Cargo registry
-        uses: actions/cache@13aacd865c20de90d75edc44e9c224db9f8060aa # v4.1.0
+        uses: actions/cache@2cdf405574d6ef1f33a1d12acccd3ae82f47b3f2 # v4.1.0
         with:
           path: |
             ~/.cargo/registry
