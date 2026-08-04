@@ -7,6 +7,7 @@ import subprocess
 import sys
 import os
 import platform
+import re
 import secrets
 
 
@@ -55,11 +56,33 @@ def _inject_compile_time_key(script_dir: str) -> str:
     return key_file
 
 
+def _read_ssot_version(script_dir: str) -> str:
+    """从 Cargo.toml（SSOT）读取版本号，用于引擎二进制文件版本资源。
+
+    与 sync_version.py 保持一致，Cargo.toml 是唯一可信源。
+    """
+    cargo_toml = os.path.join(script_dir, "src-tauri", "Cargo.toml")
+    try:
+        with open(cargo_toml, "r", encoding="utf-8") as f:
+            content = f.read()
+        match = re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    print("WARNING: Cannot read version from Cargo.toml, defaulting to 1.0.0", file=sys.stderr)
+    return "1.0.0"
+
+
 def build_engine():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
     engine_script = os.path.join(script_dir, "engine_flask.py")
     output_dir = os.path.join(script_dir, "src-tauri", "binaries")
+
+    # P2-2 修复：版本号从 SSOT（Cargo.toml）读取，不再硬编码 1.0.0
+    engine_version = _read_ssot_version(script_dir)
+    print(f"Engine version resource: {engine_version} (from SSOT Cargo.toml)")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -106,7 +129,7 @@ def build_engine():
             "--windows-console-mode=disable",
             f"--windows-company-name=Daoti",
             f"--windows-product-name=XuanDun Engine",
-            f"--windows-file-version=1.0.0",
+            f"--windows-file-version={engine_version}",
             f"--windows-icon-from-ico={os.path.join(script_dir, 'src-tauri', 'icons', 'icon.ico')}",
         ])
     elif system == "darwin":

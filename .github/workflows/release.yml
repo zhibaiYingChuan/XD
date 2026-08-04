@@ -52,10 +52,11 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Setup Rust 1.81.0 (与 CI 环境对齐，P1-9 版本锁定)
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - name: Setup Rust 1.94.0 (与 CI 构建环境对齐，P0-A 发布阻断修复)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
         with:
-          toolchain: 1.81.0
+          toolchain: 1.94.0
+          components: rustfmt, clippy
 
       - name: Install Python dependencies
         run: |
