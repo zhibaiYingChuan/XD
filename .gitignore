@@ -113,9 +113,7 @@ desktop/xuandun-desktop/start_engine.bat
 # Desktop test files (kept locally, not released)
 desktop/xuandun-desktop/test_*
 desktop/xuandun-desktop/tests/
-desktop/xuandun-desktop/src/test/
-desktop/xuandun-desktop/vitest.config.ts
-desktop/xuandun-desktop/src/**/*.test.ts
+# src/test/ 和 src/**/*.test.ts 已移除 — CI 需要这些文件来配置 jsdom 环境并运行测试
 desktop/xuandun-desktop/anti_debug.py
 desktop/xuandun-desktop/attack_samples.py
 
