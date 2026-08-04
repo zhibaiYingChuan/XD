@@ -378,14 +378,36 @@ fn log_engine(msg: &str) {
     eprintln!("[XuanDun:engine] {}", msg);
 }
 
+/// 返回当前平台引擎二进制文件名（与 build_engine.py 的 output-name 保持一致）。
+///
+/// 命名规则：`xuandun-engine-{target-triple}`，Windows 追加 `.exe`。
+/// 与 tauri.conf.json 的 externalBin（`binaries/xuandun-engine`）产出的
+/// `xuandun-engine-{target-triple}.exe` 对齐。目标三元组用 `cfg!` 拼接，
+/// 覆盖 release.yml 的三种构建目标（Windows x86_64 / macOS aarch64 / Linux x86_64）。
+fn engine_binary_name() -> String {
+    #[cfg(target_os = "windows")]
+    let triple = "x86_64-pc-windows-msvc";
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let triple = "aarch64-apple-darwin";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let triple = "x86_64-apple-darwin";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let triple = "x86_64-unknown-linux-gnu";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    let triple = "aarch64-unknown-linux-gnu";
+    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    format!("xuandun-engine-{}{}", triple, ext)
+}
+
 fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     let mut searched: Vec<String> = Vec::new();
+    let engine_name = engine_binary_name();
 
     // 1. current_exe 同级目录（打包模式主路径）
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let cands = [
-                dir.join("xuandun-engine-x86_64-pc-windows-msvc.exe"),
+                dir.join(&engine_name),
                 dir.join("xuandun-engine.exe"),
                 dir.join("xuandun-engine"),
             ];
@@ -402,7 +424,7 @@ fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     // 2. Tauri resource_dir（macOS/Linux 打包模式）
     if let Ok(res_dir) = app.path().resource_dir() {
         let cands = [
-            res_dir.join("xuandun-engine-x86_64-pc-windows-msvc.exe"),
+            res_dir.join(&engine_name),
             res_dir.join("xuandun-engine"),
         ];
         for c in &cands {
@@ -418,7 +440,7 @@ fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(src_tauri) = dir.parent() {
-                let dev_path = src_tauri.join("src-tauri").join("binaries").join("xuandun-engine-x86_64-pc-windows-msvc.exe");
+                let dev_path = src_tauri.join("src-tauri").join("binaries").join(&engine_name);
                 searched.push(dev_path.display().to_string());
                 if dev_path.exists() {
                     log_engine(&format!("Engine found at (dev): {}", dev_path.display()));

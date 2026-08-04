@@ -156,6 +156,22 @@ jobs:
             Write-Host "dist/ already exists, skipping"
           }
 
+      # 根源修复：externalBin 引入后，tauri::generate_context!() 编译期会校验
+      # src-tauri/binaries/ 下的引擎二进制存在。Rust job 不构建引擎（Nuitka 由 release 构建），
+      # 因此创建占位二进制满足编译期校验，打包时由 release.yml 的 build_engine.py 覆盖真实引擎。
+      - name: Create placeholder engine binary for externalBin
+        shell: pwsh
+        run: |
+          $binDir = "desktop\xuandun-desktop\src-tauri\binaries"
+          New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+          $placeholder = Join-Path $binDir "xuandun-engine-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path $placeholder)) {
+            Set-Content -Path $placeholder -Value "placeholder" -Encoding Byte
+            Write-Host "Created placeholder engine binary: $placeholder"
+          } else {
+            Write-Host "Engine binary already exists, skipping"
+          }
+
       - name: Cargo check (语法 + 类型检查)
         working-directory: desktop/xuandun-desktop/src-tauri
         run: cargo check --release

@@ -28,7 +28,7 @@ desktop/xuandun-desktop/node_modules/
 desktop/xuandun-desktop/dist/
 desktop/xuandun-desktop/src-tauri/binaries/*
 !desktop/xuandun-desktop/src-tauri/binaries/.gitkeep
-!desktop/xuandun-desktop/src-tauri/binaries/xuandun-engine-*.exe
+# 引擎二进制不再提交仓库：由 release.yml 的 build_engine.py（Nuitka）在 CI 编译并打包进安装包
 
 # IDE
 .vscode/
