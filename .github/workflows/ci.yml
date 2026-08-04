@@ -69,19 +69,20 @@ jobs:
           pip install -e ".[engine]"
 
       - name: Run config smoke test (确保config.py参数化正确加载)
-        run: python -c "
-from daoti_xuandun import XuanDunConfig, DefenseLevel
-# 验证v1.3.1新增参数存在且默认值正确
-cfg = XuanDunConfig()
-assert hasattr(cfg, 'natural_lang_printable_ratio_threshold'), 'Missing printable ratio param'
-assert hasattr(cfg, 'natural_lang_entropy_low'), 'Missing entropy low param'
-assert hasattr(cfg, 'natural_lang_entropy_high'), 'Missing entropy high param'
-assert hasattr(cfg, 'luoshu_poisoning_total_updates_cap'), 'Missing GateC cap param'
-assert cfg.luoshu_poisoning_total_updates_cap == 500, f'Expected 500 got {cfg.luoshu_poisoning_total_updates_cap}'
-assert cfg.natural_lang_entropy_low == 2.5
-assert cfg.natural_lang_entropy_high == 6.8
-print('PASS: XuanDunConfig v1.3.1 new params OK')
-"
+        run: |
+          python << 'PYEOF'
+          from daoti_xuandun import XuanDunConfig, DefenseLevel
+          # 验证v1.3.1新增参数存在且默认值正确
+          cfg = XuanDunConfig()
+          assert hasattr(cfg, 'natural_lang_printable_ratio_threshold'), 'Missing printable ratio param'
+          assert hasattr(cfg, 'natural_lang_entropy_low'), 'Missing entropy low param'
+          assert hasattr(cfg, 'natural_lang_entropy_high'), 'Missing entropy high param'
+          assert hasattr(cfg, 'luoshu_poisoning_total_updates_cap'), 'Missing GateC cap param'
+          assert cfg.luoshu_poisoning_total_updates_cap == 500, f'Expected 500 got {cfg.luoshu_poisoning_total_updates_cap}'
+          assert cfg.natural_lang_entropy_low == 2.5
+          assert cfg.natural_lang_entropy_high == 6.8
+          print('PASS: XuanDunConfig v1.3.1 new params OK')
+          PYEOF
 
       - name: Run regression tests (基线验证 soft-fail，找到test_*.py运行)
         run: |
