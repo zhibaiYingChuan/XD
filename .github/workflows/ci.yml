@@ -166,7 +166,8 @@ jobs:
           New-Item -ItemType Directory -Path $binDir -Force | Out-Null
           $placeholder = Join-Path $binDir "xuandun-engine-x86_64-pc-windows-msvc.exe"
           if (-not (Test-Path $placeholder)) {
-            Set-Content -Path $placeholder -Value "placeholder" -Encoding Byte
+            # pwsh 7 不支持 Set-Content -Encoding Byte，改用 WriteAllBytes 写最小占位文件
+            [System.IO.File]::WriteAllBytes($placeholder, [byte[]](0))
             Write-Host "Created placeholder engine binary: $placeholder"
           } else {
             Write-Host "Engine binary already exists, skipping"
