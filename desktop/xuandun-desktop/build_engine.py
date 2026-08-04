@@ -137,11 +137,11 @@ def build_engine():
             f"--windows-icon-from-ico={os.path.join(script_dir, 'src-tauri', 'icons', 'icon.ico')}",
         ])
     elif system == "darwin":
-        # 根源修复：onefile 模式下不能用 --macos-app-mode=gui（会生成 .app 而非二进制，
-        # 破坏 externalBin 打包，且仅对 app bundle 生效并产生警告）。
-        # 后台服务引擎用 no-console 隐藏终端窗口，产物仍是单个可执行文件。
+        # macOS 后台服务引擎：使用 background 模式隐藏终端窗口，
+        # 产物仍是单个可执行文件（onefile），不生成 .app 包。
+        # Nuitka 4.x --macos-app-mode 有效值：gui / background / ui-element
         cmd.extend([
-            "--macos-app-mode=no-console",
+            "--macos-app-mode=background",
         ])
 
     env = os.environ.copy()
