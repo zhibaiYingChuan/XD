@@ -35,8 +35,6 @@ npm install
 npm run tauri dev
 ```
 
-> **开发工程规范**：请阅读 [docs/DEVELOPMENT_SPEC.md](docs/DEVELOPMENT_SPEC.md) 了解版本归档、引擎版本校验、构建产物管理等规范。
-
 ## 许可证分类
 
 ### 外围代码（Apache 2.0）
