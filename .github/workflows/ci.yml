@@ -107,10 +107,10 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Setup Rust 1.81.0 (与本地构建环境对齐)
+      - name: Setup Rust 1.94.0 (与本地构建环境对齐)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.81.0
+          toolchain: 1.94.0
           components: rustfmt, clippy
 
       - name: Cache Cargo registry
