@@ -108,6 +108,10 @@ def build_engine():
         sys.executable, "-m", "nuitka",
         "--standalone",
         "--onefile",
+        # 根源修复：禁用 ccache 自动下载。Nuitka 在 macOS/Windows 会尝试从
+        # nuitka.net 下载 ccache，CI 环境网络受限时 FATAL 失败（nodename nor servname）。
+        # ccache 仅是编译加速，禁用不影响产物正确性，去除脆弱的外部网络依赖。
+        "--disable-cache=ccache",
         "--remove-output",
         "--lto=yes",
         "--assume-yes-for-download",
@@ -133,9 +137,11 @@ def build_engine():
             f"--windows-icon-from-ico={os.path.join(script_dir, 'src-tauri', 'icons', 'icon.ico')}",
         ])
     elif system == "darwin":
+        # 根源修复：onefile 模式下不能用 --macos-app-mode=gui（会生成 .app 而非二进制，
+        # 破坏 externalBin 打包，且仅对 app bundle 生效并产生警告）。
+        # 后台服务引擎用 no-console 隐藏终端窗口，产物仍是单个可执行文件。
         cmd.extend([
-            "--macos-app-mode=gui",
-            f"--macos-app-name=XuanDun Engine",
+            "--macos-app-mode=no-console",
         ])
 
     env = os.environ.copy()
