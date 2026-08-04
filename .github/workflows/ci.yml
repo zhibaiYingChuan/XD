@@ -69,7 +69,7 @@ jobs:
           pip install -e ".[engine]"
 
       - name: Run config smoke test (确保config.py参数化正确加载)
-        run: python _smoke_config.py || python -c "
+        run: python -c "
 from daoti_xuandun import XuanDunConfig, DefenseLevel
 # 验证v1.3.1新增参数存在且默认值正确
 cfg = XuanDunConfig()
@@ -83,8 +83,13 @@ assert cfg.natural_lang_entropy_high == 6.8
 print('PASS: XuanDunConfig v1.3.1 new params OK')
 "
 
-      - name: Run regression_test.py (基线验证，耗时较长设为soft fail)
-        run: python regression_test.py --quick || echo "WARNING: regression test failed (soft-fail for PR validation)"
+      - name: Run regression tests (基线验证 soft-fail，找到test_*.py运行)
+        run: |
+          if [ -f tests/test_xuandun.py ]; then
+            python -m pytest tests/test_xuandun.py -v --timeout=300 || echo "WARNING: pytest regression test skipped/failed (soft-fail for PR validation)"
+          else
+            echo "INFO: tests/test_xuandun.py not found, skipping pytest regression"
+          fi
         timeout-minutes: 15
 
   # ============ Job 3: Rust 静态检查 + 编译 ============
