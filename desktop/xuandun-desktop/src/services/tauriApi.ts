@@ -338,6 +338,14 @@ export function formatInvokeError(e: unknown, action: string): string {
     if (/engine not running/i.test(msg)) {
       return `${action}失败：引擎未运行，请在设置页面重启引擎或手动启动。`;
     }
+    // P1 韧性修复：识别 429 限流响应，提供明确的重试指引
+    if (/429|too many requests|rate limit/i.test(msg)) {
+      return `${action}请求过频，已被限流保护。请等待数秒后重试，或降低请求频率。`;
+    }
+    // P1 韧性修复：识别 HTML 响应（引擎返回错误页面而非 JSON），提供恢复指引
+    if (/<!doctype html|<html/i.test(msg)) {
+      return `${action}失败：引擎返回了错误页面，请尝试重启引擎。如果问题持续，请检查引擎日志。`;
+    }
     return `${action}失败: ${msg}`;
   }
   return `${action}失败: ${String(e)}`;
