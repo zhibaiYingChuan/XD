@@ -257,7 +257,7 @@ shield = XuanDun(mode="low_false_positive")
 - `src/daoti_xuandun/atlas_mapping.py` — 图谱映射
 - `desktop/xuandun-desktop/engine_flask.py` — 引擎 Flask 服务
 - `desktop/xuandun-desktop/build_engine.py` — Nuitka 编译脚本
-- `desktop/xuandun-desktop/anti_debug.py` — 反逆向工程检测（脱敏，不入仓库源码）
+- `desktop/xuandun-desktop/anti_debug.py` — 反逆向工程检测（脱敏版本）
 
 **核心限制**：
 
