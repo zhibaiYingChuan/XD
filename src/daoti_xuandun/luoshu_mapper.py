@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -28,7 +29,8 @@ import hashlib
 import os
 from collections import Counter, deque
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+
 
 import numpy as np
 
@@ -39,6 +41,32 @@ LUOSHU_NATIVE_DIM = 176
 # 出厂良性原型文件（与本文件同目录的 resources/）
 _BENIGN_NPY_FILENAME = "benign_v1.npy"
 _BENIGN_NPY_PATH = Path(__file__).resolve().parent / "resources" / _BENIGN_NPY_FILENAME
+
+
+def _resolve_benign_npy_path() -> Path:
+    """解析出厂良性原型路径，支持源码与 Nuitka 打包两种布局。
+
+    Nuitka --standalone 将模块编译为单文件 .pyd，__file__ 指向
+    dist/daoti_xuandun/ 下，resources/ 子目录不再跟随；且引擎以
+    resources/engine/ 为工作目录启动。因此按优先级尝试多个候选位置：
+      1. 源码布局：<模块目录>/resources/benign_v1.npy
+      2. 打包布局：<模块目录>/benign_v1.npy（--include-package-data 平铺）
+      3. 工作目录：<cwd>/daoti_xuandun/resources/benign_v1.npy
+      4. 工作目录：<cwd>/resources/benign_v1.npy
+      5. 工作目录：<cwd>/benign_v1.npy
+    """
+    proj_dir = Path(__file__).resolve().parent
+    candidates = [
+        proj_dir / "resources" / _BENIGN_NPY_FILENAME,
+        proj_dir / _BENIGN_NPY_FILENAME,
+        Path.cwd() / "daoti_xuandun" / "resources" / _BENIGN_NPY_FILENAME,
+        Path.cwd() / "resources" / _BENIGN_NPY_FILENAME,
+        Path.cwd() / _BENIGN_NPY_FILENAME,
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return _BENIGN_NPY_PATH
 
 
 class LuoshuSymbolMapper:
@@ -165,9 +193,10 @@ class LuoshuSymbolMapper:
         - 后向兼容：若 benign_v1.npy 丢失，回退到 15 条硬编码样本（旧逻辑）
         """
         loaded = False
-        if _BENIGN_NPY_PATH.exists():
+        benign_path = _resolve_benign_npy_path()
+        if benign_path.exists():
             try:
-                cluster_centroids = np.load(_BENIGN_NPY_PATH)
+                cluster_centroids = np.load(benign_path)
                 if (isinstance(cluster_centroids, np.ndarray)
                         and cluster_centroids.ndim == 2
                         and cluster_centroids.shape[1] == self.native_dim):

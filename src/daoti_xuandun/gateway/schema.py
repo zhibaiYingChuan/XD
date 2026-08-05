@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import re
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -92,7 +93,7 @@ class ModelConfig(BaseModel):
     provider: str = Field(..., description="模型供应商")
     backend: BackendConfig
     security: SecurityConfig = Field(default_factory=SecurityConfig)
-    fallback: str | None = Field(
+    fallback: Optional[str] = Field(
         default=None, description="故障转移目标 model_id（可选）"
     )
     timeout_seconds: int = Field(
@@ -123,11 +124,11 @@ class RouteMatch(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    model: str | None = Field(
+    model: Optional[str] = Field(
         default=None, description="model 字段匹配规则（=精确 /=*前缀通配）"
     )
     # header 匹配留接口，Sprint 2b 仅实现 model 匹配
-    header: dict[str, str] | None = Field(
+    header: Dict[str, str] | None = Field(
         default=None, description="请求头匹配（Sprint 3 实现）"
     )
 
@@ -166,13 +167,13 @@ class GatewayConfig(BaseModel):
     version: str = Field(default="1.0", description="配置版本号")
     default: DefaultPolicy = Field(default_factory=DefaultPolicy)
     # 使用 tuple 替代 list 保证不可变（评审修订重要-2）
-    models: tuple[ModelConfig, ...] = Field(
+    models: Tuple[ModelConfig, ...] = Field(
         default=(), description="模型列表"
     )
-    routes: tuple[RouteConfig, ...] = Field(
+    routes: Tuple[RouteConfig, ...] = Field(
         default=(), description="路由规则列表（按 priority 降序）"
     )
-    default_model_id: str | None = Field(
+    default_model_id: Optional[str] = Field(
         default=None, description="兜底路由 model_id"
     )
 
@@ -191,7 +192,7 @@ class GatewayConfig(BaseModel):
         # 规则 1：模型 id 全局唯一
         ids = [m.id for m in self.models]
         if len(ids) != len(set(ids)):
-            seen: set[str] = set()
+            seen: Set[str] = set()
             dupes = [i for i in ids if i in seen or seen.add(i)]
             raise ValueError(f"模型 id 重复: {dupes}")
 
@@ -228,14 +229,14 @@ class GatewayConfig(BaseModel):
 
         return self
 
-    def _check_fallback_cycle(self, id_set: set[str]) -> None:
+    def _check_fallback_cycle(self, id_set: Set[str]) -> None:
         """检测 fallback 链是否形成环。"""
-        fallback_map: dict[str, str | None] = {
+        fallback_map: Dict[str, Optional[str]] = {
             m.id: m.fallback for m in self.models
         }
         for start in id_set:
-            visited: set[str] = set()
-            current: str | None = start
+            visited: Set[str] = set()
+            current: Optional[str] = start
             while current is not None and current in id_set:
                 if current in visited:
                     raise ValueError(
@@ -244,20 +245,20 @@ class GatewayConfig(BaseModel):
                 visited.add(current)
                 current = fallback_map.get(current)
 
-    def get_model(self, model_id: str) -> ModelConfig | None:
+    def get_model(self, model_id: str) -> Optional[ModelConfig]:
         """按 id 查询模型配置（O(n)，配置规模小无需索引）。"""
         for m in self.models:
             if m.id == model_id:
                 return m
         return None
 
-    def get_enabled_models(self) -> tuple[ModelConfig, ...]:
+    def get_enabled_models(self) -> Tuple[ModelConfig, ...]:
         """返回所有 enabled 模型。"""
         return tuple(m for m in self.models if m.enabled)
 
     def resolve_route(
-        self, request_model: str | None
-    ) -> tuple[ModelConfig | None, str | None]:
+        self, request_model: Optional[str]
+    ) -> Tuple[Optional[ModelConfig], Optional[str]]:
         """解析路由：按 priority 降序匹配，返回 (模型, 匹配说明)。
 
         路由匹配语义（A-10）：

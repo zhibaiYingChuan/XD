@@ -26,7 +26,8 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
+
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -50,8 +51,8 @@ logger = logging.getLogger("xuandun-gateway-app")
 _START_TIME = time.time()
 
 # 全局配置管理器与反向代理
-_config_manager: ConfigManager | None = None
-_reverse_proxy: ReverseProxy | None = None
+_config_manager: Optional[ConfigManager] = None
+_reverse_proxy: Optional[ReverseProxy] = None
 
 
 def _get_config_manager() -> ConfigManager:
@@ -124,7 +125,7 @@ app = FastAPI(
 # 健康检查（T01 验收：端口 18765 可访问 /health）
 # ──────────────────────────────────────────────────────────────
 @app.get("/health")
-async def health() -> dict[str, Any]:
+async def health() -> Dict[str, Any]:
     """健康检查端点。
 
     G-18 修复：区分三种状态，避免 Docker healthcheck 假阳性。
@@ -167,7 +168,7 @@ async def health() -> dict[str, Any]:
 # OpenAI 兼容：/v1/models（T11，不含密钥）
 # ──────────────────────────────────────────────────────────────
 @app.get("/v1/models")
-async def list_models() -> dict[str, Any]:
+async def list_models() -> Dict[str, Any]:
     """OpenAI 兼容的模型列表端点。
 
     返回 enabled 模型列表，绝不包含密钥信息。
@@ -326,7 +327,7 @@ async def chat_completions(request: Request):
 # 网关管理 API（T10 统计 + 配置安全视图）
 # ──────────────────────────────────────────────────────────────
 @app.get("/api/stats/realtime")
-async def stats_realtime() -> dict[str, Any]:
+async def stats_realtime() -> Dict[str, Any]:
     """实时统计快照（T10 按模型维度请求计数）。
 
     Sprint 3 db.rs schema 迁移后写入持久化存储，
@@ -336,7 +337,7 @@ async def stats_realtime() -> dict[str, Any]:
     stats_list = proxy.get_stats_snapshot()
 
     # 按模型维度聚合
-    by_model: dict[str, dict[str, Any]] = {}
+    by_model: Dict[str, Dict[str, Any]] = {}
     for s in stats_list:
         mid = s["model_id"]
         if mid not in by_model:
@@ -367,10 +368,108 @@ async def stats_realtime() -> dict[str, Any]:
 
 
 @app.get("/api/config/safe")
-async def config_safe_view() -> dict[str, Any]:
+async def config_safe_view() -> Dict[str, Any]:
     """配置安全视图（不含密钥，供桌面端展示）。"""
     config = _get_config_manager().current_config
     return config.to_safe_view()
+
+
+# ──────────────────────────────────────────────────────────────
+# POST /rate/limit：无限消耗防护管理接口（P2）
+#   请求字段（全部可选）：
+#     action: str         = "status" | "update_config" | "reset_session" | "all"（默认 all）
+#     policy: str         = 目标安全策略（STANDARD/STRICT/...），缺省=全部已创建策略
+#     session_id: str     = 针对某个 session 查询/重置
+#     top_n: int          = 活跃会话返回数量（默认 20）
+#     update_config: dict = {global_qps_limit, max_request_length,
+#                            session_quota_per_minute, session_quota_per_hour}
+#     reset_session: str  = 需要重置配额的 session_id
+#   响应：{
+#     status: {policy_name: rate_limit_status结果},
+#     config_updated: { ... },     // 若有更新
+#     session_reset: { ... }       // 若有重置
+#   }
+# ──────────────────────────────────────────────────────────────
+@app.post("/rate/limit")
+@app.post("/api/rate/limit")  # 别名：支持 /api 前缀风格
+async def rate_limit_endpoint(request: Request) -> Dict[str, Any]:
+    """P2 无限消耗防护：限流状态查询/配置更新/会话配额重置。
+
+    同时挂载在 /rate/limit（用户需求格式）和 /api/rate/limit（管理接口风格）。
+    """
+    try:
+        body_bytes = await request.body()
+        import json as _json
+        req = _json.loads(body_bytes) if body_bytes else {}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(
+            status_code=400,
+            content=build_error_body(
+                message=f"请求体 JSON 解析失败: {e}",
+                error_type="bad_request",
+                code="invalid_json",
+            ),
+        )
+    if not isinstance(req, dict):
+        return JSONResponse(
+            status_code=400,
+            content=build_error_body(
+                message="请求体必须是 JSON 对象",
+                error_type="bad_request",
+            ),
+        )
+    action = str(req.get("action", "all")).lower()
+    policy = req.get("policy") or None
+    session_id = req.get("session_id") or None
+    top_n = int(req.get("top_n", 20) or 20)
+    if top_n <= 0:
+        top_n = 20
+
+    result: Dict[str, Any] = {"action": action, "policy": policy}
+    from .security import get_security_checker
+    checker = get_security_checker()
+
+    try:
+        do_status = (
+            action in {"status", "all", "query", "get"}
+        )
+        do_update = (
+            action in {"update_config", "update", "all", "set", "config"}
+            and isinstance(req.get("update_config"), dict)
+        )
+        do_reset = (
+            action in {"reset_session", "reset", "all", "clear"}
+            and isinstance(req.get("reset_session"), str)
+        )
+
+        if do_status:
+            result["status"] = checker.rate_limit_status(
+                policy=policy, session_id=session_id, top_n=top_n
+            )
+        if do_update:
+            updates = dict(req["update_config"])
+            result["config_updated"] = checker.update_rate_limit_config(
+                policy=policy, **updates
+            )
+        if do_reset:
+            sid = str(req["reset_session"])
+            result["session_reset"] = checker.reset_session_quota(
+                session_id=sid, policy=policy
+            )
+
+        result["ok"] = True
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.error("POST /rate/limit 执行异常: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content=build_error_body(
+                message=f"限流管理异常: {type(e).__name__}",
+                error_type="rate_limit_error",
+                code="internal_error",
+                details=str(e),
+            ),
+        )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -414,7 +513,7 @@ def main():
             pass
 
     parser = argparse.ArgumentParser(description="玄盾 AI 安全网关")
-    parser.add_argument("--host", type=str, default="0.0.0.0",
+    parser.add_argument("--host", type=str, default="0.0.0.0",  # nosec B104
                         help="监听地址（默认 0.0.0.0，服务器端反向代理）")
     parser.add_argument("--port", type=int, default=18765,
                         help="监听端口（默认 18765）")

@@ -300,6 +300,18 @@ impl Database {
         Ok(rows)
     }
 
+    pub fn delete_snapshot(&self, snapshot_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let affected = conn.execute(
+            "DELETE FROM config_snapshots WHERE id = ?1",
+            params![snapshot_id],
+        ).map_err(|e| e.to_string())?;
+        if affected == 0 {
+            return Err(format!("Snapshot not found: id={}", snapshot_id));
+        }
+        Ok(())
+    }
+
     pub fn restore_snapshot(&self, snapshot_id: i64) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;

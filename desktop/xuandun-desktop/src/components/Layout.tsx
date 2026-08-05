@@ -2,7 +2,6 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import StatusBar from './StatusBar';
 import { useState, useEffect } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
-import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
   LayoutDashboard,
   ShieldCheck,
@@ -25,8 +24,6 @@ const navItems = [
 
 export default function Layout() {
   const [version, setVersion] = useState('');
-  // P1-18 修复：帮助中心点击反馈状态
-  const [helpToast, setHelpToast] = useState<string | null>(null);
   // Sprint7 微交互：页面切换动画，使用 location.pathname 作为 key 触发重新挂载
   const location = useLocation();
   useEffect(() => {
@@ -35,15 +32,7 @@ export default function Layout() {
       .catch(() => setVersion('v1.0.0'));
   }, []);
 
-  // PB-01 修复：帮助中心点击打开用户指南文档
-  const handleHelpClick = (e: { preventDefault: () => void }) => {
-    e.preventDefault();
-    openUrl('https://github.com/zhibaiYingChuan/XD/blob/main/docs/%E7%94%A8%E6%88%B7%E6%8C%87%E5%8D%97.md').catch(() => {
-      // Tauri bridge 不可用时降级为 toast 提示
-      setHelpToast('无法打开浏览器，请手动访问：github.com/zhibaiYingChuan/XD/blob/main/docs/用户指南.md');
-      setTimeout(() => setHelpToast(null), 5000);
-    });
-  };
+  // PB-01 修复：帮助中心改为内置用户手册页面（/help），不再跳转外部仓库文档
 
   return (
     <div className="app-layout">
@@ -78,12 +67,12 @@ export default function Layout() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <a href="#" className="nav-item" onClick={handleHelpClick}>
+          <NavLink to="/help" className="nav-item">
             <span className="nav-icon">
               <HelpCircle size={18} strokeWidth={1.5} />
             </span>
             <span className="nav-label">帮助中心</span>
-          </a>
+          </NavLink>
           {version && <div className="sidebar-version">{version}</div>}
         </div>
       </aside>
@@ -94,17 +83,6 @@ export default function Layout() {
           <Outlet />
         </div>
       </main>
-      {/* P1-18 修复：帮助中心点击 toast 提示，告知用户文档状态 */}
-      {helpToast && (
-        <div className="help-toast" style={{
-          position: 'fixed', bottom: '16px', left: '50%', transform: 'translateX(-50%)',
-          padding: '8px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)',
-          borderRadius: '6px', boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 1000,
-          fontSize: '0.9em', color: 'var(--text-primary)',
-        }}>
-          {helpToast}
-        </div>
-      )}
     </div>
   );
 }

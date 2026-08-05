@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -7,7 +8,8 @@
 # 符号边界动态调整，符号表可扩展，攻击者无法建立静态逆映射。
 
 from collections import OrderedDict
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 
 import numpy as np
 

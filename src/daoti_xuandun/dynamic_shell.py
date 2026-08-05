@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -6,7 +7,8 @@
 # 动态阴阳壳 — 状态依赖权重演化 + 混沌非零偏置
 # 壳本身是一个动态系统，权重随状态在线更新，任何输入都产生高熵输出。
 
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import hashlib
 import numpy as np
 

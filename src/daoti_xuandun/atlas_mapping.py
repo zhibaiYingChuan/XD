@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 compat)
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -11,7 +14,7 @@ ATLAS 技术编号，便于安全事件分类、报告和态势感知。
 """
 
 # 攻击类型 → ATLAS 技术映射表
-_ATLAS_MAPPINGS: dict[str, dict] = {
+_ATLAS_MAPPINGS: Dict[str, dict] = {
     "提示注入": {
         "technique_id": "AML.T0051",
         "technique_name": "Prompt Injection",
@@ -65,7 +68,7 @@ _ATLAS_MAPPINGS: dict[str, dict] = {
 }
 
 # 拦截阶段 → 攻击类型映射（一个阶段可能关联多种攻击类型）
-_REJECT_STAGE_TO_ATTACK_TYPES: dict[str, list[str]] = {
+_REJECT_STAGE_TO_ATTACK_TYPES: Dict[str, List[str]] = {
     "domain_awareness": ["提示注入", "越狱", "角色扮演"],
     "timing_checker": ["多轮渐进攻击"],
     "input_too_long": ["编码攻击", "混淆攻击"],
@@ -82,7 +85,7 @@ _REJECT_STAGE_TO_ATTACK_TYPES: dict[str, list[str]] = {
 }
 
 
-def map_reject_stage_to_atlas(reject_stage: str) -> list[str]:
+def map_reject_stage_to_atlas(reject_stage: str) -> List[str]:
     """将拦截阶段映射到 MITRE ATLAS 技术编号列表。
 
     一个拦截阶段可能关联多种攻击类型，每种攻击类型对应一个

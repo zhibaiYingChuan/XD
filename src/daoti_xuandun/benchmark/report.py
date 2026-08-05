@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -13,7 +14,8 @@
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 
 from daoti_xuandun.benchmark.probes import ThreeStageReport
 

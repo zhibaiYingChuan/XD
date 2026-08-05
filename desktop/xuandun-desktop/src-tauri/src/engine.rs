@@ -22,11 +22,43 @@ pub fn safe_preview(s: &str, max: usize) -> &str {
 }
 
 static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    // P0 修复：管理接口鉴权链路。
+    // 引擎端 _require_admin_auth() 要求管理端点 Origin ∈ {tauri://localhost, http://tauri.localhost}，
+    // 否则返回 403。此前 HTTP_CLIENT 从不发送 Origin 头，导致紧急逃生/灰度部署/模式切换/告警/
+    // 预热等 9 个管理端点全部 403 失效（用户可见：逃生状态/灰度比例"获取失败"）。
+    // 统一作为默认头携带 Origin，覆盖所有请求（非管理端点不校验 Origin，无副作用）。
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    default_headers.insert(
+        reqwest::header::ORIGIN,
+        reqwest::header::HeaderValue::from_static("tauri://localhost"),
+    );
     reqwest::Client::builder()
+        .default_headers(default_headers)
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
+
+/// 引擎管理令牌（与引擎端 XUANDUN_ADMIN_TOKEN 对齐）。
+/// 若配置了该令牌，桌面端转发管理请求时必须透传 X-Admin-Token，否则引擎返回 401。
+/// 未配置时返回 None（引擎端 _ADMIN_TOKEN 为空，仅需 Origin 同源即可）。
+fn admin_token() -> Option<String> {
+    std::env::var("XUANDUN_ADMIN_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 为管理端点请求透传 X-Admin-Token 头（若配置了引擎管理令牌）。
+/// 引擎端配置 XUANDUN_ADMIN_TOKEN 后，管理端点即使 Origin 同源也必须携带
+/// 匹配的 X-Admin-Token，否则返回 401。未配置时透传为空，不影响现有逻辑。
+fn attach_admin_token(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    if let Some(token) = admin_token() {
+        req.header("X-Admin-Token", token)
+    } else {
+        req
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ProtectResult {
@@ -143,10 +175,30 @@ pub async fn send_protect_request(engine_url: &str, text: &str, session: &str, m
     })
 }
 
+/// 输出护栏单次检测：转发到引擎 /output/protect。
+/// 返回引擎原始 JSON（含 action / risk_level / reason / output：打码后的文本）。
+/// 与输入侧 protect 一样使用 30s 独立超时，覆盖冷启动。
+pub async fn send_output_protect_request(engine_url: &str, text: &str, session: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{}/output/protect", engine_url);
+    let body = serde_json::json!({ "text": text, "session": session });
+    let resp = HTTP_CLIENT.post(&url)
+        .json(&body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Engine request failed: {}", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Engine returned HTTP {}: {}", status.as_u16(), body_text));
+    }
+    resp.json().await.map_err(|e| format!("Engine response parse failed: {}", e))
+}
+
 pub async fn sync_mode_to_engine(engine_url: &str, mode: &str) -> Result<(), String> {
     let url = format!("{}/set-mode", engine_url);
     let body = serde_json::json!({ "mode": mode });
-    let resp = HTTP_CLIENT.post(&url).json(&body).send().await
+    let resp = attach_admin_token(HTTP_CLIENT.post(&url).json(&body)).send().await
         .map_err(|e| format!("Sync mode failed: {}", e))?;
 
     // 引擎set-mode可能在加载新模式检测器时抛异常返回500，但mode状态已更新
@@ -176,7 +228,7 @@ pub async fn sync_mode_to_engine(engine_url: &str, mode: &str) -> Result<(), Str
 
 pub async fn engine_get(engine_url: &str, path: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", engine_url, path);
-    let resp = HTTP_CLIENT.get(&url).send().await
+    let resp = attach_admin_token(HTTP_CLIENT.get(&url)).send().await
         .map_err(|e| format!("Engine GET failed: {}", e))?;
     // P1修复：必须检查HTTP状态码，避免解析错误响应为JSON
     let status = resp.status();
@@ -189,7 +241,7 @@ pub async fn engine_get(engine_url: &str, path: &str) -> Result<serde_json::Valu
 
 pub async fn engine_post(engine_url: &str, path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", engine_url, path);
-    let resp = HTTP_CLIENT.post(&url).json(&body).send().await
+    let resp = attach_admin_token(HTTP_CLIENT.post(&url).json(&body)).send().await
         .map_err(|e| format!("Engine POST failed: {}", e))?;
     // P1修复：必须检查HTTP状态码，避免解析错误响应为JSON
     let status = resp.status();
@@ -205,7 +257,7 @@ pub async fn engine_post(engine_url: &str, path: &str, body: serde_json::Value) 
 /// 1. 阴阳门状态卡片 404 错误
 /// 2. /set-mode 可能在创建新模式 shield 时返回 HTTP 500
 /// 3. 缺少最新的抗毒化 GateC 500 次上限
-const MIN_ENGINE_VERSION: &str = "1.3.0";
+const MIN_ENGINE_VERSION: &str = "1.3.2";
 
 /// 语义化版本比较：返回 -1(a<b) / 0(a==b) / 1(a>b)
 fn compare_versions(a: &str, b: &str) -> i32 {
@@ -285,8 +337,7 @@ pub async fn send_warmup_request(
         "safe_texts": safe_texts,
         "attack_texts": attack_texts,
     });
-    let resp = HTTP_CLIENT.post(&url)
-        .json(&body)
+    let resp = attach_admin_token(HTTP_CLIENT.post(&url).json(&body))
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -308,7 +359,12 @@ pub async fn ensure_engine_running(app: &AppHandle) -> Result<(), String> {
     };
 
     if is_running && check_engine_health(&engine_url).await {
-        return Ok(());
+        // P0 修复：即使引擎已在运行且健康，也必须执行版本校验。
+        // 修复前此处直接 return Ok(())，会静默复用旧引擎进程而不检查版本——
+        // 当二进制已更新为 v1.3.2 但旧引擎进程仍在监听时，用户拿到的仍是旧行为
+        // （如阴阳门统计为零），且用户可能没有第二次启动应用的机会。
+        // 改为 mark_engine_running_and_verify 后，版本过低会写入 startup_error 提示用户。
+        return mark_engine_running_and_verify(app, &engine_url, "already running").await;
     }
 
     // P0-1 修复：在尝试启动 sidecar 之前，先检测是否有外部 Flask 引擎已在运行
@@ -410,6 +466,15 @@ fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
                 dir.join(&engine_name),
                 dir.join("xuandun-engine.exe"),
                 dir.join("xuandun-engine"),
+                // Windows/MSIX 打包：资源目录在同级 resources/engine/ 下
+                // NSIS 默认安装结构：<install_dir>/xuandun-desktop.exe + resources/engine/
+                dir.join("resources").join("engine").join(&engine_name),
+                dir.join("resources").join("engine").join("xuandun-engine.exe"),
+                dir.join("resources").join("engine").join("xuandun-engine"),
+                // 兼容开发/便携版结构：直接在 exe 同级的 engine/ 子目录
+                dir.join("engine").join(&engine_name),
+                dir.join("engine").join("xuandun-engine.exe"),
+                dir.join("engine").join("xuandun-engine"),
             ];
             for c in &cands {
                 searched.push(c.display().to_string());
@@ -421,11 +486,15 @@ fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
         }
     }
 
-    // 2. Tauri resource_dir（macOS/Linux 打包模式）
+    // 2. Tauri resource_dir（macOS/Linux 打包模式，Windows sidecar-less 模式）
     if let Ok(res_dir) = app.path().resource_dir() {
         let cands = [
             res_dir.join(&engine_name),
             res_dir.join("xuandun-engine"),
+            // P0 误报治理修复：standalone 目录模式，主引擎在 resources/engine 子目录
+            res_dir.join("engine").join(&engine_name),
+            res_dir.join("engine").join("xuandun-engine.exe"),
+            res_dir.join("engine").join("xuandun-engine"),
         ];
         for c in &cands {
             searched.push(c.display().to_string());
@@ -436,15 +505,22 @@ fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
         }
     }
 
-    // 3. 开发模式：src-tauri/binaries/
+    // 3. 开发模式：src-tauri/resources/engine/（新 standalone 构建产物位置）
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(src_tauri) = dir.parent() {
-                let dev_path = src_tauri.join("src-tauri").join("binaries").join(&engine_name);
-                searched.push(dev_path.display().to_string());
-                if dev_path.exists() {
-                    log_engine(&format!("Engine found at (dev): {}", dev_path.display()));
-                    return Some(dev_path);
+                let dev_new = src_tauri.join("src-tauri").join("resources").join("engine").join(&engine_name);
+                searched.push(dev_new.display().to_string());
+                if dev_new.exists() {
+                    log_engine(&format!("Engine found at (dev-standalone): {}", dev_new.display()));
+                    return Some(dev_new);
+                }
+                // 兼容旧 binaries 目录产物
+                let dev_old = src_tauri.join("src-tauri").join("binaries").join(&engine_name);
+                searched.push(dev_old.display().to_string());
+                if dev_old.exists() {
+                    log_engine(&format!("Engine found at (dev-onefile): {}", dev_old.display()));
+                    return Some(dev_old);
                 }
             }
         }

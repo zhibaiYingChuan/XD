@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -8,7 +9,8 @@
 import hashlib
 import time
 import threading
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Tuple, Union
+
 
 import numpy as np
 
@@ -20,6 +22,23 @@ if TYPE_CHECKING:
     from daoti_xuandun.dynamic_shell import DynamicShell
     from daoti_xuandun.ancient_mapper import SelfOrganizingMapper
     from daoti_xuandun.timing_checker import TimingConsistencyChecker
+
+
+class _DecisionCompat:
+    """将 check_output() 返回的决策字典适配为 guardrail 处置所需的属性访问。
+
+    仅暴露 allowed / action 两个字段，供 resolve_output 复用处置逻辑，
+    避免在公开接口层引入对内部 OutputDecision 类的强依赖。
+    """
+
+    def __init__(self, decision: dict):
+        self.allowed = bool(decision.get("allowed", True))
+        self.action = decision.get("action", "pass")
+
+
+def _decision_from_dict(decision: dict) -> _DecisionCompat:
+    """将决策字典转换为 _DecisionCompat 轻量对象。"""
+    return _DecisionCompat(decision)
 
 
 class XuanDun:
@@ -116,9 +135,65 @@ class XuanDun:
         else:
             self.timing_checker = None
 
+        # 输出护栏（Output Guardrail）：在模型输出侧检测违规内容，形成双向闭环。
+        # 复用洛书编码做语言无关表征，输出侧独立原型库，与输入侧物理隔离。
+        if getattr(config, "enable_output_guardrail", True):
+            from daoti_xuandun._check_output import OutputGuardrail
+
+            self.output_guardrail = OutputGuardrail(config)
+        else:
+            self.output_guardrail = None
+
+        # 敏感信息泄露检测（节 9.7：PII / 密钥 / 企业自定义词典）
+        #   与输出护栏平行：
+        #     - 护栏关注"内容风险"（色情暴力/越狱指令）
+        #     - 本模块关注"数据脱敏"（身份证/密钥/公司内部关键词）
+        #   处置顺序：先检测 → high 拦截，medium 打码，low 告警
+        if getattr(config, "enable_sensitive_leak", True):
+            from daoti_xuandun.sensitive_leak import SensitiveLeakDetector
+
+            path = getattr(config, "sensitive_dict_path", None)
+            self.sensitive_detector: Optional[SensitiveLeakDetector] = SensitiveLeakDetector(
+                custom_dict_path=path
+            )
+        else:
+            self.sensitive_detector = None
+
+        # 间接提示注入检测（节 9.8：Indirect Prompt Injection）
+        #   检测"外部内容围栏 + 围栏内部恶意指令"模式，覆盖 RAG / 浏览器插件 / 邮件摘要类应用
+        #   得分 ≥ block_threshold → 流水线拦截
+        #   ≥ warn_threshold → debug_info 给出 sanitize_text（已删恶意行）
+        if getattr(config, "enable_external_injection_check", True):
+            from daoti_xuandun._check_external import ExternalContentChecker
+
+            self.external_checker: Optional[ExternalContentChecker] = ExternalContentChecker(
+                block_threshold=float(getattr(config, "external_injection_block_threshold", 3.0)),
+                warn_threshold=float(getattr(config, "external_injection_warn_threshold", 2.0)),
+            )
+        else:
+            self.external_checker = None
+
+        # 系统提示泄露升级检测（节 9.9：Prompt Leak — 语义分类 + 置信度）
+        #   超越纯关键词组合：用组合特征分(触发词+动作词权重) + 洛书语义距离融合，
+        #   输出 0~1 置信度，分级处置（block / warn 打标）
+        if getattr(config, "enable_prompt_leak_check", True):
+            from daoti_xuandun._check_prompt_leak import PromptLeakChecker
+
+            self.prompt_leak_checker: Optional[PromptLeakChecker] = PromptLeakChecker(
+                block_min=float(getattr(config, "prompt_leak_block_min", 0.90)),
+                warn_min=float(getattr(config, "prompt_leak_warn_min", 0.70)),
+                use_luoshu=bool(getattr(config, "prompt_leak_use_luoshu", True)),
+            )
+        else:
+            self.prompt_leak_checker = None
+
         self._global_requests: int = 0
         self._global_window_start: float = time.monotonic()
         self._rate_lock = threading.Lock()
+        # 会话级配额：{session_id: {"min_cnt": int, "min_start": float(monotonic秒),
+        #                            "hr_cnt": int, "hr_start": float}}
+        # 线程安全：调用方（_protect_impl）已经持 _protect_lock，不需要额外加锁
+        self._session_quotas: Dict[str, Dict[str, Union[int, float]]] = {}
         self._protect_lock = threading.RLock()
         self._entropy_check_counter: int = 0
         self._rng = np.random.default_rng()
@@ -241,6 +316,12 @@ class XuanDun:
                 "请解释一下相对论的基本原理",
                 "帮我制定一个学习计划",
                 "这道数学题怎么解",
+                # 冷启动中文良性补充：编程/诗词/翻译等常见命令式
+                "用Python写快速排序",
+                "请把李白静夜思全文",
+                "把这段英文翻译为中文",
+                "用JavaScript写一个网页",
+                "请帮我写一首关于春天的诗",
             ]
         else:
             warmup_samples = []
@@ -363,6 +444,147 @@ class XuanDun:
         if self.domain_awareness is None:
             return {"enabled": False, "outer_gate": {}, "inner_gate": {}}
         return self.domain_awareness.get_dual_layer_stats()
+
+    # ── 输出护栏（Output Guardrail）公开接口 ──
+
+    def check_output(self, text: Optional[str], session_id: str = "default") -> dict:
+        """检测模型输出文本是否含违规内容（输出侧护栏）。
+
+        复用洛书编码做语言无关表征，输出侧独立原型库三级处置：
+        - high   → 拦截
+        - medium → 打码
+        - low    → 仅告警
+        任何异常降级放行并告警，绝不断服务。
+
+        Args:
+            text: 模型输出的原始文本。
+            session_id: 会话标识符（保留，供后续会话级统计扩展）。
+
+        Returns:
+            输出护栏决策字典（含 allowed / risk_level / action / reason /
+            violation_distance / safe_distance）。
+        """
+        if self.output_guardrail is None:
+            return {"enabled": False, "allowed": True, "risk_level": "pass",
+                    "action": "pass", "reason": "输出护栏未启用"}
+        decision = self.output_guardrail.check_output(text)
+        return {
+            "enabled": True,
+            "allowed": decision.allowed,
+            "risk_level": decision.risk_level,
+            "action": decision.action,
+            "reason": decision.reason,
+            "violation_distance": decision.violation_distance,
+            "safe_distance": decision.safe_distance,
+            "degraded": decision.degraded,
+        }
+
+    def resolve_output(self, text: str, decision: dict) -> str:
+        """根据输出护栏决策返回最终输出文本（拦截/打码/原样）。
+
+        Args:
+            text: 模型输出的原始文本。
+            decision: check_output() 返回的决策字典。
+
+        Returns:
+            最终应返回给用户的输出文本。
+        """
+        if self.output_guardrail is None:
+            return text
+        # 将决策字典转换为 guardrail 的 OutputDecision 语义，直接复用处置逻辑
+        return self.output_guardrail.resolve_output(text, _decision_from_dict(decision))
+
+    def warmup_output_guardrail(self, safe_texts: Optional[list] = None,
+                                violation_texts: Optional[list] = None):
+        """批量预热输出护栏原型库（安全输出 + 违规输出）。"""
+        if self.output_guardrail is not None:
+            self.output_guardrail.warmup(safe_texts=safe_texts,
+                                         violation_texts=violation_texts)
+
+    def get_output_guardrail_stats(self) -> dict:
+        """返回输出护栏运行统计（脱敏）。"""
+        if self.output_guardrail is None:
+            return {"enabled": False}
+        return self.output_guardrail.get_stats()
+
+    def get_output_guardrail_history(self, limit: int = 20) -> list:
+        """返回输出护栏最近处置记录（脱敏）。"""
+        if self.output_guardrail is None:
+            return []
+        return self.output_guardrail.get_history(limit)
+
+    def get_output_guardrail_trend(self, granularity: str = "hour",
+                                   start: Optional[str] = None,
+                                   end: Optional[str] = None) -> list:
+        """返回输出护栏处置趋势（时间序列，脱敏）。"""
+        if self.output_guardrail is None:
+            return []
+        return self.output_guardrail.get_trend(granularity, start, end)
+
+    def get_output_guardrail_config(self) -> dict:
+        """返回输出护栏当前生效配置快照（白名单参数）。
+
+        供引擎 /output/config GET 端点回显；缺失 output_guardrail 时返回空快照。
+        """
+        if self.output_guardrail is None:
+            return {}
+        return {k: getattr(self.config, k) for k in self.output_guardrail._RUNTIME_CONFIG_WHITELIST}
+
+    def update_output_guardrail_config(self, cfg: dict) -> dict:
+        """运行期更新输出护栏配置（引擎 /output/config POST 端点调用）。
+
+        仅更新白名单内可调参数，非法键忽略；返回生效快照。
+        """
+        if self.output_guardrail is None:
+            raise RuntimeError("output_guardrail not initialized")
+        return self.output_guardrail.update_config(**cfg)
+
+    # ── 敏感信息泄露防护（企业词典管理）公开接口 ──
+
+    def add_sensitive_keyword(self, name: str, keyword: str, *,
+                              category: str = "custom", severity: str = "medium",
+                              case_sensitive: bool = False) -> Tuple[bool, str]:
+        """新增企业自定义敏感关键词。
+
+        Args:
+            name: 规则名（唯一，覆盖同名规则）。
+            keyword: 关键词字符串。
+            category: 分类标签（如 internal/customer/financial）。
+            severity: high|medium|low。
+            case_sensitive: 是否大小写敏感。
+
+        Returns:
+            (success, message) 元组。
+        """
+        if self.sensitive_detector is None:
+            return False, "敏感信息检测未启用（config.enable_sensitive_leak=False）"
+        return self.sensitive_detector.add_keyword(
+            name, keyword, category=category, severity=severity,
+            case_sensitive=case_sensitive,
+        )
+
+    def add_sensitive_regex(self, name: str, pattern: str, *,
+                            category: str = "custom", severity: str = "medium",
+                            case_sensitive: bool = False) -> Tuple[bool, str]:
+        """新增企业自定义敏感正则。"""
+        if self.sensitive_detector is None:
+            return False, "敏感信息检测未启用（config.enable_sensitive_leak=False）"
+        return self.sensitive_detector.add_regex(
+            name, pattern, category=category, severity=severity,
+            case_sensitive=case_sensitive,
+        )
+
+    def remove_sensitive_pattern(self, name: str) -> bool:
+        """删除一条企业自定义敏感模式。"""
+        if self.sensitive_detector is None:
+            return False
+        return self.sensitive_detector.remove_pattern(name)
+
+    def list_sensitive_patterns(self) -> List[Dict[str, Any]]:
+        """返回当前所有自定义敏感模式（JSON 友好）。"""
+        if self.sensitive_detector is None:
+            return []
+        return self.sensitive_detector.list_patterns()
 
     def recommend_config(self, output_format: str = "dict") -> Union[dict, str]:
         """基于当前域档案自动推荐配置参数。
@@ -966,6 +1188,141 @@ th {{ background: #f5f5f5; }}
                     "Request dropped to prevent resource exhaustion."
                 )
 
+    def _check_request_length(self, raw_input):
+        """单请求长度限制：超长输入直接拦截，防止超大 prompt 耗显存/CPU。
+
+        仅对 str 类型生效（符号序列 Vector 长度由上游控制）。
+        max_request_length ≤ 0 视为不限。
+        """
+        limit = self.config.max_request_length
+        if limit <= 0 or not isinstance(raw_input, str):
+            return
+        n = len(raw_input)
+        if n > limit:
+            raise RuntimeError(
+                f"Request length ({n} chars) exceeds limit ({limit} chars). "
+                "Oversized input blocked to prevent GPU memory exhaustion."
+            )
+
+    def _check_session_quota(self, session_id: str):
+        """会话级配额（按 session_id 的每分钟/每小时计数器）。
+
+        计数窗口：
+          * 分钟窗口：从 min_start 起 60s，到期自动清零并重置起点
+          * 小时窗口：从 hr_start 起 3600s，到期自动清零并重置起点
+        session_quota_per_minute/hour ≤ 0 视为该维度不限。
+        清零后当前请求计入新窗口（不会丢当前调用的计数）。
+        """
+        cfg = self.config
+        min_limit = cfg.session_quota_per_minute
+        hr_limit = cfg.session_quota_per_hour
+        if min_limit <= 0 and hr_limit <= 0:
+            return  # 两维都不限，跳过分配
+        now = time.monotonic()
+        slot = self._session_quotas.get(session_id)
+        if slot is None:
+            slot = {"min_cnt": 0, "min_start": now, "hr_cnt": 0, "hr_start": now}
+            self._session_quotas[session_id] = slot
+
+        # 分钟窗口
+        if min_limit > 0:
+            if now - slot["min_start"] >= 60.0:
+                slot["min_cnt"] = 0
+                slot["min_start"] = now
+            slot["min_cnt"] = int(slot["min_cnt"]) + 1
+            if int(slot["min_cnt"]) > min_limit:
+                slot["min_cnt"] = int(slot["min_cnt"]) - 1
+                raise RuntimeError(
+                    f"Session '{session_id}' minute quota ({min_limit}/min) exceeded. "
+                    "Request throttled to prevent abuse."
+                )
+        # 小时窗口
+        if hr_limit > 0:
+            if now - slot["hr_start"] >= 3600.0:
+                slot["hr_cnt"] = 0
+                slot["hr_start"] = now
+            slot["hr_cnt"] = int(slot["hr_cnt"]) + 1
+            if int(slot["hr_cnt"]) > hr_limit:
+                slot["hr_cnt"] = int(slot["hr_cnt"]) - 1
+                raise RuntimeError(
+                    f"Session '{session_id}' hour quota ({hr_limit}/hr) exceeded. "
+                    "Request throttled to prevent abuse."
+                )
+
+    def rate_limit_status(self, session_id: str | None = None, top_n: int = 20) -> Dict[str, Any]:
+        """返回限流/配额状态快照（给 POST /rate/limit 端点使用）。
+
+        返回字段：
+          config: {global_qps_limit, max_request_length, session_quota_per_minute, session_quota_per_hour}
+          global: {current_qps_window_count, window_elapsed_sec, qps_limit}
+          sessions: top-N 活跃会话（按分钟计数排序），或指定 session_id 的精确状态
+        """
+        cfg = self.config
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._global_window_start)
+        with self._rate_lock:
+            qps_count = int(self._global_requests)
+
+        sessions_out: Dict[str, Any] = {}
+        if session_id is not None:
+            # 精确查询单个 session
+            slot = self._session_quotas.get(session_id)
+            if slot is None:
+                sessions_out[session_id] = {
+                    "minute_count": 0, "minute_remaining": max(0.0, 60.0 - 0.0),
+                    "hour_count": 0, "hour_remaining": 3600.0,
+                }
+            else:
+                min_cnt = int(slot["min_cnt"])
+                hr_cnt = int(slot["hr_cnt"])
+                min_remain = max(0.0, 60.0 - (now - float(slot["min_start"])))
+                hr_remain = max(0.0, 3600.0 - (now - float(slot["hr_start"])))
+                sessions_out[session_id] = {
+                    "minute_count": min_cnt,
+                    "minute_limit": cfg.session_quota_per_minute,
+                    "minute_window_remaining_sec": round(min_remain, 2),
+                    "hour_count": hr_cnt,
+                    "hour_limit": cfg.session_quota_per_hour,
+                    "hour_window_remaining_sec": round(hr_remain, 2),
+                }
+        else:
+            # 取 top_n 活跃（按分钟计数排序）
+            items = sorted(
+                self._session_quotas.items(),
+                key=lambda kv: int(kv[1].get("min_cnt", 0)),
+                reverse=True,
+            )[:top_n]
+            for sid, slot in items:
+                min_cnt = int(slot.get("min_cnt", 0))
+                hr_cnt = int(slot.get("hr_cnt", 0))
+                min_remain = max(0.0, 60.0 - (now - float(slot.get("min_start", now))))
+                hr_remain = max(0.0, 3600.0 - (now - float(slot.get("hr_start", now))))
+                sessions_out[sid] = {
+                    "minute_count": min_cnt,
+                    "minute_limit": cfg.session_quota_per_minute,
+                    "minute_window_remaining_sec": round(min_remain, 2),
+                    "hour_count": hr_cnt,
+                    "hour_limit": cfg.session_quota_per_hour,
+                    "hour_window_remaining_sec": round(hr_remain, 2),
+                }
+
+        return {
+            "config": {
+                "global_qps_limit": cfg.global_qps_limit,
+                "max_request_length": cfg.max_request_length,
+                "session_quota_per_minute": cfg.session_quota_per_minute,
+                "session_quota_per_hour": cfg.session_quota_per_hour,
+            },
+            "global_qps": {
+                "window_count": qps_count,
+                "window_elapsed_sec": round(elapsed, 3),
+                "limit": cfg.global_qps_limit,
+                "enabled": cfg.global_qps_limit > 0,
+            },
+            "sessions": sessions_out,
+            "total_sessions_tracked": len(self._session_quotas),
+        }
+
     def _side_channel_delay(self):
         """侧信道延迟掩码：注入随机微秒级延迟，模糊时序分析。
 
@@ -1021,26 +1378,51 @@ th {{ background: #f5f5f5; }}
         timing_distance = None
         trust_level = TrustLevel.UNKNOWN
         domain_distance = None
+        trust_decay_value = None
+        intent_drift_score = None
+        intent_drift_detected = None
 
         self._check_rate_limit()
+        self._check_request_length(raw_input)   # 无限消耗防护：超长输入拦截
+        self._check_session_quota(session_id)  # 无限消耗防护：会话级分钟/小时配额
         self._entropy_guard()
 
         # 阶段1：内生域感知
         if self.domain_awareness is not None:
             decision, vec, trust_level, domain_distance = self.domain_awareness.process(raw_input, session_id)
+            # ── P0 多轮会话状态跟踪：turn_count++ + trust_decay 前进一轮 + 用 domain_distance 更新漂移
+            #    把 turn_count 和 trust_decay 提前到阶段1，保证即便后续 REJECT 也已前进到"本轮"
+            #    这样 update_drift_with_domain_distance 里 turn_count >= min_turns 时可以触发漂移检测
+            if self.timing_checker is not None and hasattr(self.timing_checker, 'advance_turn'):
+                self.timing_checker.advance_turn(session_id)
+            if self.timing_checker is not None and hasattr(self.timing_checker, 'update_drift_with_domain_distance'):
+                self.timing_checker.update_drift_with_domain_distance(session_id, domain_distance)
             if decision == Decision.REJECT:
                 self._side_channel_delay()
                 debug_info = None
                 if self.config.debug and hasattr(self.domain_awareness, '_last_debug_info'):
                     debug_info = self.domain_awareness._last_debug_info
+                # 在拒绝分支也读取会话状态（已有的 trust/drift 仍有效）
+                if self.timing_checker is not None:
+                    st = self.timing_checker.get_session_state(session_id)
+                    trust_decay_value = st["trust_decay_value"]
+                    intent_drift_score = st["intent_drift_score"]
+                    intent_drift_detected = st["intent_drift_detected"]
                 return ProtectResult(
                     allowed=False,
                     reject_stage="domain_awareness",
                     trust_level=trust_level,
                     domain_distance=domain_distance,
                     debug_info=debug_info,
+                    trust_decay_value=trust_decay_value,
+                    intent_drift_score=intent_drift_score,
+                    intent_drift_detected=intent_drift_detected,
                 )
         else:
+            # 没有 domain_awareness 时也要推进会话状态，保证 turn_count / trust_decay 单调前进
+            # （没有 domain_distance → 漂移不更新，但 turn_count 仍需递增）
+            if self.timing_checker is not None and hasattr(self.timing_checker, 'advance_turn'):
+                self.timing_checker.advance_turn(session_id)
             if isinstance(raw_input, str):
                 dim = self.config.hidden_dim
                 hash_vec = np.zeros(dim, dtype=np.float32)
@@ -1065,7 +1447,8 @@ th {{ background: #f5f5f5; }}
                 raise ValueError("Feature vector is None before shell transform")
             if self.symbol_mapper is not None:
                 pre_shell_hash = self._hash_vector(vec)
-                sess_hash = int(hashlib.md5(session_id.encode('utf-8')).hexdigest()[:8], 16) & 0x7FFFFFFF
+                # 非密码学用途：会话级扰动种子（bandit B324 豁免）
+                sess_hash = int(hashlib.md5(session_id.encode('utf-8'), usedforsecurity=False).hexdigest()[:8], 16) & 0x7FFFFFFF
                 pre_shell_hash = pre_shell_hash ^ (sess_hash * 2654435761)
             vec = self.dynamic_shell.transform(vec, session_id, byte_anomaly=byte_anomaly)
 
@@ -1100,20 +1483,202 @@ th {{ background: #f5f5f5; }}
         # 会导致良性查询被拒。保留 check() 调用以维护窗口状态和距离记录。
         if self.timing_checker is not None and sym_seq is not None:
             _, timing_distance = self.timing_checker.check(sym_seq, session_id)
+            # 从 timing_checker 读取多轮会话状态（trust_decay / intent_drift）
+            st = self.timing_checker.get_session_state(session_id)
+            trust_decay_value = st["trust_decay_value"]
+            intent_drift_score = st["intent_drift_score"]
+            intent_drift_detected = st["intent_drift_detected"]
 
         self._side_channel_delay()
+
+        # 阶段5：敏感信息泄露检测（PII / 密钥 / 企业自定义词典）
+        #   分 3 级处置（节 9.7）：
+        #     - high：身份证/私钥/JWT/AWS Secret 等 → 直接拦截（reject_stage=sensitive_leak）
+        #     - medium：手机号/银行卡/Bearer Token 等 → 对 final_output 打码，继续放行
+        #     - low：邮箱/车牌号 → 仅在 debug_info 标注，不影响放行
+        #   为了统一对 raw_input（字符串）和 symbol_seq（List[int]）生效，
+        #   这里先在 raw_input（原始输入文本）上检测，命中后按以上策略处置；
+        #   如果 raw_input 不是字符串（如已经是 symbol list），则跳过（由前端/上游负责）。
+        sensitive_hit_obj = None
+        sensitive_hit_severity = None
+        if self.sensitive_detector is not None and isinstance(raw_input, str):
+            _h, _obj = self.sensitive_detector.check(raw_input)
+            if _h and _obj is not None:
+                sensitive_hit_obj = _obj
+                sensitive_hit_severity = _obj.severity
 
         debug_info = None
         if self.config.debug and hasattr(self.domain_awareness, '_last_debug_info'):
             debug_info = self.domain_awareness._last_debug_info
+        # 命中 low 级别：只在 debug_info 标注
+        if sensitive_hit_obj is not None and sensitive_hit_severity == "low":
+            if debug_info is None:
+                debug_info = {}
+            if isinstance(debug_info, dict):
+                debug_info["sensitive_leak"] = {
+                    "category": sensitive_hit_obj.category,
+                    "severity": sensitive_hit_severity,
+                    "pattern_name": sensitive_hit_obj.pattern_name,
+                }
+
+        # 命中 high 级别：拦截
+        if (sensitive_hit_obj is not None and sensitive_hit_severity == "high"
+                and getattr(self.config, "sensitive_high_block", True)):
+            return ProtectResult(
+                allowed=False,
+                reject_stage="sensitive_leak",
+                trust_level=trust_level,
+                domain_distance=domain_distance,
+                timing_distance=timing_distance,
+                attack_category=f"sensitive:{sensitive_hit_obj.category}",
+                debug_info={"sensitive_leak": {
+                    "category": sensitive_hit_obj.category,
+                    "severity": "high",
+                    "pattern_name": sensitive_hit_obj.pattern_name,
+                }},
+                trust_decay_value=trust_decay_value,
+                intent_drift_score=intent_drift_score,
+                intent_drift_detected=intent_drift_detected,
+            )
+
+        # 命中 medium 级别：打码（把 raw_input 中的敏感片段替换为 [REDACTED:<cat>]），
+        #   之后用打码后的文本重新走一遍编码流程（保持符号序列与脱敏文本一致）。
+        #   为了避免重复走完整编码链路（性能），这里仅当 final_output 是字符串时直接打码。
+        final_output_payload = sym_seq
+        if (sensitive_hit_obj is not None and sensitive_hit_severity == "medium"
+                and getattr(self.config, "sensitive_medium_redact", True)
+                and isinstance(raw_input, str)
+                and self.sensitive_detector is not None):
+            # 返回前把 raw_input 作为 final_output 的人类可读副本同时返回：
+            #   - final_output（symbol 序列）仍然返回，保证符号表链路兼容；
+            #   - 在 debug_info 中额外返回 redacted_text，让上层直接拿脱敏文本。
+            redacted = self.sensitive_detector.redact(raw_input)
+            if debug_info is None:
+                debug_info = {}
+            if isinstance(debug_info, dict):
+                debug_info["redacted_text"] = redacted
+                debug_info["sensitive_leak"] = {
+                    "category": sensitive_hit_obj.category,
+                    "severity": "medium",
+                    "pattern_name": sensitive_hit_obj.pattern_name,
+                }
+
+        # 阶段6：间接提示注入检测（节 9.8，external checker 只对原始文本生效）
+        #   - block 级 → REJECT（reject_stage=external_injection）
+        #   - warn 级 → 仅在 debug_info 输出 sanitized_text（行级删除了恶意指令）
+        external_decision = None
+        if self.external_checker is not None and isinstance(raw_input, str):
+            external_decision = self.external_checker.check(raw_input)
+            should_block = bool(external_decision.block)
+            warn_hit = (not should_block) and external_decision.score >= self.external_checker.warn_threshold
+            if should_block:
+                # 构造匹配对象详情列表（不把整段匹配文本塞进返回结果，避免把攻击载荷泄漏给攻击者）
+                match_info = [
+                    {"category": m.category, "severity": m.severity,
+                     "pattern": m.pattern_name, "offset": [m.start, m.end]}
+                    for m in external_decision.matches
+                ][:10]
+                return ProtectResult(
+                    allowed=False,
+                    reject_stage="external_injection",
+                    trust_level=trust_level,
+                    domain_distance=domain_distance,
+                    timing_distance=timing_distance,
+                    attack_category=f"indirect:{external_decision.category or 'unknown'}",
+                    debug_info={
+                        "external_injection": {
+                            "score": round(external_decision.score, 2),
+                            "category": external_decision.category,
+                            "matches": match_info,
+                        }
+                    },
+                    trust_decay_value=trust_decay_value,
+                    intent_drift_score=intent_drift_score,
+                    intent_drift_detected=intent_drift_detected,
+                )
+            if warn_hit and getattr(self.config, "external_injection_sanitize", True):
+                if debug_info is None:
+                    debug_info = {}
+                if isinstance(debug_info, dict):
+                    debug_info["external_injection"] = {
+                        "score": round(external_decision.score, 2),
+                        "category": external_decision.category,
+                        "sanitized_text": self.external_checker.sanitize(raw_input),
+                    }
+
+        # 阶段7：系统提示泄露升级检测（节 9.9：Prompt Leak — 语义分类 + 置信度）
+        #   分级处置：
+        #     - confidence ≥ block_min → 直接拦截（reject_stage=prompt_leak）
+        #     - ≥ warn_min 且 < block_min → 在 debug_info 打标（保留 matches、category、置信度），
+        #       不拦截，仅对上层提示"疑似刺探"
+        #   仅对 raw_input 为字符串生效（符号序列无文本语义）
+        prompt_leak_decision = None
+        if self.prompt_leak_checker is not None and isinstance(raw_input, str):
+            # 若启用洛书语义融合，则从 domain_awareness 中取出 _luoshu（语言无关符号映射器）
+            luoshu_ref = None
+            if self.prompt_leak_checker.use_luoshu and self.domain_awareness is not None:
+                luoshu_ref = getattr(self.domain_awareness, "_luoshu", None)
+            prompt_leak_decision = self.prompt_leak_checker.check(raw_input, luoshu=luoshu_ref)
+
+            # ≥ block_min → 拦截
+            if bool(prompt_leak_decision.block):
+                # 保留前 10 条 matches 标签（不暴露原文本片段，避免反向构造攻击载荷）
+                match_tags = (prompt_leak_decision.matches or [])[:10]
+                return ProtectResult(
+                    allowed=False,
+                    reject_stage="prompt_leak",
+                    trust_level=trust_level,
+                    domain_distance=domain_distance,
+                    timing_distance=timing_distance,
+                    attack_category=f"prompt_leak:{prompt_leak_decision.category}",
+                    debug_info={
+                        "prompt_leak": {
+                            "confidence": round(float(prompt_leak_decision.confidence), 3),
+                            "category": prompt_leak_decision.category,
+                            "semantic_distance": (
+                                round(float(prompt_leak_decision.semantic_distance), 3)
+                                if prompt_leak_decision.semantic_distance is not None
+                                   and prompt_leak_decision.semantic_distance >= 0.0
+                                else None
+                            ),
+                            "matches": match_tags,
+                            "severity": "high",
+                        }
+                    },
+                    trust_decay_value=trust_decay_value,
+                    intent_drift_score=intent_drift_score,
+                    intent_drift_detected=intent_drift_detected,
+                )
+
+            # ≥ warn_min 但未达 block → 仅在 debug_info 打标，不拦截
+            if prompt_leak_decision.confidence >= self.prompt_leak_checker.warn_min:
+                if debug_info is None:
+                    debug_info = {}
+                if isinstance(debug_info, dict):
+                    match_tags = (prompt_leak_decision.matches or [])[:10]
+                    debug_info["prompt_leak"] = {
+                        "confidence": round(float(prompt_leak_decision.confidence), 3),
+                        "category": prompt_leak_decision.category,
+                        "semantic_distance": (
+                            round(float(prompt_leak_decision.semantic_distance), 3)
+                            if prompt_leak_decision.semantic_distance is not None
+                               and prompt_leak_decision.semantic_distance >= 0.0
+                            else None
+                        ),
+                        "matches": match_tags,
+                        "severity": "warn",
+                    }
 
         return ProtectResult(
             allowed=True,
-            final_output=sym_seq,
+            final_output=final_output_payload,
             timing_distance=timing_distance,
             trust_level=trust_level,
             domain_distance=domain_distance,
             debug_info=debug_info,
+            trust_decay_value=trust_decay_value,
+            intent_drift_score=intent_drift_score,
+            intent_drift_detected=intent_drift_detected,
         )
 
     def compute_integrity_hash(self) -> str:
@@ -1201,6 +1766,7 @@ th {{ background: #f5f5f5; }}
 
         self._global_requests = 0
         self._global_window_start = time.monotonic()
+        self._session_quotas.clear()  # 无限消耗防护：会话配额重置
         self._entropy_check_counter = 0
 
     def _entropy_guard(self):

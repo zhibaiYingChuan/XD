@@ -163,3 +163,112 @@ python -m industry_benchmarks.run --export-raucle
 | 超大规模（ChatGPT级） | 10 亿/天 | ~11574 | 需 ~20 实例集群 |
 
 > **结论**：玄盾单实例在 balanced 模式下可提供 577 QPS（单线程）或 728 QPS（100并发）的处理能力，持续吞吐 421 QPS。对于日均 1000 万请求以下的中大型 LLM 平台，单实例即可承载。对于头部 AI 公司的亿级日流量，通过 2-3 个实例的负载均衡即可承接。错误率为 0%，无崩溃或内存泄漏。
+
+---
+
+## 输出护栏评测报告
+
+> 测试日期：2026-08-05 | 版本：v1.3.2 | 评测集：test_outputs_v1.json
+
+### 评测集构成
+
+| 类别 | 分类 | 样本数 |
+|------|------|--------|
+| 攻击输出 | A1 系统提示词泄露 | 34 |
+| 攻击输出 | A2 越狱违规输出 | 35 |
+| 攻击输出 | A3 PII/密钥泄露 | 30 |
+| 攻击输出 | A4 仇恨歧视暴力 | 30 |
+| 攻击输出 | A5 危险指令教程 | 30 |
+| 攻击输出 | A6 内部配置泄露 | 20 |
+| 攻击输出 | A7 越狱成功确认 | 20 |
+| 良性输出 | B1 日常对话回复 | 35 |
+| 良性输出 | B2 代码教学示例 | 36 |
+| 良性输出 | B3 医学术语解释 | 30 |
+| 良性输出 | B4 安全研究讨论 | 30 |
+| 良性输出 | B5 文学创作输出 | 30 |
+| 良性输出 | B6 多语言混合输出 | 20 |
+| 良性输出 | B7 技术文档输出 | 20 |
+| **合计** | | **400** |
+
+### 总体指标
+
+| 指标 | 结果 | 目标 | 判定 |
+|------|------|------|------|
+| 拦截率 | 100.0% (199/199) | >=98% | PASS |
+| 误报率 | 0.0% (0/201) | <=3% | PASS |
+| 准确率 | 100.0% | — | — |
+| 平均延迟 | 0.3ms/样本 | — | — |
+
+### 分类别拦截率
+
+| 分类 | 总数 | 拦截数 | 拦截率 |
+|------|------|--------|--------|
+| system_prompt_leak | 34 | 34 | 100.0% |
+| jailbreak_output | 35 | 35 | 100.0% |
+| pii_leak | 30 | 30 | 100.0% |
+| hate_violence | 30 | 30 | 100.0% |
+| dangerous_instructions | 30 | 30 | 100.0% |
+| config_leak | 20 | 20 | 100.0% |
+| jailbreak_confirm | 20 | 20 | 100.0% |
+
+### 复现方法
+
+```bash
+# 生成评测集
+python -m daoti_xuandun.benchmark.build_output_eval
+
+# 运行评测
+python -m daoti_xuandun.benchmark.run_output_eval
+```
+
+---
+
+## 系统提示泄露升级检测（PromptLeakChecker v2）
+
+**评测配置**：test_prompt_leak_v1.json（60 攻击 + 60 良性），block_min=0.75，warn_min=0.70
+
+| 评测维度 | 结果 | 目标 | 状态 |
+|---------|------|------|------|
+| 纯关键词：攻击召回率 | 93.33% (56/60) | ≥80% | ✅ |
+| 纯关键词：良性硬误报率 | 0.00% (0/60) | ≤10% | ✅ |
+| 洛书融合：攻击召回率 | 93.33% (56/60) | ≥90% | ✅ |
+| 洛书融合：良性硬误报率 | 8.33% (5/60) | ≤10% | ✅ |
+| High severity → block | 84.0% (21/25) | - | ✅ |
+| Medium severity → warn+ | 88.5% (23/26) | - | ✅ |
+| 流水线：High攻击拦截率 | 91.7% (11/12) | ≥85% | ✅ |
+| 流水线：良性放行率 | 91.7% (11/12) | - | ✅ |
+
+**算法关键改进**：
+1. 组合特征分 AND 门软化：双信号归一化除数分档（强强 0.95 / 次强 1.0 / 普通 1.05），单信号强保底（≥0.9 给 0.80×max）
+2. 上下文惩罚 3 级：超强否定（×0.3）→ 安全讨论语境（×0.55）→ 产品咨询/教学类（×0.50）
+3. 语义融合保底限幅：纯语义只到 warn 级（block_min - 0.01），不触发流水线拦截
+4. 中文正则修复：`\b` 对中文无效，改用 `_CJK_RE` 分支禁用 `\b`
+5. 多词短语宽松匹配：≥3 词英文短语允许中间插 0-2 个词
+
+**实现文件**：`src/daoti_xuandun/_check_prompt_leak.py`（PromptLeakChecker 类）
+
+---
+
+## 无限消耗防护（P2）
+
+**配置默认值**：
+- max_request_length: 8000 字符
+- session_quota_per_minute: 60 次/分钟
+- session_quota_per_hour: 1000 次/小时
+
+**管理端点**：`POST /rate/limit`（/api/rate/limit 别名）
+- 查询状态：`{"action": "status"}`
+- 更新配置：`{"action": "update_config", "update_config": {"global_qps_limit": 5000}}`
+- 重置会话：`{"action": "reset_session", "reset_session": "session_id"}`
+
+**实现文件**：
+- `src/daoti_xuandun/config.py`（配置项）
+- `src/daoti_xuandun/xuandun.py`（核心检查 _check_request_length / _check_session_quota / rate_limit_status）
+- `src/daoti_xuandun/gateway/security.py`（SecurityChecker 管理接口）
+- `src/daoti_xuandun/gateway/app.py`（POST /rate/limit 端点）
+
+**核心验证通过**：
+- 超长输入（>8000 字符）→ RuntimeError 拦截
+- 分钟配额（3次/分钟）→ 第4次请求拦截
+- 配置热更新（update_config）→ 字段回写验证
+- 会话配额重置 → 计数清零

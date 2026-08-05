@@ -132,6 +132,71 @@ export interface DualLayerStats {
   };
 }
 
+// ── 输出护栏（模型→用户）：stats / history / trend ──
+// 数据由引擎按分钟桶内存采集（准实时、重启清空），脱敏返回。
+
+export interface OutputStats {
+  /** 输出护栏是否启用（引擎 config.enable_output_guardrail） */
+  enabled?: boolean;
+  total_checks: number;
+  blocked: number;
+  redacted: number;
+  alerted: number;
+}
+
+export interface OutputHistoryEntry {
+  time: string;
+  action: 'block' | 'redact' | 'alert' | 'pass';
+  risk_level: 'high' | 'medium' | 'low' | 'pass';
+  reason: string;
+  preview: string;
+}
+
+export interface OutputHistoryResponse {
+  history: OutputHistoryEntry[];
+}
+
+export interface OutputTrendPoint {
+  time: string;
+  checked: number;
+  blocked: number;
+  redacted: number;
+  alerted: number;
+}
+
+export interface OutputTrendResponse {
+  points: OutputTrendPoint[];
+}
+
+// 输出护栏配置（引擎 /output/config 返回的生效快照）
+export interface OutputConfigResponse {
+  status?: string;
+  config: {
+    enable_output_guardrail?: boolean;
+    output_guardrail_high_threshold?: number;
+    output_guardrail_medium_threshold?: number;
+    output_guardrail_low_threshold?: number;
+    output_guardrail_safe_exempt?: number;
+    output_guardrail_rule_block_signal?: number;
+    output_guardrail_rule_medium_signal?: number;
+    output_guardrail_redact_token?: string;
+  };
+}
+
+// 输出护栏单次检测结果（对应引擎 /output/protect 的返回）
+export interface OutputProtectResponse {
+  allowed: boolean;
+  risk_level: string;
+  action: 'pass' | 'block' | 'redact' | 'alert';
+  reason: string;
+  /** 处置后的输出文本：redact 时为片段打码后的文本，block 时为安全提示，pass/alert 为原文 */
+  output: string;
+  violation_distance?: number | null;
+  safe_distance?: number | null;
+  degraded: boolean;
+  latency_ms: number;
+}
+
 // ── 企业级运维：逃生通道 + 灰度部署 ──
 
 export interface EmergencyBypassState {
@@ -308,13 +373,20 @@ export const api = {
     // 从而验证Detect.tsx第80行的超时分支（否则永远不触发，超时分支形同虚设）
     if (typeof window !== 'undefined' &&
         (window as any).__HCSE_HANG_PROTECT === true) {
-      return new Promise<ProtectResponse>(() => {
-        // 故意不调用resolve/reject，模拟"卡死"——35秒后由invokeWithTimeout外层Promise.race触发超时
+      // 构造与 invokeWithTimeout 完全同构的超时结构：底层 invoke 永不 resolve（模拟后端卡死），
+      // 外层 Promise.race 保留 PROTECT_COLD=35s 定时器，使 InvokeTimeoutError 真实触发，
+      // 从而验证 Detect.tsx 的超时兜底分支（裸挂起 Promise 会绕过超时，分支形同虚设）。
+      const hangPromise = new Promise<ProtectResponse>(() => {
+        // 故意不调用 resolve/reject，模拟后端"永不返回"
       });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new InvokeTimeoutError('protect', TIMEOUT.PROTECT_COLD)), TIMEOUT.PROTECT_COLD);
+      });
+      return Promise.race([hangPromise, timeoutPromise]) as Promise<ProtectResponse>;
     }
     return invokeWithTimeout<ProtectResponse>('protect', { req: { text, session, mode } }, TIMEOUT.PROTECT_COLD);
   },
-  setMode: (mode: string) => invokeWithTimeout<void>('set_mode', { mode }, TIMEOUT.FAST),
+  setMode: (mode: string) => invokeWithTimeout<void>('set_mode', { mode }, TIMEOUT.NORMAL),
   getLogs: (filterAllowed?: boolean, limit?: number, offset?: number) =>
     invokeWithTimeout<LogResponse>('get_logs', { filterAllowed, limit, offset }, TIMEOUT.FAST),
   getConfig: (key: string) => invokeWithTimeout<string | null>('get_config', { key }, TIMEOUT.FAST),
@@ -323,6 +395,8 @@ export const api = {
   // 前端预留34s冗余，使用RESTART_ENGINE=95s，保证Rust端先返回Err而不是前端先抛超时
   restartEngine: () => invokeWithTimeout<void>('restart_engine', undefined, TIMEOUT.RESTART_ENGINE),
   stopEngine: () => invokeWithTimeout<void>('stop_engine', undefined, TIMEOUT.SLOW),
+  // UI修复：打开引擎日志文件（Dashboard启动失败时供用户点击查看）
+  openEngineLog: () => invokeWithTimeout<string>('open_engine_log', undefined, TIMEOUT.FAST),
   // Sprint1-P0-7: IPC析构散落报错修复——3s快速noop心跳，10s定时检测桥接是否还活着
   heartbeatNoop: () => invokeWithTimeout<{ ok: boolean; ts: number }>('noop_heartbeat', undefined, TIMEOUT.NOOP_HEARTBEAT),
   warmup: (safeTexts: string[], attackTexts: string[]) =>
@@ -335,9 +409,7 @@ export const api = {
   createSnapshot: (label: string) => invokeWithTimeout<number>('create_snapshot', { label }, TIMEOUT.NORMAL),
   listSnapshots: () => invokeWithTimeout<[number, string, string][]>('list_snapshots', undefined, TIMEOUT.FAST),
   restoreSnapshot: (snapshotId: number) => invokeWithTimeout<void>('restore_snapshot', { snapshotId }, TIMEOUT.NORMAL),
-  startProxy: (port: number) => invokeWithTimeout<void>('start_proxy_cmd', { port }, TIMEOUT.FAST),
-  stopProxy: () => invokeWithTimeout<void>('stop_proxy_cmd', undefined, TIMEOUT.FAST),
-  isProxyRunning: () => invokeWithTimeout<boolean>('is_proxy_running_cmd', undefined, TIMEOUT.FAST),
+  deleteSnapshot: (snapshotId: number) => invokeWithTimeout<void>('delete_snapshot', { snapshotId }, TIMEOUT.NORMAL),
   getLearningStatus: () => invokeWithTimeout<LearningStatus>('get_learning_status', undefined, TIMEOUT.FAST),
   // Cycle1洁净度：已删除switchLearningMode（UI移除手动切换，防止运维误触，仅配置文件/API Key控制）
   // Cycle1洁净度：已删除getLearningDetails / runSimulation（独立页面删除，仅保留CLI脚本）
@@ -358,14 +430,28 @@ export const api = {
   testNotifier: (channel: string, config: any) =>
     invokeWithTimeout<any>('test_notifier', { channel, config }, TIMEOUT.SLOW),
   getDualLayerStats: () => invokeWithTimeout<DualLayerStats>('get_dual_layer_stats', undefined, TIMEOUT.FAST),
+  // ── 输出护栏（模型→用户）数据接口 ──
+  getOutputStats: () => invokeWithTimeout<OutputStats>('get_output_stats', undefined, TIMEOUT.FAST),
+  getOutputHistory: (limit: number = 20) =>
+    invokeWithTimeout<OutputHistoryResponse>('get_output_history', { limit }, TIMEOUT.FAST),
+  getOutputTrend: (granularity: string = 'hour', start?: string, end?: string) =>
+    invokeWithTimeout<OutputTrendResponse>('get_output_trend', { granularity, start, end }, TIMEOUT.NORMAL),
+  // 输出护栏单次检测（Detect 页"输出侧护栏"标签）：返回打码后的实际文本
+  checkOutput: (text: string, session: string = 'default') =>
+    invokeWithTimeout<OutputProtectResponse>('check_output', { text, session }, TIMEOUT.PROTECT_COLD),
+  // 输出护栏配置（Settings 专家模式）：读取生效快照 / 动态调校
+  getOutputConfig: () =>
+    invokeWithTimeout<OutputConfigResponse>('get_output_config', undefined, TIMEOUT.FAST),
+  setOutputConfig: (config: Record<string, string | number | boolean>) =>
+    invokeWithTimeout<OutputConfigResponse>('set_output_config', { config }, TIMEOUT.NORMAL),
   // ── 企业级运维：逃生通道 + 灰度部署 ──
   setEmergencyBypass: (enabled: boolean) =>
-    invokeWithTimeout<EmergencyBypassState>('set_emergency_bypass', { enabled }, TIMEOUT.FAST),
+    invokeWithTimeout<EmergencyBypassState>('set_emergency_bypass', { enabled }, TIMEOUT.NORMAL),
   getEmergencyBypass: () =>
-    invokeWithTimeout<EmergencyBypassState>('get_emergency_bypass', undefined, TIMEOUT.FAST),
+    invokeWithTimeout<EmergencyBypassState>('get_emergency_bypass', undefined, TIMEOUT.NORMAL),
   setGrayDeployRatio: (ratio: number) =>
-    invokeWithTimeout<GrayDeployState>('set_gray_deploy_ratio', { ratio }, TIMEOUT.FAST),
+    invokeWithTimeout<GrayDeployState>('set_gray_deploy_ratio', { ratio }, TIMEOUT.NORMAL),
   getGrayDeployRatio: () =>
-    invokeWithTimeout<GrayDeployState>('get_gray_deploy_ratio', undefined, TIMEOUT.FAST),
-  getBypassStats: () => invokeWithTimeout<BypassStats>('get_bypass_stats', undefined, TIMEOUT.FAST),
+    invokeWithTimeout<GrayDeployState>('get_gray_deploy_ratio', undefined, TIMEOUT.NORMAL),
+  getBypassStats: () => invokeWithTimeout<BypassStats>('get_bypass_stats', undefined, TIMEOUT.NORMAL),
 };

@@ -382,6 +382,26 @@ body {
   font-weight: 700;
 }
 
+/* UI修复：启动失败可点击链接按钮 */
+.status-hero-error-link {
+  margin-top: 4px;
+  padding: 4px 10px;
+  background: rgba(229, 77, 77, 0.12);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  align-self: flex-start;
+}
+
+.status-hero-error-link:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -425,6 +445,23 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   margin-bottom: 16px;
+}
+
+/* 专家模式布局：flex 列 + order 实现专家卡片置顶、通用卡片置灰弱化
+   专家模式开启时：专家卡片(order 0)置顶，通用卡片(order 1)置灰但仍可交互 */
+.settings-page {
+  display: flex;
+  flex-direction: column;
+}
+.settings-page .expert-card {
+  order: 0;
+}
+.settings-page .general-card {
+  order: 1;
+}
+.settings-page.settings-expert-on .general-card {
+  opacity: 0.55;
+  filter: saturate(0.6);
 }
 
 .card-header {
@@ -772,15 +809,37 @@ body {
 }
 
 .mode-card-title {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
-  margin-bottom: 6px;
+  text-align: center;
+  padding: 4px 0;
 }
 
 .mode-card-desc {
   font-size: 11px;
   color: var(--text-secondary);
   line-height: 1.5;
+}
+
+/* 当前模式说明面板：选中模式的详细说明单独展示，字号更大、更易读，切换模式时实时联动 */
+.mode-detail-panel {
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: var(--dt-primary-50);
+  border: 1px solid var(--dt-primary-100);
+  border-left: 3px solid var(--dt-primary);
+  border-radius: var(--radius-md);
+}
+.mode-detail-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.mode-detail-desc {
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--text-primary);
 }
 
 .result-card {
@@ -831,6 +890,123 @@ body {
   padding: 2px 8px;
   border-radius: 10px;
   font-size: 11px;
+}
+
+/* ── Detect 页：输入侧 / 输出护栏 双方向检测标签（2026-08-05） ── */
+.detect-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+.detect-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.detect-tab:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.detect-tab.active {
+  background: var(--dt-primary-50);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── 输出护栏提示条 ── */
+.output-guardrail-hint {
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--warning);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+
+/* ── 输出护栏检测结果卡：按处置动作着色（与仪表盘处置色语义一致） ── */
+.output-result-card {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.output-result-card.pass {
+  border-color: var(--success);
+}
+.output-result-card.block {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+.output-result-card.redact {
+  border-color: var(--warning);
+}
+.output-result-card.alert {
+  border-color: var(--text-secondary);
+}
+.output-risk-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid;
+}
+.output-risk-badge.risk-high {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.output-risk-badge.risk-medium {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.output-risk-badge.risk-low {
+  color: var(--text-secondary);
+  border-color: var(--text-secondary);
+}
+.output-risk-badge.risk-pass {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+/* ── 打码后的输出文本块 ── */
+.output-redacted-block {
+  margin-top: 12px;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+.output-redacted-label {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+  margin-bottom: 8px;
+}
+.output-redacted-text {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: var(--font-family-mono, 'JetBrains Mono', monospace);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  margin: 0;
 }
 
 .filter-group {
@@ -1213,6 +1389,48 @@ body {
   background: var(--success-bg);
   color: var(--success);
   border: 1px solid var(--success);
+}
+
+/* 防护模式卡片内的活性状态行：引擎自动的观察/保护状态 + 学习进度 */
+.mode-active-row {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.mode-active-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mode-active-row-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.mode-active-sm {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.mode-active-sm .status-dot {
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+}
+.mode-active-progress {
+  margin-top: 12px;
+}
+.mode-active-bar {
+  height: 14px;
+}
+.mode-active-note {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: var(--dt-bg-secondary);
+  padding: 8px 10px;
+  border-radius: 6px;
 }
 
 .learning-progress-section {
@@ -1702,36 +1920,6 @@ body {
   border-color: var(--accent, #4ecdc4);
 }
 
-.realtime-metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 12px;
-}
-
-.realtime-metric-item {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: var(--radius-md, 8px);
-  padding: 12px 16px;
-  text-align: center;
-}
-
-.realtime-metric-label {
-  font-size: 12px;
-  color: var(--text-secondary, #999);
-  margin-bottom: 6px;
-}
-
-.realtime-metric-value {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary, #fff);
-}
-
-.realtime-metric-value.highlight {
-  color: var(--danger, #ff6b6b);
-}
-
 /* Reports 页面 */
 .report-generate-buttons {
   display: flex;
@@ -1849,6 +2037,36 @@ body {
   background: var(--bg-secondary, #1a1a2e);
   color: var(--text-primary, #fff);
   font-size: 13px;
+}
+
+/* 输出护栏配置卡：阈值字段（带处置语义标签） */
+.threshold-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.threshold-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  width: fit-content;
+}
+.threshold-tag.threat-high {
+  color: var(--dt-danger);
+  background: var(--dt-danger-50);
+}
+.threshold-tag.threat-medium {
+  color: var(--dt-warning);
+  background: var(--dt-warning-50);
+}
+.threshold-tag.threat-low {
+  color: var(--dt-success);
+  background: var(--dt-success-50);
+}
+.threshold-input {
+  width: 110px;
+  flex: none;
 }
 
 .notifier-actions {
@@ -2660,6 +2878,224 @@ body {
   .dashboard-chart-row {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── 输出护栏（模型→用户）区块 ──
+   独立成区突出"双向闭环"。处置色：拦截=朱砂红、打码=琥珀金、告警=水墨灰。
+   与输入侧拦截色一致，保证"拦截"语义跨区块统一。 */
+.output-guardrail-card .card-header {
+  align-items: center;
+}
+.output-guardrail-note {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  cursor: help;
+}
+.output-stats-grid {
+  margin-bottom: var(--dt-card-gap);
+}
+/* 输出护栏内嵌卡片（处置分布 / 处置趋势） */
+.card-inner {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+.subcard-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+.output-history-section {
+  margin-top: var(--dt-card-gap);
+}
+.output-action-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+  border-radius: 999px;
+  line-height: 1.6;
+}
+/* 输出护栏处置动作颜色（拦截=朱砂红/打码=琥珀金/告警=水墨灰/放行=玄盾青） */
+.output-action-block {
+  background: var(--dt-danger-50);
+  color: var(--dt-danger);
+  border-color: var(--dt-danger);
+}
+.output-action-redact {
+  background: var(--dt-warning-50);
+  color: var(--dt-warning);
+  border-color: var(--dt-warning);
+}
+.output-action-alert {
+  background: var(--dt-info-50);
+  color: var(--dt-info);
+  border-color: var(--dt-info);
+}
+.output-action-pass {
+  background: var(--dt-success-50);
+  color: var(--dt-success);
+  border-color: var(--dt-success);
+}
+/* 输出侧风险等级（语义与输入侧信任相反：high=高风险=红/medium=中=黄/low=低=绿/pass=无=青） */
+.output-risk-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+  border-radius: 999px;
+  line-height: 1.6;
+}
+.output-risk-high {
+  background: var(--dt-danger-50);
+  color: var(--dt-danger);
+  border-color: var(--dt-danger);
+}
+.output-risk-medium {
+  background: var(--dt-warning-50);
+  color: var(--dt-warning);
+  border-color: var(--dt-warning);
+}
+.output-risk-low {
+  background: var(--dt-success-50);
+  color: var(--dt-success);
+  border-color: var(--dt-success);
+}
+.output-risk-pass {
+  background: var(--dt-info-50);
+  color: var(--dt-info);
+  border-color: var(--dt-info);
+}
+/* 拦截日志页：来源切换（输入侧/输出护栏），与现有 filter-btn 风格一致但加分隔 */
+.source-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-right: 4px;
+  padding-right: 8px;
+  border-right: 1px solid var(--dt-border-strong);
+}
+
+/* ── 仪表盘信息架构重构（2026-08-05）──
+   双向闭环分组：输入侧（用户→模型，道体蓝）+ 输出侧（模型→用户，玄盾青）。
+   方向区分靠色相+文案双通道；时效语义：输入侧=历史可筛选，输出侧=准实时。 */
+.dashboard-section {
+  margin-bottom: var(--dt-card-gap);
+}
+/* P1-2 修复：Section 标题层级重构——区块名(15px/700)为主标题，
+   方向徽章(11px)作前缀，时效标注(11px/弱色)降级为次要说明。
+   打破"方向徽章/区块名/时效标注"三平级，让用户一眼聚焦区块名。 */
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 8px 0 12px;
+}
+.direction-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  vertical-align: 1px;
+}
+.direction-badge.input {
+  color: var(--dt-primary);
+  background: var(--dt-primary-100);
+  border: 1px solid rgba(43, 95, 215, 0.30);
+}
+.direction-badge.output {
+  color: var(--dt-success);
+  background: var(--dt-success-100);
+  border: 1px solid rgba(0, 212, 170, 0.30);
+}
+/* 时效标注：输入侧=历史可筛选（中性），输出侧=准实时（玄盾青）
+   P1-2 修复：降级为次要说明——字号 11px、颜色用三级文字色，弱化视觉权重 */
+.stale-note {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  cursor: help;
+  margin-left: 2px;
+}
+/* P1-3 修复：拦截记录表"查看全部"链接按钮——弱化文字链接风格，hover 变道体蓝 */
+.view-all-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+.view-all-link:hover {
+  color: var(--dt-primary);
+  border-color: var(--dt-primary-200);
+  background: var(--dt-primary-50);
+}
+/* P1-4 修复：折叠条增强可发现性——从裸分隔线改为带背景/边框的可点击条，
+   加 hover 高亮与展开态，让用户明确知道"进阶指标"可点击展开 */
+.advanced-section {
+  margin-top: var(--dt-card-gap);
+}
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.advanced-toggle:hover {
+  color: var(--dt-primary);
+  background: var(--dt-bg-hover);
+  border-color: var(--dt-primary-200);
+}
+.advanced-toggle .chevron {
+  transition: transform 0.2s ease;
+  color: var(--text-secondary);
+}
+.advanced-toggle.open {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.advanced-toggle.open .chevron {
+  transform: rotate(180deg);
+}
+/* 折叠区展开时内容紧贴折叠条，底部圆角衔接 */
+.advanced-body {
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  padding: 0 16px;
+}
+/* 输出侧护栏收进"进阶指标"折叠区后，与周度对比之间留出分隔间距 */
+.advanced-inner-section {
+  margin-top: 20px;
 }
 
 /* KPI 卡片趋势箭头（规范§8.2） */

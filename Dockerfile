@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="Daoti XuanDun Team"
 LABEL description="Daoti XuanDun - Active Defense Security Gateway for LLM Runtime"
-LABEL version="1.2.3"
+LABEL version="1.3.2"
 
 WORKDIR /app
 

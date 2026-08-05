@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { api, LearningStatus, formatInvokeError, DualLayerStats } from '../services/tauriApi';
+import { api, LearningStatus, formatInvokeError, DualLayerStats, OutputConfigResponse } from '../services/tauriApi';
 // 设计系统规范：图标统一使用 lucide-react，strokeWidth=1.5，禁止 emoji
 import {
-  CheckCircle, AlertTriangle, Lightbulb, RefreshCw, Square,
+  CheckCircle, AlertTriangle, Lightbulb, RefreshCw, Square, Upload,
   Smartphone, MessageSquare, Mail, Link, Monitor, Zap, Brain,
   ChevronDown, ChevronRight, type LucideIcon,
 } from 'lucide-react';
@@ -95,7 +95,6 @@ export default function Settings() {
   const [mode, setMode] = useState('balanced');
   const { modalProps: confirmModalProps, confirm } = useConfirmModal();
   const [autoStart, setAutoStart] = useState(false);
-  const [interceptTraffic, setInterceptTraffic] = useState(true);
   const [warmupSafeText, setWarmupSafeText] = useState('');
   const [warmupAttackText, setWarmupAttackText] = useState('');
   const [warmupStatus, setWarmupStatus] = useState('');
@@ -114,20 +113,15 @@ export default function Settings() {
   const [testingChannel, setTestingChannel] = useState<string | null>(null);
   // K3-企业精简版：专家模式开关。默认关闭隐藏所有敏感性配置（预热/密钥/快照/引擎重启）
   const [expertMode, setExpertMode] = useState(false);
-  // P0修复：补全代理服务、紧急逃生、灰度部署、快照管理的状态
-  const [proxyRunning, setProxyRunning] = useState(false);
-  const [proxyPort, setProxyPort] = useState(18765);
+  // P0修复：补全紧急逃生、灰度部署、快照管理的状态
   // P1-09 修复：端口输入框使用字符串 state，允许临时空值，blur 时校验
-  const [proxyPortInput, setProxyPortInput] = useState('18765');
-  // P1-09 修复：端口校验错误状态
-  const [proxyPortError, setProxyPortError] = useState<string | null>(null);
-  const [proxyStarting, setProxyStarting] = useState(false);
-  const [proxyStopping, setProxyStopping] = useState(false);
   const [emergencyBypass, setEmergencyBypass] = useState(false);
   const [grayRatio, setGrayRatio] = useState(1.0);
   // P1-10 修复：灰度比例滑块防抖，拖动过程仅更新本地 pending state
   const [grayRatioPending, setGrayRatioPending] = useState(1.0);
   const grayCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // GAP-01 修复：逃生通道状态加载失败后的自动重试定时器（救命功能必须能自愈）
+  const bypassAutoRetryTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // P1-11 修复：防护模式切换防并发
   const [modeSwitching, setModeSwitching] = useState(false);
   const [snapshots, setSnapshots] = useState<Array<[number, string, string]>>([]);
@@ -140,9 +134,8 @@ export default function Settings() {
   const [generatingKey, setGeneratingKey] = useState(false);
   // GAP-03 修复：快照恢复 loading 状态，防止用户重复点击导致并发恢复覆盖配置
   const [restoringSnapshot, setRestoringSnapshot] = useState(false);
-  // Sprint1-P0-3: 运维4卡独立错误状态（Promise.allSettled + 独立报错，不再串行吞错）
+  // Sprint1-P0-3: 运维3卡独立错误状态（Promise.allSettled + 独立报错，不再串行吞错）
   // 原来的串行await导致首项失败则后续不加载，且单一opsLoadError被后写覆盖
-  const [opsProxyLoadError, setOpsProxyLoadError] = useState<string | null>(null);
   const [opsBypassLoadError, setOpsBypassLoadError] = useState<string | null>(null);
   const [opsGrayLoadError, setOpsGrayLoadError] = useState<string | null>(null);
   const [opsSnapshotLoadError, setOpsSnapshotLoadError] = useState<string | null>(null);
@@ -154,6 +147,10 @@ export default function Settings() {
   const [yinyangLoadError, setYinyangLoadError] = useState<string | null>(null);
   // GAP-P1-09 修复：Settings组件级 mountedRef，灰度滑块timer内setState前校验
   const settingsMountedRef = useRef(true);
+  // 输出护栏配置（专家模式）：引擎 /output/config 生效快照 + 本地编辑态
+  const [outputCfg, setOutputCfg] = useState<OutputConfigResponse['config']>({});
+  const [outputCfgSaving, setOutputCfgSaving] = useState(false);
+  const [outputCfgError, setOutputCfgError] = useState<string | null>(null);
 
   const fetchLearning = useCallback(async () => {
     try {
@@ -213,13 +210,11 @@ export default function Settings() {
         api.getConfig('mode'),
         // [1] auto_start
         api.getConfig('auto_start'),
-        // [2] intercept_traffic
-        api.getConfig('intercept_traffic'),
-        // [3] warmup_safe_text
+        // [2] warmup_safe_text
         api.getConfig('warmup_safe_text'),
-        // [4] warmup_attack_text
+        // [3] warmup_attack_text
         api.getConfig('warmup_attack_text'),
-        // [5] hasSecretKey
+        // [4] hasSecretKey
         api.hasSecretKey(),
       ]);
       // [0] mode
@@ -230,21 +225,30 @@ export default function Settings() {
       if (mainCfgResults[1].status === 'fulfilled' && mainCfgResults[1].value) {
         setAutoStart(mainCfgResults[1].value === 'true');
       }
-      // [2] intercept_traffic
+      // [2] warmup_safe_text
       if (mainCfgResults[2].status === 'fulfilled' && mainCfgResults[2].value) {
-        setInterceptTraffic(mainCfgResults[2].value === 'true');
+        setWarmupSafeText(mainCfgResults[2].value);
       }
-      // [3] warmup_safe_text
+      // [3] warmup_attack_text
       if (mainCfgResults[3].status === 'fulfilled' && mainCfgResults[3].value) {
-        setWarmupSafeText(mainCfgResults[3].value);
+        setWarmupAttackText(mainCfgResults[3].value);
       }
-      // [4] warmup_attack_text
-      if (mainCfgResults[4].status === 'fulfilled' && mainCfgResults[4].value) {
-        setWarmupAttackText(mainCfgResults[4].value);
+      // [4] hasSecretKey
+      if (mainCfgResults[4].status === 'fulfilled') {
+        setHasKey(mainCfgResults[4].value);
       }
-      // [5] hasSecretKey
-      if (mainCfgResults[5].status === 'fulfilled') {
-        setHasKey(mainCfgResults[5].value);
+
+      // 输出护栏配置（专家模式）：独立加载，失败仅记录错误不阻塞其他卡片
+      try {
+        const og = await api.getOutputConfig();
+        if (settingsMountedRef.current) {
+          setOutputCfg(og?.config || {});
+          setOutputCfgError(null);
+        }
+      } catch (e) {
+        if (settingsMountedRef.current) {
+          setOutputCfgError(formatInvokeError(e, '加载输出护栏配置'));
+        }
       }
 
       // notifier 配置：5个通道独立 try-catch（原逻辑已独立，保留）
@@ -258,38 +262,52 @@ export default function Settings() {
       }
       setNotifierConfigs(configs);
 
-      // Sprint1-P0-3: 运维4卡并行加载 + 独立错误（Promise.allSettled 互不阻塞）
+      // Sprint1-P0-3: 运维3卡并行加载 + 独立错误（Promise.allSettled 互不阻塞）
       const opsResults = await Promise.allSettled([
-        api.isProxyRunning(),
         api.getEmergencyBypass(),
         api.getGrayDeployRatio(),
         api.listSnapshots(),
       ]);
-      // [0] 代理状态
+      // [0] 紧急逃生
       if (opsResults[0].status === 'fulfilled') {
-        setProxyRunning(opsResults[0].value);
-        setOpsProxyLoadError(null);
-      } else {
-        setOpsProxyLoadError('代理服务状态获取失败');
-      }
-      // [1] 紧急逃生
-      if (opsResults[1].status === 'fulfilled') {
-        setEmergencyBypass(opsResults[1].value.enabled);
+        setEmergencyBypass(opsResults[0].value.enabled);
         setOpsBypassLoadError(null);
       } else {
-        setOpsBypassLoadError('紧急逃生状态获取失败');
+        // P1 修复：错误信息含原因+修复路径，不再干巴巴显示"获取失败"
+        setOpsBypassLoadError(
+          `紧急逃生状态获取失败：${formatInvokeError(opsResults[0].reason, '逃生状态')}。将自动重试，请确认引擎已启动（引擎管理→重启）。`
+        );
+        // GAP-01 修复：初始加载失败也启动每 5s 自动重试（内联，避免依赖顺序）
+        if (!bypassAutoRetryTimerRef.current) {
+          bypassAutoRetryTimerRef.current = setInterval(async () => {
+            try {
+              const r = await api.getEmergencyBypass();
+              if (!settingsMountedRef.current) return;
+              setEmergencyBypass(r.enabled);
+              setOpsBypassLoadError(null);
+              if (bypassAutoRetryTimerRef.current) {
+                clearInterval(bypassAutoRetryTimerRef.current);
+                bypassAutoRetryTimerRef.current = null;
+              }
+            } catch {
+              // 继续等待下一次定时重试
+            }
+          }, 5000);
+        }
       }
-      // [2] 灰度比例
-      if (opsResults[2].status === 'fulfilled') {
-        setGrayRatio(opsResults[2].value.ratio);
-        setGrayRatioPending(opsResults[2].value.ratio);
+      // [1] 灰度比例
+      if (opsResults[1].status === 'fulfilled') {
+        setGrayRatio(opsResults[1].value.ratio);
+        setGrayRatioPending(opsResults[1].value.ratio);
         setOpsGrayLoadError(null);
       } else {
-        setOpsGrayLoadError('灰度部署比例获取失败');
+        setOpsGrayLoadError(
+          `灰度部署比例获取失败：${formatInvokeError(opsResults[1].reason, '灰度比例')}。请确认引擎已启动（引擎管理→重启），或点击重试。`
+        );
       }
-      // [3] 快照列表
-      if (opsResults[3].status === 'fulfilled') {
-        setSnapshots(opsResults[3].value);
+      // [2] 快照列表
+      if (opsResults[2].status === 'fulfilled') {
+        setSnapshots(opsResults[2].value);
         setOpsSnapshotLoadError(null);
       } else {
         setOpsSnapshotLoadError('快照列表加载失败');
@@ -307,6 +325,11 @@ export default function Settings() {
       if (grayCommitTimerRef.current) {
         clearTimeout(grayCommitTimerRef.current);
         grayCommitTimerRef.current = null;
+      }
+      // GAP-01 修复：组件卸载时清理逃生自动重试定时器，防止对已卸载组件 setState
+      if (bypassAutoRetryTimerRef.current) {
+        clearInterval(bypassAutoRetryTimerRef.current);
+        bypassAutoRetryTimerRef.current = null;
       }
     };
   }, [fetchLearning]);
@@ -348,6 +371,48 @@ export default function Settings() {
     }
   };
 
+  // 输出护栏配置保存：同步到引擎（/output/config POST），失败必须报错不静默
+  const handleSaveOutputConfig = async () => {
+    if (outputCfgSaving) return;
+    // 校验：阈值须满足 高 < 中 < 低（与引擎语义一致）。
+    // 引擎「攻击距离 < 阈值 → 处置」，即距离越小越危险：拦截阈值最低(0.30)、
+    // 打码居中(0.45)、告警最高(0.60)。旧逻辑误写为 低<中<高 与引擎相反，
+    // 导致加载引擎默认配置(0.3/0.45/0.6)点保存必然报错——未做任何修改却保存失败。
+    const num = (v: unknown) => Number(v);
+    const high = num(outputCfg.output_guardrail_high_threshold);
+    const medium = num(outputCfg.output_guardrail_medium_threshold);
+    const low = num(outputCfg.output_guardrail_low_threshold);
+    if (outputCfg.enable_output_guardrail &&
+        !(high < medium && medium < low)) {
+      showMessage('error', '阈值需满足 高<中<低 的单调关系（拦截最严、告警最松，如 0.3/0.45/0.6）');
+      return;
+    }
+    setOutputCfgSaving(true);
+    setOutputCfgError(null);
+    try {
+      const result = await api.setOutputConfig({ ...outputCfg });
+      if (settingsMountedRef.current) {
+        setOutputCfg(result?.config || outputCfg);
+        showMessage('success', '输出护栏配置已同步到引擎');
+      }
+    } catch (e) {
+      if (settingsMountedRef.current) {
+        setOutputCfgError(formatInvokeError(e, '保存输出护栏配置'));
+        showMessage('error', '输出护栏配置保存失败');
+      }
+    } finally {
+      if (settingsMountedRef.current) setOutputCfgSaving(false);
+    }
+  };
+
+  // GAP-01 修复：停止逃生状态自动重试定时器
+  const stopBypassAutoRetry = useCallback(() => {
+    if (bypassAutoRetryTimerRef.current) {
+      clearInterval(bypassAutoRetryTimerRef.current);
+      bypassAutoRetryTimerRef.current = null;
+    }
+  }, []);
+
   // P1-NEW-1 修复：紧急逃生状态获取失败时提供重试按钮
   const retryEmergencyBypass = useCallback(async () => {
     setOpsBypassLoadError(null);
@@ -355,11 +420,30 @@ export default function Settings() {
       const result = await api.getEmergencyBypass();
       if (!settingsMountedRef.current) return;
       setEmergencyBypass(result.enabled);
-    } catch {
+      stopBypassAutoRetry(); // 恢复成功，停止自动重试
+    } catch (err) {
       if (!settingsMountedRef.current) return;
-      setOpsBypassLoadError('紧急逃生状态获取失败');
+      setOpsBypassLoadError(
+        `紧急逃生状态获取失败：${formatInvokeError(err, '逃生状态')}。将自动重试，请确认引擎已启动（引擎管理→重启）。`
+      );
+      // GAP-01 修复：失败后安排每 5s 自动重试，直到成功。
+      // 逃生是「最坏情况救命」功能，不能因引擎瞬时故障而永久停留在错误态静默失效。
+      // 内联重试逻辑避免 useCallback 循环依赖。
+      if (!bypassAutoRetryTimerRef.current) {
+        bypassAutoRetryTimerRef.current = setInterval(async () => {
+          try {
+            const r = await api.getEmergencyBypass();
+            if (!settingsMountedRef.current) return;
+            setEmergencyBypass(r.enabled);
+            setOpsBypassLoadError(null);
+            stopBypassAutoRetry();
+          } catch {
+            // 继续等待下一次定时重试
+          }
+        }, 5000);
+      }
     }
-  }, []);
+  }, [stopBypassAutoRetry]);
 
   // P1-NEW-1 修复：灰度部署比例获取失败时提供重试按钮
   const retryGrayDeploy = useCallback(async () => {
@@ -369,9 +453,11 @@ export default function Settings() {
       if (!settingsMountedRef.current) return;
       setGrayRatio(result.ratio);
       setGrayRatioPending(result.ratio);
-    } catch {
+    } catch (err) {
       if (!settingsMountedRef.current) return;
-      setOpsGrayLoadError('灰度部署比例获取失败');
+      setOpsGrayLoadError(
+        `灰度部署比例获取失败：${formatInvokeError(err, '灰度比例')}。请确认引擎已启动（引擎管理→重启），或再次重试。`
+      );
     }
   }, []);
 
@@ -383,18 +469,6 @@ export default function Settings() {
       showMessage('success', '设置已保存');
     } catch {
       setAutoStart(oldVal);
-      showMessage('error', '设置保存失败');
-    }
-  };
-
-  const handleInterceptTrafficChange = async (val: boolean) => {
-    const oldVal = interceptTraffic;
-    setInterceptTraffic(val);
-    try {
-      await api.setConfig('intercept_traffic', val ? 'true' : 'false');
-      showMessage('success', '设置已保存');
-    } catch {
-      setInterceptTraffic(oldVal);
       showMessage('error', '设置保存失败');
     }
   };
@@ -419,6 +493,29 @@ export default function Settings() {
       setWarming(false);
     }
   };
+
+  // 领域自适应文件上传：读取 .txt 文件按行填充对应预热文本框
+  const readWarmupFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>, target: 'safe' | 'attack') => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (lines.length === 0) {
+        setWarmupStatus('文件中没有有效文本');
+        return;
+      }
+      if (target === 'safe') {
+        setWarmupSafeText((prev) => prev ? `${prev}\n${lines.join('\n')}` : lines.join('\n'));
+      } else {
+        setWarmupAttackText((prev) => prev ? `${prev}\n${lines.join('\n')}` : lines.join('\n'));
+      }
+      setWarmupStatus(`已载入 ${lines.length} 条${target === 'safe' ? '良性' : '攻击'}文本`);
+    } catch (err) {
+      setWarmupStatus(`文件读取失败：${String(err)}`);
+    }
+  }, []);
 
   // NEW-P0-04 修复：引擎重启/停止进行中拦截页面关闭/刷新
   useEffect(() => {
@@ -579,82 +676,6 @@ export default function Settings() {
     }));
   };
 
-  // P0修复：代理服务启停处理
-  // P1-09 修复：端口输入校验，允许临时空值，实时校验端口范围 1-65535
-  const handlePortChange = (value: string) => {
-    if (value === '') {
-      setProxyPortInput('');
-      setProxyPortError(null);
-      return;
-    }
-    const num = parseInt(value);
-    if (isNaN(num)) return;
-    setProxyPortInput(String(num));
-    // 实时校验端口范围
-    if (num < 1 || num > 65535) {
-      setProxyPortError('端口范围：1-65535');
-    } else {
-      setProxyPortError(null);
-    }
-  };
-
-  const handlePortBlur = () => {
-    const num = parseInt(proxyPortInput);
-    if (isNaN(num)) {
-      setProxyPortInput('18765');
-      setProxyPort(18765);
-      setProxyPortError(null);
-      return;
-    }
-    if (num < 1 || num > 65535) {
-      setProxyPortError('端口范围：1-65535');
-      return;
-    }
-    setProxyPortInput(String(num));
-    setProxyPort(num);
-    setProxyPortError(null);
-  };
-
-  const handleStartProxy = async () => {
-    // P1-09 修复：启动前校验端口合法性
-    const portNum = parseInt(proxyPortInput);
-    if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-      setProxyPortError('端口范围：1-65535');
-      return;
-    }
-    setProxyPort(portNum);
-    setProxyPortError(null);
-    setProxyStarting(true);
-    try {
-      await api.startProxy(proxyPort);
-      setProxyRunning(true);
-      showMessage('success', `代理已启动，监听 127.0.0.1:${proxyPort}`);
-    } catch (e: any) {
-      // GAP-S5-07 修复：代理启动失败时提供排查指引，特别针对端口占用场景
-      const errMsg = String(e);
-      if (errMsg.includes('port') || errMsg.includes('端口') || errMsg.includes('Address already in use') || errMsg.includes('EADDRINUSE')) {
-        showMessage('error', `代理启动失败：端口 ${proxyPort} 可能被占用。\n\n排查建议：\n1. 检查端口占用：netstat -ano | findstr :${proxyPort}\n2. 尝试更换端口（1024-65535）\n3. 查看 engine.log 排查引擎状态`);
-      } else {
-        showMessage('error', `代理启动失败: ${e}`);
-      }
-    } finally {
-      setProxyStarting(false);
-    }
-  };
-
-  const handleStopProxy = async () => {
-    setProxyStopping(true);
-    try {
-      await api.stopProxy();
-      setProxyRunning(false);
-      showMessage('success', '代理已停止');
-    } catch (e: any) {
-      showMessage('error', `代理停止失败: ${e}，请查看日志排查端口占用`);
-    } finally {
-      setProxyStopping(false);
-    }
-  };
-
   // P0修复：紧急逃生切换处理
   // P1-01 修复：启用紧急逃生时强制二次确认（停止引擎/删除密钥已有确认，紧急逃生风险更高）
   const handleEmergencyBypassChange = async (enabled: boolean) => {
@@ -743,14 +764,43 @@ export default function Settings() {
     }
   };
 
+  // 删除快照：需二次验证，防止误删灾备数据
+  const handleDeleteSnapshot = async (snapshotId: number) => {
+    if (!(await confirm('确定要删除此快照吗？\n\n删除后该快照将无法恢复，此操作不可撤销。'))) {
+      return;
+    }
+    try {
+      await api.deleteSnapshot(snapshotId);
+      const snaps = await api.listSnapshots();
+      setSnapshots(snaps);
+      showMessage('success', '快照已删除');
+    } catch (e: any) {
+      showMessage('error', `快照删除失败: ${e}`);
+    }
+  };
+
+  // 防护模式：卡片仅展示模式名（标签），每个模式的详细说明由下方「当前模式」面板展示，
+  // 切换模式时说明实时联动，避免把小字挤在卡片标签里看不清
   const modes = [
-    { key: 'high_security', label: '高安全', desc: '最严格的防护策略，可能产生较多误报' },
-    { key: 'balanced', label: '平衡', desc: '兼顾安全与可用性的推荐策略' },
-    { key: 'low_false_positive', label: '低误报', desc: '减少误报，适合对可用性要求高的场景' },
+    {
+      key: 'high_security',
+      label: '高安全',
+      detail: '最严格的防护策略：对所有疑似威胁（提示词注入、越狱、敏感信息泄露等）采用高强度拦截，是安全要求极高场景的首选。代价是可能产生较多误报，正常请求若被误判，需人工复核后放行。',
+    },
+    {
+      key: 'balanced',
+      label: '平衡',
+      detail: '在拦截能力与正常请求可用性之间取得平衡：对高风险攻击严格拦截，对模糊边界请求适度放行，是系统推荐的默认策略，适用于大多数业务场景。',
+    },
+    {
+      key: 'low_false_positive',
+      label: '低误报',
+      detail: '优先保障正常请求不被误伤：仅在置信度极高时才拦截，适合可用性优先、误报成本高的场景。代价是可能放行部分低置信度的风险请求，需配合日志人工抽查。',
+    },
   ];
 
   return (
-    <div className="page settings-page">
+    <div className={`page settings-page${expertMode ? ' settings-expert-on' : ''}`}>
       {/* P0-4 修复：每页唯一 H1，符合 WCAG AA 规范 §3.3/§3.4 */}
       <div className="page-header">
         <h1 className="page-title">系统设置</h1>
@@ -766,9 +816,8 @@ export default function Settings() {
         </div>
       )}
 
-      {/* K3-企业精简版：专家模式全局开关，放在最顶部。
-           关闭状态 = 普通运维视图，仅能看/改白名单、防御等级、逃生通道；
-           开启状态 = 开发者/架构师视图，能操作预热、密钥、引擎重启等敏感性配置。 */}
+      {/* 专家模式全局开关：开启时专家卡片置顶、通用卡片变灰；关闭时仅显示通用功能。
+          不再使用锚点导航条，而是通过 CSS order 将专家卡片置于页面顶部。 */}
       <div className="card">
         <div className="card-body" style={{ padding: '12px 20px' }}>
           <div className="setting-item" style={{ margin: 0 }}>
@@ -776,7 +825,7 @@ export default function Settings() {
               <div className="setting-label">专家模式</div>
               <div className="setting-desc">
                 {expertMode
-                  ? '已启用，显示全部敏感性配置（预热/密钥/快照/引擎管理）'
+                  ? '已启用，专家卡片已置顶，通用卡片置灰弱化'
                   : '已关闭，隐藏敏感性配置（仅运维日常需要的配置可见）'}
               </div>
             </div>
@@ -792,7 +841,8 @@ export default function Settings() {
         </div>
       </div>
 
-      <div className="card">
+      {/* 通用卡片区块：专家模式开启时整体置灰弱化（pointer-events 保持可交互） */}
+      <div className="card general-card">
         <div className="card-header">
           <h3>防护模式</h3>
         </div>
@@ -834,73 +884,60 @@ export default function Settings() {
                   style={{ pointerEvents: modeSwitching ? 'none' : 'auto', opacity: modeSwitching ? 0.6 : 1 }}
                 >
                   <div className="mode-card-title">{m.label}</div>
-                  <div className="mode-card-desc">{m.desc}</div>
                 </div>
               );
             })}
           </div>
-        </div>
-      </div>
 
-      <div className="card">
-        <div className="card-header">
-          <h3>活性防护模式</h3>
-          <span className="card-subtitle">观察→学习→自动切换架构</span>
-        </div>
-        <div className="card-body">
-          {learning ? (
-            <>
-              <div className="learning-mode-display">
-                <span className={`mode-badge ${learning.mode === 'observing' ? 'mode-observing' : 'mode-protecting'}`}>
+          {/* 当前模式说明面板：展示选中模式的详细说明，切换模式时实时联动，替代挤在卡片里的文字 */}
+          <div className="mode-detail-panel">
+            <div className="mode-detail-title">
+              <Zap size={14} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: '6px' }} />
+              当前模式：{modes.find((m) => m.key === mode)?.label ?? '平衡'}
+            </div>
+            <div className="mode-detail-desc">
+              {modes.find((m) => m.key === mode)?.detail ?? modes[1].detail}
+            </div>
+          </div>
+
+          {/* 活性状态行：引擎自动的观察/保护状态 + 学习进度，与上方手动选择的防护模式共用一张模式卡 */}
+          <div className="mode-active-row">
+            <div className="mode-active-row-head">
+              <span className="mode-active-row-label">活性状态</span>
+              {learning ? (
+                <span className={`mode-badge mode-active-sm ${learning.mode === 'observing' ? 'mode-observing' : 'mode-protecting'}`}>
                   {learning.mode === 'observing'
-                    ? <><span className="status-dot dot-observing"></span> 观察模式（学习中）</>
-                    : <><span className="status-dot dot-protecting"></span> 保护模式</>}
+                    ? <><span className="status-dot dot-observing"></span> 观察（学习中）</>
+                    : <><span className="status-dot dot-protecting"></span> 保护</>}
                 </span>
-              </div>
-
-              {learning.mode === 'observing' && (
-                <div className="learning-progress-section">
-                  <div className="learning-progress-label">
-                    已学习：{learning.sample_count} / {learning.min_samples_for_switch} 条正常对话
-                  </div>
-                  <div className="learning-progress-bar-large">
-                    <div className="learning-progress-fill-large" style={{ width: `${Math.round(learning.learning_progress * 100)}%` }}>
-                      <span className="learning-progress-text">{Math.round(learning.learning_progress * 100)}%</span>
-                    </div>
-                  </div>
-                  <div className="learning-prototypes-mini">
-                    <span>安全原型: {learning.safe_prototypes}</span>
-                    <span>攻击原型: {learning.attack_prototypes}</span>
-                    <span>模拟拦截: {learning.would_block_count}</span>
+              ) : (
+                <span className="mode-badge mode-active-sm">加载中</span>
+              )}
+            </div>
+            {learning && learning.mode === 'observing' && (
+              <div className="mode-active-progress">
+                <div className="learning-progress-label">
+                  已学习：{learning.sample_count} / {learning.min_samples_for_switch} 条正常对话，达标后自动切换保护
+                </div>
+                <div className="learning-progress-bar-large mode-active-bar">
+                  <div className="learning-progress-fill-large" style={{ width: `${Math.round(learning.learning_progress * 100)}%` }}>
+                    <span className="learning-progress-text">{Math.round(learning.learning_progress * 100)}%</span>
                   </div>
                 </div>
-              )}
-
-              {/* K2-企业安全：移除UI手动切换按钮，改为只读提示。
-                   模式切换已移至配置文件 / 启动参数，
-                   防止运维半夜被报警惊醒时误触导致恶意流量长驱直入。 */}
-              <div className="mode-readonly-hint" style={{ marginTop: '16px', padding: '10px 12px', background: 'var(--dt-bg-secondary)', borderRadius: '6px', fontSize: '0.85em', color: 'var(--text-secondary)' }}>
-                <Lightbulb size={14} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: '6px' }} />
-                活性防护模式由引擎根据学习进度自动切换，UI仅展示当前状态。
-                如需手动调整，请修改配置文件或通过API Key权限控制。
               </div>
-
-              {learning.mode === 'observing' && learning.sample_count < learning.min_samples_for_switch && (
-                <div className="mode-switch-warning">
-                  样本不足（{learning.sample_count}/{learning.min_samples_for_switch}），积累足够正常对话后将自动切换到保护模式
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="empty-state">加载学习中...</div>
-          )}
+            )}
+            <div className="mode-active-note">
+              <Lightbulb size={13} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: '6px' }} />
+              活性状态由引擎根据学习进度自动切换，与上方防护模式相互独立：防护模式决定拦截严格度（手动选择），活性状态决定是否已启用拦截（自动）。
+            </div>
+          </div>
         </div>
       </div>
 
       {/* K2-YinYangGate降级：从独立路由改为Settings内专家模式下的只读折叠卡片
            企业用户日常运维不需要看阴阳门细节；架构师调试时展开查看双层架构指标 */}
       {expertMode && (
-        <div className="card">
+        <div className="card expert-card" id="expert-yinyang">
           <div
             className="card-header"
             onClick={() => setYinyangExpanded((v) => !v)}
@@ -987,7 +1024,7 @@ export default function Settings() {
         </div>
       )}
 
-      <div className="card">
+      <div className="card general-card">
         <div className="card-header">
           <h3>通用设置</h3>
         </div>
@@ -1002,80 +1039,12 @@ export default function Settings() {
               <span className="toggle-slider"></span>
             </label>
           </div>
-
-          <div className="setting-item">
-            <div className="setting-info">
-              <div className="setting-label">流量拦截</div>
-              <div className="setting-desc">启用实时流量拦截功能</div>
-            </div>
-            <label className="toggle">
-              <input type="checkbox" checked={interceptTraffic} onChange={(e) => handleInterceptTrafficChange(e.target.checked)} />
-              <span className="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      {/* P0修复：代理服务卡片 - 补全OnboardingWizard指引的代理启停功能 */}
-      <div className="card">
-        <div className="card-header">
-          <h3>代理服务</h3>
-          <span className="card-subtitle">HTTP 代理模式 · 拦截 AI 工具流量</span>
-        </div>
-        <div className="card-body">
-          <div className="setting-item">
-            <div className="setting-info">
-              <div className="setting-label">代理状态</div>
-              <div className="setting-desc">
-                {opsProxyLoadError ? (
-                  <span style={{ color: 'var(--danger)' }}>{opsProxyLoadError}</span>
-                ) : proxyRunning ? (
-                  <><span className="status-dot dot-online"></span> 运行中 · 监听 127.0.0.1:{proxyPort}</>
-                ) : (
-                  <><span className="status-dot dot-offline"></span> 已停止</>
-                )}
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-              {!proxyRunning && !opsProxyLoadError ? (
-                <>
-                  <input
-                    type="number"
-                    className={`form-input${proxyPortError ? ' input-error' : ''}`}
-                    style={{ width: '80px' }}
-                    value={proxyPortInput}
-                    onChange={(e) => handlePortChange(e.target.value)}
-                    onBlur={handlePortBlur}
-                    min={1}
-                    max={65535}
-                    disabled={proxyStarting}
-                  />
-                  <button className="btn btn-primary" onClick={handleStartProxy} disabled={proxyStarting}>
-                    {proxyStarting ? '启动中...' : '启动代理'}
-                  </button>
-                </>
-              ) : proxyRunning ? (
-                <button className="btn btn-danger" onClick={handleStopProxy} disabled={proxyStopping || !!opsProxyLoadError}>
-                  {proxyStopping ? '停止中...' : '停止代理'}
-                </button>
-              ) : null}
-            </div>
-            {proxyPortError && (
-              <div style={{ color: 'var(--danger)', fontSize: '0.8em', marginTop: '4px' }}>
-                {proxyPortError}
-              </div>
-            )}
-          </div>
-          <div style={{ marginTop: '8px', fontSize: '0.85em', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Lightbulb size={16} strokeWidth={1.5} />
-            <span>将 AI 工具的 HTTP 代理地址设为 127.0.0.1:{proxyPort} 即可接入玄盾防护</span>
-          </div>
         </div>
       </div>
 
       {/* K3-企业精简版：领域自适应属于专家调参，默认隐藏 */}
       {expertMode && (
-        <div className="card">
+        <div className="card expert-card" id="expert-adaptive">
           <div className="card-header">
             <h3>领域自适应</h3>
             <span className="card-subtitle">专家调参 · 出厂原型之外的领域特定预热</span>
@@ -1083,23 +1052,49 @@ export default function Settings() {
           <div className="card-body">
             <div className="form-group">
               <label className="form-label">良性预热文本</label>
-              <textarea
-                className="form-textarea"
-                value={warmupSafeText}
-                onChange={(e) => setWarmupSafeText(e.target.value)}
-                placeholder="输入领域相关的良性文本，每行一条..."
-                rows={3}
-              />
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                <textarea
+                  className="form-textarea"
+                  value={warmupSafeText}
+                  onChange={(e) => setWarmupSafeText(e.target.value)}
+                  placeholder="输入领域相关的良性文本，每行一条..."
+                  rows={3}
+                  style={{ flex: 1 }}
+                />
+                <label className="btn btn-sm btn-secondary" style={{ cursor: 'pointer', flexShrink: 0 }}>
+                  <Upload size={14} strokeWidth={1.5} style={{ marginRight: '4px' }} />
+                  上传文件
+                  <input
+                    type="file"
+                    accept=".txt"
+                    style={{ display: 'none' }}
+                    onChange={(e) => readWarmupFile(e, 'safe')}
+                  />
+                </label>
+              </div>
             </div>
             <div className="form-group">
               <label className="form-label">攻击预热文本</label>
-              <textarea
-                className="form-textarea"
-                value={warmupAttackText}
-                onChange={(e) => setWarmupAttackText(e.target.value)}
-                placeholder="输入已知的攻击样本，每行一条..."
-                rows={3}
-              />
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                <textarea
+                  className="form-textarea"
+                  value={warmupAttackText}
+                  onChange={(e) => setWarmupAttackText(e.target.value)}
+                  placeholder="输入已知的攻击样本，每行一条..."
+                  rows={3}
+                  style={{ flex: 1 }}
+                />
+                <label className="btn btn-sm btn-secondary" style={{ cursor: 'pointer', flexShrink: 0 }}>
+                  <Upload size={14} strokeWidth={1.5} style={{ marginRight: '4px' }} />
+                  上传文件
+                  <input
+                    type="file"
+                    accept=".txt"
+                    style={{ display: 'none' }}
+                    onChange={(e) => readWarmupFile(e, 'attack')}
+                  />
+                </label>
+              </div>
             </div>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
               <button className="btn btn-primary" onClick={handleWarmup} disabled={warming}>{warming ? '预热中...' : '提交预热'}</button>
@@ -1109,7 +1104,125 @@ export default function Settings() {
         </div>
       )}
 
-      <div className="card">
+      {/* 输出护栏配置卡：专家模式可见。动态调校输出侧处置（开关/阈值/打码占位符），
+          与 Detect 页"输出护栏"标签、Dashboard 输出护栏形成「配置闭环」 */ }
+      {expertMode && (
+        <div className="card expert-card" id="expert-output-guardrail">
+          <div className="card-header">
+            <h3>输出护栏配置</h3>
+            <span className="card-subtitle">专家调参 · 模型→用户 输出侧处置</span>
+          </div>
+          <div className="card-body">
+            <div className="setting-item" style={{ margin: 0 }}>
+              <div className="setting-info">
+                <div className="setting-label">启用输出护栏</div>
+                <div className="setting-desc">
+                  在模型输出侧检测违规内容（拦截/打码/告警）。关闭后输出侧不做检测，仅保留输入侧防护。
+                </div>
+              </div>
+              <label className="toggle toggle-sm">
+                <input
+                  type="checkbox"
+                  checked={!!outputCfg.enable_output_guardrail}
+                  onChange={(e) => setOutputCfg((p) => ({ ...p, enable_output_guardrail: e.target.checked }))}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '16px' }}>
+              <label className="form-label">打码占位符（命中敏感片段时替换为）</label>
+              <input
+                className="form-input"
+                value={outputCfg.output_guardrail_redact_token ?? '[REDACTED]'}
+                onChange={(e) => setOutputCfg((p) => ({ ...p, output_guardrail_redact_token: e.target.value }))}
+                style={{ maxWidth: '220px' }}
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">处置阈值（违规距离，需满足 高 ＜ 中 ＜ 低；越小越严格，如 0.3/0.45/0.6）</label>
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                <div className="threshold-field">
+                  <span className="threshold-tag threat-high">高 · 拦截</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    className="form-input threshold-input"
+                    value={outputCfg.output_guardrail_high_threshold ?? ''}
+                    onChange={(e) => setOutputCfg((p) => ({ ...p, output_guardrail_high_threshold: Number(e.target.value) }))}
+                  />
+                </div>
+                <div className="threshold-field">
+                  <span className="threshold-tag threat-medium">中 · 打码</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    className="form-input threshold-input"
+                    value={outputCfg.output_guardrail_medium_threshold ?? ''}
+                    onChange={(e) => setOutputCfg((p) => ({ ...p, output_guardrail_medium_threshold: Number(e.target.value) }))}
+                  />
+                </div>
+                <div className="threshold-field">
+                  <span className="threshold-tag threat-low">低 · 告警</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    className="form-input threshold-input"
+                    value={outputCfg.output_guardrail_low_threshold ?? ''}
+                    onChange={(e) => setOutputCfg((p) => ({ ...p, output_guardrail_low_threshold: Number(e.target.value) }))}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {outputCfgError && (
+              <div className="alert-banner alert-danger" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: '12px' }}>
+                <AlertTriangle size={16} strokeWidth={1.5} />
+                <span>{outputCfgError}</span>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '16px' }}>
+              <button className="btn btn-primary" onClick={handleSaveOutputConfig} disabled={outputCfgSaving}>
+                {outputCfgSaving ? '保存中...' : '保存到引擎'}
+              </button>
+              <span style={{ fontSize: '0.85em', color: 'var(--text-secondary)' }}>
+                阈值调高更宽松、调低更严格；引擎重启后恢复出厂默认。
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* K3-企业精简版：密钥保护属于高敏感操作，独立专家卡片并置顶 */}
+      {expertMode && (
+        <div className="card expert-card" id="expert-key">
+          <div className="card-header">
+            <h3>密钥保护</h3>
+            <span className="card-subtitle">专家工具 · 签名防篡改</span>
+          </div>
+          <div className="card-body">
+            <div className="setting-item" style={{ margin: 0 }}>
+              <div className="setting-info">
+                <div className="setting-label">引擎密钥</div>
+                <div className="setting-desc">
+                  引擎密钥用于签名防篡改，防止配置与日志被恶意篡改。密钥存入系统密钥库（Windows 凭据管理器 / macOS 钥匙串），由系统统一管理，不落明文盘；删除后引擎会重新生成新密钥，无需手动备份。
+                  {hasKey ? ' (已存储)' : ' (未设置)'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {/* Cycle1-L4-1：同时以ref同步值和state异步值做条件渲染，防止删除失败catch中异步setHasKey(true)未生效时按钮消失假状态
+                    只要任一值为true就认为密钥存在，宁可显示删除按钮多一点也不暴露"假成功删除" */}
+                {!(hasKey || hasKeyRef.current) && <button className="btn btn-primary" onClick={handleGenerateKey} disabled={generatingKey}>{generatingKey ? '生成中...' : '生成密钥'}</button>}
+                {(hasKey || hasKeyRef.current) && <button className="btn btn-danger" onClick={handleDeleteKey}>删除密钥</button>}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="card general-card">
         <div className="card-header">
           <h3>安全与审计</h3>
         </div>
@@ -1122,27 +1235,11 @@ export default function Settings() {
             <button className="btn btn-primary" onClick={handleVerifyAudit} disabled={verifying}>{verifying ? '验证中...' : '验证'}</button>
           </div>
           {auditReport && <div style={{ marginTop: '8px', fontSize: '0.85em', padding: '8px', background: 'var(--bg-secondary)', borderRadius: '6px' }}>{auditReport}</div>}
-
-          {/* K3-企业精简版：密钥保护属于高敏感操作，默认隐藏 */}
-          {expertMode && (
-            <div className="setting-item" style={{ marginTop: '12px' }}>
-              <div className="setting-info">
-                <div className="setting-label">密钥保护</div>
-                <div className="setting-desc">将引擎密钥存储到操作系统密钥库{hasKey ? ' (已存储)' : ' (未设置)'}</div>
-              </div>
-              <div style={{ display: 'flex', gap: '6px' }}>
-                {/* Cycle1-L4-1：同时以ref同步值和state异步值做条件渲染，防止删除失败catch中异步setHasKey(true)未生效时按钮消失假状态
-                    只要任一值为true就认为密钥存在，宁可显示删除按钮多一点也不暴露"假成功删除" */}
-                {!(hasKey || hasKeyRef.current) && <button className="btn btn-primary" onClick={handleGenerateKey} disabled={generatingKey}>{generatingKey ? '生成中...' : '生成密钥'}</button>}
-                {(hasKey || hasKeyRef.current) && <button className="btn btn-danger" onClick={handleDeleteKey}>删除密钥</button>}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
       {/* P0修复：企业运维卡片 - 紧急逃生 + 灰度部署 */}
-      <div className="card">
+      <div className="card general-card">
         <div className="card-header">
           <h3>企业运维</h3>
           <span className="card-subtitle">紧急逃生 · 灰度部署 · 故障容灾</span>
@@ -1218,7 +1315,7 @@ export default function Settings() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card general-card">
         <div className="card-header">
           <h3>告警通道</h3>
           <span className="card-subtitle">拦截事件自动推送到企业 IM / 邮件 / SIEM</span>
@@ -1305,12 +1402,15 @@ export default function Settings() {
 
       {/* K3-企业精简版：数据快照属于灾备高级功能，默认隐藏 */}
       {expertMode && (
-        <div className="card">
+        <div className="card expert-card" id="expert-snapshot">
           <div className="card-header">
             <h3>数据快照</h3>
             <span className="card-subtitle">专家工具 · 配置备份与一键恢复</span>
           </div>
           <div className="card-body">
+            <div style={{ marginBottom: '12px', fontSize: '0.85em', lineHeight: '1.6', color: 'var(--text-secondary)' }}>
+              快照保存所有防护配置（模式、白名单、预热、密钥状态等）。版本升级或误操作后可一键恢复，建议重大变更前创建；恢复会覆盖当前配置，请谨慎操作。
+            </div>
             <div className="form-group form-group-inline">
               <input
                 type="text"
@@ -1330,7 +1430,7 @@ export default function Settings() {
             )}
             {!opsSnapshotLoadError && snapshots.length > 0 ? (
               <div style={{ marginTop: '12px' }}>
-                {snapshots.map(([id, label, timestamp]) => (
+                {snapshots.map(([id, timestamp, label]) => (
                   <div key={id} className="setting-item" style={{ padding: '8px 0' }}>
                     <div className="setting-info">
                       <div className="setting-label">{label}</div>
@@ -1338,13 +1438,21 @@ export default function Settings() {
                         {timestamp}
                       </div>
                     </div>
-                    <button
-                      className="btn btn-sm btn-secondary"
-                      onClick={() => handleRestoreSnapshot(id)}
-                      disabled={restoringSnapshot}
-                    >
-                      {restoringSnapshot ? '恢复中...' : '恢复'}
-                    </button>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                      <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => handleRestoreSnapshot(id)}
+                        disabled={restoringSnapshot}
+                      >
+                        {restoringSnapshot ? '恢复中...' : '恢复'}
+                      </button>
+                      <button
+                        className="btn btn-sm btn-danger"
+                        onClick={() => handleDeleteSnapshot(id)}
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1359,7 +1467,7 @@ export default function Settings() {
 
       {/* K3-企业精简版：引擎管理重启/停止可能中断业务，默认隐藏 */}
       {expertMode && (
-        <div className="card">
+        <div className="card expert-card" id="expert-engine">
           <div className="card-header">
             <h3>引擎管理</h3>
             <span className="card-subtitle">专家工具 · 引擎重启/停止（会中断服务）</span>

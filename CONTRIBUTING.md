@@ -14,9 +14,9 @@
 ### 前置要求
 
 - Python 3.11+
-- Rust 1.75+（stable）
+- Rust 1.94.0+（stable，与 CI 保持一致，满足 edition2024 依赖要求）
 - Node.js 20+
-- Nuitka 4.x（`pip install nuitka`）
+- Nuitka 4.x（`pip install nuitka`，CI 钉定 `nuitka==4.1.3`）
 
 ### 本地启动
 
@@ -57,6 +57,7 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE_
 - `src/daoti_xuandun/atlas_mapping.py`
 - `desktop/xuandun-desktop/engine_flask.py`
 - `desktop/xuandun-desktop/build_engine.py`
+- `desktop/xuandun-desktop/anti_debug.py`（脱敏，不入仓库源码）
 
 **注意**：请勿在 PR 中暴露核心算法的设计意图注释或原始类名。修改核心算法请先联系 spring60@vip.qq.com 签署 CLA。
 
@@ -83,7 +84,7 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE_
 ### 示例
 
 ```
-feat: v1.5.0 企业评估工具包 逃生通道/灰度部署/日志重放/配置回滚/行业样本/快速验证
+feat: v1.3.2 桌面端内置 OpenAI 兼容透明防护端点（产品闭环）
 fix: v1.2.2 根因修复 — flask/waitress 声明为 engine optional deps
 docs: 更正仓库地址为 zhibaiYingChuan/XD 并清理文档夸大内容
 ```

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 compat)
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -152,9 +155,13 @@ def _handle_tools_call(params: dict) -> dict:
     elif name == "xuandun_status":
         try:
             import urllib.request
+            from urllib.parse import urlparse
             engine_url = os.environ.get("XUANDUN_ENGINE_URL", "http://localhost:18765")
+            # 安全加固：仅允许 http/https 访问本地引擎（bandit B310）
+            if urlparse(engine_url).scheme not in ("http", "https"):
+                return {"content": [{"type": "text", "text": "engine url scheme not allowed"}]}
             req = urllib.request.Request(f"{engine_url}/status", method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:  # nosec B310
                 engine_status = json.loads(resp.read().decode("utf-8"))
             return {
                 "content": [{"type": "text", "text": json.dumps({

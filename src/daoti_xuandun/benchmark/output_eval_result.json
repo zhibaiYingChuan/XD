@@ -1,0 +1,13 @@
+{
+  "block_rate": 1.0,
+  "false_positive_rate": 0.0,
+  "accuracy": 1.0,
+  "attack_total": 199,
+  "attack_blocked": 199,
+  "benign_total": 201,
+  "benign_blocked": 0,
+  "misses": 0,
+  "false_positives": 0,
+  "pass": true,
+  "elapsed_seconds": 0.12
+}

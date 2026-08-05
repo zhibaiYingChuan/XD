@@ -28,7 +28,8 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
 
 import yaml
 from pydantic import ValidationError
@@ -148,12 +149,12 @@ class ConfigManager:
     def __init__(self, config_path: str | Path):
         self._config_path = Path(config_path)
         self._lock = threading.Lock()
-        self._current: GatewayConfig | None = None
-        self._watcher_thread: threading.Thread | None = None
+        self._current: Optional[GatewayConfig] = None
+        self._watcher_thread: threading.Optional[Thread] = None
         self._watcher_stop = threading.Event()
         self._observer = None
         self._last_change_time: float = 0
-        self._on_reload_callbacks: list[Callable[[GatewayConfig], None]] = []
+        self._on_reload_callbacks: List[Callable[[GatewayConfig], None]] = []
 
     @property
     def current_config(self) -> GatewayConfig:

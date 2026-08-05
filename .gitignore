@@ -99,7 +99,9 @@ desktop/xuandun-desktop/anti_debug.py
 desktop/xuandun-desktop/src-tauri/gen/
 
 # Internal-only scripts
-scripts/
+scripts/*
+# 部署验证脚本是公开交付物，须收录仓库（部署指南引用）
+!scripts/verify_installation.py
 tests/
 
 # Local temporary verification scripts (not for public release)
@@ -170,3 +172,27 @@ assets/image_*.jpg
 
 # 中文临时规划文档（本地内部，不公开）
 《*.md
+
+# === 发布推送前补充忽略规则 ===
+
+# Nuitka 引擎编译产物（desktop 打包用，由 CI 的 build_engine.py 生成，不入仓库）
+desktop/xuandun-desktop/src-tauri/resources/
+
+# Web Demo 已删除（独立网站展示），本地残留部署/调试脚本不入仓库
+web-demo/
+
+# HCSE/CDP 测试报告与开发过程文档（仅保留 docs/ 白名单内的公开文档）
+reports/
+desktop/xuandun-desktop/docs/
+
+# 桌面端本地验证/复现脚本与临时资产（非资产，不公开）
+desktop/xuandun-desktop/_dashboard_clean.png
+desktop/xuandun-desktop/repro_*.py
+experience_first_run.py
+measure_*.py
+measure_threshold.py
+test_simulator.py
+test_simulator.ps1
+
+# 本地模型路由配置（从 models.yaml.example 复制，不入仓库）
+config/models.yaml

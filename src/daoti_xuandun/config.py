@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -7,7 +8,8 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import os
 
 from .secure_strings import secure_value
@@ -140,6 +142,29 @@ class XuanDunConfig:
     # 抗毒化保护：单个稳态周期（T=100条）内最多允许更新多少个原型簇心，防止批量注入短期覆盖全局
     luoshu_poisoning_max_updates_per_hundred: int = 3
 
+    # ── 输出护栏（Output Guardrail）：
+    #   在模型输出侧检测违规内容，形成"输入检测 + 输出护栏"的双向闭环。
+    #   复用洛书映射器 encode 做语言无关编码，但使用输出侧独立原型库（安全/违规），
+    #   与输入侧原型隔离，避免相互污染（节 9.5 独立评测集 test_outputs_v1）。
+    #   三级处置（节 9.1）：high→拦截 / medium→打码替换 / low→仅告警。
+    enable_output_guardrail: bool = True   # 是否启用输出护栏
+    # 攻击距离分级阈值（distance 越小越危险，由 compute_attack_distance 产出）
+    output_guardrail_high_threshold: float = float(secure_value("output_guardrail_high_threshold", "0.30"))    # 攻击距离 < 此值 → 高危拦截
+    output_guardrail_medium_threshold: float = float(secure_value("output_guardrail_medium_threshold", "0.45"))  # 攻击距离 < 此值 → 中危打码
+    output_guardrail_low_threshold: float = float(secure_value("output_guardrail_low_threshold", "0.60"))        # 攻击距离 < 此值 → 低危告警
+    # 安全距离豁免阈值：安全距离 < 此值 时优先放行，防止正常输出（医学术语/代码）被误拦
+    output_guardrail_safe_exempt: float = float(secure_value("output_guardrail_safe_exempt", "0.20"))
+    # 打码替换占位符（节 9.1 中危处置）
+    output_guardrail_redact_token: str = "[REDACTED]"
+    # 输出侧原型库容量上限（独立于输入侧，防原型洪水）
+    output_guardrail_prototype_max: int = 256
+    # 违规模式信号（规则检测，回归融合权重）：
+    #   洛书语义距离区分度有限，纯空间距离无法可靠识别"系统提示词/密钥泄露"等违规输出。
+    #   因此融合"违规模式信号"（正则+特征词，见 _check_output._compute_rule_signal）。
+    #   以下为三类违规模式信号的触发阈值（0~1，值越高越危险）。
+    output_guardrail_rule_block_signal: float = float(secure_value("output_guardrail_rule_block_signal", "0.80"))    # 模式信号 ≥ 此值 → 高危险，直接拦截
+    output_guardrail_rule_medium_signal: float = float(secure_value("output_guardrail_rule_medium_signal", "0.50"))  # 模式信号 ≥ 此值 → 中危险，打码
+
     # 时序一致性校验
     enable_timing_check: bool = True
     max_window_size: int = 32
@@ -147,10 +172,18 @@ class XuanDunConfig:
     state_ttl: int = 3600
     timing_ewma_alpha: float = 0.1       # 时序 EWMA 平滑系数
     timing_threshold_floor: float = 0.5   # 时序阈值硬下限
-
-    # 会话管理
+    # 会话管理（LRU 淘汰 / TTL 过期）
     max_sessions: int = 10000             # 最大会话数，超限 LRU 淘汰
     session_ttl: int = 7200               # 会话过期时间（秒）
+
+    # 会话级信任度衰减（trust_decay）与意图漂移（intent_drift）—— 多轮对话状态跟踪
+    #   trust 初始=1.0（最高信任），每轮按 decay_rate 指数衰减，不低于 trust_floor。
+    #   trust 仅反映"静默衰减"，实际风险升级由 intent_drift 触发。
+    session_trust_decay_rate: float = 0.95    # 每轮信任度保留率（0.95 表示衰减 5%）
+    session_trust_floor: float = 0.30          # 信任度硬下限（不降至 0，避免长期对话被无限降权）
+    # 意图漂移：马氏距离偏离会话历史 EWMA 的 σ 倍数，超过 drift_sigma_threshold 视为意图突变
+    session_intent_drift_sigma: float = 2.5    # 漂移阈值：距离偏离 EWMA 均值 > 2.5σ → 触发
+    session_intent_drift_min_turns: int = 6    # 前 N 轮统计不足时不触发漂移判定（避免冷启动误报）
 
     # 侧信道防御
     side_channel_delay: bool = False       # 是否启用随机延迟掩码（抗时序分析）
@@ -160,8 +193,11 @@ class XuanDunConfig:
     prototype_distance_noise: float = 0.0  # 原型距离噪声标准差，模糊边界防枚举
     prototype_projection_scale: float = 0.0  # 高维随机投影扰动强度，0=关闭，推荐 0.01~0.05
 
-    # 全局速率限制
+    # 全局速率限制 + 无限消耗防护（节 9.x：资源耗尽攻击防御）
     global_qps_limit: int = 0              # 全局 QPS 上限，0 表示不限
+    max_request_length: int = 8000         # 单请求字符长度上限（超长直接拦截，防超大输入耗显存）
+    session_quota_per_minute: int = 60     # 会话每分钟配额（按 session_id 限流），0=不限
+    session_quota_per_hour: int = 1000     # 会话每小时配额（按 session_id 限流），0=不限
 
     # 活性防护增强（抗理论级攻击）
     enable_entropy_guard: bool = False     # 壳输出熵/混沌性统计验证，检测退化
@@ -178,6 +214,30 @@ class XuanDunConfig:
 
     # 观察→学习→自动切换（活性防护架构）
     enable_observing_mode: bool = True      # 启用观察模式：接入后先旁听学习，积累样本后自动切换到拦截
+
+    # 敏感信息泄露防护（节 9.7：PII / 密钥 / 企业自定义词典）
+    #   high→流水线直接 REJECT，medium→对输出打码 [REDACTED:<cat>]，low→仅告警（不影响放行）
+    enable_sensitive_leak: bool = True                # 是否启用敏感信息检测
+    sensitive_high_block: bool = True                 # 命中 high 级别 → 流水线拦截（reject_stage=sensitive_leak）
+    sensitive_medium_redact: bool = True              # 命中 medium 级别 → 对 final_output 打码（不拦截）
+    sensitive_low_alert_only: bool = True             # 命中 low 级别 → 仅在 debug_info 标注（不拦截不打码）
+    sensitive_dict_path: Optional[str] = None         # 企业自定义词典持久化路径（None → {XUANDUN_DATA_DIR}/sensitive_dict.json）
+
+    # 间接提示注入防护（节 9.8：Indirect Prompt Injection）
+    #   检测用户prompt中嵌入的「外部内容围栏 + 围栏内部恶意指令」组合（RAG/邮件/网页摘要场景）
+    #   阈值越高越严格；默认 ≥3.0 拦截，≥2.0 仅告警
+    enable_external_injection_check: bool = True      # 是否启用间接提示注入检测
+    external_injection_block_threshold: float = 3.5   # 累计反指令特征分 ≥ 此值 → 流水线拦截（reject_stage=external_injection）
+    external_injection_warn_threshold: float = 2.0    # ≥ 此值 → 打标 sanitize_text 入 debug_info（不拦截）
+    external_injection_sanitize: bool = True          # 命中 warn 且未拦截时，在 debug_info 输出脱敏后的安全文本
+
+    # 系统提示泄露升级检测（节 9.9：Prompt Leak — 洛书语义分类 + 置信度）
+    #   超越纯关键词组合（旧 detect_system_prompt_leak 只有 bool），
+    #   用洛书语义距离 + 组合特征分输出置信度，分级处置。
+    enable_prompt_leak_check: bool = True             # 是否启用系统提示泄露语义检测
+    prompt_leak_block_min: float = 0.75               # 置信度 ≥ 此值 → 流水线拦截（reject_stage=prompt_leak）
+    prompt_leak_warn_min: float = 0.70                # 置信度 ≥ 此值 → 打标入 debug_info（不拦截）
+    prompt_leak_use_luoshu: bool = True               # 是否用洛书语义距离增强置信度
     min_samples_for_switch: int = 1000      # 自动切换到保护模式所需的最小正常样本数
     enable_builtin_attacks: bool = True     # 启用内置攻击样本（让洛书攻击原型库从一开始就不为空）
 

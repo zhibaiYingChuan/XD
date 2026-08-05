@@ -54,6 +54,30 @@ describe('tauriApi', () => {
     });
   });
 
+  describe('protect HCSE hang 钩子', () => {
+    it('后端卡死时 35s 后真实触发 InvokeTimeoutError（超时分支可达）', async () => {
+      // 缺陷1回归：裸挂起 Promise 会绕过 invokeWithTimeout 的 35s 定时器，
+      // 导致 Detct.tsx 的超时兜底分支永远不可达。修复后必须保留外层定时器。
+      (window as any).__HCSE_HANG_PROTECT = true;
+      vi.useFakeTimers();
+
+      let caught: unknown = null;
+      const promise = api.protect('hello', 'sess1', 'balanced').catch((e) => {
+        caught = e;
+      });
+
+      // 推进到 PROTECT_COLD=35s 之后，触发超时 reject
+      await vi.advanceTimersByTimeAsync(35_000);
+      await promise;
+
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as any)?.name).toBe('InvokeTimeoutError');
+
+      vi.useRealTimers();
+      (window as any).__HCSE_HANG_PROTECT = false;
+    });
+  });
+
   describe('setMode', () => {
     it('calls set_mode command', async () => {
       mockInvoke.mockResolvedValue(undefined);

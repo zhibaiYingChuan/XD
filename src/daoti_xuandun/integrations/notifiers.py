@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -18,9 +19,11 @@ import socket
 import logging
 import smtplib
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 from abc import ABC, abstractmethod
 from urllib import request as url_request
+from urllib.parse import urlparse
 from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
@@ -290,6 +293,10 @@ class SyslogNotifier(BaseNotifier):
 
 
 def _post_json(url: str, payload: dict, headers: Optional[dict] = None) -> bool:
+    # 安全加固：仅允许 http/https，防止 file:// 等 scheme 被滥用读取本地文件（bandit B310）
+    if urlparse(url).scheme not in ("http", "https"):
+        logger.error("POST url scheme not allowed (only http/https): %s", urlparse(url).scheme)
+        return False
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = url_request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json; charset=utf-8")
@@ -297,7 +304,7 @@ def _post_json(url: str, payload: dict, headers: Optional[dict] = None) -> bool:
         for k, v in headers.items():
             req.add_header(k, v)
     try:
-        with url_request.urlopen(req, timeout=10) as resp:
+        with url_request.urlopen(req, timeout=10) as resp:  # nosec B310
             return resp.status == 200
     except URLError as e:
         logger.error("POST %s failed: %s", url, e)

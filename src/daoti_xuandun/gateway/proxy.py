@@ -38,7 +38,8 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
+
 
 import httpx
 
@@ -95,17 +96,17 @@ def _resolve_api_key(model_config: ModelConfig) -> str:
 class RequestStats:
     """单次请求统计（T10 按模型维度请求计数埋点）。"""
 
-    def __init__(self, model_id: str, request_model: str | None):
+    def __init__(self, model_id: str, request_model: Optional[str]):
         self.model_id = model_id
         self.request_model = request_model
         self.start_time = time.time()
-        self.first_byte_time: float | None = None
-        self.end_time: float | None = None
+        self.first_byte_time: Optional[float] = None
+        self.end_time: Optional[float] = None
         self.status: str = "pending"  # pending/blocked/forwarded/error/timeout
-        self.upstream_status: int | None = None
+        self.upstream_status: Optional[int] = None
         self.bytes_forwarded: int = 0
         self.fallback_used: bool = False
-        self.error_type: str | None = None
+        self.error_type: Optional[str] = None
 
     def mark_first_byte(self) -> None:
         if self.first_byte_time is None:
@@ -115,7 +116,7 @@ class RequestStats:
         self.end_time = time.time()
         self.status = status
 
-    def to_log_dict(self) -> dict[str, Any]:
+    def to_log_dict(self) -> Dict[str, Any]:
         """转为日志记录字典（T10，前置 schema 兼容）。
 
         Sprint 3 db.rs schema 迁移后写入 stats_model_hourly 表。
@@ -149,11 +150,11 @@ class ReverseProxy:
 
     def __init__(self, config_manager: ConfigManager):
         self._config_manager = config_manager
-        self._http_client: httpx.AsyncClient | None = None
-        self._stats_log: list[dict[str, Any]] = []
+        self._http_client: httpx.Optional[AsyncClient] = None
+        self._stats_log: List[Dict[str, Any]] = []
         self._stats_lock = __import__("threading").Lock()
         # 待关闭的旧客户端列表（G-15 修复：热加载时异步 aclose 旧客户端，避免 socket 泄漏）
-        self._pending_close_clients: list[httpx.AsyncClient] = []
+        self._pending_close_clients: List[httpx.AsyncClient] = []
 
         # 注册热加载回调：重建 httpx 客户端
         config_manager.add_reload_callback(self._on_config_reload)
@@ -214,14 +215,14 @@ class ReverseProxy:
             if len(self._stats_log) > 10000:
                 self._stats_log = self._stats_log[-5000:]
 
-    def get_stats_snapshot(self) -> list[dict[str, Any]]:
+    def get_stats_snapshot(self) -> List[Dict[str, Any]]:
         """获取统计快照（供 /api/stats/realtime 使用）。"""
         with self._stats_lock:
             return list(self._stats_log)
 
     async def handle_chat_completions(
         self, request_body: dict
-    ) -> tuple[int, dict | None, AsyncGenerator[bytes, None] | None, dict[str, str]]:
+    ) -> Tuple[int, dict | None, AsyncGenerator[bytes, None] | None, Dict[str, str]]:
         """处理 /v1/chat/completions 请求。
 
         Returns:
@@ -292,7 +293,7 @@ class ReverseProxy:
         request_body: dict,
         stream: bool,
         stats: RequestStats,
-    ) -> tuple[int, dict | None, AsyncGenerator[bytes, None] | None, dict[str, str]]:
+    ) -> Tuple[int, dict | None, AsyncGenerator[bytes, None] | None, Dict[str, str]]:
         """转发请求到后端模型。
 
         三层超时控制（A-25）：connect=5s / read=模型配置 / total=模型配置
@@ -411,11 +412,11 @@ class ReverseProxy:
         client: httpx.AsyncClient,
         backend_url: str,
         forward_body: dict,
-        headers: dict[str, str],
+        headers: Dict[str, str],
         timeout: httpx.Timeout,
         model_config: ModelConfig,
         stats: RequestStats,
-    ) -> tuple[int, dict | None, AsyncGenerator[bytes, None] | None, dict[str, str]]:
+    ) -> Tuple[int, dict | None, AsyncGenerator[bytes, None] | None, Dict[str, str]]:
         """流式转发：httpx.AsyncClient.stream() 逐 chunk 透传。
 
         错误传播规范（A-24）：

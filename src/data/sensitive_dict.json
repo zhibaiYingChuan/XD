@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "generated_at": "2026-08-05T10:11:47",
+  "patterns": [
+    {
+      "name": "top_secret_bar",
+      "kind": "keyword",
+      "payload": "绝密项目BAR",
+      "category": "internal",
+      "severity": "high",
+      "case_sensitive": false,
+      "enabled": true
+    },
+    {
+      "name": "project_foo",
+      "kind": "keyword",
+      "payload": "绝密项目FOO",
+      "category": "internal",
+      "severity": "high",
+      "case_sensitive": false,
+      "enabled": true
+    },
+    {
+      "name": "project_phoenix",
+      "kind": "keyword",
+      "payload": "Phoenix-Reborn-2026",
+      "category": "internal_codeword",
+      "severity": "high",
+      "case_sensitive": false,
+      "enabled": true
+    },
+    {
+      "name": "order_no_format",
+      "kind": "regex",
+      "payload": "ORD-[A-Z]{2}-\\d{8}-\\d{3,}",
+      "category": "internal_order",
+      "severity": "medium",
+      "case_sensitive": false,
+      "enabled": true
+    }
+  ]
+}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daoti-xuandun"
-version = "1.3.1"
+version = "1.3.2"
 description = "道体·玄盾 - 轻量级AI运行时安全网关"
 readme = "README.md"
 authors = [{ name = "Small Loong" }]
@@ -71,3 +71,16 @@ src_paths = ["src", "tests"]
 [tool.mypy]
 ignore_missing_imports = true
 python_version = "3.10"
+
+# ---- 代码安全扫描（CI bandit 门禁）----
+# 目标：聚焦中高危真实安全风险，排除误报与工具代码
+#   - exclude_dirs: benchmark 测试工具（含攻击样本文本与 subprocess 执行，非生产运行时）
+#   - skips:
+#       B105 枚举值 'PASS'/'WARN' 被误判为硬编码口令（types.py TrustLevel/Decision）
+#       B110 捕获异常后 pass（LOW，异常风格，非直接漏洞）
+#       B112 捕获异常后 continue（LOW，异常风格，非直接漏洞）
+#   - 中高危项（B104 bind 0.0.0.0、B310 urlopen）已在源码用 nosec 标注人工审查理由
+[tool.bandit]
+targets = ["src"]
+exclude_dirs = ["src/daoti_xuandun/benchmark", "build", "tests"]
+skips = ["B105", "B110", "B112"]

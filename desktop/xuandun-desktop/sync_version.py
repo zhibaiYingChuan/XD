@@ -79,7 +79,8 @@ def sync_engine_flask(version: str, check_only: bool) -> bool:
     content = ENGINE_FLASK_PY.read_text(encoding="utf-8")
     # 匹配 health 端点中的 version，宽松匹配空格与引号风格
     # 格式：return jsonify({"status": "ok", "version": "1.2.3"})
-    pattern = r'("status":\s*"ok",\s*"version":\s*")([^"]+)(")'
+    # 必须锚定 return jsonify 前缀，避免误匹配上方文档注释中的版本号
+    pattern = r'(return jsonify\(\{"status":\s*"ok",\s*"version":\s*")([^"]+)(")'
     match = re.search(pattern, content)
     if not match:
         print(f"WARNING: Cannot find version pattern in {ENGINE_FLASK_PY}", file=sys.stderr)

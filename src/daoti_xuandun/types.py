@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -7,7 +8,8 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 
 import numpy as np
 
@@ -50,6 +52,9 @@ class ProtectResult:
         timing_distance: 最后阶段的马氏距离。
         trust_level: 内生域感知判定出的信任等级。
         domain_distance: 与最近原型的距离。
+        trust_decay_value: 会话级信任度衰减值（初始1.0，每轮按配置衰减，下限为trust_floor）。
+        intent_drift_score: 会话级意图漂移分数（当前距离与会话EWMA的σ偏离倍数）。
+        intent_drift_detected: 是否检测到意图漂移（分数>配置的sigma阈值且轮数>min_turns）。
     """
 
     allowed: bool
@@ -60,3 +65,6 @@ class ProtectResult:
     domain_distance: Optional[float] = None
     debug_info: Optional[dict] = None
     attack_category: Optional[str] = None
+    trust_decay_value: Optional[float] = None
+    intent_drift_score: Optional[float] = None
+    intent_drift_detected: Optional[bool] = None

@@ -7,7 +7,6 @@ mod commands;
 mod db;
 mod engine;
 mod tray;
-mod proxy;
 mod keyring;
 
 #[cfg(target_os = "windows")]
@@ -126,11 +125,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::protect,
+            commands::check_output,
             commands::set_mode,
             commands::get_logs,
-            commands::start_proxy_cmd,
-            commands::stop_proxy_cmd,
-            commands::is_proxy_running_cmd,
             commands::get_config,
             commands::set_config,
             commands::restart_engine,
@@ -144,8 +141,14 @@ pub fn run() {
             commands::create_snapshot,
             commands::list_snapshots,
             commands::restore_snapshot,
+            commands::delete_snapshot,
             commands::get_learning_status,
             commands::get_dual_layer_stats,
+            commands::get_output_stats,
+            commands::get_output_history,
+            commands::get_output_trend,
+            commands::get_output_config,
+            commands::set_output_config,
             commands::set_emergency_bypass,
             commands::get_emergency_bypass,
             commands::set_gray_deploy_ratio,
@@ -161,6 +164,8 @@ pub fn run() {
             commands::test_notifier,
             // Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令注册
             commands::noop_heartbeat,
+            // UI修复：打开引擎日志文件（Dashboard启动失败时可点击跳转）
+            commands::open_engine_log,
         ])
         .build(tauri::generate_context!());
 

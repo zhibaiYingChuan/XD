@@ -64,8 +64,8 @@ jobs:
 
       - name: Install project dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install numpy pytest
+          python -m pip install --upgrade pip setuptools
+          pip install numpy pytest pip-audit bandit
           pip install -e ".[engine]"
 
       - name: Run config smoke test (确保config.py参数化正确加载)
@@ -92,6 +92,21 @@ jobs:
             echo "INFO: tests/test_xuandun.py not found, skipping pytest regression"
           fi
         timeout-minutes: 15
+
+      # ---- 代码安全扫描门禁（P1 代码安全治理）----
+      - name: bandit - Python 代码安全扫描
+        run: |
+          # 排除 benchmark 测试工具目录（含攻击样本文本与 subprocess，非生产运行时）
+          # 跳过 B105(枚举'PASS'误报)/B110/B112(异常风格LOW)，
+          # 中高危项(B104 bind 0.0.0.0 / B310 urlopen)已在源码用 nosec + scheme 白名单处理
+          python -m bandit -r src -x src/daoti_xuandun/benchmark -s B105,B110,B112
+        timeout-minutes: 5
+
+      - name: pip-audit - Python 依赖漏洞扫描
+        run: |
+          # 扫描当前已安装环境（含项目依赖），仅允许 0 个已知漏洞
+          python -m pip_audit --local
+        timeout-minutes: 5
 
   # ============ Job 3: Rust 静态检查 + 编译 ============
   rust-clippy:
@@ -172,6 +187,15 @@ jobs:
           } else {
             Write-Host "Engine binary already exists, skipping"
           }
+
+      - name: cargo audit - Rust 依赖漏洞扫描
+        shell: pwsh
+        run: |
+          # 安装 cargo-audit 并扫描 Cargo.lock，发现漏洞即失败（-d 更严格）
+          cargo install cargo-audit --locked
+          cargo audit -d
+        working-directory: desktop/xuandun-desktop/src-tauri
+        timeout-minutes: 10
 
       - name: Cargo check (语法 + 类型检查)
         working-directory: desktop/xuandun-desktop/src-tauri

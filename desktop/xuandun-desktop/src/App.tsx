@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard';
 import Detect from './pages/Detect';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
+import Help from './pages/Help';
 import { api, isTauriBridgeAvailable } from './services/tauriApi';
 import './App.css';
 
@@ -230,6 +231,7 @@ function AppContent() {
             <Route path="/detect" element={<Detect />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/help" element={<Help />} />
             {/* Cycle1-交互P0 404白屏修复：所有未匹配路由（#/wizard/#/agents/#/reports/#/yinyang等历史旧URL）
                  统一重定向到仪表盘，不显示白屏。企业用户收藏旧URL不会看到空白页 */}
             <Route path="*" element={<Navigate to="/" replace />} />

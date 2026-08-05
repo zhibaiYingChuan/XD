@@ -9,9 +9,10 @@
 ## 核心特性
 
 - **三重检测引擎**：域距离 + 结构/二进制异常 + 4-gram 统计
+- **双向安全闭环**：输入侧检测 + 输出护栏（模型输出侧违规检测，拦截/打码/告警三级处置）
 - **原创理论架构**：拒绝门理论 + 洛书符号映射器 + 动态阴阳壳
 - **活性防护架构**：观察→学习→自动切换，零配置接入，自动学习正常语言模式后开启保护
-- **内置攻击样本库**：36 条攻击种子覆盖 OWASP LLM Top 10 六大类（基准测试套件含 213 条攻击样本 + 129 条良性样本），系统启动即知"什么是坏"
+- **内置攻击样本库**：260 条攻击种子 + 30 条良性样本（7 大类 26 子类型）覆盖 OWASP LLM Top 10，系统启动即知"什么是坏"（行业基准测试套件另含 213 条攻击样本 + 129 条良性样本）
 - **模拟测试模块**：内置攻击样本库测试防护能力，生成拦截率/误报率/漏报率报告
 - **活性在线学习**：从通过的请求中自动学习，防御能力随使用持续增强
 - **反逆向保护**：Nuitka 编译 + 三端 anti\_debug + 编译期 key 注入 + 阈值加密
@@ -19,6 +20,14 @@
 - **会话隔离**：不同会话施加特定置换，设计目标为汉明距离 > 50%（实际值取决于输入与运行时状态）
 
 > 📖 **用户指南**：如需完整的使用说明、API 参考和最佳实践，请参阅 [docs/用户指南.md](docs/用户指南.md)。
+
+> ⚠️ **如何保护你的模型**：安装玄盾桌面端**不会自动拦截**电脑上任何 AI Agent 或模型的流量。玄盾提供三种需要主动接入的防护方式（可并列使用）：
+>
+> - **① 桌面端内置 OpenAI 兼容端点（推荐）**：把模型的 `base_url` 指向桌面端引擎的 `http://localhost:18765/v1`，玄盾即可透明地对请求做"输入防护 → 转发上游模型 → 输出防护"全链路检测，无需改模型客户端代码。支持云端 API、本地模型（Ollama 等）、私有化部署三类模型。
+> - **② 手动检测 + 本地 API**：在桌面端手动检测文本，或让模型服务方调用 `localhost:18765/protect`（输入侧）与 `/output/protect`（输出侧）接口接入；
+> - **③ 反向代理网关**：通过 SDK 的 OpenAI 兼容网关（`daoti_xuandun.gateway`，FastAPI）把模型接到玄盾后面，支持流式（SSE）透传与多模型路由。
+>
+> 详细说明与配置见 [docs/用户指南.md](docs/用户指南.md)「接入方式」章节。
 
 ## 下载安装
 
@@ -28,17 +37,17 @@
 
 | 平台                    | 安装包                            | 说明                |
 | --------------------- | ------------------------------ | ----------------- |
-| Windows x64           | `XuanDun_1.3.1_x64-setup.exe`  | NSIS 安装程序，支持中英文   |
-| macOS (Apple Silicon) | `XuanDun_1.3.1_aarch64.dmg`    | M1/M2/M3 芯片       |
-| Linux x64             | `XuanDun_1.3.1_amd64.AppImage` | 便携版，无需安装          |
-| Linux x64             | `XuanDun_1.3.1_amd64.deb`      | Debian/Ubuntu 包管理 |
+| Windows x64           | `XuanDun_1.3.2_x64-setup.exe`  | NSIS 安装程序，支持中英文   |
+| macOS (Apple Silicon) | `XuanDun_1.3.2_aarch64.dmg`    | M1/M2/M3 芯片       |
+| Linux x64             | `XuanDun_1.3.2_amd64.AppImage` | 便携版，无需安装          |
+| Linux x64             | `XuanDun_1.3.2_amd64.deb`      | Debian/Ubuntu 包管理 |
 
 > **macOS 用户注意**：DMG 未签名（待 Apple Developer ID 申请后签名），首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。仅提供 Apple Silicon (M1/M2/M3+) 原生版本，Intel Mac 用户建议升级至 Apple Silicon 设备。
 
 ### Python SDK（开发者集成）
 
 ```bash
-pip install daoti-xuandun==1.3.1
+pip install daoti-xuandun==1.3.2
 ```
 
 ### B端企业部署
@@ -80,6 +89,24 @@ python -m daoti_xuandun.challenge_api --port 8080
 
 访问 `http://localhost:8080/challenge` 提交文本测试防护效果。
 
+### 方式4：桌面端透明防护模型（OpenAI 兼容端点）
+
+安装并启动桌面端后，引擎在本地 `18765` 端口提供 OpenAI 兼容的 `/v1/chat/completions` 防护端点。把模型客户端的 `base_url` 改成本地地址即可透明接入防护：
+
+```bash
+# 1. 配置上游模型（环境变量，禁止硬编码）
+export XUANDUN_UPSTREAM_URL="https://api.openai.com/v1"   # 云端 API
+export XUANDUN_UPSTREAM_API_KEY="sk-..."                  # 如需鉴权
+# 或本地模型：export XUANDUN_UPSTREAM_URL="http://localhost:11434/v1"
+# 或私有化：  export XUANDUN_UPSTREAM_URL="http://内网:8000/v1"
+
+# 2. 把模型的 base_url 指向桌面端引擎
+# 例如 OpenAI SDK：
+#   client = OpenAI(base_url="http://localhost:18765/v1", api_key="x")
+```
+
+防护链路：**输入侧检测 → 转发上游模型 → 输出侧检测**，命中攻击返回 OpenAI 兼容的 403 错误，输出侧违规支持拦截/打码二级处置。详见 [docs/用户指南.md](docs/用户指南.md)「接入方式」章节。
+
 ## 活性防护：观察→学习→自动切换
 
 道体·玄盾采用"活性防护"架构——接入后不立即拦截，而是先旁听学习正常语言模式，积累足够样本后自动切换到拦截模式。
@@ -114,7 +141,7 @@ python -m daoti_xuandun.challenge_api --port 8080
 
 - **状态条**：顶部实时显示当前模式（观察/保护）和学习进度
 - **学习状态页面**：查看学习进度、原型统计、模拟拦截预览
-- **模拟测试页面**：使用内置 200+ 攻击样本测试防护能力，生成报告
+- **模拟测试页面**：使用内置 260 攻击样本测试防护能力，生成报告
 - **手动切换**：运维人员可随时手动切换观察/保护模式
 
 ### Python SDK 控制
@@ -201,9 +228,9 @@ shield = XuanDun(mode="low_false_positive")
 
 ### 硬件配置推荐
 
-| 部署规模    | 硬件规格   | STANDARD层级预期性能    | 内存占用   |
-| ------- | ------ | ----------------- | ------ |
-| 个人开发/测试 | 1核2G   | 延迟\~2ms，QPS\~200  | <300MB |
+| 部署规模    | 硬件规格   | STANDARD层级预期性能      | 内存占用   |
+| ------- | ------ | ------------------- | ------ |
+| 个人开发/测试 | 1核2G   | 延迟\~2ms，QPS\~200    | <300MB |
 | 中小型API  | 2核4G   | 延迟\~1.7ms，QPS\~400  | <500MB |
 | 生产环境    | 4核8G   | 延迟\~1.7ms，QPS\~577  | <1GB   |
 | 高并发     | 8核16G+ | 延迟\~1.7ms，QPS\~728+ | <2GB   |
@@ -230,6 +257,7 @@ shield = XuanDun(mode="low_false_positive")
 - `src/daoti_xuandun/atlas_mapping.py` — 图谱映射
 - `desktop/xuandun-desktop/engine_flask.py` — 引擎 Flask 服务
 - `desktop/xuandun-desktop/build_engine.py` — Nuitka 编译脚本
+- `desktop/xuandun-desktop/anti_debug.py` — 反逆向工程检测（脱敏，不入仓库源码）
 
 **核心限制**：
 
@@ -250,7 +278,7 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE\
 ### 环境要求
 
 - **Python** 3.11+
-- **Rust** 1.75+（stable）
+- **Rust** 1.94.0+（stable，与 CI 保持一致，满足 edition2024 依赖要求）
 - **Node.js** 20+
 - **Nuitka** 4.x（`pip install nuitka`）
 
@@ -261,10 +289,10 @@ Rust 桌面端、TypeScript 前端、配置文件、文档、测试受 [LICENSE\
 git clone https://github.com/zhibaiYingChuan/XD.git
 cd XD
 
-# 2. 安装 Python 依赖
-pip install -e .
+# 2. 安装 Python 依赖（engine extras 含 flask/waitress，引擎编译必需）
+pip install -e ".[engine]"
 
-# 3. 编译 Nuitka 引擎二进制（生成 src-tauri/binaries/xuandun-engine-*）
+# 3. 编译 Nuitka 引擎二进制（standalone 目录模式，输出到 src-tauri/resources/engine/）
 cd desktop/xuandun-desktop
 python build_engine.py
 

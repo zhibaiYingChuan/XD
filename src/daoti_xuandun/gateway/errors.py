@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 
 logger = logging.getLogger("xuandun-gateway-errors")
 
@@ -38,9 +39,9 @@ ERROR_TYPE_INTERNAL = "xuandun_internal"
 def build_error_body(
     message: str,
     error_type: str = ERROR_TYPE_INTERNAL,
-    code: str | None = None,
-    hint: str | None = None,
-) -> dict[str, Any]:
+    code: Optional[str] = None,
+    hint: Optional[str] = None,
+) -> Dict[str, Any]:
     """构造 OpenAI 兼容的错误响应体。
 
     OpenAI 协议错误格式：
@@ -53,7 +54,7 @@ def build_error_body(
         }
     }
     """
-    err: dict[str, Any] = {
+    err: Dict[str, Any] = {
         "message": message,
         "type": error_type,
         "param": None,
@@ -65,7 +66,7 @@ def build_error_body(
     return {"error": err}
 
 
-def build_blocked_body(reason: str, policy: str = "balanced") -> dict[str, Any]:
+def build_blocked_body(reason: str, policy: str = "balanced") -> Dict[str, Any]:
     """构造安全检测拦截错误体（403）。"""
     return build_error_body(
         message=f"请求被玄盾安全策略拦截：{reason}",
@@ -75,7 +76,7 @@ def build_blocked_body(reason: str, policy: str = "balanced") -> dict[str, Any]:
     )
 
 
-def build_sse_error_event(error_body: dict[str, Any]) -> bytes:
+def build_sse_error_event(error_body: Dict[str, Any]) -> bytes:
     """构造 SSE error event（流式中断时使用）。
 
     流式响应已开始（HTTP 200 已发送），无法再用 HTTP 状态码，
@@ -86,8 +87,8 @@ def build_sse_error_event(error_body: dict[str, Any]) -> bytes:
 
 
 def build_upstream_error_body(
-    status_code: int, upstream_body: bytes | None = None
-) -> dict[str, Any]:
+    status_code: int, upstream_body: Optional[bytes] = None
+) -> Dict[str, Any]:
     """根据上游状态码构造错误体。
 
     密钥失效（上游 401）特殊处理（评审修订重要-3）：
@@ -154,8 +155,8 @@ class GatewayError(Exception):
     def __init__(
         self,
         status_code: int,
-        error_body: dict[str, Any],
-        headers: dict[str, str] | None = None,
+        error_body: Dict[str, Any],
+        headers: Dict[str, str] | None = None,
     ):
         self.status_code = status_code
         self.error_body = error_body
@@ -176,7 +177,7 @@ class BlockedByShieldError(GatewayError):
 class NoRouteError(GatewayError):
     """无路由匹配且无兜底（404）。"""
 
-    def __init__(self, request_model: str | None = None):
+    def __init__(self, request_model: Optional[str] = None):
         msg = f"无路由匹配: model={request_model!r}"
         if request_model is None:
             msg = "请求未指定 model 且无兜底路由"
@@ -237,10 +238,10 @@ class UpstreamUnreachableError(GatewayError):
 class UpstreamHttpError(GatewayError):
     """上游返回非 2xx 状态码。"""
 
-    def __init__(self, status_code: int, upstream_body: bytes | None = None):
+    def __init__(self, status_code: int, upstream_body: Optional[bytes] = None):
         mapped = map_status_for_upstream_error(status_code)
         error_body = build_upstream_error_body(status_code, upstream_body)
-        headers: dict[str, str] = {}
+        headers: Dict[str, str] = {}
         # G-21 修复 + 评审修订重要-3：401/429 禁止自动重试
         if should_disable_retry(status_code):
             headers["X-XuanDun-NoRetry"] = "1"

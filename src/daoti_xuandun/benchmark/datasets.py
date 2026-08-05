@@ -1,3 +1,4 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 """探针数据集定义 — 三阶段评估用的样本集合。
 
@@ -9,7 +10,8 @@ expected_label 取值:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 
 
 @dataclass

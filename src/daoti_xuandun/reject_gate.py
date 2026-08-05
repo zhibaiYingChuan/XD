@@ -1,10 +1,12 @@
+from __future__ import annotations
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
 from collections import deque
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
 import hashlib
 import random
 import math
@@ -16,7 +18,7 @@ import unicodedata
 import numpy as np
 
 from daoti_xuandun.config import XuanDunConfig
-from daoti_xuandun.preprocessors import try_decode_payloads, normalize_unicode, check_imperative_whitelist, contains_attack_keywords, contains_strong_attack_keywords, detect_roleplay_pattern, detect_social_engineering, detect_data_exfiltration, detect_system_prompt_leak, detect_excessive_agency, detect_dangerous_command_pattern, detect_training_data_exploitation, detect_leet_speak_attack
+from daoti_xuandun.preprocessors import try_decode_payloads, normalize_unicode, check_imperative_whitelist, contains_attack_keywords, contains_strong_attack_keywords, detect_roleplay_pattern, detect_social_engineering, detect_data_exfiltration, detect_system_prompt_leak, detect_excessive_agency, detect_dangerous_command_pattern, detect_training_data_exploitation, detect_leet_speak_attack, detect_chinese_harmful_content
 from daoti_xuandun.luoshu_mapper import LuoshuSymbolMapper
 from daoti_xuandun.types import Decision, TrustLevel, Vector
 
@@ -245,8 +247,13 @@ class EndogenousDomainAwareness:
         if detect_leet_speak_attack(raw_input):
             return ("reject", "leet_speak_attack", is_inquiry, is_learning)
 
-        # 10. 已学习的攻击模式（从内门反馈）
-        input_hash = hashlib.md5(raw_input.encode("utf-8")).hexdigest()[:8]
+        # 10. 中文公序良俗 / 越狱 / 学术包装攻击（B9 修复）
+        if detect_chinese_harmful_content(raw_input):
+            return ("reject", "chinese_harmful_content", is_inquiry, is_learning)
+
+        # 11. 已学习的攻击模式（从内门反馈）
+        # 非密码学用途：仅作已学习攻击模式的缓存键指纹（bandit B324 豁免）
+        input_hash = hashlib.md5(raw_input.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
         # _outer_learned_attacks 的读访问在此处，写访问在 _inner_feedback_to_outer 中，
         # 后者已通过 _outer_cache_lock 互斥。此处读取为只读操作，deque 的只读遍历
         # 在 CPython GIL 下是原子的，与持锁写入并发时最坏情况是读到稍旧的状态，
@@ -292,7 +299,8 @@ class EndogenousDomainAwareness:
         """
         if not isinstance(raw_input, str) or not raw_input:
             return
-        input_hash = hashlib.md5(raw_input.encode("utf-8")).hexdigest()[:8]
+        # 非密码学用途：仅作已学习攻击模式的缓存键指纹（bandit B324 豁免）
+        input_hash = hashlib.md5(raw_input.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
         with self._outer_cache_lock:
             if decision == Decision.REJECT:
                 if input_hash not in self._outer_learned_attacks:
@@ -892,7 +900,8 @@ class EndogenousDomainAwareness:
 
         input_key = None
         if isinstance(raw_input, str) and len(raw_input) > 0:
-            input_key = int(hashlib.md5(raw_input.encode('utf-8')).hexdigest()[:8], 16) & 0xFFFF
+            # 非密码学用途：退避缓存键（bandit B324 豁免）
+            input_key = int(hashlib.md5(raw_input.encode('utf-8'), usedforsecurity=False).hexdigest()[:8], 16) & 0xFFFF
         if input_key is not None:
             # 重复缓存为共享状态，多线程并发读-改-写需加锁，
             # 避免 count 丢失与 dict 迭代过程中被并发变更（P0-3）
@@ -2574,7 +2583,8 @@ class EndogenousDomainAwareness:
                         hash_vec[idx] += deviation * 4.0
             n = len(raw_input)
             if n > 0:
-                base_seed = int(hashlib.md5(raw_input.encode('utf-8')).hexdigest()[:8], 16) & 0x7FFFFFFF
+                # 非密码学用途：动态壳向量扰动种子（bandit B324 豁免）
+                base_seed = int(hashlib.md5(raw_input.encode('utf-8'), usedforsecurity=False).hexdigest()[:8], 16) & 0x7FFFFFFF
                 base_rng = np.random.default_rng(seed=base_seed)
                 base = base_rng.normal(0, 0.3, dim).astype(np.float32)
                 hash_vec = hash_vec + base

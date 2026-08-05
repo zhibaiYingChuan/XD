@@ -4,7 +4,7 @@ use tauri::{Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use std::sync::Mutex;
 
-use crate::engine::{EngineState, send_protect_request, send_warmup_request, sync_mode_to_engine, restart_engine as engine_restart, stop_engine as engine_stop, safe_preview, engine_get, engine_post};
+use crate::engine::{EngineState, send_protect_request, send_output_protect_request, send_warmup_request, sync_mode_to_engine, restart_engine as engine_restart, stop_engine as engine_stop, safe_preview, engine_get, engine_post};
 use crate::db::Database;
 
 #[derive(Serialize)]
@@ -229,12 +229,40 @@ pub async fn protect(
     }
 }
 
+/// 输出护栏单次检测：转发到引擎 /output/protect。
+/// 返回引擎原始 JSON（含 action/risk_level/reason/output=打码后文本）。
+/// 供前端 Detect 页"输出侧护栏"标签调用，让用户直接看到打码/拦截/告警的实际效果。
+#[tauri::command]
+pub async fn check_output(
+    state: State<'_, Mutex<EngineState>>,
+    text: String,
+    session: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if text.trim().is_empty() {
+        return Err("输出文本不能为空".to_string());
+    }
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Err("引擎未运行".to_string());
+    }
+    let session = session.unwrap_or_else(|| "default".to_string());
+    send_output_protect_request(&engine_url, &text, &session).await
+}
+
 #[tauri::command]
 pub async fn set_mode(
     state: State<'_, Mutex<EngineState>>,
     db: State<'_, Database>,
     mode: String,
 ) -> Result<(), String> {
+    // P1 修复：记录旧模式，用于引擎同步失败时回滚内存态，避免"界面显示新、引擎实际旧"的状态分裂。
+    let old_mode = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        s.mode.clone()
+    };
     {
         let mut s = state.lock().map_err(|e| e.to_string())?;
         s.set_mode(&mode)?;
@@ -246,6 +274,10 @@ pub async fn set_mode(
     // GAP-05 修复：安全产品模式同步失败必须返回错误，避免前端误认为模式已切换
     if let Err(e) = sync_mode_to_engine(&engine_url, &mode).await {
         eprintln!("[xuandun] sync_mode_to_engine failed: {}", e);
+        // 回滚 Rust 内存态到旧模式，消除"内存已改、引擎未改"的状态分裂
+        if let Ok(mut s) = state.lock() {
+            let _ = s.set_mode(&old_mode);
+        }
         // 仍然保存到 DB 和审计日志，但返回错误让前端知道引擎未同步
         let _ = db.set_config("mode", &mode);
         let _ = db.insert_audit("mode_change", &format!("{} (engine sync failed: {})", mode, e));
@@ -275,21 +307,6 @@ pub async fn get_logs(
 }
 
 #[tauri::command]
-pub async fn start_proxy_cmd(app: tauri::AppHandle, port: u16) -> Result<(), String> {
-    crate::proxy::start_proxy(app, port).await
-}
-
-#[tauri::command]
-pub async fn stop_proxy_cmd() -> Result<(), String> {
-    crate::proxy::stop_proxy()
-}
-
-#[tauri::command]
-pub fn is_proxy_running_cmd() -> bool {
-    crate::proxy::is_proxy_running()
-}
-
-#[tauri::command]
 pub async fn get_config(db: State<'_, Database>, key: String) -> Result<Option<String>, String> {
     db.get_config(&key)
 }
@@ -307,6 +324,47 @@ pub async fn restart_engine(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn stop_engine(app: tauri::AppHandle) -> Result<(), String> {
     engine_stop(&app)
+}
+
+/// 打开引擎日志文件（用系统默认关联程序打开）。
+/// 日志路径：%LOCALAPPDATA%/com.daoti.xuandun-desktop/engine.log
+#[tauri::command]
+pub async fn open_engine_log() -> Result<String, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("com.daoti.xuandun-desktop");
+    let path = dir.join("engine.log");
+
+    // 若日志文件不存在，先创建空文件避免 open 报错
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::File::create(&path);
+    }
+
+    let path_str = path.to_string_lossy().to_string();
+
+    // 用系统默认程序打开日志文件（Windows: notepad/默认编辑器）
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        Command::new("cmd")
+            .args(["/C", "start", "", &path_str])
+            .spawn()
+            .map_err(|e| format!("打开日志失败: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        Command::new("open").arg(&path).spawn().map_err(|e| format!("打开日志失败: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        Command::new("xdg-open").arg(&path).spawn().map_err(|e| format!("打开日志失败: {}", e))?;
+    }
+
+    Ok(path_str)
 }
 
 #[tauri::command]
@@ -371,6 +429,11 @@ pub fn list_snapshots(db: State<'_, Database>) -> Result<Vec<(i64, String, Strin
 #[tauri::command]
 pub fn restore_snapshot(db: State<'_, Database>, snapshot_id: i64) -> Result<(), String> {
     db.restore_snapshot(snapshot_id)
+}
+
+#[tauri::command]
+pub fn delete_snapshot(db: State<'_, Database>, snapshot_id: i64) -> Result<(), String> {
+    db.delete_snapshot(snapshot_id)
 }
 
 #[tauri::command]
@@ -490,6 +553,102 @@ pub async fn get_dual_layer_stats(state: State<'_, Mutex<EngineState>>) -> Resul
             }))
         }
     }
+}
+
+// ── 输出护栏（模型→用户）：stats / history / trend ──
+// 数据由引擎侧内存按分钟桶采集（准实时、重启清空），前端呈现时需标注来源。
+
+#[tauri::command]
+pub async fn get_output_stats(state: State<'_, Mutex<EngineState>>) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        // 字段对齐前端 OutputStats 接口，保证前端字段完整
+        return Ok(serde_json::json!({
+            "total_checks": 0, "blocked": 0, "redacted": 0, "alerted": 0
+        }));
+    }
+    engine_get(&engine_url, "/output/stats").await
+}
+
+#[tauri::command]
+pub async fn get_output_history(
+    state: State<'_, Mutex<EngineState>>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Ok(serde_json::json!({ "history": [] }));
+    }
+    let limit = limit.unwrap_or(20).max(1).min(200);
+    engine_get(&engine_url, &format!("/output/history?limit={}", limit)).await
+}
+
+/// 读取输出护栏当前生效配置（引擎 /output/config GET）。
+/// 供 Settings 专家模式「输出护栏配置卡」回显。
+#[tauri::command]
+pub async fn get_output_config(
+    state: State<'_, Mutex<EngineState>>,
+) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Err("引擎未运行".to_string());
+    }
+    engine_get(&engine_url, "/output/config").await
+}
+
+/// 动态调校输出护栏配置（引擎 /output/config POST）。
+/// config: 白名单内可调参数 {enable_output_guardrail, *_threshold, redact_token, ...}
+/// 返回引擎生效快照。失败必须返回错误，不得静默吞掉（安全产品硬约束）。
+#[tauri::command]
+pub async fn set_output_config(
+    state: State<'_, Mutex<EngineState>>,
+    config: serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Err("引擎未运行".to_string());
+    }
+    if config.is_empty() {
+        return Err("配置不能为空".to_string());
+    }
+    let body = serde_json::json!({ "config": config });
+    engine_post(&engine_url, "/output/config", body).await
+}
+
+#[tauri::command]
+pub async fn get_output_trend(
+    state: State<'_, Mutex<EngineState>>,
+    granularity: String,
+    start: Option<String>,
+    end: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let (engine_url, is_running) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.get_engine_url(), s.running)
+    };
+    if !is_running {
+        return Ok(serde_json::json!({ "points": [] }));
+    }
+    let mut path = format!("/output/stats/timeseries?granularity={}", granularity);
+    if let Some(s) = start {
+        path.push_str(&format!("&start={}", s));
+    }
+    if let Some(e) = end {
+        path.push_str(&format!("&end={}", e));
+    }
+    engine_get(&engine_url, &path).await
 }
 
 // ── 企业级运维：逃生通道 + 灰度部署 ──

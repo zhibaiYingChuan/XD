@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 compat)
 # SPDX-License-Identifier: DaoTi-Research-1.0
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
@@ -6,7 +9,7 @@
 # daoti_xuandun - 道体·玄盾 AI运行时安全网关
 # Implements §1.3 交付形态 — 道体动态活性架构
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 from daoti_xuandun.config import DefenseLevel, XuanDunConfig
 from daoti_xuandun.types import (
