@@ -585,7 +585,7 @@ pub async fn get_output_history(
     if !is_running {
         return Ok(serde_json::json!({ "history": [] }));
     }
-    let limit = limit.unwrap_or(20).max(1).min(200);
+    let limit = limit.unwrap_or(20).clamp(1, 200);
     engine_get(&engine_url, &format!("/output/history?limit={}", limit)).await
 }
 
