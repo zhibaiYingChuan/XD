@@ -31,11 +31,14 @@ jobs:
     steps:
       # B-03 修复：harden-runner 出网过滤（安全加固）
       # CVE-2024-52587/CVE-2026-25598 修复：升级到 v2.16.0
+      # 【2026-08-07 修复】disable-sudo 仅对非 Linux 平台生效。
+      #   Linux 构建需 sudo apt-get 安装 webkit2gtk/gtk 系统依赖，
+      #   若全局 disable-sudo: true 会直接导致 Linux 构建失败（exit 1）。
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
-          disable-sudo: true
+          disable-sudo: ${{ runner.os != 'Linux' }}
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
