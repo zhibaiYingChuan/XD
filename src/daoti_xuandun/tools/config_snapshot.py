@@ -142,7 +142,7 @@ def _cleanup_old_snapshots(keep: int = 5):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="道体·玄盾 配置快照管理 — 备份/回滚配置"
+        description="道体玄盾 配置快照管理 — 备份/回滚配置"
     )
     parser.add_argument("--backup", "-b", action="store_true",
                         help="创建当前配置的快照")

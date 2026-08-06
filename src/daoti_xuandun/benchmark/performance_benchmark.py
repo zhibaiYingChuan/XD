@@ -107,7 +107,7 @@ def run_performance_benchmark(level: DefenseLevel,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="道体·玄盾 性能基准测试")
+    parser = argparse.ArgumentParser(description="道体玄盾 性能基准测试")
     parser.add_argument("--level", type=str, default="ALL",
                         choices=["BASIC", "STANDARD", "STRICT", "PARANOID", "ALL"],
                         help="防御层级 (默认: ALL)")
@@ -124,7 +124,7 @@ def main():
         levels = [DefenseLevel(args.level)]
 
     print("=" * 70)
-    print("  道体·玄盾 (Daoti XuanDun) 性能基准测试")
+    print("  道体玄盾 (Daoti XuanDun) 性能基准测试")
     print("=" * 70)
     print()
 

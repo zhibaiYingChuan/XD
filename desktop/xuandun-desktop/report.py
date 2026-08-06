@@ -16,7 +16,7 @@ from typing import Optional
 def format_report_markdown(report: dict) -> str:
     """将测试报告格式化为 Markdown。"""
     lines = [
-        "# 道体·玄盾 模拟测试报告",
+        "# 道体玄盾 模拟测试报告",
         "",
         f"**执行时间**: {report.get('timestamp', '')}",
         f"**测试模式**: {_mode_name(report.get('mode', ''))}",

@@ -129,7 +129,7 @@ def _build_report(results: List[dict], elapsed: float, input_path: str,
     avg_latency = sum(r["latency_ms"] for r in results) / max(1, total)
 
     lines = [
-        "# 道体·玄盾 日志重放报告",
+        "# 道体玄盾 日志重放报告",
         "",
         f"**生成时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"**输入文件**: {input_path}",
@@ -201,7 +201,7 @@ def _build_report(results: List[dict], elapsed: float, input_path: str,
         "",
         "---",
         "",
-        "> 本报告由道体·玄盾日志重放工具自动生成。",
+        "> 本报告由道体玄盾日志重放工具自动生成。",
         "> 重放结果仅反映当前配置下的检测效果，不代表生产环境实时表现。",
     ])
 
@@ -210,7 +210,7 @@ def _build_report(results: List[dict], elapsed: float, input_path: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="道体·玄盾 日志重放工具 — 用历史日志验证拦截效果"
+        description="道体玄盾 日志重放工具 — 用历史日志验证拦截效果"
     )
     parser.add_argument("--input", "-i", required=True,
                         help="JSONL 格式日志文件路径")

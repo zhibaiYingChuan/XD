@@ -489,7 +489,7 @@ class BenchmarkRunner:
             ])
 
         print(f"\n{'='*70}")
-        print(f"  道体·玄盾 三阶段基准测试 — 防御层级: {self.defense_level.value}")
+        print(f"  道体玄盾 三阶段基准测试 — 防御层级: {self.defense_level.value}")
         print(f"{'='*70}")
 
         self._warmup()

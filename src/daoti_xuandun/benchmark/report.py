@@ -23,7 +23,7 @@ from daoti_xuandun.benchmark.probes import ThreeStageReport
 @dataclass
 class BenchmarkReport:
     """基准测试综合报告（三阶段评估）。"""
-    title: str = "道体·玄盾 行业基准测试报告（三阶段评估）"
+    title: str = "道体玄盾 行业基准测试报告（三阶段评估）"
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     framework_refs: List[str] = field(default_factory=lambda: [
         "OWASP AI Testing Guide (AITG)",
@@ -141,7 +141,7 @@ class BenchmarkReport:
         lines.append("## 设计哲学：活性防护的三阶段评估")
         lines.append("")
         lines.append("传统防火墙使用二元判定（允许/拒绝），将「陌生但无害」的输入错误归类为威胁。")
-        lines.append("道体·玄盾采用**三阶段活性评估**，符合人类安全直觉：")
+        lines.append("道体玄盾采用**三阶段活性评估**，符合人类安全直觉：")
         lines.append("")
         lines.append("| 阶段 | 输入特征 | 系统行为 | 目标指标 |")
         lines.append("|------|---------|---------|---------|")
@@ -253,7 +253,7 @@ class BenchmarkReport:
 
         lines.append("## 与传统防火墙的本质区别")
         lines.append("")
-        lines.append("| 维度 | 传统 WAF/防火墙 | 道体·玄盾 |")
+        lines.append("| 维度 | 传统 WAF/防火墙 | 道体玄盾 |")
         lines.append("|------|---------------|----------|")
         lines.append("| 判定方式 | 二元（允许/拒绝） | 三阶段（HIGH/LOW/REJECT） |")
         lines.append("| 未知输入 | 默认拒绝（高误报） | LOW_TRUST 接纳 + 混沌期孵化 |")

@@ -4,7 +4,7 @@ from __future__ import annotations
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾挑战赛API — 供外部安全研究者测试防御能力。
+"""道体玄盾挑战赛API — 供外部安全研究者测试防御能力。
 
 启动方式：
     python -m daoti_xuandun.challenge_api --port 8080
@@ -120,7 +120,7 @@ class ChallengeHandler(BaseHTTPRequestHandler):
             self._json_response(self.state.status())
         elif self.path == "/rules":
             self._json_response({
-                "name": "道体·玄盾 (Daoti XuanDun) 挑战赛",
+                "name": "道体玄盾 (Daoti XuanDun) 挑战赛",
                 "description": "测试活性防护系统的防御能力",
                 "rules": [
                     "提交任意文本，系统将判断是否允许通过",
@@ -168,7 +168,7 @@ class ChallengeHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="道体·玄盾挑战赛API")
+    parser = argparse.ArgumentParser(description="道体玄盾挑战赛API")
     parser.add_argument("--port", type=int, default=8080, help="监听端口")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="监听地址（默认 127.0.0.1，设为 0.0.0.0 对外开放）")
     parser.add_argument("--level", type=str, default="STANDARD",
@@ -179,7 +179,7 @@ def main():
     ChallengeHandler.state = ChallengeState(args.level)
 
     server = HTTPServer((args.host, args.port), ChallengeHandler)
-    print(f"道体·玄盾挑战赛API已启动: http://{args.host}:{args.port}")
+    print(f"道体玄盾挑战赛API已启动: http://{args.host}:{args.port}")
     print(f"防御层级: {args.level}")
     print("端点: POST /challenge | GET /status | GET /rules")
     try:

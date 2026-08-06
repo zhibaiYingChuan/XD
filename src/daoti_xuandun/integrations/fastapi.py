@@ -4,7 +4,7 @@ from __future__ import annotations
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾 FastAPI 集成模块。
+"""道体玄盾 FastAPI 集成模块。
 
 使用方式：
     from daoti_xuandun.integrations.fastapi import XuanDunGuard

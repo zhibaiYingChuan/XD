@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 com
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾命令行管理工具。
+"""道体玄盾命令行管理工具。
 
 用法：
     python -m daoti_xuandun.manage init --domain mydata.txt
@@ -122,7 +122,7 @@ def cmd_recommend(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="daoti_xuandun.manage",
-        description="道体·玄盾命令行管理工具",
+        description="道体玄盾命令行管理工具",
         epilog=(
             "常用命令速查:\n"
             "  python -m daoti_xuandun.manage init --domain mydata.txt --output profile.json\n"

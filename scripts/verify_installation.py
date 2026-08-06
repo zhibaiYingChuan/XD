@@ -5,7 +5,7 @@
 # 详见 LICENSE 文件
 # -*- coding: utf-8 -*-
 """
-道体·玄盾 — 一键安装验证脚本
+道体玄盾 — 一键安装验证脚本
 
 客户部署后运行此脚本，即可确认以下四个环节是否就绪：
   1. 环境检查：Python 版本、核心依赖包是否完整
@@ -145,7 +145,7 @@ def check_environment() -> None:
     for pkg in OPTIONAL_PACKAGES:
         _check_package(pkg, required=False)
 
-    # --- 道体·玄盾核心包 ---
+    # --- 道体玄盾核心包 ---
     _check_package("daoti_xuandun", required=True, display_name="核心包 daoti_xuandun")
 
 
@@ -333,7 +333,7 @@ def print_summary() -> int:
     print()
 
     if _fail_count == 0:
-        print("  ★ 全部通过 — 道体·玄盾安装验证成功，防护已生效。")
+        print("  ★ 全部通过 — 道体玄盾安装验证成功，防护已生效。")
         return 0
     elif _fail_count < total:
         print("  △ 部分失败 — 请根据上方 [✗] 项排查，部分功能可能不可用。")
@@ -348,7 +348,7 @@ def print_summary() -> int:
 # ---------------------------------------------------------------------------
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="道体·玄盾 一键安装验证脚本",
+        description="道体玄盾 一键安装验证脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n  python scripts/verify_installation.py\n  python scripts/verify_installation.py --port 18765",
     )
@@ -358,7 +358,7 @@ def main() -> int:
     args = parser.parse_args()
 
     print("=" * 56)
-    print("  道体·玄盾 — 一键安装验证")
+    print("  道体玄盾 — 一键安装验证")
     print(f"  目标: {args.host}:{args.port}")
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 56)

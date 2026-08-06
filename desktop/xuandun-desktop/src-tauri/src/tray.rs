@@ -33,7 +33,7 @@ pub fn create_tray(app: &AppHandle) -> Result<TrayIcon, String> {
         .icon(app.default_window_icon().cloned().unwrap_or_else(|| {
             tauri::image::Image::new(&[0u8; 4], 1, 1)
         }))
-        .tooltip("道体·玄盾 - 守护中")
+        .tooltip("道体玄盾 - 守护中")
         .menu(&menu)
         .on_menu_event(move |app, event| {
             match event.id.as_ref() {

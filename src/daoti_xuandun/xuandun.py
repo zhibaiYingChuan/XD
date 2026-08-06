@@ -42,7 +42,7 @@ def _decision_from_dict(decision: dict) -> _DecisionCompat:
 
 
 class XuanDun:
-    """§7.1 道体·玄盾 主集成类 — 动态活性安全网关。
+    """§7.1 道体玄盾 主集成类 — 动态活性安全网关。
 
     开箱即用，无需提供域分类器。所有模块采用道体原生动态机制：
     - 内生域感知：在线原型距离比较，自主识别未知域
@@ -637,7 +637,7 @@ table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
 th {{ background: #f5f5f5; }}
 </style></head><body>
-<h1>道体·玄盾 - 配置推荐报告</h1>
+<h1>道体玄盾 - 配置推荐报告</h1>
 <div class="card">
 <p>安全评分: <span class="score">{score}</span>/100</p>
 <p>预热样本数: {rec.get('warmup_samples_used', 0)}</p>
@@ -962,7 +962,7 @@ th {{ background: #f5f5f5; }}
         """将报告格式化为人类可读文本。"""
         lines = [
             "=" * 50,
-            "  道体·玄盾 - 误判分析报告",
+            "  道体玄盾 - 误判分析报告",
             "=" * 50,
             "",
             f"总输入数: {report['total_inputs']}",
@@ -1017,7 +1017,7 @@ th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
 th {{ background: #f5f5f5; }}
 .summary {{ margin: 1em 0; padding: 1em; background: #f9f9f9; border-radius: 4px; }}
 </style></head><body>
-<h1>道体·玄盾 - 误判分析报告</h1>
+<h1>道体玄盾 - 误判分析报告</h1>
 <div class="summary">
 <p>总输入: {report['total_inputs']} | 误判: {report['total_misclassified']}
 | 误拒: {report['false_positives']} | 漏检: {report['false_negatives']}

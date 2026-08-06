@@ -828,7 +828,7 @@ def test_notifier_endpoint():
         attack_category="test",
         trust_level="TEST",
         reject_stage="test",
-        text_preview="这是一条来自道体·玄盾的测试告警",
+        text_preview="这是一条来自道体玄盾的测试告警",
         engine_mode="balanced",
     )
     notifier = cls(config)
@@ -1614,7 +1614,7 @@ def main():
             monitor_thread = threading.Thread(target=_monitor_debugger, daemon=True)
             monitor_thread.start()
 
-    parser = argparse.ArgumentParser(description="道体·玄盾 桌面端引擎")
+    parser = argparse.ArgumentParser(description="道体玄盾 桌面端引擎")
     parser.add_argument("--port", type=int, default=18765)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--mode", type=str, default="balanced",
@@ -1638,7 +1638,7 @@ def main():
     _get_shield(args.mode)
     logger.info("Default shield mode initialized.")
 
-    logger.info("道体·玄盾引擎启动: %s:%d (mode=%s)", args.host, args.port, args.mode)
+    logger.info("道体玄盾引擎启动: %s:%d (mode=%s)", args.host, args.port, args.mode)
 
     try:
         from waitress import serve

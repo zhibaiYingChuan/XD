@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 com
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-# daoti_xuandun - 道体·玄盾 AI运行时安全网关
+# daoti_xuandun - 道体玄盾 AI运行时安全网关
 # Implements §1.3 交付形态 — 道体动态活性架构
 
 __version__ = "1.3.2"

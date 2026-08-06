@@ -178,7 +178,7 @@ class ReportGenerator:
 
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><title>道体·玄盾 安全报告 - {type_label}</title>
+<head><meta charset="UTF-8"><title>道体玄盾 安全报告 - {type_label}</title>
 <style>
 body {{ font-family: -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #333; }}
 h1 {{ color: #4ecdc4; border-bottom: 2px solid #4ecdc4; padding-bottom: 8px; }}
@@ -194,7 +194,7 @@ th {{ background: #f5f5f5; }}
 .footer {{ margin-top: 32px; padding-top: 12px; border-top: 1px solid #ddd; font-size: 12px; color: #999; }}
 </style></head>
 <body>
-<h1>道体·玄盾 安全{type_label}</h1>
+<h1>道体玄盾 安全{type_label}</h1>
 <p>报告周期：{start[:10]} 至 {end[:10]} | 生成时间：{summary['generated_at']}</p>
 
 <h2>1. 概要摘要</h2>
@@ -216,7 +216,7 @@ th {{ background: #f5f5f5; }}
 <table><thead><tr><th>文本摘要</th><th>攻击分类</th><th>拦截阶段</th></tr></thead><tbody>{sample_rows}</tbody></table>
 
 <div class="footer">
-<p>本报告由道体·玄盾自动生成 | SPDX-License-Identifier: DaoTi-Research-1.0</p>
+<p>本报告由道体玄盾自动生成 | SPDX-License-Identifier: DaoTi-Research-1.0</p>
 <p>数据来源：SQLite logs 表 | 报告类型：{type_label}</p>
 </div>
 </body></html>"""
@@ -224,7 +224,7 @@ th {{ background: #f5f5f5; }}
     def _render_markdown(self, stats: Dict, charts: Dict, summary: Dict, report_type: str, start: str, end: str) -> str:
         type_label = {'weekly': '周报', 'monthly': '月报', 'adhoc': '自定义报告'}.get(report_type, report_type)
         lines = [
-            f"# 道体·玄盾 安全{type_label}",
+            f"# 道体玄盾 安全{type_label}",
             f"",
             f"**报告周期**：{start[:10]} 至 {end[:10]}  ",
             f"**生成时间**：{summary['generated_at']}",
@@ -266,6 +266,6 @@ th {{ background: #f5f5f5; }}
             f"",
             f"---",
             f"",
-            f"*本报告由道体·玄盾自动生成 | SPDX-License-Identifier: DaoTi-Research-1.0*",
+            f"*本报告由道体玄盾自动生成 | SPDX-License-Identifier: DaoTi-Research-1.0*",
         ])
         return '\n'.join(lines)

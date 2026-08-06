@@ -79,7 +79,7 @@ class BaseNotifier(ABC):
         sev = SEVERITY_LABELS.get(event.severity, event.severity)
         cat = event.attack_category or "未知"
         lines = [
-            f"【道体·玄盾 {sev}告警】",
+            f"【道体玄盾 {sev}告警】",
             f"事件类型: {event.event_type}",
             f"攻击分类: {cat}",
             f"信任等级: {event.trust_level}",
@@ -140,7 +140,7 @@ class FeishuNotifier(BaseNotifier):
 
         card = {
             "header": {
-                "title": {"tag": "plain_text", "content": f"道体·玄盾 {sev}告警"},
+                "title": {"tag": "plain_text", "content": f"道体玄盾 {sev}告警"},
                 "template": "red" if event.severity == "critical" else "orange" if event.severity == "important" else "blue",
             },
             "elements": [
@@ -183,7 +183,7 @@ class EmailNotifier(BaseNotifier):
         use_tls = self.config.get("use_tls", True)
 
         sev = SEVERITY_LABELS.get(event.severity, event.severity)
-        subject = f"[{sev}] 道体·玄盾安全告警 - {event.attack_category or '拦截'}"
+        subject = f"[{sev}] 道体玄盾安全告警 - {event.attack_category or '拦截'}"
         body = self._format_message(event)
         body_html = body.replace("\n", "<br>\n")
 

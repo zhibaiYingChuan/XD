@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 com
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾交互式配置向导。
+"""道体玄盾交互式配置向导。
 
 用法：
     python -m daoti_xuandun.setup
@@ -224,7 +224,7 @@ def _generate_code(mode: str, domain_name: str, sample_file: str,
                    has_profile: bool, profile_file: str,
                    log_samples: list) -> str:
     lines = [
-        f'# 道体·玄盾 - {domain_name}场景配置',
+        f'# 道体玄盾 - {domain_name}场景配置',
         '# 由交互式配置向导自动生成',
         '',
         'from daoti_xuandun import XuanDun',
@@ -284,7 +284,7 @@ def _generate_code(mode: str, domain_name: str, sample_file: str,
 
 def run_wizard():
     print("=" * 60)
-    print("  道体·玄盾 - 交互式配置向导")
+    print("  道体玄盾 - 交互式配置向导")
     print("  AI运行时安全网关 · 活性防护")
     print("=" * 60)
     print()

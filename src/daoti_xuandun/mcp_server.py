@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 com
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾 MCP Server。
+"""道体玄盾 MCP Server。
 
 作为 MCP (Model Context Protocol) Server 运行，
 供 Claude Desktop 等 MCP 兼容 Agent 调用。
@@ -58,7 +58,7 @@ _TOOL_PROTECT = {
 
 _TOOL_STATUS = {
     "name": "xuandun_status",
-    "description": "获取道体·玄盾防护引擎的运行状态",
+    "description": "获取道体玄盾防护引擎的运行状态",
     "inputSchema": {
         "type": "object",
         "properties": {},

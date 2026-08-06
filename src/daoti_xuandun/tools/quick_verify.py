@@ -153,7 +153,7 @@ def _build_report(owasp_results: List[dict], industry_results: List[dict],
     avg_latency = sum(r["latency_ms"] for r in all_results) / max(1, total)
 
     lines = [
-        "# 道体·玄盾 快速验证报告",
+        "# 道体玄盾 快速验证报告",
         "",
         f"**生成时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"**防御层级**: {level}",
@@ -264,7 +264,7 @@ def _build_report(owasp_results: List[dict], industry_results: List[dict],
         "",
         "---",
         "",
-        "> 本报告由道体·玄盾自动生成，结果基于内置测试样本，仅供参考。",
+        "> 本报告由道体玄盾自动生成，结果基于内置测试样本，仅供参考。",
         "> 实际防护效果取决于部署环境和业务场景，建议结合历史日志重放验证。",
     ])
 
@@ -273,7 +273,7 @@ def _build_report(owasp_results: List[dict], industry_results: List[dict],
 
 def main():
     parser = argparse.ArgumentParser(
-        description="道体·玄盾 快速验证报告 — 一键生成产品能力报告"
+        description="道体玄盾 快速验证报告 — 一键生成产品能力报告"
     )
     parser.add_argument("--output", "-o", default=None,
                         help="输出文件路径（默认输出到 stdout）")

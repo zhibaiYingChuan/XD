@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 com
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾 行业基准测试模块（三阶段评估）。
+"""道体玄盾 行业基准测试模块（三阶段评估）。
 
 参照 OWASP AITG / NIST Dioptra / garak 等框架，
 对内嵌攻击数据集进行三阶段系统性安全评估。
