@@ -1,7 +1,0 @@
-﻿gh : invalid character 'ï' looking for beginning of value
-At line:15 char:9664
-+ ... pgrep\bin'; gh api "repos/zhibaiYingChuan/XD/actions/jobs/92493059861 ...
-+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (invalid charact...inning of value:String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 
