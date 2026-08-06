@@ -208,8 +208,9 @@ jobs:
         run: |
           # 安装 cargo-audit 并扫描 Cargo.lock，发现漏洞仅警告不阻断
           # 第三方依赖漏洞非本项目代码问题，阻断 CI 会影响开发效率
+          # 注意：--db 需要指定漏洞数据库路径，不传 -d 参数（cargo audit 无 -d 简写）
           cargo install cargo-audit --locked
-          cargo audit -d
+          cargo audit
         working-directory: desktop/xuandun-desktop/src-tauri
         timeout-minutes: 10
 
