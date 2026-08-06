@@ -188,6 +188,20 @@ jobs:
             Write-Host "Engine binary already exists, skipping"
           }
 
+      # 根源修复：tauri.conf.json 的 bundle.resources 引用 "resources/engine"（Nuitka 打包目录），
+      # cargo check 编译期会校验该路径存在。CI 的 rust job 不打包引擎（Nuitka 由 release 构建），
+      # 因此创建占位目录满足编译期校验，打包时由 release.yml 的 build_engine.py 生成真实引擎目录。
+      - name: Create placeholder resources/engine dir for cargo check
+        shell: pwsh
+        run: |
+          $resDir = "desktop\xuandun-desktop\src-tauri\resources\engine"
+          if (-not (Test-Path $resDir)) {
+            New-Item -ItemType Directory -Path $resDir -Force | Out-Null
+            Write-Host "Created placeholder resources/engine directory"
+          } else {
+            Write-Host "resources/engine already exists, skipping"
+          }
+
       - name: cargo audit - Rust 依赖漏洞扫描
         shell: pwsh
         continue-on-error: true
