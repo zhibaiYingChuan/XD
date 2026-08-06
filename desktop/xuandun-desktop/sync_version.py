@@ -8,6 +8,7 @@
   - tauri.conf.json
   - engine_flask.py (health 端点返回的 version)
   - pyproject.toml (Python SDK 版本号)
+  - src/daoti_xuandun/__init__.py (__version__)
   - README.md (下载链接与 pip install 命令中的版本号)
 
 使用方式：
@@ -39,6 +40,8 @@ ENGINE_FLASK_PY = SCRIPT_DIR / "engine_flask.py"
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 PYPROJECT_TOML = PROJECT_ROOT / "pyproject.toml"
 README_MD = PROJECT_ROOT / "README.md"
+# Python SDK 包 __init__.py 中的 __version__
+DAOTI_INIT_PY = PROJECT_ROOT / "src" / "daoti_xuandun" / "__init__.py"
 
 
 def read_cargo_version() -> str:
@@ -138,6 +141,26 @@ def sync_readme(version: str, check_only: bool) -> bool:
     return True
 
 
+def sync_daoti_init(version: str, check_only: bool) -> bool:
+    """同步 src/daoti_xuandun/__init__.py 中的 __version__。返回是否有变更。"""
+    if not DAOTI_INIT_PY.exists():
+        return False
+    content = DAOTI_INIT_PY.read_text(encoding="utf-8")
+    # 匹配 __version__ = "x.x.x"
+    pattern = r'(__version__\s*=\s*")([^"]+)(")'
+    match = re.search(pattern, content)
+    if not match:
+        return False
+    current = match.group(2)
+    if current == version:
+        return False
+    if check_only:
+        return True
+    new_content = content[:match.start()] + match.group(1) + version + match.group(3) + content[match.end():]
+    DAOTI_INIT_PY.write_text(new_content, encoding="utf-8")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="版本号 SSOT 同步与校验")
     parser.add_argument("--check", action="store_true", help="仅校验，不修改（CI 门禁用）")
@@ -152,13 +175,14 @@ def main() -> int:
     changed |= sync_engine_flask(cargo_version, args.check)
     changed |= sync_pyproject(cargo_version, args.check)
     changed |= sync_readme(cargo_version, args.check)
+    changed |= sync_daoti_init(cargo_version, args.check)
 
     if args.check:
         if changed:
             print(f"ERROR: Version mismatch detected! Run 'python sync_version.py' to sync.", file=sys.stderr)
             return 1
         print("OK: All version numbers are consistent across Cargo.toml, package.json, "
-              "tauri.conf.json, engine_flask.py, pyproject.toml, README.md.")
+              "tauri.conf.json, engine_flask.py, pyproject.toml, README.md, daoti_xuandun/__init__.py.")
         return 0
     else:
         if changed:
