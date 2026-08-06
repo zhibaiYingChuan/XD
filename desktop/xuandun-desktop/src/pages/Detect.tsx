@@ -59,6 +59,12 @@ export default function Detect() {
   const [outputLoading, setOutputLoading] = useState(false);
   const outputTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const outputCheckingRef = useRef(false);
+  // 组件挂载守卫：批量检测循环内校验，用户中途切页时中止后续 setState 与网络请求
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // G-13 修复：添加 Toast 到队列（不覆盖现有 Toast）
   // P0-NEW-2 修复：Toast 去重——如果队列中已存在相同 message+type 的 Toast，不重复添加
@@ -229,6 +235,8 @@ export default function Detect() {
     setBatchLoading(true);
     try {
       for (let i = 0; i < pending.length; i += BATCH_CONCURRENCY) {
+        // 中途切页（组件卸载）时中止后续批次，避免对已卸载组件 setState
+        if (!mountedRef.current) return;
         const chunk = pending.slice(i, i + BATCH_CONCURRENCY);
         await Promise.allSettled(chunk.map(async (item) => {
           try {
