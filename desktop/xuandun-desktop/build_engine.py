@@ -152,8 +152,9 @@ def build_engine():
 
     # 引擎主程序最终文件名（与 engine.rs engine_binary_name() 对齐）
     final_engine_name = f"xuandun-engine-{target}{ext}"
-    # Nuitka standalone 主程序名 = <脚本名>.exe
-    nuitka_main_name = f"engine_flask{ext}"
+    # Nuitka standalone 主程序名 = <脚本名>.exe（Windows）或 <脚本名>.bin（macOS/Linux）
+    # macOS/Linux 上 Nuitka 4.x 输出 <script>.bin 而非无扩展名的 <script>
+    nuitka_main_name = f"engine_flask.bin" if system != "windows" else f"engine_flask{ext}"
     # 出厂良性原型数据文件名（与 luoshu_mapper.py 中的常量对齐）
     _BENIGN_NPY_FILENAME = "benign_v1.npy"
 
