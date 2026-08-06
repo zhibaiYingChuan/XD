@@ -91,7 +91,7 @@ jobs:
           find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) | while read f; do
             dir=$(dirname "$f")
             base=$(basename "$f")
-            newbase=$(echo "$base" | sed 's/道体·玄盾/XuanDun/g')
+            newbase=$(echo "$base" | sed 's/道体玄盾/XuanDun/g')
             [ "$base" != "$newbase" ] && mv "$f" "$dir/$newbase" && echo "Renamed: $base -> $newbase"
           done
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "道体·玄盾",
+  "productName": "道体玄盾",
   "version": "1.3.2",
   "identifier": "com.daoti.xuandun-desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "道体·玄盾",
+        "title": "道体玄盾",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,
