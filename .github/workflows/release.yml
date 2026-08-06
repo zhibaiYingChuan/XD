@@ -162,9 +162,9 @@ jobs:
           echo "" >> "$REPORT"
 
           if [ -z "${VIRUSTOTAL_API_KEY:-}" ]; then
-            echo "⚠️ 未配置 VIRUSTOTAL_API_KEY Secret，跳过 VirusTotal 扫描（无法检测误报率）"
+            echo "[WARNING] 未配置 VIRUSTOTAL_API_KEY Secret，跳过 VirusTotal 扫描（无法检测误报率）"
             echo "" >> "$REPORT"
-            echo "## ⚠️ 未启用 VirusTotal 扫描" >> "$REPORT"
+            echo "## [WARNING] 未启用 VirusTotal 扫描" >> "$REPORT"
             echo "未在 GitHub Secrets 配置 VIRUSTOTAL_API_KEY，跳过发布前误报率检测。**强烈建议启用此门禁以避免 Trojan/Intercept.a 类误报事件。**" >> "$REPORT"
             exit 0
           fi

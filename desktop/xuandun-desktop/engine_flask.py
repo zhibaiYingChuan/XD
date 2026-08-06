@@ -3,7 +3,7 @@
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
 
-"""道体·玄盾 桌面端引擎入口 - 使用 Flask 替代 http.server。
+"""道体玄盾 桌面端引擎入口 - 使用 Flask 替代 http.server。
 
 Flask 内置的开发服务器在 Windows 上更稳定。
 生产环境应使用 waitress 或 gunicorn。

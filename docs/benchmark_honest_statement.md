@@ -1,4 +1,4 @@
-# 道体·玄盾 基准测试诚实声明
+# 道体玄盾 基准测试诚实声明
 
 ## 产品版本：v1.3.2 | 输入侧基准测试日期：2026-08-03 | 输出护栏评测日期：2026-08-05 | 本文档更新：2026-08-06
 
@@ -113,14 +113,14 @@
 
 ## 四、可复现性声明
 
-1. 所有测试结果可通过以下命令复现：
+1. 所有测试结果可通过以下命令复现（行业基准测试工具为内部开发工具，不随公开仓库发布）：
    ```bash
    python -m industry_benchmarks.run --suite owasp_llm_top10 --mode balanced
    python -m industry_benchmarks.run --suite raucle_bench_compat --mode balanced
    python -m industry_benchmarks.run --suite internal_extended --mode balanced
    ```
 
-2. 所有测试套件随源码开源，可在 `industry_benchmarks/suites/` 目录查看完整样本。
+2. 测试套件与样本数据为内部开发工具，不随公开仓库发布。测试方法学详见[白皮书](白皮书.md)。
 
 3. 所有随机种子已固定（`seed=42`），结果确定性可复现。
 

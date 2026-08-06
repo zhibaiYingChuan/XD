@@ -291,7 +291,7 @@
 
 ### 首次发布
 
-- 道体·玄盾核心引擎（基于阴气域感知的提示注入检测）
+- 道体玄盾核心引擎（基于阴气域感知的提示注入检测）
 - Tauri 桌面端应用（Windows/macOS/Linux 三平台）
 - Python SDK（`pip install daoti-xuandun`）
 - 代理模式（HTTP 代理拦截 AI 工具流量）

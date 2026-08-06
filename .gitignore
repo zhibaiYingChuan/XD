@@ -92,6 +92,7 @@ desktop/xuandun-desktop/start_engine.bat
 # Desktop test files (kept locally, not released)
 desktop/xuandun-desktop/test_*
 desktop/xuandun-desktop/tests/
+
 # src/test/ 和 src/**/*.test.ts 已移除 — CI 需要这些文件来配置 jsdom 环境并运行测试
 desktop/xuandun-desktop/anti_debug.py
 
@@ -102,7 +103,11 @@ desktop/xuandun-desktop/src-tauri/gen/
 scripts/*
 # 部署验证脚本是公开交付物，须收录仓库（部署指南引用）
 !scripts/verify_installation.py
-tests/
+tests/*
+# 但 CI 回归测试文件须纳入版本控制
+!tests/test_xuandun.py
+!tests/conftest.py
+!tests/__init__.py
 
 # Local temporary verification scripts (not for public release)
 _verify_examples.py

@@ -1,4 +1,4 @@
-# 道体·玄盾 行业基准测试报告
+# 道体玄盾 行业基准测试报告
 
 > 生成时间: 2026-08-03T13:08:52.227705+00:00
 
@@ -6,9 +6,9 @@
 
 ## 产品信息
 
-- **产品**: Daoti XuanDun (道体·玄盾)
+- **产品**: Daoti XuanDun (道体玄盾)
 - **类型**: LLM Runtime Security Gateway (Active Defense)
-- **可复现**: All results can be reproduced by running: python -m industry_benchmarks.run --suite <name> --mode <mode>
+- **可复现**: 行业基准测试工具为内部开发工具，不随公开仓库发布。如需复现测试结果，请联系维护者或参考[白皮书](白皮书.md)中的方法学说明。
 
 ## 测试结果汇总
 
@@ -81,7 +81,7 @@
 
 1. **语言不匹配**：默认预热样本以中文为主，而行业基准测试集多为英文
 2. **解决方案**：提供英文`warmup_safe`样本后，良性接纳率可提升至90%+
-3. **验证方法**：运行 `python -m industry_benchmarks.run --suite <name> --warmup-en`
+3. **验证方法**：参见[白皮书](白皮书.md)方法学说明
 
 ## 反馈回灌验证
 
