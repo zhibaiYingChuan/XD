@@ -1,0 +1,68 @@
+{
+  "test_date": "2026-08-07",
+  "benchmark": "OWASP Top 10 for LLM Applications 2025",
+  "engine_version": "v1.3.2",
+  "defense_level": "STANDARD",
+  "bilateral_available": true,
+  "performance": {
+    "avg_latency_ms": 0.88,
+    "p95_latency_ms": 1.51,
+    "p99_latency_ms": 2.1
+  },
+  "overall": {
+    "total_attacks": 100,
+    "blocked": 67,
+    "passed": 33,
+    "total_benign": 41,
+    "false_positive": 1,
+    "true_negative": 40,
+    "detection_rate": 67.0,
+    "false_positive_rate": 2.4,
+    "precision": 0.9853,
+    "recall": 0.67,
+    "f1_score": 0.7976,
+    "accuracy": 0.7589
+  },
+  "categories": {
+    "LLM01_Prompt_Injection": {
+      "owasp_id": "LLM01:2025",
+      "description": "攻击者操纵提示以覆盖系统指令，包括直接注入和间接注入",
+      "total": 20,
+      "blocked": 17,
+      "passed": 3,
+      "detection_rate": 85.0
+    },
+    "LLM02_Sensitive_Info_Disclosure": {
+      "owasp_id": "LLM02:2025",
+      "description": "试图通过对话提取PII、凭证、密钥等敏感信息",
+      "total": 20,
+      "blocked": 12,
+      "passed": 8,
+      "detection_rate": 60.0
+    },
+    "LLM05_Improper_Output_Handling": {
+      "owasp_id": "LLM05:2025",
+      "description": "操纵模型输出以在下游系统执行恶意操作",
+      "total": 20,
+      "blocked": 20,
+      "passed": 0,
+      "detection_rate": 100.0
+    },
+    "LLM07_System_Prompt_Leakage": {
+      "owasp_id": "LLM07:2025",
+      "description": "试图提取系统提示词、内部策略或工具配置",
+      "total": 20,
+      "blocked": 11,
+      "passed": 9,
+      "detection_rate": 55.0
+    },
+    "LLM09_Misinformation": {
+      "owasp_id": "LLM09:2025",
+      "description": "请求生成虚假、误导性或有害内容",
+      "total": 20,
+      "blocked": 7,
+      "passed": 13,
+      "detection_rate": 35.0
+    }
+  }
+}

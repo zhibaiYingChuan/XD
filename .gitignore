@@ -73,6 +73,8 @@ docs/*
 !docs/用户指南.md
 !docs/部署指南.md
 !docs/benchmark_honest_statement.md
+!docs/产品报告_五维审计_20260807.md
+!docs/AI安全基准测试报告_20260807.md
 
 # Root-level internal planning docs (Chinese)
 6.5计划.md
@@ -108,6 +110,8 @@ tests/*
 !tests/test_xuandun.py
 !tests/conftest.py
 !tests/__init__.py
+!tests/benchmark_owasp_llm.py
+!tests/benchmark_owasp_results.json
 
 # Local temporary verification scripts (not for public release)
 _verify_examples.py
