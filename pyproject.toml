@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=64", "wheel", "maturin>=1.7"]
+build-backend = "maturin"
 
 [project]
 name = "daoti-xuandun"
@@ -51,6 +51,14 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# ── 双梯形镜像递归网络 Rust 扩展（maturin） ──
+# 用 PyO3 将 Rust 算法编译为 Python 可调用的原生扩展模块
+# 模块名 daoti_xuandun_pyo3，源码位于 crates/daoti_xuandun_pyo3
+[tool.maturin]
+manifest-path = "crates/daoti_xuandun_pyo3/Cargo.toml"
+module-name = "daoti_xuandun_pyo3"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

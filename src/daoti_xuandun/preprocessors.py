@@ -199,11 +199,14 @@ _ROLEPLAY_ATTACK_INDICATORS: Tuple[str, ...] = (
 
 
 def detect_roleplay_pattern(text: str) -> bool:
-    """检测角色扮演越狱攻击的组合模式（B1 修复）。
+    """检测角色扮演越狱攻击的组合模式（B1 修复 + P0 同义词扩展）。
 
     组合模式：触发词（假装/扮演/想象/suppose/pretend）+ 攻击性指示词
     （邪恶/反派/无限制/模拟世界/恶意软件等）。两者同时出现才判定为攻击，
     避免误拦良性角色扮演（如"扮演导游"、"假装你是厨师"）。
+
+    P0 增强：当精确关键词匹配失败时，使用同义词扩展表进行第二次匹配，
+    捕获同义词替换变体（如"模拟"替代"扮演"、"有害"替代"恶意"等）。
 
     Args:
         text: 待检测文本。
@@ -213,9 +216,28 @@ def detect_roleplay_pattern(text: str) -> bool:
     """
     normalized = normalize_unicode(text)
     lower = normalized.lower()
+    # 第一轮：精确关键词匹配（原始逻辑）
     has_trigger = any(t in lower for t in _ROLEPLAY_TRIGGERS)
     has_indicator = any(i in lower for i in _ROLEPLAY_ATTACK_INDICATORS)
-    return has_trigger and has_indicator
+    if has_trigger and has_indicator:
+        return True
+    # 第二轮：同义词扩展匹配（P0 修复）
+    # 当精确匹配失败时，使用同义词扩展表检查是否包含同义词变体。
+    # 检查是否有至少一个 trigger 的同义词命中，且至少一个 indicator 的同义词命中。
+    # 不要求比例，因为同义词扩展表只覆盖常见变体，命中一个就说明攻击意图。
+    _trigger_syn_hit = False
+    for t in _ROLEPLAY_TRIGGERS:
+        synonyms = _SYNONYM_EXPANSION.get(t, ())
+        if any(syn in lower for syn in synonyms):
+            _trigger_syn_hit = True
+            break
+    _indicator_syn_hit = False
+    for i in _ROLEPLAY_ATTACK_INDICATORS:
+        synonyms = _SYNONYM_EXPANSION.get(i, ())
+        if any(syn in lower for syn in synonyms):
+            _indicator_syn_hit = True
+            break
+    return _trigger_syn_hit and _indicator_syn_hit
 
 
 # B2 修复：社会工程攻击检测组合模式
@@ -737,6 +759,110 @@ def detect_chinese_harmful_content(text: str) -> bool:
 # 扩展 _DANGEROUS_TOPIC_INDICATORS 以覆盖更完整的中文危险主题
 # 扩展 _ROLEPLAY_ATTACK_INDICATORS 以覆盖「黑暗AI」等角色引导攻击
 
+
+# ── P0 修复：同义词自动扩展表 ──────────────────────────────────────────────
+# 每个原始词映射到一组同义词，用于跨函数攻击意图聚合和检测增强。
+# 当检测函数无法精确匹配时，同义词匹配可提供部分得分。
+_SYNONYM_EXPANSION: Dict[str, Tuple[str, ...]] = {
+    # 角色扮演触发词同义词
+    "假装": ("装作", "假定", "假设", "当作"),
+    "扮演": ("模拟", "饰演", "充当", "cosplay", "角色扮演"),
+    "想象": ("设想", "构思", "幻想", "假想"),
+    "假设": ("假定", "假想", "设想", "假如"),
+    "pretend": ("act as", "suppose", "imagine", "make believe"),
+    "roleplay": ("role play", "act as", "cosplay", "扮演"),
+    "你现在是": ("你变成", "你成为", "你作为", "你当前是", "你此刻是"),
+    "停止作为": ("停止扮演", "结束扮演", "不再作为", "切换角色"),
+    "switch to": ("change to", "transform to", "convert to", "become"),
+    "you are now": ("you are currently", "you have become", "act as", "pretend to be"),
+    # 角色扮演攻击指示词同义词
+    "邪恶": ("有害", "危险", "负面", "不良", "黑暗"),
+    "反派": ("反面", "坏角色", "反角", "恶人"),
+    "恶意": ("有害", "恶毒", "危险", "破坏性", "不良"),
+    "没有限制": ("无边界", "无约束", "自由回答", "任意回答", "随意回答", "放开限制"),
+    "没有安全限制": ("安全已移除", "无安全约束", "安全已关闭", "过滤已关闭"),
+    "不受限制": ("无边界", "无约束", "完全自由", "无限自由"),
+    "无限制": ("无限", "无边界", "完全自由", "无限自由"),
+    "安全规则都已被移除": ("安全规则已删除", "安全规则已取消", "安全规则不适用"),
+    "没有规则": ("无规则", "规则已移除", "规则不适用", "规则已删除"),
+    "no rules": ("no boundaries", "no constraints", "no limits", "free from rules"),
+    "no restrictions": ("no limits", "no boundaries", "free", "unfettered"),
+    "unrestricted": ("unlimited", "unconstrained", "free", "boundless"),
+    "evil": ("malicious", "harmful", "dangerous", "dark", "bad"),
+    "malicious": ("harmful", "evil", "destructive", "dangerous", "vicious"),
+    "villain": ("antagonist", "evil character", "bad guy", "dark side"),
+    "模拟世界": ("虚拟世界", "虚构场景", "模拟场景", "假设场景"),
+    "虚构世界": ("虚拟世界", "幻想世界", "假设世界", "模拟世界"),
+    "simulation": ("simulated world", "virtual scenario", "fictional scenario"),
+    "恶意软件": ("有害软件", "破坏性软件", "病毒", "木马"),
+    "入侵系统": ("攻击系统", "破解系统", "渗透系统", "非法访问"),
+    "malware": ("virus", "trojan", "ransomware", "spyware", "harmful software"),
+    "hack": ("crack", "intrude", "penetrate", "break into", "gain unauthorized access"),
+}
+
+# 同义词检测辅助：返回文本中匹配的同义词扩展得分
+# 用于跨函数攻击意图聚合器，提供"部分匹配"信号
+def _compute_synonym_match_score(text: str, base_words: Tuple[str, ...]) -> float:
+    """计算文本中与 base_words 同义词扩展的匹配得分。
+
+    对 base_words 中的每个词，先查同义词扩展表，然后检查文本是否包含
+    原始词或同义词。返回匹配比例（0.0 ~ 1.0）。
+
+    P0 修正：使用"至少一个命中"逻辑，而非比例阈值。
+    因为同义词扩展表只覆盖常见变体，命中一个就说明攻击意图。
+    返回 0.0 或 1.0，表示是否有同义词匹配。
+
+    Args:
+        text: 待检测文本（已 normalize 和 lower）。
+        base_words: 基准词列表。
+
+    Returns:
+        1.0 如果有至少一个同义词匹配，0.0 否则。
+    """
+    if not text or not base_words:
+        return 0.0
+    for word in base_words:
+        if word in text:
+            return 1.0
+        synonyms = _SYNONYM_EXPANSION.get(word, ())
+        if any(syn in text for syn in synonyms):
+            return 1.0
+    return 0.0
+
+
+def _compute_partial_match_score(
+    text: str,
+    triggers: Tuple[str, ...],
+    indicators: Tuple[str, ...],
+) -> float:
+    """计算组合模式的部分匹配得分（跨函数攻击意图聚合用）。
+
+    返回 0.0 ~ 1.0 的连续得分，反映检测函数"命中程度"：
+    - 0.0: 无任何匹配
+    - 0.3: 仅命中 trigger（含同义词）
+    - 0.3: 仅命中 indicator（含同义词）
+    - 0.6: 同时命中 trigger 和 indicator（即原始检测函数的 True）
+    - 1.0: 高密度匹配（多个 trigger + 多个 indicator）
+
+    Args:
+        text: 待检测文本（已 normalize 和 lower）。
+        triggers: 触发词列表。
+        indicators: 指示词列表。
+
+    Returns:
+        部分匹配得分。
+    """
+    trigger_match = _compute_synonym_match_score(text, triggers)
+    indicator_match = _compute_synonym_match_score(text, indicators)
+
+    if trigger_match > 0 and indicator_match > 0:
+        score = 0.6 + (trigger_match + indicator_match) * 0.2
+        return min(1.0, score)
+    elif trigger_match > 0:
+        return max(0.1, trigger_match * 0.3)
+    elif indicator_match > 0:
+        return max(0.1, indicator_match * 0.3)
+    return 0.0
 
 
 def check_imperative_whitelist(text: str) -> Tuple[bool, float]:

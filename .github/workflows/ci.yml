@@ -68,6 +68,18 @@ jobs:
           pip install numpy pytest pip-audit bandit
           pip install -e ".[engine]"
 
+      # P0 修复：CI 环境编译 Rust 扩展（双梯形镜像递归网络）
+      - name: Setup Rust 1.94.0 (与本地构建环境对齐)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.94.0
+
+      - name: Install maturin and build Rust extension
+        run: |
+          pip install maturin>=1.7
+          maturin build --release --manifest-path crates/daoti_xuandun_pyo3/Cargo.toml
+          pip install --force-reinstall target/wheels/*.whl
+
       - name: Run config smoke test (确保config.py参数化正确加载)
         run: |
           python << 'PYEOF'
@@ -81,16 +93,16 @@ jobs:
           assert cfg.luoshu_poisoning_total_updates_cap == 500, f'Expected 500 got {cfg.luoshu_poisoning_total_updates_cap}'
           assert cfg.natural_lang_entropy_low == 2.5
           assert cfg.natural_lang_entropy_high == 6.8
-          print('PASS: XuanDunConfig v1.3.1 new params OK')
+          # 验证v1.3.2双梯形参数
+          assert hasattr(cfg, 'bilateral_num_layers'), 'Missing bilateral_num_layers'
+          assert hasattr(cfg, 'bilateral_state_dim'), 'Missing bilateral_state_dim'
+          assert hasattr(cfg, 'bilateral_t_iter'), 'Missing bilateral_t_iter'
+          print('PASS: XuanDunConfig v1.3.2 params OK')
           PYEOF
 
-      - name: Run regression tests (基线验证 soft-fail，找到test_*.py运行)
+      - name: Run all regression tests (含 test_xuandun + test_reject_gate)
         run: |
-          if [ -f tests/test_xuandun.py ]; then
-            python -m pytest tests/test_xuandun.py -v --timeout=300 || echo "WARNING: pytest regression test skipped/failed (soft-fail for PR validation)"
-          else
-            echo "INFO: tests/test_xuandun.py not found, skipping pytest regression"
-          fi
+          python -m pytest tests/ -v --timeout=300
         timeout-minutes: 15
 
       # ---- 代码安全扫描门禁（P1 代码安全治理）----
@@ -220,6 +232,15 @@ jobs:
 
       - name: Cargo clippy (零警告门禁 -D warnings)
         working-directory: desktop/xuandun-desktop/src-tauri
+        run: cargo clippy --release -- -D warnings
+
+      # P0 修复：PyO3 扩展 crate 编译验证
+      - name: Cargo check (PyO3 扩展 - 双梯形递归网络)
+        working-directory: crates/daoti_xuandun_pyo3
+        run: cargo check --release
+
+      - name: Cargo clippy (PyO3 扩展 - 零警告门禁)
+        working-directory: crates/daoti_xuandun_pyo3
         run: cargo clippy --release -- -D warnings
 
   # ============ Job 4: TypeScript 前端构建 + 单元测试 ============

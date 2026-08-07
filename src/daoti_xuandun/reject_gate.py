@@ -18,7 +18,19 @@ import unicodedata
 import numpy as np
 
 from daoti_xuandun.config import XuanDunConfig
-from daoti_xuandun.preprocessors import try_decode_payloads, normalize_unicode, check_imperative_whitelist, contains_attack_keywords, contains_strong_attack_keywords, detect_roleplay_pattern, detect_social_engineering, detect_data_exfiltration, detect_system_prompt_leak, detect_excessive_agency, detect_dangerous_command_pattern, detect_training_data_exploitation, detect_leet_speak_attack, detect_chinese_harmful_content
+from daoti_xuandun.preprocessors import (
+    try_decode_payloads, normalize_unicode, check_imperative_whitelist,
+    contains_attack_keywords, contains_strong_attack_keywords,
+    detect_roleplay_pattern, detect_social_engineering, detect_data_exfiltration,
+    detect_system_prompt_leak, detect_excessive_agency, detect_dangerous_command_pattern,
+    detect_training_data_exploitation, detect_leet_speak_attack, detect_chinese_harmful_content,
+    _compute_partial_match_score,
+    _ROLEPLAY_TRIGGERS, _ROLEPLAY_ATTACK_INDICATORS,
+    _SOCIAL_ENG_TRIGGERS, _SOCIAL_ENG_ATTACK_INDICATORS,
+    _DATA_EXFIL_TRIGGERS, _DATA_EXFIL_ACTION_INDICATORS,
+    _SYSTEM_PROMPT_LEAK_TRIGGERS, _SYSTEM_PROMPT_LEAK_ACTION_INDICATORS,
+    _EXCESSIVE_AGENCY_TRIGGERS, _EXCESSIVE_AGENCY_ACTION_INDICATORS,
+)
 from daoti_xuandun.luoshu_mapper import LuoshuSymbolMapper
 from daoti_xuandun.types import Decision, TrustLevel, Vector
 
@@ -138,6 +150,7 @@ class EndogenousDomainAwareness:
         self._negation_calibrated: bool = False
         self._negation_weights_locked: bool = False
         self._last_debug_info: Optional[dict] = None
+        self._bilateral_debug: Optional[dict] = None
         self._luoshu: Optional[LuoshuSymbolMapper] = None
         self._language_feature_weight: float = 1.0
         self._language_weight_update_counter: int = 0
@@ -145,6 +158,26 @@ class EndogenousDomainAwareness:
         self._rng = np.random.default_rng(seed=int.from_bytes(self._key, "little") ^ 0x5BD1E995)
         if config.enable_luoshu_mapper:
             self._luoshu = LuoshuSymbolMapper(config)
+
+        # ── 双梯形镜像递归网络（Rust + PyO3 原生扩展） ──
+        # 玄盾灵魂级底层算法。对"不确定/边界模糊"请求增加递归轨迹分析，
+        # 输出递归置信度和轨迹振荡度，作为 fused_anomaly 的增强信号。
+        # 角色扮演/组合策略类攻击会产生高振荡、不收敛的递归轨迹。
+        self._bilateral: Optional[object] = None
+        self._bilateral_available: bool = False
+        self._bilateral_adjustment = None  # P1-3: 缓存 analyze_and_adjust 结果
+        try:
+            from daoti_xuandun_pyo3 import BilateralLadderDetector
+            self._bilateral = BilateralLadderDetector(
+                config.bilateral_num_layers,
+                config.bilateral_state_dim,
+                config.bilateral_t_iter,
+            )
+            self._bilateral_available = True
+        except Exception:
+            # Rust 扩展不可用时不阻塞主流程，静默降级为纯 Python 检测
+            self._bilateral_available = False
+            self._bilateral = None
 
         # 观察→学习→自动切换（活性防护架构）
         self.mode: str = "observing" if config.enable_observing_mode else "protecting"
@@ -605,6 +638,10 @@ class EndogenousDomainAwareness:
             })
             return Decision.PASS, feat, TrustLevel.LOW, float(dist)
 
+        # P1-3: 每次进入 process() 重置双梯形缓存，防止上次结果残留
+        self._bilateral_adjustment = None
+        self._bilateral_debug = None
+
         # ── 外门：快速拒绝门 ──
         # 外门计算结果作为局部变量传递给内门，避免使用实例变量在多线程下被并发写入
         outer_is_inquiry = False
@@ -715,6 +752,7 @@ class EndogenousDomainAwareness:
         dangerous_command_signal = 0.0
         training_data_exploitation_signal = 0.0
         leet_speak_attack_signal = 0.0
+        cross_function_attack_score = 0.0
         if isinstance(raw_input, str):
             effective_input = raw_input
 
@@ -784,6 +822,55 @@ class EndogenousDomainAwareness:
             # B8 修复：Leet speak 编码攻击检测（解码后检测攻击关键词）
             if detect_leet_speak_attack(raw_input):
                 leet_speak_attack_signal = 1.0
+
+            # ── P0 修复：跨函数攻击意图聚合信号 ──
+            # 当多个检测函数同时出现部分匹配（只命中 trigger 或只命中 indicator）
+            # 时，单个检测函数无法判定为攻击，但多个函数同时部分匹配本身就是
+            # 强烈异常信号。本信号聚合所有检测函数的部分匹配得分，提供
+            # "跨函数攻击意图"的连续估计。
+            # 使用同义词扩展表，使同义词替换的攻击变体也能贡献部分得分。
+            _cross_function_scores = []
+            # 角色扮演越狱（B1）
+            _cross_function_scores.append(
+                _compute_partial_match_score(normalized, _ROLEPLAY_TRIGGERS, _ROLEPLAY_ATTACK_INDICATORS)
+            )
+            # 社会工程（B2）
+            _cross_function_scores.append(
+                _compute_partial_match_score(normalized, _SOCIAL_ENG_TRIGGERS, _SOCIAL_ENG_ATTACK_INDICATORS)
+            )
+            # 数据泄露（B3）
+            _cross_function_scores.append(
+                _compute_partial_match_score(normalized, _DATA_EXFIL_TRIGGERS, _DATA_EXFIL_ACTION_INDICATORS)
+            )
+            # 系统提示词泄露（B4）
+            _cross_function_scores.append(
+                _compute_partial_match_score(normalized, _SYSTEM_PROMPT_LEAK_TRIGGERS, _SYSTEM_PROMPT_LEAK_ACTION_INDICATORS)
+            )
+            # 过度代理（B5）
+            _cross_function_scores.append(
+                _compute_partial_match_score(normalized, _EXCESSIVE_AGENCY_TRIGGERS, _EXCESSIVE_AGENCY_ACTION_INDICATORS)
+            )
+            # 筛选出有部分匹配（>0）的得分
+            _active_scores = [s for s in _cross_function_scores if s > 0.0]
+            if _active_scores:
+                # 聚合策略：取最高分 + 次高分 × 0.3 + 其余之和 × 0.1
+                # 这样当 1 个函数高命中时靠最高分，3+ 个函数同时部分匹配时靠累积
+                _sorted = sorted(_active_scores, reverse=True)
+                _primary = _sorted[0]
+                _secondary = _sorted[1] * 0.3 if len(_sorted) > 1 else 0.0
+                _residual = sum(_sorted[2:]) * 0.1 if len(_sorted) > 2 else 0.0
+                cross_function_attack_score = min(1.0, _primary + _secondary + _residual)
+            else:
+                cross_function_attack_score = 0.0
+
+            # 增强：如果同时有 3 个以上检测函数出现部分匹配（哪怕每个都很低），
+            # 这本身就是异常信号，提升得分
+            _partial_hit_count = sum(1 for s in _cross_function_scores if s >= 0.1)
+            if _partial_hit_count >= 3 and cross_function_attack_score < 0.4:
+                cross_function_attack_score = max(cross_function_attack_score, 0.4)
+            if _partial_hit_count >= 4 and cross_function_attack_score < 0.6:
+                cross_function_attack_score = max(cross_function_attack_score, 0.6)
+
             novel_trigram_ratio = self._compute_novel_trigram_ratio(raw_input)
             self._compute_rare_fourgram_ratio(raw_input)
             fourgram_signal = self._compute_fourgram_signal(raw_input, is_inquiry, is_learning)
@@ -794,9 +881,48 @@ class EndogenousDomainAwareness:
             homoglyph_signal = self._compute_homoglyph_signal(raw_input)
             luoshu_signal = self._compute_luoshu_signal(raw_input)
             if self._luoshu is not None:
-                luoshu_state = self._luoshu.encode(raw_input)
-                luoshu_attack_dist = self._luoshu.compute_attack_distance(luoshu_state)
-                luoshu_safe_dist = self._luoshu.compute_safe_distance(luoshu_state)
+                # P0 韧性修复：洛书主路径全部用 try/except 包裹，异常时降级为默认距离
+                # 防止 encode/compute_distance 内部异常导致 process() 崩溃
+                try:
+                    luoshu_state = self._luoshu.encode(raw_input)
+
+                    # ── 阶段二：双梯形递归轨迹 → 洛书状态增强 ──
+                    # 将输入文本先送入双梯形镜像递归网络（Rust 原生扩展），
+                    # 取其最后一层的逆向状态作为"洛书空间坐标"的增强偏置。
+                    # 角色扮演/组合策略攻击会产生高振荡的递归轨迹，使
+                    # 增强后的 luoshu_state 在攻击原型空间中产生更大距离，
+                    # 从而提升 luoshu_attack_dist 信号，辅助 fused_anomaly 决策。
+                    if self._bilateral_available and isinstance(raw_input, str) and len(raw_input) > 10:
+                        try:
+                            # P1-3 修复：合并 analyze+get_adjustment 为单次 forward() 调用
+                            # analyze_and_adjust 一次返回 (boost, conf_red, debug, analyze_dict)
+                            bil_boost, bil_conf_red, bil_debug, bilateral_result = \
+                                self._bilateral.analyze_and_adjust(raw_input)
+                            # 缓存 adjustment 供阶段一使用，避免重复 forward()
+                            self._bilateral_adjustment = (bil_boost, bil_conf_red, bil_debug)
+                            bilateral_output = bilateral_result.get("output_state", None)
+                            if bilateral_output is not None and len(bilateral_output) == self.state_dim:
+                                # 递归输出状态与洛书编码状态加权融合
+                                # 融合权重：递归异常度越高，递归输出占主导地位
+                                bilateral_anomaly = bilateral_result.get("recursive_anomaly", 0.0)
+                                bilateral_weight = 0.15 + bilateral_anomaly * 0.35  # 0.15~0.50
+                                luoshu_state = (
+                                    luoshu_state * (1.0 - bilateral_weight)
+                                    + np.array(bilateral_output, dtype=np.float32) * bilateral_weight
+                                )
+                                luoshu_state = luoshu_state / (np.linalg.norm(luoshu_state) + 1e-8)
+                        except Exception:
+                            # 双梯形异常不阻塞主流程
+                            self._bilateral_adjustment = None
+                            pass
+
+                    luoshu_attack_dist = self._luoshu.compute_attack_distance(luoshu_state)
+                    luoshu_safe_dist = self._luoshu.compute_safe_distance(luoshu_state)
+                except Exception:
+                    # 洛书编码/距离计算异常时降级为默认值，不阻塞主决策流程
+                    luoshu_state = None
+                    luoshu_attack_dist = 1.0
+                    luoshu_safe_dist = 1.0
         else:
             fourgram_signal = 0.0
             leet_signal = 0.0
@@ -893,6 +1019,32 @@ class EndogenousDomainAwareness:
             else:
                 fused_anomaly = max(0.0, fused_anomaly * 0.9 + luoshu_signal * 0.1)
 
+        # ── P0 修复：跨函数攻击意图聚合信号融入 fused_anomaly ──
+        # 当多个检测函数同时出现部分匹配时，cross_function_attack_score > 0，
+        # 提升 fused_anomaly 以反映"多个检测函数同时部分命中"的异常。
+        # 阈值 0.4 意味着至少 2 个函数有部分匹配，或 3+ 个函数有低分匹配。
+        if cross_function_attack_score > 0.4:
+            fused_anomaly = max(fused_anomaly, fused_anomaly * 0.5 + cross_function_attack_score * 0.5)
+        elif cross_function_attack_score > 0.2:
+            fused_anomaly = max(fused_anomaly, fused_anomaly * 0.7 + cross_function_attack_score * 0.3)
+
+        # ── 阶段一：双梯形镜像递归网络增强 ──
+        # P1-3 修复：复用阶段二已缓存的 adjustment 结果，避免重复 forward() 调用
+        if self._bilateral_available and isinstance(raw_input, str) and len(raw_input) > 10:
+            if self._bilateral_adjustment is not None:
+                try:
+                    anomaly_boost, confidence_reduction, bilateral_info = self._bilateral_adjustment
+                    if anomaly_boost != 0.0:
+                        if anomaly_boost > 0:
+                            fused_anomaly = min(1.0, fused_anomaly + anomaly_boost)
+                        else:
+                            fused_anomaly = max(0.0, fused_anomaly + anomaly_boost)
+                    self._bilateral_debug = bilateral_info
+                except Exception:
+                    self._bilateral_debug = None
+            else:
+                self._bilateral_debug = None
+
         self._luoshu_veto = False
         if self._luoshu is not None and self._luoshu.attack_prototypes:
             if luoshu_attack_dist < 0.15 and luoshu_safe_dist > 0.5:
@@ -910,8 +1062,16 @@ class EndogenousDomainAwareness:
                     count, _ = self._repetition_cache[input_key]
                     self._repetition_cache[input_key] = (count + 1, dist)
                     if count >= 3 and raw_structural_anomaly < 0.2:
-                        repetition_boost = min(0.3, count * 0.05)
-                        dist = max(0.0, dist - repetition_boost)
+                        # ── P2 修复：原型驯化检测 ──
+                        # 当跨函数攻击意图聚合得分较高时，说明输入包含角色扮演
+                        # 攻击特征，即使重复通过也不降低距离，防止攻击者先用
+                        # 良性角色扮演"驯化"原型，再逐步加入攻击性内容。
+                        if cross_function_attack_score >= 0.4:
+                            # 攻击特征明显，不降低距离
+                            pass
+                        else:
+                            repetition_boost = min(0.3, count * 0.05)
+                            dist = max(0.0, dist - repetition_boost)
                 else:
                     self._repetition_cache[input_key] = (1, dist)
                 if len(self._repetition_cache) > 1000:
@@ -1132,6 +1292,16 @@ class EndogenousDomainAwareness:
             if debug_info is not None:
                 debug_info["anomaly_signals"].append("leet_speak_attack")
 
+        # ── P0 修复：跨函数攻击意图聚合信号，无视距离直接拦截 ──
+        # 当 cross_function_attack_score >= 0.6 时，意味着至少 2 个检测函数
+        # 同时有部分匹配（含同义词扩展），或 3+ 个函数有低分部分匹配。
+        # 这本身就是强烈攻击信号，无需依赖原型距离。
+        if decision == Decision.PASS and cross_function_attack_score >= 0.6:
+            decision = Decision.REJECT
+            trust = TrustLevel.UNKNOWN
+            if debug_info is not None:
+                debug_info["anomaly_signals"].append("cross_function_attack")
+
         if decision == Decision.REJECT and normalized_benign_signal:
             decision = Decision.PASS
             trust = TrustLevel.LOW
@@ -1153,6 +1323,21 @@ class EndogenousDomainAwareness:
                 else:
                     state = self._luoshu.encode(raw_input)
                     self._luoshu.learn_safe(state)
+            # ── P1 修复：漏报闭环反馈 ──
+            # 当内门 PASS 但跨函数攻击意图聚合得分较高（>=0.4）时，
+            # 说明有多个检测函数同时出现部分匹配（含同义词扩展），
+            # 但恰好没有达到后置覆盖拦截阈值（0.6）。
+            # 此时将输入的低权重 4-gram 写入 rejected_fourgram_profile，
+            # 使后续同类型变体攻击更容易被 fourgram_signal 捕获。
+            # 使用低权重（0.3）避免正反馈循环，同时确保变体攻击能被学习。
+            if isinstance(raw_input, str) and cross_function_attack_score >= 0.4:
+                self._update_rejected_fourgram_profile(raw_input, weight=0.3)
+                if self._luoshu is not None and isinstance(raw_input, str):
+                    try:
+                        state = self._luoshu.encode(raw_input)
+                        self._luoshu.learn_attack(state)
+                    except Exception:
+                        pass
         elif decision == Decision.REJECT and isinstance(raw_input, str) and trust == TrustLevel.UNKNOWN:
             # ── 自证预言抑制：只有真正命中攻击关键词/信号的 REJECT，才写入拒绝四元组档案。
             #    防止"误报→喂饱rejected统计→更多误报"正反馈循环（根因修复idx>200出现的fourgram=+0.6）
@@ -2501,7 +2686,7 @@ class EndogenousDomainAwareness:
             )
             self._domain_inquiry_prefixes = dict(sorted_prefixes[250:])
 
-    def _update_rejected_fourgram_profile(self, text: str):
+    def _update_rejected_fourgram_profile(self, text: str, weight: float = 1.0):
         """更新被拒绝4-gram档案：从被拒绝的输入中动态学习。
 
         活性防护哲学：被拒绝的4-gram模式不是硬编码的攻击关键词列表，
@@ -2511,6 +2696,9 @@ class EndogenousDomainAwareness:
 
         EWMA平滑：使用指数加权移动平均更新频率，避免单次输入
         对档案产生过大影响。定期裁剪低频4-gram，控制内存使用。
+
+        P1 扩展：支持 weight 参数（0.0~1.0），用于控制本次学习的权重。
+        漏报闭环反馈场景使用 weight=0.3 低权重学习，避免正反馈循环。
         """
         if not text or len(text) < 4:
             return
@@ -2526,13 +2714,15 @@ class EndogenousDomainAwareness:
         for fg in fourgrams:
             fourgrams[fg] /= total_fg
 
-        alpha = min(0.3, 1.0 / (self._rejected_fourgram_count + 1))
+        # 应用权重：降低 frequency 影响，使低权重学习更温和
+        effective_weight = max(0.1, min(1.0, weight))
+        alpha = min(0.3, 1.0 / (self._rejected_fourgram_count + 1)) * effective_weight
         if not self._rejected_fourgram_profile:
-            self._rejected_fourgram_profile = fourgrams
+            self._rejected_fourgram_profile = {fg: freq * effective_weight for fg, freq in fourgrams.items()}
         else:
             for fg, freq in fourgrams.items():
                 old = self._rejected_fourgram_profile.get(fg, 0.0)
-                self._rejected_fourgram_profile[fg] = old * (1 - alpha) + freq * alpha
+                self._rejected_fourgram_profile[fg] = old * (1 - alpha) + freq * alpha * effective_weight
             for fg in list(self._rejected_fourgram_profile.keys()):
                 if fg not in fourgrams:
                     self._rejected_fourgram_profile[fg] *= (1 - alpha)

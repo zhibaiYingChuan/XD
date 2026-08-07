@@ -120,6 +120,14 @@ class XuanDunConfig:
     #   要加入动态安全原型的向量，若与已有攻击原型的最近距离 < 此阈值，视为“伪装良性毒化样本”，拒绝学习
     #   0.0 = 关闭  →  1.0 = 任何近邻都拒绝  →  推荐 0.80~0.92 之间
     luoshu_poisoning_similarity_threshold: float = 0.88
+
+    # ── 双梯形镜像递归网络参数（Rust + PyO3 原生扩展） ──
+    # 玄盾灵魂级底层算法：多层双向递归迭代，捕捉角色扮演/组合策略攻击的
+    # 隐藏意图偏移，输出递归置信度和轨迹振荡度作为 fused_anomaly 的增强信号
+    bilateral_num_layers: int = 3       # 递归层数（默认3层）
+    bilateral_state_dim: int = 64       # 状态向量维度（默认64维）
+    bilateral_t_iter: int = 5           # 递归迭代次数（默认5次）
+
     # 四元组攻击相似度冷启动门槛
     # 出厂 warmup 只有 8 条攻击短种子 + 25 条安全句子，统计严重失真
     # 拒绝样本 < 此值 或 域内 4-gram 种类数 < 500 时禁用 fourgram_signal，防系统性误报
@@ -281,6 +289,11 @@ class XuanDunConfig:
                     raise RuntimeError("Production environment requires secure key, but fallback mapping_key is being used")
                 sys.stderr.write("[XuanDun] WARNING: XUANDUN_MAPPING_KEY not set, using insecure fallback key\n")
                 self.mapping_key = b"ancient_map_16b!"
+
+        # P0 韧性修复：双梯形参数上限校验，防止恶意/错误配置导致 forward() 死循环
+        assert 1 <= self.bilateral_num_layers <= 16, "bilateral_num_layers 超出安全范围 [1, 16]"
+        assert 1 <= self.bilateral_state_dim <= 512, "bilateral_state_dim 超出安全范围 [1, 512]"
+        assert 1 <= self.bilateral_t_iter <= 50, "bilateral_t_iter 超出安全范围 [1, 50]"
 
     @classmethod
     def for_level(cls, level: DefenseLevel, **overrides) -> "XuanDunConfig":
