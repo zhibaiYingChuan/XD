@@ -77,8 +77,8 @@ jobs:
       - name: Install maturin and build Rust extension
         run: |
           pip install maturin>=1.7
-          maturin build --release --manifest-path crates/daoti_xuandun_pyo3/Cargo.toml
-          pip install --force-reinstall target/wheels/*.whl
+          maturin build --release --manifest-path crates/daoti_xuandun_pyo3/Cargo.toml --out wheels
+          pip install --force-reinstall wheels/*.whl
 
       - name: Run config smoke test (确保config.py参数化正确加载)
         run: |
