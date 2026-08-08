@@ -75,8 +75,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-          # 【2026-08-07 回退】移除 libfuse2 安装，与 v1.3.1 成功配置一致。
-          #   v1.3.1 的 Linux 构建能成功通过 AppImage 打包，说明 libfuse2 非必需。
+          # 【2026-08-09 定论】Linux 仅打包 .deb，不再打 AppImage。
+          #   历史结论：ca07a07 曾以"v1.3.1 无需修复即可通过 AppImage"为由回退 libfuse2/
+          #   APPIMAGE_EXTRACT_AND_RUN/disable-sudo 并重加 appimage 目标，导致 Linux 构建
+          #   在 linuxdeploy 阶段失败（failed to run linuxdeploy，CI 无 FUSE）。
+          #   且 linuxdeploy 存在 2026 上游回归（tauri#14796），即便 APPIMAGE_EXTRACT_AND_RUN=1
+          #   部分场景仍失败。故移除 appimage 目标（见 tauri.conf.json），Linux 稳定产出 .deb。
+          #   禁止未经充分验证重新加回 appimage 目标。
 
       - name: Build Nuitka engine
         working-directory: desktop/xuandun-desktop
@@ -88,8 +93,8 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop/xuandun-desktop
-        # 【2026-08-07 回退】移除 APPIMAGE_EXTRACT_AND_RUN 环境变量，与 v1.3.1 成功配置一致。
-        #   v1.3.1 的 Linux 构建能成功通过 AppImage 打包，说明无需此环境变量。
+        # 【2026-08-09 定论】Linux 仅打包 .deb（tauri.conf.json 已移除 appimage 目标）。
+        #   详见上方 "Install Linux system dependencies" 注释，禁止重新加回 AppImage 打包。
         run: npm run tauri build
 
       - name: Rename bundle files to ASCII
