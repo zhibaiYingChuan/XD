@@ -17,6 +17,92 @@ from daoti_xuandun.config import XuanDunConfig
 from daoti_xuandun.types import SymbolSeq, TimingDecision
 
 
+class BoundaryResidenceDetector:
+    """边界驻留检测器 — 追踪会话在边界区域的连续停留。
+
+    信息型攻击者不会只问一次，而是反复在边界区域试探（多种问法问同一个
+    敏感问题）。本检测器追踪每个会话最近N轮的域距离，当连续在边界区域
+    停留超过阈值时，触发高敏模式告警。
+
+    边界区域定义：域距离在 [threshold * 0.5, threshold * 1.5] 范围内，
+    即既非明确安全也非明确攻击的"不确定"区域。
+
+    触发后效果：
+    - boundary_residence_alert = True
+    - 该会话后续请求提升检测优先级
+    - 信任度衰减阈值降低 50%
+    """
+
+    def __init__(self, residence_window: int = 5,
+                 boundary_threshold: float = 0.5):
+        """初始化边界驻留检测器。
+
+        Args:
+            residence_window: 连续停留轮数阈值，超过此值触发告警。
+            boundary_threshold: 域距离阈值，用于定义边界区域。
+        """
+        self._residence_window = residence_window
+        self._boundary_threshold = boundary_threshold
+        # 每个会话的域距离历史队列
+        self._residence_tracker: Dict[str, deque] = {}
+        # 每个会话的告警状态
+        self._residence_alert: Dict[str, bool] = {}
+
+    def _is_in_boundary(self, dist: float) -> bool:
+        """判断域距离是否在边界区域内。
+
+        边界区域：threshold * 0.5 <= dist <= threshold * 1.5
+        即既非明确安全（dist 很小）也非明确攻击（dist 很大）。
+        """
+        lower = self._boundary_threshold * 0.5
+        upper = self._boundary_threshold * 1.5
+        return lower <= dist <= upper
+
+    def update(self, session_id: str, domain_distance: float) -> None:
+        """更新会话的边界驻留状态。
+
+        Args:
+            session_id: 会话标识符。
+            domain_distance: 当前轮的域距离。
+        """
+        if session_id not in self._residence_tracker:
+            self._residence_tracker[session_id] = deque(maxlen=self._residence_window)
+            self._residence_alert[session_id] = False
+
+        self._residence_tracker[session_id].append(domain_distance)
+
+        # 检查最近N轮是否全部在边界区域内
+        recent = list(self._residence_tracker[session_id])
+        if len(recent) >= self._residence_window:
+            boundary_count = sum(1 for d in recent if self._is_in_boundary(d))
+            self._residence_alert[session_id] = boundary_count >= self._residence_window
+        else:
+            # 不足窗口大小时不触发告警
+            self._residence_alert[session_id] = False
+
+    def is_alert(self, session_id: str) -> bool:
+        """返回指定会话是否触发了边界驻留告警。"""
+        return self._residence_alert.get(session_id, False)
+
+    def get_residence_score(self, session_id: str) -> float:
+        """返回边界驻留程度（0-1）。
+
+        0 = 未在边界停留，1 = 完全在边界停留。
+        """
+        if session_id not in self._residence_tracker:
+            return 0.0
+        recent = list(self._residence_tracker[session_id])
+        if not recent:
+            return 0.0
+        boundary_count = sum(1 for d in recent if self._is_in_boundary(d))
+        return float(boundary_count / len(recent))
+
+    def clear(self, session_id: str) -> None:
+        """清除指定会话的驻留状态。"""
+        self._residence_tracker.pop(session_id, None)
+        self._residence_alert.pop(session_id, None)
+
+
 class TimingConsistencyChecker:
     """§6.2 时序一致性校验 - 检测重放及节律异常。
 
@@ -77,6 +163,13 @@ class TimingConsistencyChecker:
         self._trust_floor = getattr(config, 'session_trust_floor', 0.30)
         self._drift_sigma = getattr(config, 'session_intent_drift_sigma', 2.5)
         self._drift_min_turns = getattr(config, 'session_intent_drift_min_turns', 6)
+
+        # ── 边界驻留检测器：追踪会话在边界区域的连续停留 ──
+        # 当连续N轮域距离处于边界区域时触发告警，提升后续检测优先级
+        self._boundary_detector = BoundaryResidenceDetector(
+            residence_window=getattr(config, 'boundary_residence_window', 5),
+            boundary_threshold=getattr(config, 'prototype_distance_threshold', 0.5),
+        )
 
     # Implements §6.2 _extract_feature
     def _extract_feature(self, sym_seq: SymbolSeq) -> np.ndarray:
@@ -210,6 +303,9 @@ class TimingConsistencyChecker:
         d = float(domain_distance)
         alpha = self._domain_ewma_alpha
 
+        # ── 边界驻留检测：更新会话的域距离历史 ──
+        self._boundary_detector.update(session_id, d)
+
         if session_id not in self._domain_ewma_mean:
             # 初始化：首轮用当前值起步，方差设为极小值避免 sigma=0
             self._domain_ewma_mean[session_id] = d
@@ -252,6 +348,8 @@ class TimingConsistencyChecker:
                 "intent_drift_score": 0.0,
                 "intent_drift_detected": False,
                 "turn_count": 0,
+                "boundary_residence": 0.0,
+                "boundary_residence_alert": False,
             }
         # 优先读取本轮已暴露的 trust（check() 中写入），否则回退到下一轮缓存
         exposed = self._session_exposed_trust.get(session_id, self._session_trust[session_id])
@@ -260,6 +358,8 @@ class TimingConsistencyChecker:
             "intent_drift_score": float(self._session_last_drift_score.get(session_id, 0.0)),
             "intent_drift_detected": bool(self._session_last_drift_detected.get(session_id, False)),
             "turn_count": int(self._session_turn_count.get(session_id, 0)),
+            "boundary_residence": float(self._boundary_detector.get_residence_score(session_id)),
+            "boundary_residence_alert": bool(self._boundary_detector.is_alert(session_id)),
         }
 
     def _adaptive_threshold(self, session_id: str, distance: float) -> float:

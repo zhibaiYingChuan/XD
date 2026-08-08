@@ -2,6 +2,33 @@
 
 本项目变更遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.3.3-beta] - 2026-08-08
+
+### 新增
+
+#### 企业 API Key 签发与收费体系（Web 网关）
+- 商业模式：桌面端免费（个人）、Web 网关企业收费；企业 API Key 由玄盾供应商离线签发，网关仅验签、不可自建
+- [tools/license_manager] 供应商签发工具链：`gen_keypair.py`（RSA-2048 公私钥）、`sign_api_key.py`（离线签发 `XDKEY-<jwt>`）、`verify_api_key.py`（自测验签）、`web_console.py`（本机网页签发台，含吊销）
+- 企业 API Key 采用 RS256 JWT 自校验：携带套餐 `tier`、有效期 `exp`、唯一标识 `jti`、配额 `quota`，到期自动失效实现订阅式收费
+- [gateway/jwt_auth.py] 网关离线验签：公钥校验签名/`iss`/`exp`/`jti`，未配置公钥时业务端点 fail-closed 返回 503
+- [gateway/revoked_store.py] 吊销黑名单：按 `jti` 持久化，吊销后网关立即拒绝该企业请求
+- [gateway/app.py] 鉴权中间件重构：管理密钥（环境变量 `XUANDUN_ADMIN_KEY`）与管理端点、企业密钥（JWT）与业务端点 `/api/v1/protect` 分离；业务端点按 `jti` 计量用量
+- [admin-console] 「企业授权」只读查询页：展示企业密钥套餐/有效期/用量/吊销状态（`/api/v1/keys`、`/api/v1/keys/revoke`）
+
+#### 工具检测模块（Agent 攻击防护）
+- [src/daoti_xuandun/tool_detector.py + tool_risk_registry.py] 工具调用检测与风险注册表，覆盖 Agent/工具调用攻击场景
+
+### 修复
+- 引擎二进制升级至 1.3.3-beta；版本号全项目统一（SSOT）
+- Dockerfile / docker-compose.yml 版本号同步为 1.3.3-beta
+- 网关认证从"可自建业务密钥"重构为"供应商签发企业密钥"，杜绝绕过收费
+
+### 变更
+- 引擎二进制不再提交仓库，改由 CI 的 `build_engine.py`（Nuitka）编译打包
+- 攻击样本库新增至 260 条 + 30 条良性（含中文场景特有攻击）
+
+---
+
 ## [1.3.2] - 2026-08-05
 
 ### 新增

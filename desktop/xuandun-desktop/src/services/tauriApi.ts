@@ -207,6 +207,18 @@ export interface GrayDeployState {
   ratio: number;
 }
 
+/** 上游模型配置（设置页可视化表单）：OpenAI 兼容接口，引擎启动时注入环境变量 */
+export interface UpstreamConfig {
+  /** 上游模型 OpenAI 兼容地址（如 https://api.openai.com/v1） */
+  url: string;
+  /** 上游 API Key（可空，私有化模型无需鉴权） */
+  apiKey: string;
+  /** 默认模型名（可空，缺省用请求里的 model） */
+  model: string;
+  /** 请求上游超时秒数（默认 300） */
+  timeout: number;
+}
+
 export interface BypassStats {
   emergency_bypass: boolean;
   gray_deploy_ratio: number;
@@ -462,4 +474,8 @@ export const api = {
   getGrayDeployRatio: () =>
     invokeWithTimeout<GrayDeployState>('get_gray_deploy_ratio', undefined, TIMEOUT.NORMAL),
   getBypassStats: () => invokeWithTimeout<BypassStats>('get_bypass_stats', undefined, TIMEOUT.NORMAL),
+  // ── 上游模型配置（设置页可视化表单）──
+  getUpstreamConfig: () => invokeWithTimeout<UpstreamConfig>('get_upstream_config', undefined, TIMEOUT.FAST),
+  setUpstreamConfig: (config: UpstreamConfig) =>
+    invokeWithTimeout<void>('set_upstream_config', { config }, TIMEOUT.NORMAL),
 };

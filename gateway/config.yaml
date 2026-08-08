@@ -1,0 +1,27 @@
+# 玄盾企业级安全网关 — 默认配置文件
+# 可通过 XUANDUN_CONFIG_PATH 环境变量指定自定义路径
+
+gateway:
+  host: "0.0.0.0"
+  port: 18765
+  log_level: "info"   # debug / info / warn / error
+
+security:
+  mode: "protecting"        # observing / protecting / blocking
+  defense_level: "standard" # standard / strict / permissive
+  output_guardrail: true    # 输出护栏
+  sensitive_leak: true      # 敏感信息泄露检测
+
+# 多模型路由（可选）
+# models:
+#   - id: deepseek-v3
+#     name: 深度求索 V3
+#     endpoint: http://internal.deepseek:8000/v1
+#     type: private
+#     api_key: ${DEEPSEEK_API_KEY}
+#   - id: gpt-4
+#     name: GPT-4
+#     endpoint: https://api.openai.com/v1
+#     type: public
+#     api_key: ${OPENAI_API_KEY}
+models: []

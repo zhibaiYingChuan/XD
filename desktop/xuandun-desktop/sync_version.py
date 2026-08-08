@@ -43,6 +43,11 @@ README_MD = PROJECT_ROOT / "README.md"
 # Python SDK 包 __init__.py 中的 __version__
 DAOTI_INIT_PY = PROJECT_ROOT / "src" / "daoti_xuandun" / "__init__.py"
 
+# v1.3.3-beta 扩展：docker-compose.yml 镜像标签
+DOCKER_COMPOSE = PROJECT_ROOT / "docker-compose.yml"
+
+# v1.3.3-beta 扩展：admin-console 构建注入由 vite.config.ts 自动读取 pyproject.toml，无需手动同步
+
 
 def read_cargo_version() -> str:
     """从 Cargo.toml 读取版本号（SSOT）。"""
@@ -78,15 +83,15 @@ def sync_tauri_conf(version: str, check_only: bool) -> bool:
 
 
 def sync_engine_flask(version: str, check_only: bool) -> bool:
-    """同步 engine_flask.py 中 health 端点返回的 version。返回是否有变更。"""
+    """同步 engine_flask.py 中 _ENGINE_VERSION 常量。返回是否有变更。"""
     content = ENGINE_FLASK_PY.read_text(encoding="utf-8")
-    # 匹配 health 端点中的 version，宽松匹配空格与引号风格
-    # 格式：return jsonify({"status": "ok", "version": "1.2.3"})
-    # 必须锚定 return jsonify 前缀，避免误匹配上方文档注释中的版本号
-    pattern = r'(return jsonify\(\{"status":\s*"ok",\s*"version":\s*")([^"]+)(")'
+    # 匹配 _ENGINE_VERSION 常量赋值行（R4 修复后版本单一来源移至此常量）
+    # 格式：_ENGINE_VERSION = "1.2.3"
+    # 必须锚定 _ENGINE_VERSION = 前缀，避免误匹配文档注释中的版本号
+    pattern = r'(_ENGINE_VERSION\s*=\s*")([^"]+)(")'
     match = re.search(pattern, content)
     if not match:
-        print(f"WARNING: Cannot find version pattern in {ENGINE_FLASK_PY}", file=sys.stderr)
+        print(f"WARNING: Cannot find _ENGINE_VERSION pattern in {ENGINE_FLASK_PY}", file=sys.stderr)
         return False
     current = match.group(2)
     if current == version:
@@ -130,9 +135,12 @@ def sync_readme(version: str, check_only: bool) -> bool:
     content = README_MD.read_text(encoding="utf-8")
     original = content
     # 匹配 XuanDun_<version>_ 文件名中的版本号
-    content = re.sub(r'(XuanDun_)(\d+\.\d+\.\d+)(_)', rf'\g<1>{version}\g<3>', content)
+    content = re.sub(r'(XuanDun_)(\d+\.\d+\.\d+)([-\w]*)(_)', rf'\g<1>{version}\g<4>', content)
     # 匹配 daoti-xuandun==<version> pip 安装命令中的版本号
-    content = re.sub(r'(daoti-xuandun==)(\d+\.\d+\.\d+)', rf'\g<1>{version}', content)
+    # 修复：此前正则为 daoti-xuandun==(\d+\.\d+\.\d+)，不含预发布后缀(-beta)，
+    # 导致替换时在 -beta 后重复追加后缀（1.3.3-beta-beta），每次 check 都误报不一致。
+    # 现用 (\d+\.\d+\.\d+[-\w]*) 捕获完整版本（含 -beta/-rc 等），整体替换。
+    content = re.sub(r'(daoti-xuandun==)(\d+\.\d+\.\d+[-\w]*)', rf'\g<1>{version}', content)
     if content == original:
         return False
     if check_only:
@@ -161,6 +169,23 @@ def sync_daoti_init(version: str, check_only: bool) -> bool:
     return True
 
 
+def sync_docker_compose(version: str, check_only: bool) -> bool:
+    """同步 docker-compose.yml 中的镜像标签版本号。返回是否有变更。"""
+    if not DOCKER_COMPOSE.exists():
+        return False
+    content = DOCKER_COMPOSE.read_text(encoding="utf-8")
+    original = content
+    # xuandun-gateway:1.3.2 / xuandun-console:1.3.2
+    content = re.sub(r'(xuandun-gateway:)\d+\.\d+\.\d+(-\w+)?', rf'\g<1>{version}', content)
+    content = re.sub(r'(xuandun-console:)\d+\.\d+\.\d+(-\w+)?', rf'\g<1>{version}', content)
+    if content == original:
+        return False
+    if check_only:
+        return True
+    DOCKER_COMPOSE.write_text(content, encoding="utf-8")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="版本号 SSOT 同步与校验")
     parser.add_argument("--check", action="store_true", help="仅校验，不修改（CI 门禁用）")
@@ -176,6 +201,7 @@ def main() -> int:
     changed |= sync_pyproject(cargo_version, args.check)
     changed |= sync_readme(cargo_version, args.check)
     changed |= sync_daoti_init(cargo_version, args.check)
+    changed |= sync_docker_compose(cargo_version, args.check)
 
     if args.check:
         if changed:

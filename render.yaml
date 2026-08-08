@@ -1,4 +1,4 @@
-﻿﻿# Render 后端服务配置文件
+﻿# Render 后端服务配置文件
 # 部署 Web Demo 后端到 Render：https://render.com
 # 使用方式：在 Render Dashboard 连接 GitHub 仓库，选择 "Blueprint" 类型部署
 
@@ -10,7 +10,7 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    healthCheckPath: /api/health
+    healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: CORS_ORIGINS

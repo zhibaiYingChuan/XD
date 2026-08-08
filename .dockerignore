@@ -1,4 +1,4 @@
-﻿# 排除不必要的文件，加速 Docker 构建
+# 排除不必要的文件，加速 Docker 构建
 target/
 **/node_modules/
 **/.git/
@@ -16,10 +16,8 @@ desktop/
 daoti-xuandun/
 pages/
 poc/
-*.md
+tests/                    # 测试文件无需打包进镜像
 *.log
-*.txt
-*.json
 *.xml
 *.png
 *.jpg

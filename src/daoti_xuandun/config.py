@@ -105,6 +105,7 @@ class XuanDunConfig:
     luoshu_confidence_borderline_safe: float = 0.4     # 安全距离在此区间时降低语言特征权重
     luoshu_confidence_borderline_attack: float = 0.35  # 攻击距离在此区间时降低语言特征权重
     luoshu_confidence_borderline_weight: float = 0.5   # 边界区域语言特征权重
+    luoshu_attack_veto_threshold: float = 0.30   # 出厂预热攻击原型直接否决阈值（纯编码距离<此值→强制拦截）
 
     # 洛书三阶段自适应学习策略（出厂→影子缓冲→稳态微调）
     # — 出厂阶段(A)：仅使用静态 benign_v1.npy，不做任何在线写入

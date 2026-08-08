@@ -122,6 +122,14 @@ _stress_test.py
 # Runtime runtime artifacts
 learning_snapshot.json
 
+# 网关运行时数据（含密钥哈希，不入库）
+gateway/.api_keys.json
+gateway/.api_keys.json.tmp
+gateway/.xuandun_mode
+# 企业密钥吊销黑名单（运行时生成，不入库）
+gateway/.revoked_keys.json
+gateway/.revoked_keys.json.tmp
+
 # Local design assets (not part of source)
 xdlogo.jpg
 
@@ -206,3 +214,18 @@ test_simulator.ps1
 
 # 本地模型路由配置（从 models.yaml.example 复制，不入仓库）
 config/models.yaml
+
+# ── 安全敏感文件（P0-2 修复）──
+.env
+*.pem
+*.key
+credentials*
+secret*
+# 供应商签发日志（含企业名/配额/jti，仅供运营，不入库）
+tools/license_manager/LICENSE_LOG.json
+tools/license_manager/_tmp_e2e/
+# 企业 API Key 签发工具（本地运营用，非产品交付物，不入库）
+tools/license_manager/
+
+# TypeScript 增量编译缓存（构建生成，不入库）
+*.tsbuildinfo

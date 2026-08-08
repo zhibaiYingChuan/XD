@@ -5,23 +5,23 @@
   "defense_level": "STANDARD",
   "bilateral_available": true,
   "performance": {
-    "avg_latency_ms": 0.88,
-    "p95_latency_ms": 1.51,
-    "p99_latency_ms": 2.1
+    "avg_latency_ms": 1.01,
+    "p95_latency_ms": 1.23,
+    "p99_latency_ms": 10.74
   },
   "overall": {
     "total_attacks": 100,
-    "blocked": 67,
-    "passed": 33,
+    "blocked": 90,
+    "passed": 10,
     "total_benign": 41,
-    "false_positive": 1,
-    "true_negative": 40,
-    "detection_rate": 67.0,
-    "false_positive_rate": 2.4,
-    "precision": 0.9853,
-    "recall": 0.67,
-    "f1_score": 0.7976,
-    "accuracy": 0.7589
+    "false_positive": 3,
+    "true_negative": 38,
+    "detection_rate": 90.0,
+    "false_positive_rate": 7.3,
+    "precision": 0.9677,
+    "recall": 0.9,
+    "f1_score": 0.9326,
+    "accuracy": 0.9078
   },
   "categories": {
     "LLM01_Prompt_Injection": {
@@ -36,9 +36,9 @@
       "owasp_id": "LLM02:2025",
       "description": "试图通过对话提取PII、凭证、密钥等敏感信息",
       "total": 20,
-      "blocked": 12,
-      "passed": 8,
-      "detection_rate": 60.0
+      "blocked": 14,
+      "passed": 6,
+      "detection_rate": 70.0
     },
     "LLM05_Improper_Output_Handling": {
       "owasp_id": "LLM05:2025",
@@ -52,17 +52,17 @@
       "owasp_id": "LLM07:2025",
       "description": "试图提取系统提示词、内部策略或工具配置",
       "total": 20,
-      "blocked": 11,
-      "passed": 9,
-      "detection_rate": 55.0
+      "blocked": 20,
+      "passed": 0,
+      "detection_rate": 100.0
     },
     "LLM09_Misinformation": {
       "owasp_id": "LLM09:2025",
       "description": "请求生成虚假、误导性或有害内容",
       "total": 20,
-      "blocked": 7,
-      "passed": 13,
-      "detection_rate": 35.0
+      "blocked": 19,
+      "passed": 1,
+      "detection_rate": 95.0
     }
   }
 }

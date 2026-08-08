@@ -119,6 +119,11 @@ class LuoshuSymbolMapper:
         self._static_prototypes: List[np.ndarray] = []
         self._static_count = 0  # 仅统计展示，不参与 deque
         self.attack_prototypes: List[np.ndarray] = []
+        # 出厂预热攻击原型（只读）：来自 attack_v1.json + BUILTIN_ATTACKS，
+        # 经人工校准覆盖市面常见攻击。与 attack_prototypes（在线学习积累、可能被
+        # 良性样本污染）物理隔离，仅用于"出厂预热攻击直接否决"硬拦截，保证
+        # 交付成品对常见攻击开箱生效且不受在线学习污染导致的良性误报影响。
+        self.factory_attack_prototypes: List[np.ndarray] = []
         self._attack_fingerprint_counter: Counter = Counter()
         self._attack_dedup_threshold = 0.95
         self._attack_max_per_cluster = 3
@@ -334,6 +339,25 @@ class LuoshuSymbolMapper:
         sims = protos_norm @ state_norm
         return 1.0 - float(np.max(sims))
 
+    def compute_factory_attack_distance(self, state: np.ndarray) -> float:
+        """计算状态向量与【出厂预热攻击原型】的最小距离。
+
+        与 compute_attack_distance 的区别：仅针对出厂预热只读原型库
+        （factory_attack_prototypes，来自 attack_v1.json + BUILTIN_ATTACKS），
+        不包含在线学习积累的攻击原型。在线学习原型可能被良性样本污染，
+        若纳入会引发良性误报，故出厂预热否决（硬拦截）只使用本方法。
+        """
+        if not self.factory_attack_prototypes:
+            return 1.0
+        state_176 = self._to_native(state)
+        state_norm = self._normalize(state_176)
+        protos = np.array(self.factory_attack_prototypes, dtype=np.float32)
+        norms = np.linalg.norm(protos, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-8)
+        protos_norm = protos / norms
+        sims = protos_norm @ state_norm
+        return 1.0 - float(np.max(sims))
+
     def compute_local_density(self, state: np.ndarray, threshold: float = 0.7) -> float:
         """计算状态向量在洛书空间中的局部密度。"""
         if not self.safe_prototypes:
@@ -450,11 +474,15 @@ class LuoshuSymbolMapper:
 
         # ================= Gate A – 攻击相似度门 =================
         # 阈值：luoshu_poisoning_similarity_threshold（0 表示关闭这道门）
+        # 全面审查发现：旧实现只查在线 attack_prototypes，忽略出厂预热攻击原型
+        # factory_attack_prototypes。出厂攻击原型是最可信的攻击特征，样本与出厂
+        # 攻击高度相似更可能是"伪装良性"，必须一并纳入拒绝学习，补齐防毒化盲区。
         poison_threshold = float(getattr(cfg, "luoshu_poisoning_similarity_threshold", 0.0))
-        if poison_threshold > 0.0 and len(self.attack_prototypes) > 0:
-            # 计算 state 与所有攻击原型的最近余弦相似度
+        atk_pool = list(self.attack_prototypes) + list(self.factory_attack_prototypes)
+        if poison_threshold > 0.0 and atk_pool:
+            # 计算 state 与所有攻击原型（在线+出厂）的最近余弦相似度
             state_norm = self._normalize(state_176)
-            atk = np.array(self.attack_prototypes, dtype=np.float32)
+            atk = np.array(atk_pool, dtype=np.float32)
             atk_norms = np.linalg.norm(atk, axis=1, keepdims=True)
             atk_norms = np.maximum(atk_norms, 1e-8)
             atk_normed = atk / atk_norms
@@ -490,30 +518,42 @@ class LuoshuSymbolMapper:
         # ================= 真正执行 EMA 微调 =================
         state_norm = self._normalize(state_176)
         protos = np.array(self.safe_prototypes, dtype=np.float32)
-        norms = np.linalg.norm(protos, axis=1, keepdims=True)
+        # 排除刚 append 的自身向量（learn_safe 已把 state_176 追加到末尾，
+        # protos[-1] 即 state_176）。若包含自身，argmax 恒命中自身导致
+        # EMA 退化为 no-op（new_vec 恒等于自身），"越用越准"学习失效。
+        # 仅在前 N-1 个既有原型中找最近邻做微调。
+        if len(protos) < 2:
+            return
+        base_protos = protos[:-1]
+        norms = np.linalg.norm(base_protos, axis=1, keepdims=True)
         norms = np.maximum(norms, 1e-8)
-        protos_norm = protos / norms
+        protos_norm = base_protos / norms
         sims = protos_norm @ state_norm
         best_idx = int(np.argmax(sims))
         # 学习率从配置读取，兜底 0.01
         lr = float(getattr(cfg, "luoshu_steady_state_learning_rate", 0.01))
-        new_vec = (1.0 - lr) * protos[best_idx] + lr * state_176
+        new_vec = (1.0 - lr) * base_protos[best_idx] + lr * state_176
         self.safe_prototypes[best_idx] = self._normalize(new_vec).copy()
         self._steady_updates_in_window += 1
         self._steady_total_updates += 1
 
-    def learn_attack(self, state: np.ndarray):
+    def learn_attack(self, state: np.ndarray, factory: bool = False):
         """将状态向量加入攻击原型集合（带去重和频率门限，质疑C修复）。
 
         活性防护哲学：攻击原型学习不是无脑积累，而是需要防污染。
         - 去重：与已有攻击原型高度相似（>0.95）的不重复添加
         - 频率门限：同一聚类最多添加3个原型，防原型洪水攻击
+
+        factory=True 时写入出厂预热只读原型库（factory_attack_prototypes），
+        该库用于硬拦截直接否决，绝不接受在线学习写入，防止良性污染导致误报。
         """
         state_176 = self._to_native(state)
         state_norm = self._normalize(state_176)
 
-        if self.attack_prototypes:
-            protos = np.array(self.attack_prototypes, dtype=np.float32)
+        target = self.factory_attack_prototypes if factory else self.attack_prototypes
+
+        if target:
+            protos = np.array(target, dtype=np.float32)
             norms = np.linalg.norm(protos, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             protos_norm = protos / norms
@@ -522,15 +562,18 @@ class LuoshuSymbolMapper:
 
             if max_sim > self._attack_dedup_threshold:
                 best_idx = int(np.argmax(sims))
-                fp = self._fingerprint(self.attack_prototypes[best_idx])
+                fp = self._fingerprint(target[best_idx])
                 self._attack_fingerprint_counter[fp] += 1
                 if self._attack_fingerprint_counter[fp] >= self._attack_max_per_cluster:
                     return
 
-        self.attack_prototypes.append(state_176.copy())
+        target.append(state_176.copy())
         fp = self._fingerprint(state_176)
         self._attack_fingerprint_counter[fp] += 1
 
+        # 出厂只读原型库固定容量，不参与在线截断；在线攻击原型执行容量上限
+        if factory:
+            return
         max_size = self.config.prototype_max_size
         if len(self.attack_prototypes) > max_size:
             removed = self.attack_prototypes.pop(0)

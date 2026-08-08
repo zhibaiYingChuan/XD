@@ -162,6 +162,9 @@ pub fn run() {
             commands::save_notifier_config,
             commands::get_notifier_config,
             commands::test_notifier,
+            // 上游模型可视化配置（设置页表单，引擎启动时注入环境变量）
+            commands::get_upstream_config,
+            commands::set_upstream_config,
             // Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令注册
             commands::noop_heartbeat,
             // UI修复：打开引擎日志文件（Dashboard启动失败时可点击跳转）

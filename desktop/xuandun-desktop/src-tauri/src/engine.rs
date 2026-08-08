@@ -259,13 +259,22 @@ pub async fn engine_post(engine_url: &str, path: &str, body: serde_json::Value) 
 /// 3. 缺少最新的抗毒化 GateC 500 次上限
 const MIN_ENGINE_VERSION: &str = "1.3.2";
 
+/// 解析单个版本段，仅取数字前缀，忽略 -beta/-rc 等预发布后缀。
+/// 例如 "3-beta" -> 3，"2" -> 2。
+/// 修复：此前直接 p.parse() 遇 "3-beta" 失败被 filter_map 丢弃，导致
+/// "1.3.3-beta" 被解析成 [1,3]，与 "1.3.2"=[1,3,2] 比较时误判版本过低，触发错误告警/闪退。
+fn parse_version_segment(seg: &str) -> u32 {
+    seg.chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
 /// 语义化版本比较：返回 -1(a<b) / 0(a==b) / 1(a>b)
 fn compare_versions(a: &str, b: &str) -> i32 {
-    let parse = |s: &str| -> Vec<u32> {
-        s.split('.').filter_map(|p| p.parse().ok()).collect()
-    };
-    let va = parse(a);
-    let vb = parse(b);
+    let va: Vec<u32> = a.split('.').map(parse_version_segment).collect();
+    let vb: Vec<u32> = b.split('.').map(parse_version_segment).collect();
     for i in 0..va.len().max(vb.len()) {
         let na = *va.get(i).unwrap_or(&0);
         let nb = *vb.get(i).unwrap_or(&0);
@@ -530,6 +539,37 @@ fn find_engine_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 从 DB 读取上游模型配置，并注入到引擎子进程环境变量（XUANDUN_UPSTREAM_*）。
+/// 用户无需手动设置系统环境变量，只需在设置页表单填写，引擎启动时自动注入。
+fn apply_upstream_env(app: &AppHandle, cmd: &mut std::process::Command) {
+    let (url, api_key, model, timeout) = {
+        let db = app.state::<crate::db::Database>();
+        let url = db.get_config("upstream_url").ok().flatten().unwrap_or_default();
+        let api_key = db.get_config("upstream_api_key").ok().flatten().unwrap_or_default();
+        let model = db.get_config("upstream_model").ok().flatten().unwrap_or_default();
+        let timeout = db.get_config("upstream_timeout").ok().flatten()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(300.0);
+        (url, api_key, model, timeout)
+    };
+    if !url.is_empty() {
+        cmd.env("XUANDUN_UPSTREAM_URL", &url);
+    }
+    if !api_key.is_empty() {
+        cmd.env("XUANDUN_UPSTREAM_API_KEY", &api_key);
+    }
+    if !model.is_empty() {
+        cmd.env("XUANDUN_UPSTREAM_MODEL", &model);
+    }
+    cmd.env("XUANDUN_UPSTREAM_TIMEOUT", timeout.to_string());
+    log_engine(&format!(
+        "Upstream env applied: url={} model={} timeout={}",
+        if url.is_empty() { "(空)" } else { "已配置" },
+        if model.is_empty() { "(空)" } else { &model },
+        timeout
+    ));
+}
+
 fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
     log_engine("start_engine_sidecar: begin");
 
@@ -543,12 +583,13 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
             log_engine(&format!("Spawning engine: {}", path.display()));
             // P1修复：stdout/stderr 都必须被读取，否则管道缓冲区满时子进程会挂起
             // 引擎通过HTTP API通信，stdout/stderr 仅用于诊断日志
-            let mut child = Command::new(&path)
-                .creation_flags(CREATE_NO_WINDOW)
+            let mut cmd = Command::new(&path);
+            cmd.creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+                .stderr(Stdio::piped());
+            apply_upstream_env(app, &mut cmd);
+            let mut child = cmd.spawn()
                 .map_err(|e| {
                     let msg = format!("Failed to spawn engine at {:?}: {}", path, e);
                     log_engine(&msg);
@@ -594,11 +635,12 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
         if let Some(path) = find_engine_path(app) {
             use std::process::{Command, Stdio};
             log_engine(&format!("Spawning engine: {}", path.display()));
-            let mut child = Command::new(&path)
-                .stdin(Stdio::null())
+            let mut cmd = Command::new(&path);
+            cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
+                .stderr(Stdio::piped());
+            apply_upstream_env(app, &mut cmd);
+            let mut child = cmd.spawn()
                 .map_err(|e| {
                     let msg = format!("Failed to spawn engine at {:?}: {}", path, e);
                     log_engine(&msg);
@@ -860,6 +902,23 @@ mod tests {
         let state = EngineState::new();
         assert!(state.child_handle.is_none());
         // state 在此作用域结束时 drop，不应 panic
+    }
+
+    #[test]
+    fn test_compare_versions_beta_suffix_not_lower() {
+        // 回归：1.3.3-beta 必须高于 1.3.2（此前 -beta 后缀导致误判版本过低触发错误告警）
+        assert_eq!(compare_versions("1.3.3-beta", "1.3.2"), 1);
+        assert_eq!(compare_versions("1.3.2", "1.3.3-beta"), -1);
+    }
+
+    #[test]
+    fn test_compare_versions_basic() {
+        assert_eq!(compare_versions("1.3.2", "1.3.2"), 0);
+        assert_eq!(compare_versions("1.3.3", "1.3.2"), 1);
+        assert_eq!(compare_versions("1.2.9", "1.3.0"), -1);
+        assert_eq!(compare_versions("1.3.2-rc1", "1.3.2"), 0);
+        assert_eq!(compare_versions("2.0.0", "1.9.9"), 1);
+        assert_eq!(compare_versions("unknown", "1.3.2"), -1); // 无法解析按 0 处理
     }
 
     #[test]

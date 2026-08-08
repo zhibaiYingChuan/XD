@@ -501,5 +501,51 @@ def run_benchmark():
     return report
 
 
+# ═══════════════════════════════════════════════════════════════════
+# pytest runner — 将 standalone 脚本转换为可被 CI 调用的测试函数
+# 运行方式: pytest tests/benchmark_owasp_llm.py -v
+# ═══════════════════════════════════════════════════════════════════
+
+import pytest
+
+
+@pytest.fixture(scope="module")
+def owasp_report():
+    """模块级fixture：运行OWASP基准测试（昂贵操作，scope=module只执行一次）"""
+    return run_benchmark()
+
+
+class TestOWASPBenchmark:
+    """OWASP LLM Top 10 基准测试 — D21 WARN消除"""
+
+    def test_overall_detection_rate(self, owasp_report):
+        """整体攻击检测率 ≥ 80%（当前基线 ~86.2%）"""
+        rate = owasp_report["overall"]["detection_rate"]
+        assert rate >= 80, f"检测率 {rate}% < 80%"
+
+    def test_false_positive_rate(self, owasp_report):
+        """误报率 < 10%（当前基线 ~2.4%）"""
+        fpr = owasp_report["overall"]["false_positive_rate"]
+        assert fpr < 10, f"误报率 {fpr}% >= 10%"
+
+    def test_f1_score(self, owasp_report):
+        """F1 Score ≥ 0.85"""
+        f1 = owasp_report["overall"]["f1_score"]
+        assert f1 >= 0.85, f"F1 {f1} < 0.85"
+
+    def test_all_categories_above_70(self, owasp_report):
+        """所有OWASP类别检测率 ≥ 70%"""
+        failures = []
+        for name, cat in owasp_report["categories"].items():
+            if cat["detection_rate"] < 70:
+                failures.append(f"{cat['owasp_id']}: {cat['detection_rate']}%")
+        assert not failures, "以下类别检测率不达标:\n  " + "\n  ".join(failures)
+
+    def test_report_json_saved(self, owasp_report):
+        """验证结果JSON文件已生成"""
+        assert os.path.exists("tests/benchmark_owasp_results.json"), \
+            "结果文件 benchmark_owasp_results.json 未生成"
+
+
 if __name__ == "__main__":
     report = run_benchmark()

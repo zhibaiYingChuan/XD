@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Tuple, Union
 import numpy as np
 
 from daoti_xuandun.config import DefenseLevel, XuanDunConfig
-from daoti_xuandun.types import Decision, ProtectResult, TimingDecision, TrustLevel, Vector
+from daoti_xuandun.types import Decision, ProtectResult, TimingDecision, TrustLevel, Vector, RateLimitError
 
 if TYPE_CHECKING:
     from daoti_xuandun.reject_gate import EndogenousDomainAwareness
@@ -433,6 +433,44 @@ class XuanDun:
             return 1.0
         return self.domain_awareness.get_gray_deploy_ratio()
 
+    def get_output_guardrail_enabled(self) -> bool:
+        """返回输出护栏当前是否启用。"""
+        return self.output_guardrail is not None
+
+    def set_output_guardrail_enabled(self, enabled: bool) -> dict:
+        """运行时开关输出护栏（Output Guardrail）。
+
+        构造时若关闭（config.enable_output_guardrail=False），本方法可在运行期
+        动态初始化；关闭时置为 None，protect 流程通过 `self.output_guardrail is not None`
+        判断是否生效，无需重建 shield。
+        """
+        if enabled and self.output_guardrail is None:
+            from daoti_xuandun._check_output import OutputGuardrail
+            self.output_guardrail = OutputGuardrail(self.config)
+        elif not enabled:
+            self.output_guardrail = None
+        self.config.enable_output_guardrail = enabled
+        return {"ok": True, "output_guardrail": enabled}
+
+    def get_sensitive_leak_enabled(self) -> bool:
+        """返回敏感信息检测当前是否启用。"""
+        return self.sensitive_detector is not None
+
+    def set_sensitive_leak_enabled(self, enabled: bool) -> dict:
+        """运行时开关敏感信息泄露检测。
+
+        protect 流程通过 `self.sensitive_detector is not None` 判断是否执行检测，
+        本方法在运行期动态初始化或置空，无需重建 shield。
+        """
+        if enabled and self.sensitive_detector is None:
+            from daoti_xuandun.sensitive_leak import SensitiveLeakDetector
+            self.sensitive_detector = SensitiveLeakDetector(
+                custom_dict_path=getattr(self.config, "sensitive_dict_path", None))
+        elif not enabled:
+            self.sensitive_detector = None
+        self.config.enable_sensitive_leak = enabled
+        return {"ok": True, "sensitive_leak": enabled}
+
     def get_bypass_stats(self) -> dict:
         """返回逃生通道和灰度部署的统计信息。"""
         if self.domain_awareness is None:
@@ -447,6 +485,42 @@ class XuanDun:
 
     # ── 输出护栏（Output Guardrail）公开接口 ──
 
+    def get_session_state(self, session_id: str = "default") -> dict:
+        """返回指定会话的输入侧状态（供输出侧继承）。
+
+        输入-输出状态共享：输入侧的检测结果通过本方法传递给输出侧，
+        使输出侧能根据输入侧的信任度调整检测阈值。
+
+        Returns:
+            {
+                "trust_decay_value": float,       # 衰减后的信任度 [0, 1]
+                "intent_drift_score": float,     # 意图漂移评分
+                "intent_drift_detected": bool,   # 是否检测到漂移
+                "turn_count": int,               # 累计轮数
+                "boundary_residence": float,     # 边界驻留程度 [0, 1]
+                "boundary_residence_alert": bool, # 是否触发边界驻留告警
+            }
+        """
+        if self.timing_checker is not None:
+            state = self.timing_checker.get_session_state(session_id)
+            # 补充输入侧的自指问句分数（供输出侧 L2 阈值动态调整）
+            if self.domain_awareness is not None:
+                state["query_internal_score"] = float(
+                    self.domain_awareness._session_query_internal_score.get(session_id, 0.0)
+                )
+            else:
+                state["query_internal_score"] = 0.0
+            return state
+        return {
+            "trust_decay_value": 1.0,
+            "intent_drift_score": 0.0,
+            "intent_drift_detected": False,
+            "turn_count": 0,
+            "boundary_residence": 0.0,
+            "boundary_residence_alert": False,
+            "query_internal_score": 0.0,
+        }
+
     def check_output(self, text: Optional[str], session_id: str = "default") -> dict:
         """检测模型输出文本是否含违规内容（输出侧护栏）。
 
@@ -456,18 +530,26 @@ class XuanDun:
         - low    → 仅告警
         任何异常降级放行并告警，绝不断服务。
 
+        输入-输出状态共享：本方法继承输入侧的会话状态（信任度、边界驻留等），
+        当输入侧标记为"低信任会话"时，输出侧检测阈值自动降低，采取更严格的审核策略。
+
         Args:
             text: 模型输出的原始文本。
-            session_id: 会话标识符（保留，供后续会话级统计扩展）。
+            session_id: 会话标识符，用于读取输入侧累积的会话状态。
 
         Returns:
             输出护栏决策字典（含 allowed / risk_level / action / reason /
-            violation_distance / safe_distance）。
+            violation_distance / safe_distance / session_state）。
         """
         if self.output_guardrail is None:
             return {"enabled": False, "allowed": True, "risk_level": "pass",
                     "action": "pass", "reason": "输出护栏未启用"}
-        decision = self.output_guardrail.check_output(text)
+        # 读取输入侧会话状态，传递给输出侧护栏
+        session_state = self.get_session_state(session_id)
+        decision = self.output_guardrail.check_output(text, session_state=session_state, session_id=session_id)
+        # ── 攻击样本回灌：输出侧拦截的内容自动回灌到输入侧攻击原型库 ──
+        if decision.action == "block" and text:
+            self.feedback_blocked_output(text)
         return {
             "enabled": True,
             "allowed": decision.allowed,
@@ -478,6 +560,213 @@ class XuanDun:
             "safe_distance": decision.safe_distance,
             "degraded": decision.degraded,
         }
+
+    def feedback_blocked_output(self, text: Optional[str]) -> None:
+        """将输出侧拦截的违规内容回灌到输入侧攻击原型库。
+
+        双向闭环反馈：当 check_output 拦截了违规输出时，将该内容
+        编码后注入洛书映射器的 attack_prototypes，使输入侧后续能
+        更早地识别类似攻击意图。
+
+        去重由 luoshu_mapper.learn_attack 内部的频率门限保证。
+
+        Args:
+            text: 被输出侧拦截的违规文本。
+        """
+        if not text or not text.strip():
+            return
+        # 通过 domain_awareness 访问洛书映射器
+        mapper = None
+        if self.domain_awareness is not None and hasattr(self.domain_awareness, '_luoshu'):
+            mapper = self.domain_awareness._luoshu
+        if mapper is not None:
+            try:
+                state = mapper.encode(text)
+                mapper.learn_attack(state)
+            except Exception:
+                pass
+        # P3自我演化闭环：输出拦截内容回灌到结构异常检测的拒绝4-gram档案
+        # weight=0.3：输出侧拦截内容与直接输入攻击相关性较弱，使用低权重避免过度污染
+        if self.domain_awareness is not None:
+            try:
+                self.domain_awareness._update_rejected_fourgram_profile(text, weight=0.3)
+            except Exception:
+                pass
+
+    def correct_false_positive(self, text: str, side: str = "both") -> dict:
+        """管理员标记误报后的双向纠正。
+
+        当管理员判定某条文本被误判（输入侧误拦或输出侧误拦）时，
+        将该文本从对应的攻击/违规原型库中移除，并加入安全原型库，
+        使后续类似文本不再被误判。
+
+        Args:
+            text: 被误判的文本。
+            side: 纠正方向 — "input"（输入侧）、"output"（输出侧）
+                  或 "both"（同时纠正两侧）。
+
+        Returns:
+            纠正结果字典，含 corrected/side/detail 等字段。
+        """
+        if not text or not text.strip():
+            return {"corrected": False, "side": side, "message": "空文本，无需纠正"}
+
+        result = {"corrected": False, "side": side, "detail": {}}
+
+        if side not in ("input", "output", "both"):
+            return {"corrected": False, "side": side,
+                    "error": f"无效的 side 参数: {side}，应为 input/output/both"}
+
+        corrected_any = False
+
+        # ── 输入侧纠正 ──
+        if side in ("input", "both"):
+            mapper = None
+            if self.domain_awareness is not None and hasattr(self.domain_awareness, '_luoshu'):
+                mapper = self.domain_awareness._luoshu
+            if mapper is not None:
+                try:
+                    state = mapper.encode(text)
+                    # 加入安全原型
+                    mapper.learn_safe(state)
+
+                    # 从攻击原型中移除最相似的条目
+                    removed = self._remove_nearest_attack_prototype(state)
+
+                    # 误报反馈闭环：将误报文本播种为安全域原型，
+                    # 使后续类似文本的距离检测不再误判为域外攻击
+                    if self.domain_awareness is not None:
+                        try:
+                            self.domain_awareness.seed_prototype(text)
+                        except Exception:
+                            pass
+
+                    result["detail"]["input"] = {
+                        "learned_safe": True,
+                        "removed_attack": removed,
+                        "seeded_prototype": True,
+                    }
+                    corrected_any = True
+                except Exception as e:
+                    result["detail"]["input"] = {"error": str(e)}
+            else:
+                result["detail"]["input"] = {"error": "洛书映射器未初始化"}
+
+        # ── 输出侧纠正 ──
+        if side in ("output", "both") and self.output_guardrail is not None:
+            try:
+                # 加入安全输出原型
+                self.output_guardrail.learn_safe_output(text)
+
+                # 从违规原型中移除最相似的条目
+                removed = self._remove_nearest_violation_prototype(text)
+                result["detail"]["output"] = {
+                    "learned_safe": True,
+                    "removed_violation": removed,
+                }
+                corrected_any = True
+            except Exception as e:
+                result["detail"]["output"] = {"error": str(e)}
+
+        result["corrected"] = corrected_any
+        return result
+
+    def detect_tool_call(self, user_input: str, tool_name: str,
+                         arguments: Optional[dict] = None,
+                         server_id: Optional[str] = None):
+        """MCP/Agent 工具调用安全检测。
+
+        结合用户的原始输入文本和工具名称/参数，
+        分析用户调用工具的"真实意图"是否构成风险。
+
+        Args:
+            user_input: 用户原始输入文本（用于意图检测）
+            tool_name: 工具名称（如 "execute_command", "fs_read_file"）
+            arguments: 工具调用参数字典
+            server_id: MCP 服务器 ID
+
+        Returns:
+            ToolCallRisk: 风险评估结果
+        """
+        from daoti_xuandun.tool_detector import evaluate_tool_call
+        return evaluate_tool_call(user_input, tool_name, arguments, server_id)
+
+    def _remove_nearest_attack_prototype(self, state: np.ndarray) -> bool:
+        """从洛书映射器的攻击原型库中移除与 state 最相似的条目。
+
+        Args:
+            state: 洛书空间状态向量。
+
+        Returns:
+            True 如果成功移除一个条目，False 如果库为空或未找到足够相似的条目。
+        """
+        mapper = None
+        if self.domain_awareness is not None and hasattr(self.domain_awareness, '_luoshu'):
+            mapper = self.domain_awareness._luoshu
+        if mapper is None or not mapper.attack_prototypes:
+            return False
+        try:
+            state_176 = mapper._to_native(state)
+            state_norm = mapper._normalize(state_176)
+            protos = np.array(mapper.attack_prototypes, dtype=np.float32)
+            norms = np.linalg.norm(protos, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-8)
+            protos_norm = protos / norms
+            sims = protos_norm @ state_norm
+            best_idx = int(np.argmax(sims))
+            best_sim = float(sims[best_idx])
+            # 仅当相似度 > 0.7 时才移除，避免误删不相关的条目
+            if best_sim > 0.7:
+                removed = mapper.attack_prototypes.pop(best_idx)
+                fp = mapper._fingerprint(removed)
+                if fp in mapper._attack_fingerprint_counter:
+                    mapper._attack_fingerprint_counter[fp] = max(
+                        0, mapper._attack_fingerprint_counter[fp] - 1
+                    )
+                    if mapper._attack_fingerprint_counter[fp] == 0:
+                        del mapper._attack_fingerprint_counter[fp]
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _remove_nearest_violation_prototype(self, text: str) -> bool:
+        """从输出护栏的违规原型库中移除与 text 最相似的条目。
+
+        Args:
+            text: 被误判的输出文本。
+
+        Returns:
+            True 如果成功移除一个条目，False 如果库为空或未找到足够相似的条目。
+        """
+        guardrail = self.output_guardrail
+        if guardrail is None or not guardrail._violation_prototypes:
+            return False
+        try:
+            state = guardrail._encode(text)
+            state_176 = guardrail._to_native(state)
+            state_norm = guardrail._normalize(state_176)
+            protos = np.array(guardrail._violation_prototypes, dtype=np.float32)
+            norms = np.linalg.norm(protos, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-8)
+            protos_norm = protos / norms
+            sims = protos_norm @ state_norm
+            best_idx = int(np.argmax(sims))
+            best_sim = float(sims[best_idx])
+            # 仅当相似度 > 0.7 时才移除
+            if best_sim > 0.7:
+                removed = guardrail._violation_prototypes.pop(best_idx)
+                fp = guardrail._fingerprint(removed)
+                if fp in guardrail._violation_fingerprint_counter:
+                    guardrail._violation_fingerprint_counter[fp] = max(
+                        0, guardrail._violation_fingerprint_counter[fp] - 1
+                    )
+                    if guardrail._violation_fingerprint_counter[fp] == 0:
+                        del guardrail._violation_fingerprint_counter[fp]
+                return True
+            return False
+        except Exception:
+            return False
 
     def resolve_output(self, text: str, decision: dict) -> str:
         """根据输出护栏决策返回最终输出文本（拦截/打码/原样）。
@@ -1183,7 +1472,7 @@ th {{ background: #f5f5f5; }}
 
             if self._global_requests > limit:
                 self._global_requests -= 1
-                raise RuntimeError(
+                raise RateLimitError(
                     f"Global QPS limit ({limit}/s) exceeded. "
                     "Request dropped to prevent resource exhaustion."
                 )
@@ -1199,7 +1488,7 @@ th {{ background: #f5f5f5; }}
             return
         n = len(raw_input)
         if n > limit:
-            raise RuntimeError(
+            raise RateLimitError(
                 f"Request length ({n} chars) exceeds limit ({limit} chars). "
                 "Oversized input blocked to prevent GPU memory exhaustion."
             )
@@ -1232,7 +1521,7 @@ th {{ background: #f5f5f5; }}
             slot["min_cnt"] = int(slot["min_cnt"]) + 1
             if int(slot["min_cnt"]) > min_limit:
                 slot["min_cnt"] = int(slot["min_cnt"]) - 1
-                raise RuntimeError(
+                raise RateLimitError(
                     f"Session '{session_id}' minute quota ({min_limit}/min) exceeded. "
                     "Request throttled to prevent abuse."
                 )
@@ -1244,7 +1533,7 @@ th {{ background: #f5f5f5; }}
             slot["hr_cnt"] = int(slot["hr_cnt"]) + 1
             if int(slot["hr_cnt"]) > hr_limit:
                 slot["hr_cnt"] = int(slot["hr_cnt"]) - 1
-                raise RuntimeError(
+                raise RateLimitError(
                     f"Session '{session_id}' hour quota ({hr_limit}/hr) exceeded. "
                     "Request throttled to prevent abuse."
                 )

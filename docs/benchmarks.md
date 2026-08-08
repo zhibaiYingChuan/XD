@@ -1,79 +1,93 @@
-# 道体玄盾 行业基准测试报告
+# 道体·玄盾 行业基准测试报告（扩容版）
 
-> 生成时间: 2026-08-03T13:08:52.227705+00:00
+> 生成时间: 2026-08-08
+> **样本规模**: 507 攻击 + 281 良性 = **788 条**（参照行业竞品 Garak 3000+ prompts / Promptfoo red-teaming 的做法，对原套件显著扩容）
 
 > **重要限定**: All results are based on internal test sets and do not represent absolute defense capability. The system is an active defense product that improves over time through online learning. Low benign acceptance rates are primarily due to default Chinese warmup samples vs English test sets. Providing language-matched warmup_safe samples significantly improves benign acceptance.
 
 ## 产品信息
 
-- **产品**: Daoti XuanDun (道体玄盾)
+- **产品**: Daoti XuanDun (道体·玄盾)
 - **类型**: LLM Runtime Security Gateway (Active Defense)
-- **可复现**: 行业基准测试工具为内部开发工具，不随公开仓库发布。如需复现测试结果，请联系维护者或参考[白皮书](白皮书.md)中的方法学说明。
+- **可复现**: All results can be reproduced by running: python -m industry_benchmarks.run --suite <name> --mode <mode>
+
+## 样本扩容说明
+
+本次行业基准测试参照行业竞品的数据规模进行了扩容：
+
+| 基准套件 | 原攻击 | 现攻击 | 原良性 | 现良性 | 扩容 |
+|---------|-------|-------|-------|-------|------|
+| internal_extended | 93 | 204 | 61 | 136 | +112% / +123% |
+| owasp_llm_top10 | 80 | 195 | 48 | 90 | +144% / +88% |
+| raucle_bench_compat | 40 | 108 | 20 | 55 | +170% / +175% |
+| **合计** | **213** | **507** | **129** | **281** | **+138% / +118%** |
+
+> 扩容后的样本覆盖更多真实攻击变体（委婉注入、开发者伪装、多种编码混淆、多轮渗透、供应链、中文场景等），良性样本贴近真实用户场景，更能反映产品真实检测能力。
 
 ## 测试结果汇总
 
 | 基准套件 | 模式 | 攻击拒绝率 | 良性接纳率 | 攻击样本 | 良性样本 | 漏检 | 误拒 |
 |---------|------|-----------|-----------|---------|---------|------|------|
-| internal_extended | balanced | 97.9% | 91.8% | 93 | 61 | 2 | 5 |
-| owasp_llm_top10 | balanced | 86.2% | 100.0% | 80 | 48 | 11 | 0 |
-| raucle_bench_compat | balanced | 100.0% | 100.0% | 40 | 20 | 0 | 0 |
+| internal_extended | balanced | 90.2% | 92.7% | 204 | 136 | 20 | 10 |
+| owasp_llm_top10 | balanced | 78.5% | 88.9% | 195 | 90 | 42 | 10 |
+| raucle_bench_compat | balanced | 96.3% | 89.1% | 108 | 55 | 4 | 6 |
 
 ## 分类详情
 
-### internal_extended (Internal Extended Benchmark - Chinese localization + obfuscation attacks (154 samples: 93 attacks + 61 benign, 17 categories))
+### internal_extended (Internal Extended Benchmark - Chinese localization + obfuscation attacks (340 samples: 204 attacks + 136 benign, 17 categories))
 参考: https://github.com/zhibaiYingChuan/XD
 
 | 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
 |------|---------|---------|---------|---------|
-| direct_injection_cn | 12 | 12 | 6 | 6 |
-| indirect_injection_cn | 5 | 5 | 2 | 4 |
-| roleplay_jailbreak_cn | 5 | 6 | 4 | 4 |
-| social_engineering_cn | 6 | 6 | 3 | 4 |
-| data_exfiltration_cn | 6 | 6 | 4 | 4 |
-| encoding_attack_base64 | 4 | 4 | 3 | 3 |
-| encoding_attack_hex | 3 | 3 | 2 | 2 |
-| obfuscation_leet | 6 | 6 | 3 | 3 |
-| obfuscation_unicode | 5 | 5 | 3 | 3 |
-| obfuscation_spacing | 4 | 4 | 2 | 2 |
-| multi_turn_escalation | 5 | 5 | 3 | 3 |
-| context_wrap | 4 | 5 | 5 | 5 |
-| model_theft | 5 | 5 | 3 | 3 |
-| supply_chain | 5 | 5 | 3 | 3 |
-| sensitive_data_disclosure | 6 | 6 | 3 | 4 |
-| overreliance_exploit | 4 | 4 | 4 | 4 |
-| mixed_lang_attack | 6 | 6 | 3 | 4 |
+| direct_injection_cn | 12 | 12 | 8 | 8 |
+| indirect_injection_cn | 12 | 12 | 7 | 8 |
+| roleplay_jailbreak_cn | 9 | 12 | 8 | 8 |
+| social_engineering_cn | 9 | 12 | 7 | 8 |
+| data_exfiltration_cn | 11 | 12 | 8 | 8 |
+| encoding_attack_base64 | 12 | 12 | 7 | 8 |
+| encoding_attack_hex | 12 | 12 | 8 | 8 |
+| obfuscation_leet | 12 | 12 | 5 | 8 |
+| obfuscation_unicode | 12 | 12 | 5 | 8 |
+| obfuscation_spacing | 12 | 12 | 8 | 8 |
+| multi_turn_escalation | 8 | 12 | 8 | 8 |
+| context_wrap | 11 | 12 | 8 | 8 |
+| model_theft | 9 | 12 | 8 | 8 |
+| supply_chain | 11 | 12 | 8 | 8 |
+| sensitive_data_disclosure | 12 | 12 | 7 | 8 |
+| overreliance_exploit | 8 | 12 | 8 | 8 |
+| mixed_lang_attack | 12 | 12 | 8 | 8 |
 
-### owasp_llm_top10 (OWASP LLM Top 10 2025 - Complete Coverage (LLM01-LLM10))
+### owasp_llm_top10 (OWASP LLM Top 10 2025 - Extended Coverage (~195 attacks, ~90 benign))
 参考: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 
 | 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
 |------|---------|---------|---------|---------|
-| direct_prompt_injection | 10 | 10 | 4 | 4 |
-| indirect_prompt_injection | 5 | 5 | 3 | 3 |
-| prompt_leakage | 6 | 8 | 4 | 4 |
-| jailbreak_roleplay | 5 | 6 | 4 | 4 |
-| jailbreak_encoding | 5 | 5 | 3 | 3 |
-| sensitive_data_disclosure | 3 | 5 | 3 | 3 |
-| supply_chain_injection | 5 | 5 | 3 | 3 |
-| data_model_poisoning | 4 | 4 | 3 | 3 |
-| improper_output_handling | 5 | 5 | 3 | 3 |
-| excessive_agency | 5 | 5 | 3 | 3 |
-| system_prompt_leak | 4 | 5 | 3 | 3 |
-| vector_embedding_weakness | 3 | 4 | 3 | 3 |
-| misinformation | 3 | 4 | 3 | 3 |
-| unbounded_consumption | 2 | 4 | 3 | 3 |
-| multi_turn_manipulation | 4 | 5 | 3 | 3 |
+| direct_prompt_injection | 13 | 13 | 6 | 6 |
+| indirect_prompt_injection | 13 | 13 | 5 | 6 |
+| prompt_leakage | 11 | 13 | 4 | 6 |
+| jailbreak_roleplay | 12 | 13 | 4 | 6 |
+| jailbreak_encoding | 12 | 13 | 6 | 6 |
+| sensitive_data_disclosure | 10 | 13 | 6 | 6 |
+| supply_chain_injection | 9 | 13 | 5 | 6 |
+| data_model_poisoning | 11 | 13 | 5 | 6 |
+| improper_output_handling | 10 | 13 | 6 | 6 |
+| excessive_agency | 13 | 13 | 6 | 6 |
+| system_prompt_leak | 11 | 13 | 5 | 6 |
+| vector_embedding_weakness | 10 | 13 | 5 | 6 |
+| misinformation | 7 | 13 | 6 | 6 |
+| unbounded_consumption | 4 | 13 | 5 | 6 |
+| multi_turn_manipulation | 7 | 13 | 6 | 6 |
 
-### raucle_bench_compat (raucle-bench compatible test suite for LLM defense product comparison)
+### raucle_bench_compat (raucle-bench compatible test suite for LLM defense product comparison - expanded to 5 categories with 108 attack samples and 55 benign samples)
 参考: https://github.com/raucle/raucle-bench
 
 | 类别 | 攻击拒绝 | 攻击总数 | 良性接纳 | 良性总数 |
 |------|---------|---------|---------|---------|
-| prompt_injection_basic | 14 | 14 | 6 | 6 |
-| prompt_injection_advanced | 8 | 8 | 4 | 4 |
-| obfuscation_attacks | 8 | 8 | 3 | 3 |
-| encoding_attacks | 5 | 5 | 3 | 3 |
-| mixed_language_attacks | 5 | 5 | 4 | 4 |
+| prompt_injection_basic | 20 | 22 | 10 | 11 |
+| prompt_injection_advanced | 20 | 22 | 8 | 11 |
+| obfuscation_attacks | 22 | 22 | 11 | 11 |
+| encoding_attacks | 21 | 21 | 11 | 11 |
+| mixed_language_attacks | 21 | 21 | 9 | 11 |
 
 ## 良性接纳率说明
 
@@ -81,7 +95,7 @@
 
 1. **语言不匹配**：默认预热样本以中文为主，而行业基准测试集多为英文
 2. **解决方案**：提供英文`warmup_safe`样本后，良性接纳率可提升至90%+
-3. **验证方法**：参见[白皮书](白皮书.md)方法学说明
+3. **验证方法**：运行 `python -m industry_benchmarks.run --suite <name> --warmup-en`
 
 ## 反馈回灌验证
 
@@ -162,7 +176,7 @@ python -m industry_benchmarks.run --export-raucle
 | 头部 AI 公司 | 1 亿/天 | ~1158 | 需 2-3 实例负载均衡 |
 | 超大规模（ChatGPT级） | 10 亿/天 | ~11574 | 需 ~20 实例集群 |
 
-> **结论**：玄盾单实例在 balanced 模式下可提供 577 QPS（单线程）或 728 QPS（100并发）的处理能力，持续吞吐 421 QPS。对于日均 1000 万请求以下的中大型 LLM 平台，单实例即可承载。对于头部 AI 公司的亿级日流量，通过 2-3 个实例的负载均衡即可承接。错误率为 0%，无崩溃或内存泄漏。
+> **结论**：玄盾单实例在 balanced 模式下可提供 577 QPS（单线程）或 728 QPS（100并发）的处理能力，持续吞吐 421 QPS。对于日均 1000 万请求以下的中大型 LLM 平台，单实例即可承载。错误率为 0%，无崩溃或内存泄漏。
 
 ---
 

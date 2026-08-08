@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401 (py38 com
 # daoti_xuandun - 道体玄盾 AI运行时安全网关
 # Implements §1.3 交付形态 — 道体动态活性架构
 
-__version__ = "1.3.2"
+__version__ = "1.3.3-beta"
 
 from daoti_xuandun.config import DefenseLevel, XuanDunConfig
 from daoti_xuandun.types import (

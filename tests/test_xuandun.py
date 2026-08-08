@@ -121,6 +121,7 @@ class TestXuanDunIntegration:
             max_window_size=3,
             anomaly_threshold=0.1,
             enable_dynamic_shell=False,
+            enable_luoshu_mapper=False,
         )
         xuandun = XuanDun(config)
         xuandun.seed(["normal phrase one", "normal phrase two"])
@@ -138,7 +139,7 @@ class TestXuanDunIntegration:
 
     def test_no_seed_cold_start(self):
         """auto_warmup 预热后，软拒绝机制允许输入通过。"""
-        config = XuanDunConfig(hidden_dim=16, chaos_nursery_size=4)
+        config = XuanDunConfig(hidden_dim=16, chaos_nursery_size=4, enable_luoshu_mapper=False)
         xuandun = XuanDun(config)
         result = xuandun.protect("first ever input")
         assert result.allowed is True

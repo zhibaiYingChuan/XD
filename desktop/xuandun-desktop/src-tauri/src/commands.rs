@@ -460,34 +460,6 @@ pub async fn get_learning_status(state: State<'_, Mutex<EngineState>>) -> Result
     engine_get(&engine_url, "/learning/status").await
 }
 
-#[tauri::command]
-pub async fn switch_learning_mode(
-    state: State<'_, Mutex<EngineState>>,
-    mode: String,
-) -> Result<serde_json::Value, String> {
-    let (engine_url, is_running) = {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        (s.get_engine_url(), s.running)
-    };
-    if !is_running {
-        return Err("Engine not running".to_string());
-    }
-    let body = serde_json::json!({ "mode": mode });
-    engine_post(&engine_url, "/mode/switch", body).await
-}
-
-#[tauri::command]
-pub async fn get_learning_details(state: State<'_, Mutex<EngineState>>) -> Result<serde_json::Value, String> {
-    let (engine_url, is_running) = {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        (s.get_engine_url(), s.running)
-    };
-    if !is_running {
-        return Ok(serde_json::json!({}));
-    }
-    engine_get(&engine_url, "/learning/details").await
-}
-
 // ── 双层架构（外门/内门）指标查询 ──
 
 #[tauri::command]
@@ -729,30 +701,6 @@ pub async fn get_bypass_stats(state: State<'_, Mutex<EngineState>>) -> Result<se
 }
 
 #[tauri::command]
-pub async fn run_simulation(
-    state: State<'_, Mutex<EngineState>>,
-    mode: String,
-    categories: Option<Vec<String>>,
-    custom_texts: Option<Vec<String>>,
-) -> Result<serde_json::Value, String> {
-    let (engine_url, is_running) = {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        (s.get_engine_url(), s.running)
-    };
-    if !is_running {
-        return Err("Engine not running".to_string());
-    }
-    let mut body = serde_json::json!({ "mode": mode });
-    if let Some(cats) = categories {
-        body["categories"] = serde_json::json!(cats);
-    }
-    if let Some(texts) = custom_texts {
-        body["custom_texts"] = serde_json::json!(texts);
-    }
-    engine_post(&engine_url, "/simulation/run", body).await
-}
-
-#[tauri::command]
 pub async fn send_notification(
     app: tauri::AppHandle,
     title: String,
@@ -840,128 +788,6 @@ pub async fn get_comparison_stats(
     Ok(ComparisonStats { current, baseline })
 }
 
-fn attack_category_name_cn(key: &str) -> &'static str {
-    match key {
-        "direct_prompt_injection" => "直接提示注入",
-        "indirect_prompt_injection" => "间接提示注入",
-        "jailbreak" => "越狱攻击",
-        "encoding_obfuscation" => "编码混淆",
-        "agent_attack" => "Agent攻击",
-        "data_leakage" => "数据泄露",
-        "other" => "其他",
-        _ => "未知",
-    }
-}
-
-/// HTML 实体转义，防止 XSS 攻击。
-/// 对所有插入 HTML 的用户输入必须调用此函数。
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            '/' => out.push_str("&#x2f;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// 按字符边界安全截断字符串，避免中文字符被字节切片切断导致 panic。
-/// 返回截断后的字符串（不含省略号），调用方按需追加 "..."。
-fn safe_truncate_chars(s: &str, max_chars: usize) -> String {
-    s.chars().take(max_chars).collect()
-}
-
-fn render_report_html(data: &crate::db::ReportData, report_type: &str, start: &str, end: &str) -> String {
-    let type_label = match report_type { "weekly" => "周报", "monthly" => "月报", _ => "自定义报告" };
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let cat_rows: String = data.categories.iter().take(10).map(|c| {
-        let pct = if data.total_blocked > 0 { c.count as f64 / data.total_blocked as f64 * 100.0 } else { 0.0 };
-        format!("<tr><td>{}</td><td>{}</td><td>{:.1}%</td></tr>", html_escape(attack_category_name_cn(&c.category)), c.count, pct)
-    }).collect::<Vec<_>>().join("");
-    let cat_rows = if cat_rows.is_empty() { "<tr><td colspan=\"3\">无攻击记录</td></tr>".to_string() } else { cat_rows };
-
-    let sample_rows: String = data.samples.iter().map(|s| {
-        let cat = s.attack_category.as_deref().map(attack_category_name_cn).unwrap_or("未知");
-        let stage = s.reject_stage.as_deref().unwrap_or("--");
-        // 安全截断：按字符边界，避免中文切片 panic
-        let truncated = safe_truncate_chars(&s.text_preview, 50);
-        let text_display = if s.text_preview.chars().count() > 50 {
-            format!("{}...", html_escape(&truncated))
-        } else {
-            html_escape(&truncated)
-        };
-        format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", text_display, html_escape(cat), html_escape(stage))
-    }).collect::<Vec<_>>().join("");
-    let sample_rows = if sample_rows.is_empty() { "<tr><td colspan=\"3\">无拦截样本</td></tr>".to_string() } else { sample_rows };
-
-    let cat_bars: String = data.categories.iter().take(6).map(|c| {
-        let pct = if data.total_blocked > 0 { c.count as f64 / data.total_blocked as f64 * 100.0 } else { 0.0 };
-        format!("<div style=\"margin:4px 0\"><span style=\"display:inline-block;width:120px\">{}</span><div style=\"display:inline-block;width:200px;height:16px;background:#e0e0e0;border-radius:4px\"><div style=\"width:{:.0}%;height:100%;background:#4ecdc4;border-radius:4px\"></div></div><span style=\"margin-left:8px\">{} ({:.1}%)</span></div>", html_escape(attack_category_name_cn(&c.category)), pct, c.count, pct)
-    }).collect::<Vec<_>>().join("");
-
-    // 安全截断日期字符串，避免边界 panic
-    let start_date = safe_truncate_chars(start, 10);
-    let end_date = safe_truncate_chars(end, 10);
-
-    format!("<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><title>道体·玄盾 安全{type_label}</title><style>body{{font-family:sans-serif;max-width:900px;margin:0 auto;padding:20px;color:#333}}h1{{color:#4ecdc4;border-bottom:2px solid #4ecdc4;padding-bottom:8px}}h2{{color:#45b7d1;margin-top:24px}}table{{border-collapse:collapse;width:100%;margin:12px 0}}th,td{{border:1px solid #ddd;padding:8px;font-size:13px;text-align:left}}th{{background:#f5f5f5}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}}.item{{background:#f9f9f9;padding:12px;border-radius:8px;text-align:center}}.val{{font-size:24px;font-weight:700;color:#4ecdc4}}.lbl{{font-size:12px;color:#999}}.footer{{margin-top:32px;padding-top:12px;border-top:1px solid #ddd;font-size:12px;color:#999}}</style></head><body><h1>道体玄盾 安全{type_label}</h1><p>报告周期：{} 至 {} | 生成时间：{}</p><h2>1. 概要摘要</h2><div class=\"grid\"><div class=\"item\"><div class=\"val\">{}</div><div class=\"lbl\">总请求数</div></div><div class=\"item\"><div class=\"val\" style=\"color:#ff6b6b\">{}</div><div class=\"lbl\">拦截次数</div></div><div class=\"item\"><div class=\"val\">{:.1}%</div><div class=\"lbl\">拦截率</div></div><div class=\"item\"><div class=\"val\">{}</div><div class=\"lbl\">放行次数</div></div></div><h2>2. 攻击类型分布</h2>{}<table><thead><tr><th>攻击类型</th><th>拦截量</th><th>占比</th></tr></thead><tbody>{}</tbody></table><h2>3. 代表性拦截样本</h2><table><thead><tr><th>文本摘要</th><th>攻击分类</th><th>拦截阶段</th></tr></thead><tbody>{}</tbody></table><div class=\"footer\"><p>本报告由道体玄盾自动生成 | SPDX-License-Identifier: DaoTi-Research-1.0</p></div></body></html>",
-        html_escape(&start_date), html_escape(&end_date), html_escape(&now),
-        data.total_requests, data.total_blocked, data.block_rate, data.total_allowed,
-        cat_bars, cat_rows, sample_rows)
-}
-
-#[tauri::command]
-pub async fn generate_report(
-    db: State<'_, Database>,
-    report_type: String,
-    start: String,
-    end: String,
-) -> Result<i64, String> {
-    let data = db.get_report_data(&start, &end)?;
-    let html = render_report_html(&data, &report_type, &start, &end);
-    let summary = format!("{{\"total\":{},\"blocked\":{},\"block_rate\":{:.2}}}", data.total_requests, data.total_blocked, data.block_rate);
-    let report_id = db.insert_report(&report_type, &start, &end, "html", html.as_bytes(), Some(&summary), Some("manual"))?;
-    Ok(report_id)
-}
-
-#[tauri::command]
-pub async fn list_reports(
-    db: State<'_, Database>,
-    limit: Option<usize>,
-) -> Result<Vec<crate::db::ReportSummary>, String> {
-    db.list_reports(limit.unwrap_or(50))
-}
-
-#[tauri::command]
-pub async fn get_report(
-    db: State<'_, Database>,
-    report_id: i64,
-) -> Result<serde_json::Value, String> {
-    let reports = db.list_reports(1000)?;
-    let summary = reports.iter().find(|r| r.id == report_id).cloned();
-    let (content, format) = db.get_report_content(report_id)?;
-    let content_str = String::from_utf8(content).map_err(|e| format!("Report content decode failed: {}", e))?;
-    Ok(serde_json::json!({
-        "summary": summary,
-        "content": content_str,
-        "format": format,
-    }))
-}
-
-#[tauri::command]
-pub async fn delete_report(
-    db: State<'_, Database>,
-    report_id: i64,
-) -> Result<(), String> {
-    db.delete_report(report_id)
-}
-
 #[tauri::command]
 pub async fn save_notifier_config(
     db: State<'_, Database>,
@@ -1032,4 +858,64 @@ pub fn noop_heartbeat() -> Result<serde_json::Value, String> {
         "ok": true,
         "ts": chrono::Utc::now().timestamp_millis()
     }))
+}
+
+// ── 上游模型配置（可视化表单）──
+// 配置存 DB config 表（upstream_url / upstream_api_key / upstream_model / upstream_timeout），
+// 引擎启动时由 start_engine_sidecar 读取并注入环境变量（XUANDUN_UPSTREAM_*）。
+// 用户无需修改代码/设置系统环境变量，直接在设置页表单填写即可。
+
+fn default_upstream_timeout() -> f64 { 300.0 }
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamConfig {
+    /// 上游模型 OpenAI 兼容地址（如 https://api.openai.com/v1）
+    pub url: String,
+    /// 上游 API Key（可空，私有化模型无需鉴权）
+    pub api_key: String,
+    /// 默认模型名（可空，缺省用请求里的 model）
+    pub model: String,
+    /// 请求上游超时秒数（默认 300）
+    #[serde(default = "default_upstream_timeout")]
+    pub timeout: f64,
+}
+
+impl UpstreamConfig {
+    fn from_db(db: &Database) -> Result<Self, String> {
+        let url = db.get_config("upstream_url")?.unwrap_or_default();
+        let api_key = db.get_config("upstream_api_key")?.unwrap_or_default();
+        let model = db.get_config("upstream_model")?.unwrap_or_default();
+        let timeout = db.get_config("upstream_timeout")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300.0);
+        Ok(Self { url, api_key, model, timeout })
+    }
+}
+
+/// 读取上游模型配置（设置页回显）
+#[tauri::command]
+pub fn get_upstream_config(db: State<'_, Database>) -> Result<UpstreamConfig, String> {
+    UpstreamConfig::from_db(&db)
+}
+
+/// 保存上游模型配置到 DB。校验 URL 格式；配置需重启引擎后生效（engine.rs 启动时注入）。
+#[tauri::command]
+pub fn set_upstream_config(
+    db: State<'_, Database>,
+    config: UpstreamConfig,
+) -> Result<(), String> {
+    let url = config.url.trim().to_string();
+    if url.is_empty() {
+        return Err("上游模型地址不能为空".to_string());
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("上游模型地址必须以 http:// 或 https:// 开头".to_string());
+    }
+    let timeout = if config.timeout <= 0.0 { 300.0 } else { config.timeout };
+    db.set_config("upstream_url", &url)?;
+    db.set_config("upstream_api_key", config.api_key.trim())?;
+    db.set_config("upstream_model", config.model.trim())?;
+    db.set_config("upstream_timeout", &timeout.to_string())?;
+    Ok(())
 }

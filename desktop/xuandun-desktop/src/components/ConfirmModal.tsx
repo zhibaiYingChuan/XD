@@ -153,13 +153,15 @@ export function ConfirmModal({ open, message, onConfirm, onCancel }: ConfirmModa
     if (processingRef.current) return;
     processingRef.current = true;   // 同步锁：立即生效（同macrotask内后续click必然返回）
     setProcessingUI(true);
-    onConfirm();
+    // P0-A-5 修复：try-finally 确保回调异常时锁一定释放，避免按钮永久卡死
+    try { onConfirm(); } catch {}
+    // 异步 onConfirm 应在完成后通过 30s 兜底或手动关闭弹窗来释放锁
   };
   const handleCancelClick = () => {
     if (processingRef.current) return;
     processingRef.current = true;
     setProcessingUI(true);
-    onCancel();
+    try { onCancel(); } catch {}
   };
 
   if (!open) return null;

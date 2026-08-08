@@ -1,6 +1,6 @@
 [package]
 name = "xuandun-desktop"
-version = "1.3.2"
+version = "1.3.3-beta"
 description = "道体玄盾 桌面安全守护"
 authors = ["Daoti Team"]
 edition = "2021"

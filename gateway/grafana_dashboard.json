@@ -1,0 +1,158 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0"},
+    {"type": "panel", "id": "timeseries", "name": "Time series", "version": ""},
+    {"type": "panel", "id": "stat", "name": "Stat", "version": ""},
+    {"type": "panel", "id": "gauge", "name": "Gauge", "version": ""},
+    {"type": "panel", "id": "table", "name": "Table", "version": ""}
+  ],
+  "title": "玄盾 AI安全网关 — 实时监控面板",
+  "description": "Prometheus 数据源，监控玄盾网关的拦截率、延迟、吞吐量和错误率",
+  "tags": ["xuandun", "ai-security", "gateway", "llm"],
+  "timezone": "browser",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1, "title": "请求速率 (req/s)",
+      "type": "stat", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3},
+      "targets": [{
+        "expr": "rate(xuandun_requests_total[1m])",
+        "legendFormat": "请求/秒"
+      }],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "decimals": 1}
+      }
+    },
+    {
+      "id": 2, "title": "拦截率",
+      "type": "gauge", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3},
+      "targets": [{
+        "expr": "xuandun_block_rate",
+        "legendFormat": "拦截率 %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 30, "color": "yellow"},
+              {"value": 70, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3, "title": "P50 延迟 (ms)",
+      "type": "stat", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3},
+      "targets": [{
+        "expr": "xuandun_latency_p50_ms",
+        "legendFormat": "P50 ms"
+      }],
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "decimals": 2}
+      }
+    },
+    {
+      "id": 4, "title": "P95 延迟 (ms)",
+      "type": "stat", "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3},
+      "targets": [{
+        "expr": "xuandun_latency_p95_ms",
+        "legendFormat": "P95 ms"
+      }],
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "decimals": 2}
+      }
+    },
+    {
+      "id": 5, "title": "请求处理趋势",
+      "type": "timeseries", "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(xuandun_requests_total[1m])",
+          "legendFormat": "总请求速率",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(xuandun_blocks_total[1m])",
+          "legendFormat": "拦截速率",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(xuandun_passes_total[1m])",
+          "legendFormat": "放行速率",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"fillOpacity": 20, "lineWidth": 2}
+        }
+      }
+    },
+    {
+      "id": 6, "title": "延迟趋势",
+      "type": "timeseries", "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "xuandun_latency_p50_ms",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "xuandun_latency_p95_ms",
+          "legendFormat": "P95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {"fillOpacity": 15, "lineWidth": 2}
+        }
+      }
+    },
+    {
+      "id": 7, "title": "累计统计",
+      "type": "table", "gridPos": {"x": 0, "y": 11, "w": 12, "h": 5},
+      "targets": [
+        {"expr": "xuandun_requests_total", "legendFormat": "请求总数"},
+        {"expr": "xuandun_blocks_total", "legendFormat": "拦截总数"},
+        {"expr": "xuandun_passes_total", "legendFormat": "放行总数"},
+        {"expr": "xuandun_errors_total", "legendFormat": "错误总数"},
+        {"expr": "xuandun_uptime_seconds", "legendFormat": "运行时长(s)"}
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}}
+      ]
+    },
+    {
+      "id": 8, "title": "错误率",
+      "type": "gauge", "gridPos": {"x": 12, "y": 11, "w": 12, "h": 5},
+      "targets": [{
+        "expr": "rate(xuandun_errors_total[5m]) / rate(xuandun_requests_total[5m]) * 100",
+        "legendFormat": "错误率 %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 1, "color": "yellow"},
+              {"value": 5, "color": "orange"},
+              {"value": 10, "color": "red"}
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "schemaVersion": 36,
+  "version": 1
+}

@@ -3,7 +3,7 @@ import { api, LearningStatus, formatInvokeError, DualLayerStats, OutputConfigRes
 // 设计系统规范：图标统一使用 lucide-react，strokeWidth=1.5，禁止 emoji
 import {
   CheckCircle, AlertTriangle, Lightbulb, RefreshCw, Square, Upload,
-  Smartphone, MessageSquare, Mail, Link, Monitor, Zap, Brain,
+  Smartphone, MessageSquare, Mail, Link, Monitor, Zap, Brain, Server,
   ChevronDown, ChevronRight, type LucideIcon,
 } from 'lucide-react';
 import { ConfirmModal, useConfirmModal } from '../components/ConfirmModal';
@@ -151,6 +151,9 @@ export default function Settings() {
   const [outputCfg, setOutputCfg] = useState<OutputConfigResponse['config']>({});
   const [outputCfgSaving, setOutputCfgSaving] = useState(false);
   const [outputCfgError, setOutputCfgError] = useState<string | null>(null);
+  // 上游模型配置：连接用户的大模型服务（OpenAI 兼容接口），保存后引擎启动时自动注入
+  const [upstream, setUpstream] = useState({ url: '', apiKey: '', model: '', timeout: 300 });
+  const [upstreamSaving, setUpstreamSaving] = useState(false);
 
   const fetchLearning = useCallback(async () => {
     try {
@@ -312,6 +315,21 @@ export default function Settings() {
       } else {
         setOpsSnapshotLoadError('快照列表加载失败');
       }
+
+      // 上游模型配置：独立加载，失败仅记录不阻塞其他卡片
+      try {
+        const up = await api.getUpstreamConfig();
+        if (settingsMountedRef.current) {
+          setUpstream({
+            url: up?.url || '',
+            apiKey: up?.apiKey || '',
+            model: up?.model || '',
+            timeout: up?.timeout && up.timeout > 0 ? up.timeout : 300,
+          });
+        }
+      } catch {
+        // 静默：可能是旧版本引擎不支持该命令，表单保持默认值
+      }
     };
     loadConfig();
     fetchLearning();
@@ -402,6 +420,34 @@ export default function Settings() {
       }
     } finally {
       if (settingsMountedRef.current) setOutputCfgSaving(false);
+    }
+  };
+
+  // 上游模型配置保存：校验 URL 后写入 DB（引擎启动时自动注入环境变量）
+  const handleSaveUpstream = async () => {
+    if (upstreamSaving) return;
+    const url = upstream.url.trim();
+    if (!url) {
+      showMessage('error', '请填写上游模型地址（如 https://api.openai.com/v1）');
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      showMessage('error', '上游模型地址必须以 http:// 或 https:// 开头');
+      return;
+    }
+    setUpstreamSaving(true);
+    try {
+      await api.setUpstreamConfig({
+        url,
+        apiKey: upstream.apiKey.trim(),
+        model: upstream.model.trim(),
+        timeout: upstream.timeout > 0 ? upstream.timeout : 300,
+      });
+      showMessage('success', '上游模型配置已保存，重启引擎后生效');
+    } catch (e) {
+      showMessage('error', formatInvokeError(e, '保存上游模型配置'));
+    } finally {
+      if (settingsMountedRef.current) setUpstreamSaving(false);
     }
   };
 
@@ -930,6 +976,73 @@ export default function Settings() {
               <Lightbulb size={13} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: '6px' }} />
               活性状态由引擎根据学习进度自动切换，与上方防护模式相互独立：防护模式决定拦截严格度（手动选择），活性状态决定是否已启用拦截（自动）。
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 上游模型配置：用户连接自己的大模型服务。保存后引擎启动时自动注入环境变量，
+          无需修改代码或手动设置系统环境变量（面向最终用户的简化操作） */}
+      <div className="card general-card">
+        <div className="card-header">
+          <h3>上游模型</h3>
+        </div>
+        <div className="card-body">
+          <div className="setting-item">
+            <div className="setting-info">
+              <div className="setting-desc">
+                <Server size={13} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: '6px' }} />
+                连接到你的大模型服务（OpenAI 兼容接口）。玄盾作为防护网关保护该上游模型的所有请求。
+                配置保存后重启引擎生效，无需修改代码或设置系统环境变量。
+              </div>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">上游模型地址</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="https://api.openai.com/v1"
+              value={upstream.url}
+              onChange={(e) => setUpstream({ ...upstream, url: e.target.value })}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">API Key（可选）</label>
+            <input
+              type="password"
+              className="form-input"
+              placeholder="sk-...（私有化模型可留空）"
+              value={upstream.apiKey}
+              autoComplete="new-password"
+              name="upstream-api-key"
+              onChange={(e) => setUpstream({ ...upstream, apiKey: e.target.value })}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">默认模型名（可选）</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="如 gpt-4o（留空则使用请求里的 model）"
+              value={upstream.model}
+              onChange={(e) => setUpstream({ ...upstream, model: e.target.value })}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">超时时间（秒）</label>
+            <input
+              type="number"
+              className="form-input"
+              min={1}
+              value={upstream.timeout}
+              onChange={(e) => setUpstream({ ...upstream, timeout: Number(e.target.value) || 0 })}
+            />
+          </div>
+          <div className="notifier-actions">
+            <button className="btn btn-primary" onClick={handleSaveUpstream} disabled={upstreamSaving}>
+              {upstreamSaving ? '保存中...' : '保存'}
+            </button>
+            <span style={{ marginLeft: '12px', fontSize: '13px', color: '#94a3b8' }}>保存后重启引擎生效（见下方「引擎管理」卡片）</span>
           </div>
         </div>
       </div>

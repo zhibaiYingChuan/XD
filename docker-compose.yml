@@ -1,0 +1,72 @@
+# 玄盾 v1.3.3-beta Docker Compose 统一部署
+# 启动: docker compose up -d
+# 停止: docker compose down
+# 日志: docker compose logs -f
+#
+# 服务架构:
+#   xuandun-gateway (18766) — FastAPI 安全检测网关
+#   xuandun-console (80→8080)  — Nginx 静态管理控制台
+
+services:
+  xuandun-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: xuandun-gateway:1.3.3-beta
+    container_name: xuandun-gateway
+    ports:
+      - "18766:18766"
+    environment:
+      - XUANDUN_MODE=protecting
+      - XUANDUN_LOG_LEVEL=info
+      - XUANDUN_CONFIG_PATH=/etc/xuandun/config.yaml
+      - XUANDUN_LOG_DIR=/var/log/xuandun
+      - PYTHONUNBUFFERED=1
+      # 管理密钥（必配）：管理控制台登录与密钥管理接口使用。
+      # 未配置时管理端点将拒绝访问（安全默认）。请替换为强随机密钥。
+      # - XUANDUN_ADMIN_KEY=请替换为强随机管理密钥
+      # 企业 API Key 验签公钥（必配，供企业客户接入）：
+      #   - XUANDUN_PUBLIC_KEY_PATH 指向容器内公钥文件（推荐，配合 volume 挂载）
+      #   - XUANDUN_PUBLIC_KEY 直接给 PEM 公钥内容（二选一）
+      # 未配置时所有企业 API Key 请求将被拒绝（fail-closed）。
+      # - XUANDUN_PUBLIC_KEY_PATH=/etc/xuandun/xuandun_public.pem
+    volumes:
+      # 日志持久化
+      - xuandun-logs:/var/log/xuandun
+      # 网关运行时状态持久化（吊销黑名单 .revoked_keys.json 等跨容器重建保留）
+      - xuandun-data:/app/gateway
+      # 可选：挂载企业密钥公钥（配合 XUANDUN_PUBLIC_KEY_PATH）
+      # - ./tools/license_manager/xuandun_public.pem:/etc/xuandun/xuandun_public.pem:ro
+      # 可选：挂载自定义配置
+      # - ./gateway/config.yaml:/etc/xuandun/config.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.urlopen('http://localhost:18766/health'); assert r.status==200"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  xuandun-console:
+    build:
+      context: .
+      dockerfile: admin-console/Dockerfile
+    image: xuandun-console:1.3.3-beta
+    container_name: xuandun-console
+    ports:
+      - "8080:80"
+    depends_on:
+      xuandun-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  xuandun-logs:
+    driver: local
+  xuandun-data:
+    driver: local

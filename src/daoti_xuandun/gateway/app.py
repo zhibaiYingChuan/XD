@@ -2,8 +2,15 @@
 # Copyright (c) 2026 独立研究者，知白
 # 本文件受道体研究许可证 v1.0 约束，禁止逆向工程和再分发
 # 详见 LICENSE 文件
+#
+# ⚠️ 已废弃 (P0-A-6): 本文件是 v1.3.1 时期的旧版网关实现。
+# 当前活跃版本位于 根目录 gateway/app.py，请使用：
+#     python -m uvicorn gateway.app:app --host 0.0.0.0 --port 18766
+# 本文件保留仅用于 SDK 包兼容性（daoti_xuandun 源码包包含此文件），
+# 但不应在运行时直接使用。新版网关有完整的 API Key 认证、日志轮转、
+# 安全响应头和 CORS 中间件等本文件缺失的特性。
 
-"""玄盾 AI 安全网关 — FastAPI 应用（T01 + T08/T11/T12）。
+"""玄盾 AI 安全网关 — FastAPI 应用（T01 + T08/T11/T12）— 已废弃。
 
 技术栈（POC 结论）：FastAPI + uvicorn + httpx.AsyncClient(stream=True)
 - waitress 同步 WSGI 无法透传 SSE（hop-by-hop header 限制）

@@ -61,6 +61,11 @@ logger = logging.getLogger("xuandun-engine")
 
 app = Flask(__name__)
 
+# 引擎版本号单一来源（SSOT 从 Cargo.toml 同步，见 sync_version.py）。
+# health 与 status 端点共用此常量，避免版本双字面量漂移（R4 修复）。
+# sync_version.py 通过匹配本常量赋值行来做版本同步，保持单行格式。
+_ENGINE_VERSION = "1.3.3-beta"
+
 _MODE_MAP = {
     "high_security": DefenseLevel.STRICT,
     "balanced": DefenseLevel.STANDARD,
@@ -155,6 +160,10 @@ _ADMIN_ENDPOINTS = {
     "/alert/dispatch",
     "/warmup",
     "/output/warmup",
+    # R5 修复：/output/config 直接改动输出护栏阈值（拦截/打码/告警判定），
+    # 此前未纳入此集合导致 _require_admin_auth 直接放行，对任意来源开放。
+    # 现纳入管理接口统一鉴权（Origin 同源 + 可选 X-Admin-Token）。
+    "/output/config",
     "/sensitive/dict",           # POST/DELETE 需要鉴权
     "/debug/state",
 }
@@ -428,8 +437,8 @@ def _get_shield(mode: str) -> XuanDun:
 def health():
     # S2a-T09: 标准化健康检查端点，供 Docker/K8s healthcheck 与桌面端探活使用
     # 返回字段：status(ok/degraded/down) / version / uptime(秒) / models_count(当前纳管模型数)
-    # 注意：sync_version.py 依赖本行 "status":"ok","version":"1.3.2" 模式做版本同步，保持单行
-    return jsonify({"status": "ok", "version": "1.3.2", "uptime": int(time.time() - _start_time), "models_count": 1})
+    # 注意：sync_version.py 依赖 _ENGINE_VERSION 常量赋值行做版本同步（保持单行）
+    return jsonify({"status": "ok", "version": _ENGINE_VERSION, "uptime": int(time.time() - _start_time), "models_count": 1})
 
 
 @app.route("/status", methods=["GET"])
@@ -459,6 +468,9 @@ def status():
     return jsonify({
         "running": running,
         "mode": _default_mode,
+        # R4 修复：/status 补充 version，供桌面端 Rust 在 /dual-layer/stats 降级分支
+        # 读取 engine_version，避免恒为 "unknown"。与 /health 共用 _ENGINE_VERSION 常量。
+        "version": _ENGINE_VERSION,
         "learning_mode": learning_mode,
         "learning_progress": learning_progress,
         "sample_count": sample_count,
@@ -940,12 +952,18 @@ def protect():
     data = request.get_json(silent=True) or {}
     text = data.get("text", "")
     session = data.get("session", str(uuid.uuid4())[:8])
+    # R3 修复：遵循请求级 mode（若合法），否则回退全局默认模式。
+    # 此前引擎忽略请求中的 mode，一律用 _default_mode，与桌面端 Rust 发送的
+    # mode 字段契约不一致——在 set-mode 尚未同步时 UI 显示模式与实际防护可能不符。
+    # _get_shield 会按 mode 缓存 shield，合法 mode 不会重复实例化，成本可忽略。
+    req_mode = data.get("mode") or _default_mode
+    mode = req_mode if req_mode in _MODE_MAP else _default_mode
 
     if not text:
         return jsonify({"error": "text is required"}), 400
 
     try:
-        shield = _get_shield(_default_mode)
+        shield = _get_shield(mode)
         t0 = time.perf_counter()
         result = shield.protect(text, session_id=session)
         lat = (time.perf_counter() - t0) * 1000
@@ -958,7 +976,7 @@ def protect():
         )
         logger.info(
             "protect() took %.1fms session=%s mode=%s reject_stage=%s category=%s rejected=%s preview=%s",
-            lat, session, _default_mode,
+            lat, session, mode,
             result.reject_stage, cat, rejected,
             _redact_pii_for_log(text),
         )
@@ -991,7 +1009,8 @@ def protect():
         resp = jsonify(response)
 
         # 检查是否需要保存学习快照（按 call_count 增长阈值触发）
-        _maybe_save_snapshot(_default_mode)
+        # R3 修复：快照应记录实际生效的 mode（请求级 mode 或全局默认），而非固定 _default_mode
+        _maybe_save_snapshot(mode)
 
         return _attach_cors(resp)
 

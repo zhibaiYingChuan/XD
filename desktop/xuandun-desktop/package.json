@@ -1,7 +1,7 @@
 {
   "name": "xuandun-desktop",
   "private": true,
-  "version": "1.3.2",
+  "version": "1.3.3-beta",
   "type": "module",
   "scripts": {
     "dev": "vite",

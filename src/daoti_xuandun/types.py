@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+
+# ── 自定义异常 ──
+class RateLimitError(RuntimeError):
+    """配额超限异常 — 网关应返回 HTTP 429 Too Many Requests"""
+    pass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
