@@ -112,7 +112,7 @@ tests/*
 !tests/conftest.py
 !tests/__init__.py
 !tests/benchmark_owasp_llm.py
-!tests/benchmark_owasp_results.json
+# benchmark_owasp_results.json 为测试运行时生成的产物，不入库（已从线上移除）
 
 # Local temporary verification scripts (not for public release)
 _verify_examples.py
