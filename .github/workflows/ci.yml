@@ -65,7 +65,7 @@ jobs:
       - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip setuptools
-          pip install numpy pytest pip-audit bandit
+          pip install numpy pytest pytest-timeout pip-audit bandit
           pip install -e ".[engine]"
 
       # P0 修复：CI 环境编译 Rust 扩展（双梯形镜像递归网络）
