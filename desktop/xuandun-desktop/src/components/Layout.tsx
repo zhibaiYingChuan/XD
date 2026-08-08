@@ -45,7 +45,7 @@ export default function Layout() {
         }}
       >
         <div className="sidebar-logo">
-          <img src="/logo.jpg" alt="道体·玄盾 Logo" className="sidebar-logo-img" />
+          <img src={import.meta.env.BASE_URL + 'logo.jpg'} alt="道体·玄盾 Logo" className="sidebar-logo-img" />
           <div className="sidebar-title-group">
             <span className="sidebar-title">道体·玄盾</span>
             <span className="sidebar-subtitle">模型防火墙控制台</span>

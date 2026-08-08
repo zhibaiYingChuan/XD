@@ -117,13 +117,21 @@ function AppContent() {
 
   // Sprint1-P0-7: IPC析构散落报错修复——10s noop心跳
   // 检测逻辑：
-  //   - 首次进入：isTauriBridgeAvailable()==false → 立即显示横幅（非桌面环境）
+  //   - 浏览器模式（无 __TAURI_INTERNALS__）→ 不显示错误，HTTP 回退在 tauriApi.ts 中处理
+  //   - Tauri 桌面模式 → isTauriBridgeAvailable()==false 才显示桥接错误
   //   - 每10s调用 api.heartbeatNoop()，3s超时
   //   - 连续失败3次（30s窗口）才判定桥接死亡，显示顶层红色横幅
   //   - 成功1次即可清零连胜
   useEffect(() => {
     let cancelled = false;
-    // 首次环境检查
+    // 判断是否运行在 Tauri 容器中（桌面 app）而非普通浏览器
+    const isTauriEnv = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+    // 仅在 Tauri 桌面环境中做桥接检测；浏览器模式（Web Demo）走 HTTP 回退，不报错
+    if (!isTauriEnv) {
+      // Web Demo 模式：静默，不显示桥接错误横幅
+      return;
+    }
+    // 桌面模式下桥接不可用 → 显示错误
     if (!isTauriBridgeAvailable()) {
       setIpcDead(true);
       ipcBannerRef.current = { error: 'Tauri桥接初始化失败：应用可能在浏览器环境中打开' };

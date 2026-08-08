@@ -75,6 +75,7 @@ docs/*
 !docs/项目架构文档.md
 !docs/学习进化报告.md
 !docs/交付前的诚实出厂测试.md
+!docs/出厂防御类型清单.md
 
 # Root-level internal planning docs (Chinese)
 6.5计划.md

@@ -276,14 +276,122 @@ export const TIMEOUT = {
   NOOP_HEARTBEAT: 3_000,
 } as const;
 
+// ── 浏览器环境 HTTP API 回退 ──
+// 当非 Tauri 环境（浏览器直接访问 Web Demo）时，
+// 通过 fetch 调用 /xd/api/* 代理层，无需 Tauri bridge。
+
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE) || '';
+
+/** 命令名 → HTTP 端点 + 方法映射 + 响应转换 */
+interface HttpMapping {
+  method: string;
+  path: string;
+  bodyBuilder?: (args: any) => any;
+  responseTransform?: (data: any) => any;
+}
+const COMMAND_HTTP_MAP: Record<string, HttpMapping> = {
+  get_status: {
+    method: 'GET',
+    path: '/api/health',
+    // HTTP /api/health 返回 {status, engine_running, ...} → 转换为 StatusResponse {running, healthy, ...}
+    responseTransform: (data: any) => ({
+      running: data.engine_running ?? (data.status === 'ok'),
+      healthy: data.shield_ready ?? (data.status === 'ok'),
+      mode: data.mode || 'balanced',
+      learning_mode: data.learning_mode,
+      learning_progress: data.learning_progress ?? 0,
+      sample_count: data.sample_count ?? 0,
+      uptime: data.uptime ?? 0,
+      total_requests: data.total_requests ?? 0,
+      total_blocked: data.total_blocked ?? 0,
+      block_rate: data.block_rate ?? 0,
+      startup_error: data.detail || null,
+    }),
+  },
+  protect: {
+    method: 'POST',
+    path: '/api/protect',
+    bodyBuilder: (args: any) => ({ text: args?.req?.text ?? '' }),
+  },
+  get_learning_status: {
+    method: 'GET',
+    path: '/api/mode',
+    responseTransform: (data: any) => ({
+      mode: data.learning_mode || 'protecting',
+      sample_count: data.sample_count ?? 0,
+      min_samples_for_switch: 1000,
+      learning_progress: data.attack_learning_progress ?? 0,
+      safe_prototypes: data.safe_prototypes ?? 30,
+      attack_prototypes: data.attack_prototypes_total ?? 0,
+      builtin_attacks_loaded: data.builtin_attacks_loaded ?? 0,
+      would_block_count: 0,
+      would_block_preview: [],
+      switched_at: null,
+      call_count: 0,
+    }),
+  },
+  set_mode: {
+    method: 'POST',
+    path: '/api/mode',
+    bodyBuilder: (args: any) => ({ mode: args?.mode }),
+  },
+  get_logs:    { method: 'GET',  path: '/api/logs/recent' },
+  get_config: {
+    method: 'GET',
+    path: '/api/mode',
+    responseTransform: (data: any) => data.current || 'balanced',
+  },
+};
+
+/** HTTP API 回退：在非 Tauri 环境下用 fetch 调用后端 */
+async function invokeHttp<T>(command: string, args?: Record<string, unknown>, timeoutMs: number = TIMEOUT.NORMAL): Promise<T> {
+  const mapping = COMMAND_HTTP_MAP[command];
+  if (!mapping) {
+    return Promise.reject(new Error(`HTTP 回退不支持命令: ${command}（仅支持: ${Object.keys(COMMAND_HTTP_MAP).join(', ')}）`));
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const url = `${API_BASE}${mapping.path}`;
+    const options: RequestInit = {
+      method: mapping.method,
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      signal: controller.signal,
+    };
+
+    if (mapping.method === 'POST' && mapping.bodyBuilder && args) {
+      options.body = JSON.stringify(mapping.bodyBuilder(args));
+    } else if (mapping.method === 'POST' && args) {
+      options.body = JSON.stringify(args);
+    }
+
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    // 如果有响应转换函数，转换字段名以匹配 Tauri IPC 返回的类型
+    return (mapping.responseTransform ? mapping.responseTransform(data) : data) as T;
+  } catch (e: any) {
+    if (e.name === 'AbortError') {
+      throw new InvokeTimeoutError(command, timeoutMs);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /**
  * 带超时的 invoke 包装器。
  * 超时后抛出 InvokeTimeoutError，调用方应通过 try-catch 捕获并在 UI 显示兜底提示。
  *
- * P0-01 修复：Tauri bridge 未注入兜底检测。
- * 在浏览器环境或 release 模式 custom-protocol 失效时，window.__TAURI_INTERNALS__ 为 undefined，
- * 此时所有 invoke 调用会抛出模糊错误。这里提前检测并提供可操作的提示，
- * 避免应用永远显示"加载中..."导致用户无感知。
+ * P0-01 修复：Tauri bridge 未注入兜底检测 → 已升级为 HTTP 回退。
+ * 浏览器环境（Web Demo）下自动使用 fetch() 调用 /xd/api/* 端点，
+ * 桌面应用（Tauri）下使用原生 IPC invoke。
  *
  * @param command Tauri 命令名
  * @param args 命令参数
@@ -294,16 +402,11 @@ function invokeWithTimeout<T>(
   args?: Record<string, unknown>,
   timeoutMs: number = TIMEOUT.NORMAL,
 ): Promise<T> {
-  // P0-01 修复：Tauri bridge 环境检测
-  // 浏览器环境（开发调试、误访问 localhost:1420）或 release 模式 custom-protocol 失效时
-  // window.__TAURI_INTERNALS__ 不存在，invoke 会抛出模糊错误
+  // 非 Tauri 环境 → HTTP 回退
   if (typeof window === 'undefined' ||
       !(window as any).__TAURI_INTERNALS__ ||
       typeof (window as any).__TAURI_INTERNALS__.invoke !== 'function') {
-    return Promise.reject(new Error(
-      'Tauri 桥接未就绪：请在玄盾桌面应用中打开本页面（而非浏览器）。' +
-      '若已在桌面应用中看到此提示，请检查应用是否损坏或联系支持。'
-    ));
+    return invokeHttp<T>(command, args, timeoutMs);
   }
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(() => reject(new InvokeTimeoutError(command, timeoutMs)), timeoutMs);

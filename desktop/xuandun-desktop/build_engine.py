@@ -53,9 +53,9 @@ def _inject_compile_time_key(script_dir: str) -> str:
         key_bytes = secrets.token_bytes(32)
 
     secure_values = {
-        "prototype_distance_threshold_default": "0.65",
-        "prototype_distance_threshold_basic": "0.50",
-        "prototype_distance_threshold_standard": "0.45",
+        "prototype_distance_threshold_default": "0.75",
+        "prototype_distance_threshold_basic": "0.60",
+        "prototype_distance_threshold_standard": "0.50",
         "prototype_distance_threshold_strict": "0.35",
         "reject_boundary_multiplier_default": "3.0",
         "reject_boundary_multiplier_basic": "2.0",
