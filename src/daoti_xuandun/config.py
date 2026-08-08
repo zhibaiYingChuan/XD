@@ -249,6 +249,9 @@ class XuanDunConfig:
     prompt_leak_use_luoshu: bool = True               # 是否用洛书语义距离增强置信度
     min_samples_for_switch: int = 1000      # 自动切换到保护模式所需的最小正常样本数
     enable_builtin_attacks: bool = True     # 启用内置攻击样本（让洛书攻击原型库从一开始就不为空）
+    # 保护模式下「攻击学习进化」进度展示阈值：累计在线学习攻击原型达到此值视为满进度。
+    # 仅用于 /learning/status 的 attack_learning_progress 归一化展示，不参与任何拦截决策。
+    attack_learn_threshold: int = 100
 
     # 企业级运维（逃生通道 + 灰度部署）
     emergency_bypass: bool = False           # 逃生通道：开启后所有请求直接放行，不经过任何检测

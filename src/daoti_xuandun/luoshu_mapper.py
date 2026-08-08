@@ -127,6 +127,9 @@ class LuoshuSymbolMapper:
         self._attack_fingerprint_counter: Counter = Counter()
         self._attack_dedup_threshold = 0.95
         self._attack_max_per_cluster = 3
+        # 在线攻击学习累计次数（仅统计真正新增的攻击原型，去重/限流跳过不计）
+        # 用于保护模式下向 UI 展示「攻击学习进化」的真实进度
+        self._attack_learn_count = 0
 
         # ── 三阶段自适应学习策略数据结构 ──
         # Phase B: 快速磨合期（前 3 天 / 前 200 条）— Shadow Buffer 只算偏移不改原型
@@ -574,6 +577,7 @@ class LuoshuSymbolMapper:
         # 出厂只读原型库固定容量，不参与在线截断；在线攻击原型执行容量上限
         if factory:
             return
+        self._attack_learn_count += 1  # 在线攻击学习累计次数（展示用）
         max_size = self.config.prototype_max_size
         if len(self.attack_prototypes) > max_size:
             removed = self.attack_prototypes.pop(0)
