@@ -117,6 +117,11 @@ tests/*
 _verify_examples.py
 _*.py
 _stress_test.py
+# 生产模块例外：_check_*.py 是引擎核心模块（输出护栏/外部注入/提示泄露检测），
+# 被 xuandun.py 引用，必须纳入版本控制，不能因 _*.py 规则被忽略导致 CI 缺模块
+!src/daoti_xuandun/_check_output.py
+!src/daoti_xuandun/_check_external.py
+!src/daoti_xuandun/_check_prompt_leak.py
 
 # Runtime runtime artifacts
 learning_snapshot.json
