@@ -294,10 +294,15 @@ class XuanDunConfig:
                 sys.stderr.write("[XuanDun] WARNING: XUANDUN_MAPPING_KEY not set, using insecure fallback key\n")
                 self.mapping_key = b"ancient_map_16b!"
 
-        # P0 韧性修复：双梯形参数上限校验，防止恶意/错误配置导致 forward() 死循环
-        assert 1 <= self.bilateral_num_layers <= 16, "bilateral_num_layers 超出安全范围 [1, 16]"
-        assert 1 <= self.bilateral_state_dim <= 512, "bilateral_state_dim 超出安全范围 [1, 512]"
-        assert 1 <= self.bilateral_t_iter <= 50, "bilateral_t_iter 超出安全范围 [1, 50]"
+        # P0 韧性修复：双梯形参数上限校验，防止恶意/错误配置导致 forward() 死循环。
+        # 使用 raise 而非 assert：assert 在 -O 优化编译（含 Nuitka）下会被静默剥离，
+        # 导致防护失效；同时避免 bandit B101(assert_used) 误报。
+        if not 1 <= self.bilateral_num_layers <= 16:
+            raise ValueError("bilateral_num_layers 超出安全范围 [1, 16]")
+        if not 1 <= self.bilateral_state_dim <= 512:
+            raise ValueError("bilateral_state_dim 超出安全范围 [1, 512]")
+        if not 1 <= self.bilateral_t_iter <= 50:
+            raise ValueError("bilateral_t_iter 超出安全范围 [1, 50]")
 
     @classmethod
     def for_level(cls, level: DefenseLevel, **overrides) -> "XuanDunConfig":
