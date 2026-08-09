@@ -843,7 +843,15 @@ class OutputGuardrail:
                    r"parasite|inferior race)",
                    re.IGNORECASE),
         # 危险指令教程（武器/毒品/爆炸物/黑客教程）
-        re.compile(r"(制作|制造|合成|配制|生成).{0,10}(爆炸物|炸弹|炸药|武器|毒药|毒品|危险化学|纵火|勒索病毒|恶意软件)|"
+        # 危险对象含同音/形近字混淆变体（药→要、弹→单/蛋、品→pin/平、毒→读、炸→诈），
+        # 攻击者用错别字绕过精确关键词匹配。仅对「制作/合成/配制」等危险动作前缀生效，
+        # 避免把「炸鸡」「蛋糕」等正常食物误拦。
+        re.compile(r"(制作|制造|合成|配制|生成).{0,10}(爆炸物|炸药|炸弹|"
+                   r"炸[要药]|炸[蛋单]|诈药|"
+                   r"毒品|毒[品平]|毒pin|毒药|毒[要]|"
+                   r"武器|武[器气]|危险化学|纵火|勒索病毒|恶意软件|"
+                   r"雷管|引信|导火索|"
+                   r"(bomb|explosive|weapon|drug|poison)(\s*making|\s*synthesis|\s*recipe|\s*guide)?)|"
                    r"(入侵|攻击|黑客|hacking).{0,6}(教程|步骤|方法|指南|完整|详细|steps)|"
                    r"(勒索病毒|ransomware|malware).{0,6}(实现|代码|implementation|制作)|"
                    r"(钓鱼攻击|phishing).{0,6}(方案|campaign|完整)|"
