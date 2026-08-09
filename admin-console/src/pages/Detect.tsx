@@ -14,6 +14,8 @@ export default function Detect() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // 检测方向：input=输入护栏（用户输入），output=模型输出护栏（模型输出）
+  const [direction, setDirection] = useState<'input' | 'output'>('input')
   // 检测历史：从 localStorage 恢复，切换页面/刷新后仍保留
   const [results, setResults] = useState<DetectResult[]>(() => {
     try {
@@ -40,7 +42,7 @@ export default function Detect() {
     setLoading(true)
     const t0 = performance.now()
     try {
-      const resp = await api.protect(targetText)
+      const resp = await api.protect(targetText, direction)
       const elapsed = Math.round(performance.now() - t0)
       const entry: DetectResult = {
         text: targetText.length > 100 ? targetText.slice(0, 100) + '...' : targetText,
@@ -59,7 +61,7 @@ export default function Detect() {
     } finally {
       setLoading(false)
     }
-  }, [input, results])
+  }, [input, results, direction])
 
   // 键盘事件：Enter 提交，Shift+Enter 换行
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -97,17 +99,38 @@ export default function Detect() {
           }}
         />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
-          <button
-            onClick={() => runDetect()}
-            disabled={loading}
-            style={{
-              padding: '10px 32px', background: loading ? '#1e3a5f' : '#1d4ed8', color: '#fff',
-              border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 600,
-              cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1,
-            }}
-          >
-            {loading ? '检测中...' : '检测'}
-          </button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={() => runDetect()}
+              disabled={loading}
+              style={{
+                padding: '10px 32px', background: loading ? '#1e3a5f' : '#1d4ed8', color: '#fff',
+                border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 600,
+                cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1,
+              }}
+            >
+              {loading ? '检测中...' : '检测'}
+            </button>
+            {/* 检测方向选择：输入护栏 / 模型输出护栏 */}
+            <span style={{ display: 'flex', gap: 4, alignItems: 'center', background: '#0f172a', borderRadius: 6, padding: 4, border: '1px solid #334155' }}>
+              {([
+                { v: 'input' as const, label: '输入护栏' },
+                { v: 'output' as const, label: '模型输出护栏' },
+              ]).map(o => (
+                <button
+                  key={o.v}
+                  onClick={() => setDirection(o.v)}
+                  style={{
+                    padding: '6px 12px', border: 'none', borderRadius: 4, fontSize: 12, cursor: 'pointer',
+                    background: direction === o.v ? '#1d4ed8' : 'transparent',
+                    color: direction === o.v ? '#fff' : '#94a3b8', fontWeight: direction === o.v ? 600 : 400,
+                  }}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </span>
+          </div>
           <span style={{ fontSize: 12, color: '#64748b' }}>
             Enter 提交 · 最近 {results.length} 条记录
           </span>
@@ -197,8 +220,8 @@ export default function Detect() {
         <ul style={{ marginTop: 8, paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 6 }}>
           <li>安全检测基于玄盾内生域感知 + 阴阳壳 + 洛书符号映射 + 时序校验四阶段流水线。</li>
           <li>外门使用强攻击关键词快速拦截已知攻击模式；内门使用双梯形递归网络进行精判。</li>
-          <li>拦截阶段标注：<code>domain_awareness</code>（域感知拒绝）、<code>sensitive_leak</code>（敏感信息泄露）等。</li>
-          <li>如需批量检测或输出护栏检测，请使用 <code>POST /api/v1/protect</code> API 或桌面版客户端。</li>
+          <li>拦截阶段标注：<code>domain_awareness</code>（域感知拒绝）、<code>sensitive_leak</code>（敏感信息泄露）、<code>output_guardrail</code>（输出护栏拦截）等。</li>
+          <li>通过上方「输入护栏 / 模型输出护栏」切换检测方向：输入护栏检测用户输入，模型输出护栏检测模型生成内容。</li>
         </ul>
       </div>
     </div>

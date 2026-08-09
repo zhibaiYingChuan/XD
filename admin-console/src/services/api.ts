@@ -103,6 +103,7 @@ export interface ModelsSaveResult {
 
 export interface ProtectRequest {
   text: string
+  direction?: 'input' | 'output'   // 检测方向：input=输入护栏，output=模型输出护栏
   session_id?: string
   model_id?: string
 }
@@ -150,8 +151,8 @@ export const api = {
   reloadConfig: () => post<{ success: boolean; previous_models: number; current_models: number }>('api/config/reload'),
   saveModels: (data: { models: ModelItemConfig[]; routing: RoutingConfig }) =>
     post<ModelsSaveResult>('api/config/models', data),
-  protect: (text: string, sessionId?: string, modelId?: string) =>
-    post<ProtectResponse>('api/v1/protect', { text, session_id: sessionId, model_id: modelId }),
+  protect: (text: string, direction?: 'input' | 'output', sessionId?: string, modelId?: string) =>
+    post<ProtectResponse>('api/v1/protect', { text, direction: direction || 'input', session_id: sessionId, model_id: modelId }),
   getMode: () => get<{ mode: string; version: number; available: string[] }>('api/v1/mode'),
   switchMode: (mode: string, version?: number) =>
     post<{ mode: string; previous: string; version: number; message: string }>('api/v1/mode', { mode, version }),

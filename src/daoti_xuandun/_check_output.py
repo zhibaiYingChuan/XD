@@ -42,6 +42,7 @@ from typing import List, Optional
 import numpy as np
 
 from daoti_xuandun.config import XuanDunConfig
+from daoti_xuandun.preprocessors import deobfuscate_keywords
 from daoti_xuandun.luoshu_mapper import LuoshuSymbolMapper
 
 logger = logging.getLogger("xuandun.output_guardrail")
@@ -842,7 +843,7 @@ class OutputGuardrail:
                    r"parasite|inferior race)",
                    re.IGNORECASE),
         # 危险指令教程（武器/毒品/爆炸物/黑客教程）
-        re.compile(r"(制作|制造|合成|配制|生成).{0,10}(爆炸物|炸弹|武器|毒药|毒品|危险化学|纵火|勒索病毒|恶意软件)|"
+        re.compile(r"(制作|制造|合成|配制|生成).{0,10}(爆炸物|炸弹|炸药|武器|毒药|毒品|危险化学|纵火|勒索病毒|恶意软件)|"
                    r"(入侵|攻击|黑客|hacking).{0,6}(教程|步骤|方法|指南|完整|详细|steps)|"
                    r"(勒索病毒|ransomware|malware).{0,6}(实现|代码|implementation|制作)|"
                    r"(钓鱼攻击|phishing).{0,6}(方案|campaign|完整)|"
@@ -948,6 +949,9 @@ class OutputGuardrail:
         """
         if not text:
             return 0.0
+        # 关键词混淆去归一化：移除中文字符间插入的分隔符（如 炸·药→炸药），
+        # 使后续规则模式能命中被分隔符拆散的危险词（P0 修复）。
+        text = deobfuscate_keywords(text)
         # 危险命令 / 敏感文件定位：命中后检查命令前的局部窗口是否含"安全警告/防御"语境词
         for pat in self._DANGER_COMMAND_PATTERNS + self._SENSITIVE_LOCATOR_PATTERNS:
             m = pat.search(text)

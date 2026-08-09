@@ -633,7 +633,7 @@ _CHINESE_HOWTO_ACTION_TRIGGERS: Tuple[str, ...] = (
 
 _CHINESE_HARMFUL_CONTENT_PRECISE: Tuple[str, ...] = (
     # 精确「动作+对象」组合，避免「识别诈骗」等良性被误拦
-    "制作爆炸物", "制造爆炸物", "制作炸弹", "制造炸弹",
+    "制作爆炸物", "制造爆炸物", "制作炸弹", "制造炸弹", "制作炸药", "制造炸药",
     "制作危险物品", "制造危险物品", "制作危险品", "制造危险品", "制作武器", "制造武器",
     "实施诈骗", "进行诈骗", "诈骗他人", "如何诈骗",
     "实施暴力", "进行暴力", "暴力行为", "暴力解决",
@@ -727,7 +727,7 @@ def detect_chinese_harmful_content(text: str) -> bool:
         True 如果匹配中文有害内容攻击模式，False 否则。
     """
     normalized = normalize_unicode(text)
-    lower = normalized.lower()
+    lower = deobfuscate_keywords(normalized).lower()
 
     # ③ 独立越狱信号：直接拦截
     if any(sig in lower for sig in _CHINESE_SOCIAL_ENG_BYPASS_DIRECT):
@@ -958,6 +958,31 @@ def normalize_unicode(text: str) -> str:
     text = _ZERO_WIDTH.sub('', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+# ── P0 修复：关键词混淆去归一化 ────────────────────────────────────────────
+# 攻击者常用「插入分隔符 / 错别字」等方式绕过精确关键词匹配，例如：
+#   炸药 → 炸·药 / 炸.药 / 炸 药 / 炸'药'（插入分隔符）
+# 本函数仅在中文字符两侧都是 CJK 时移除中间的分隔符（保守：不处理英文，
+# 不合并逗号/句号等分句标点，避免把正常句子粘连导致误报）。
+# 例：'制作"炸·药"' → '制作炸药'；'do not' 不受影响；'甲，乙' 不受影响。
+_CJK_CLASS = r'\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+# 用于关键词混淆的典型分隔符（不含逗号/句号/分号/冒号等分句标点）
+_OBFUSCATION_SEP = r'·•.、\'"‘’“”\-—_/\\|\u3000 '
+_OBFUSCATION_RE = re.compile(
+    rf'([{_CJK_CLASS}])[{_OBFUSCATION_SEP}]+(?=[{_CJK_CLASS}])')
+
+
+def deobfuscate_keywords(text: str) -> str:
+    """去关键词混淆：移除中文字符之间插入的常见分隔符。
+
+    仅当分隔符两侧都是 CJK 字符时才移除，因此不会破坏英文单词
+    （如 "do not"）或正常分句标点（逗号/句号等）。只影响关键词匹配，
+    不改变原文语义。返回去混淆后的文本。
+    """
+    if not text:
+        return text
+    return _OBFUSCATION_RE.sub(r'\1', text)
 
 
 # 代码模式检测相关常量

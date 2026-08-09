@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from daoti_xuandun import XuanDun, XuanDunConfig, DefenseLevel
+from daoti_xuandun import XuanDun, XuanDunConfig, DefenseLevel, ProtectResult
 from daoti_xuandun import __version__ as ENGINE_VERSION
 from daoti_xuandun.integrations import (
     AlertManager, AlertEvent,
@@ -262,6 +262,7 @@ class ProtectReq(BaseModel):
     text: str = Field(..., min_length=1, max_length=100000)
     session_id: Optional[str] = None
     model_id: Optional[str] = None
+    direction: str = Field("input", pattern="^(input|output)$")  # 检测方向：input=输入护栏，output=模型输出护栏
 
 class ProtectResp(BaseModel):
     allowed: bool; reason: Optional[str] = None
@@ -385,7 +386,19 @@ async def protect_input(request: ProtectReq, req: Request):
         request_body={"model": request.model_id} if request.model_id else None) if model_router else None
 
     try:
-        result = shield.protect(request.text)
+        # 输出护栏检测：direction=output 时走引擎输出侧护栏（check_output），
+        # 否则走默认输入护栏（protect）。修复"模型输出护栏检测文本一直放行"问题。
+        if request.direction == "output":
+            out = shield.check_output(request.text, session_id=sid)
+            result = ProtectResult(allowed=bool(out.get("allowed", True)))
+            result.reason = out.get("reason")
+            result.reject_stage = (
+                f"output_guardrail:{out.get('risk_level', 'unknown')}"
+                if out.get("action") in ("block", "redact", "alert") and not out.get("allowed", True)
+                else None
+            )
+        else:
+            result = shield.protect(request.text)
         ms = (time.time() - t0) * 1000
         blocked = not result.allowed
         metrics.record_request(blocked=blocked, latency_ms=ms)
