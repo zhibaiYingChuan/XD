@@ -54,7 +54,7 @@ export default function Dashboard() {
 
       {/* 指标卡片 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
-        {card('请求总数', stats?.requests_total ?? 0, '', '#38bdf8')}
+        {card('检测总数', stats?.requests_total ?? 0, '', '#38bdf8')}
         {card('拦截数', stats?.blocks_total ?? 0, '', '#f87171')}
         {card('拦截率', stats?.block_rate?.toFixed(1) ?? '0.0', '%', stats && stats.block_rate > 30 ? '#f87171' : '#4ade80')}
         {card('P95 延迟', stats?.p95_latency_ms?.toFixed(2) ?? '0.00', 'ms', '#a78bfa')}
@@ -62,7 +62,7 @@ export default function Dashboard() {
 
       {/* 趋势图 */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
-        <Panel title="请求趋势">
+        <Panel title="检测拦截趋势">
           <ResponsiveContainer width="100%" height={240}>
             <AreaChart data={history}>
               <defs><linearGradient id="colorBlocks" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#f87171" stopOpacity={0.3}/><stop offset="95%" stopColor="#f87171" stopOpacity={0}/></linearGradient></defs>

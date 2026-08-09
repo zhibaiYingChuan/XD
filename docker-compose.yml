@@ -24,7 +24,8 @@ services:
       - PYTHONUNBUFFERED=1
       # 管理密钥（必配）：管理控制台登录与密钥管理接口使用。
       # 未配置时管理端点将拒绝访问（安全默认）。请替换为强随机密钥。
-      # - XUANDUN_ADMIN_KEY=请替换为强随机管理密钥
+      # 从宿主环境变量注入，避免硬编码。
+      - XUANDUN_ADMIN_KEY=${XUANDUN_ADMIN_KEY:-}
       # 企业 API Key 验签公钥（必配，供企业客户接入）：
       #   - XUANDUN_PUBLIC_KEY_PATH 指向容器内公钥文件（推荐，配合 volume 挂载）
       #   - XUANDUN_PUBLIC_KEY 直接给 PEM 公钥内容（二选一）
@@ -33,8 +34,10 @@ services:
     volumes:
       # 日志持久化
       - xuandun-logs:/var/log/xuandun
-      # 网关运行时状态持久化（吊销黑名单 .revoked_keys.json 等跨容器重建保留）
-      - xuandun-data:/app/gateway
+      # 运行时状态持久化目录（撤销黑名单等跨容器重建保留）。
+      # 注意：不可挂载到 /app/gateway 源码目录，否则会覆盖镜像内最新代码，
+      # 导致每次重建镜像都运行旧版本。这里挂载到独立 runtime 子目录。
+      - xuandun-data:/app/gateway/.runtime
       # 可选：挂载企业密钥公钥（配合 XUANDUN_PUBLIC_KEY_PATH）
       # - ./tools/license_manager/xuandun_public.pem:/etc/xuandun/xuandun_public.pem:ro
       # 可选：挂载自定义配置

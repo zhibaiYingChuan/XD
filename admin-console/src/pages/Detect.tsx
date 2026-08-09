@@ -14,8 +14,20 @@ export default function Detect() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [results, setResults] = useState<DetectResult[]>([])
+  // 检测历史：从 localStorage 恢复，切换页面/刷新后仍保留
+  const [results, setResults] = useState<DetectResult[]>(() => {
+    try {
+      const saved = localStorage.getItem('xuandun_detect_history')
+      return saved ? JSON.parse(saved) : []
+    } catch { return [] }
+  })
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // 持久化检测历史到 localStorage
+  const persistResults = (next: DetectResult[]) => {
+    setResults(next)
+    try { localStorage.setItem('xuandun_detect_history', JSON.stringify(next.slice(0, 50))) } catch { /* 忽略存储失败 */ }
+  }
 
   // 执行单条检测——从DOM读取最新文本，避免React异步状态滞后
   const runDetect = useCallback(async (text?: string) => {
@@ -38,7 +50,7 @@ export default function Detect() {
         latency_ms: resp.latency_ms ?? elapsed,
         timestamp: Date.now(),
       }
-      setResults(prev => [entry, ...prev.slice(0, 49)])  // 保留最近50条
+      persistResults([entry, ...results.slice(0, 49)])  // 保留最近50条并持久化
       if (!resp.allowed) {
         setInput('')  // 拦截后清空输入框
       }
@@ -47,7 +59,7 @@ export default function Detect() {
     } finally {
       setLoading(false)
     }
-  }, [input])
+  }, [input, results])
 
   // 键盘事件：Enter 提交，Shift+Enter 换行
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

@@ -18,29 +18,16 @@ export default function AuditLogs() {
 
   const fetchLogs = useCallback(async () => {
     try {
-      // 优先使用真实审计日志端点（需 PostgreSQL），降级使用 stats 快照
       const resp = await api.getAudit()
-      if (resp.connected && resp.records.length > 0) {
-        setPgConnected(true)
-        setLogs(resp.records.map((r: any) => ({
-          id: r.id, timestamp: r.timestamp, session_id: r.session_id,
-          event: r.event, text_preview: r.text_preview || '', allowed: r.allowed,
-          reason: r.reason, stage: r.stage, latency_ms: r.latency_ms,
-          model_id: r.model_id, routed_to: r.routed_to,
-          client_ip: r.client_ip, current_hash: r.current_hash,
-        })))
-      } else {
-        setPgConnected(false)
-        // 降级：stats 快照 + 内存中的 protect 调用记录
-        const s = await api.getStats()
-        const entry: AuditEntry = {
-          id: Date.now(), timestamp: new Date().toISOString(),
-          session_id: '-', event: 'stats_snapshot', text_preview: '',
-          allowed: true, reason: null, stage: null, latency_ms: 0,
-          model_id: null, routed_to: null,
-        }
-        setLogs(prev => [entry, ...prev.slice(0, 49)])
-      }
+      // 后端统一返回记录（PostgreSQL 模式或内存缓冲区模式），前端不再伪造数据
+      setPgConnected(!!resp.connected)
+      setLogs(resp.records.map((r: any) => ({
+        id: r.id ?? r.timestamp, timestamp: r.timestamp, session_id: r.session_id,
+        event: r.event, text_preview: r.text_preview || '', allowed: r.allowed,
+        reason: r.reason, stage: r.stage, latency_ms: r.latency_ms,
+        model_id: r.model_id, routed_to: r.routed_to,
+        client_ip: r.client_ip, current_hash: r.current_hash,
+      })))
       setError('')
     } catch (e) { setError(String(e)) }
   }, [])
@@ -104,7 +91,7 @@ export default function AuditLogs() {
           <tbody>
             {logs.length === 0 && !error && (
               <tr><td colSpan={6} style={{ padding: 32, textAlign: 'center', color: '#64748b' }}>
-                {pgConnected ? '暂无审计记录。在安全检测页面执行测试后将出现在这里。' : 'PostgreSQL 未连接，显示内存统计快照。启用方式: XUANDUN_PG_ENABLED=1'}
+                {pgConnected ? '暂无审计记录。在安全检测页面执行测试后将出现在这里。' : '内存模式（未连接 PostgreSQL），暂无检测记录。执行安全检测后，检测记录将显示在这里。启用持久化: XUANDUN_PG_ENABLED=1'}
               </td></tr>
             )}
             {logs.map(l => (

@@ -289,6 +289,14 @@ class AuditLogStore:
         except Exception:
             return []
 
+    def query_memory(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """查询内存缓冲区中的审计记录（未连接 PostgreSQL 时使用）
+
+        返回最新在前的记录，与 PostgreSQL 的 ORDER BY id DESC 语义一致。
+        """
+        records = list(reversed(self._buffer))
+        return records[offset:offset + limit]
+
     def get_status(self) -> Dict:
         """获取存储状态"""
         return {

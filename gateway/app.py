@@ -593,11 +593,16 @@ async def query_audit(session_id: Optional[str] = None, event: Optional[str] = N
         raise HTTPException(status_code=503, detail="Audit store not initialized")
     status = audit_store.get_status()
     if not status.get("connected"):
+        # 未连接 PostgreSQL 时，返回内存缓冲区中的真实检测记录
+        records = audit_store.query_memory(limit=limit, offset=offset)
         return {
             "connected": False,
-            "message": "PostgreSQL 未连接，审计日志仅内存缓存。启用方式: XUANDUN_PG_ENABLED=1",
-            "records": [],
-            "total": 0,
+            "memory_mode": True,
+            "message": "PostgreSQL 未连接，返回内存缓存中的检测记录。启用方式: XUANDUN_PG_ENABLED=1",
+            "records": records,
+            "total": len(records),
+            "limit": limit,
+            "offset": offset,
         }
     records = await audit_store.query(session_id=session_id, event=event, limit=limit, offset=offset)
     return {"connected": True, "records": records, "total": len(records), "limit": limit, "offset": offset}

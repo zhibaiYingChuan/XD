@@ -15,7 +15,13 @@ class RevokedStore:
     """基于 JSON 文件的 jti 吊销黑名单（线程安全）。"""
 
     def __init__(self, path: str | None = None) -> None:
-        self.path = path or os.path.join(os.path.dirname(__file__), ".revoked_keys.json")
+        if path is None:
+            base = os.path.dirname(__file__)
+            # 优先使用独立 runtime 目录（Docker 挂载卷），避免写回源码目录
+            runtime = os.path.join(base, ".runtime")
+            path = os.path.join(runtime, ".revoked_keys.json") if os.path.isdir(runtime) \
+                else os.path.join(base, ".revoked_keys.json")
+        self.path = path
         self._lock = threading.Lock()
         self._jtis: Set[str] = set()
         self._load()
