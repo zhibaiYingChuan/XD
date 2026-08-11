@@ -8,7 +8,7 @@ const KEY_NAME: &str = "engine_secret_key";
 ///   - "engine_key"       → 引擎密钥（兼容旧版）
 ///   - "upstream_api_key" → 上游 API Key
 ///   - "notifier_config"  → 通知配置中的密钥（webhook token 等）
-/// 未识别的 service 回退到通用存储（keyring）
+///   - 未识别的 service 回退到通用存储（keyring）
 pub fn store_key_with_service(service: &str, key: &str) -> Result<(), String> {
     let entry = Entry::new(SERVICE_NAME, service).map_err(|e| e.to_string())?;
     entry.set_password(key).map_err(|e| e.to_string())?;

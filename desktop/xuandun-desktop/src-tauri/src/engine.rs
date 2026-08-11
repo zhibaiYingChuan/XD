@@ -807,7 +807,7 @@ pub async fn monitor_engine_health(app: &AppHandle) {
                         .notification()
                         .builder()
                         .title("玄盾引擎内存告警")
-                        .body(&format!("引擎内存占用 {}MB，超过 1GB 上限，正在自动重启", rss_mb))
+                        .body(format!("引擎内存占用 {}MB，超过 1GB 上限，正在自动重启", rss_mb))
                         .show();
                     let _ = stop_engine(app);
                     let _ = start_engine_sidecar(app);
