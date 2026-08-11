@@ -48,10 +48,10 @@
 
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
-| Windows x64 | `XuanDun_1.3.3-beta_x64-setup.exe` | NSIS 安装程序 |
-| macOS (Apple Silicon) | `XuanDun_1.3.3-beta_aarch64.dmg` | Apple Silicon 原生；Intel 版待支持 |
-| Linux x64 | `XuanDun_1.3.3-beta_amd64.AppImage` | 便携版 |
-| Linux x64 | `XuanDun_1.3.3-beta_amd64.deb` | Debian/Ubuntu 包 |
+| Windows x64 | `XuanDun_1.3.3_x64-setup.exe` | NSIS 安装程序 |
+| macOS (Apple Silicon) | `XuanDun_1.3.3_aarch64.dmg` | Apple Silicon 原生；Intel 版待支持 |
+| Linux x64 | `XuanDun_1.3.3_amd64.AppImage` | 便携版 |
+| Linux x64 | `XuanDun_1.3.3_amd64.deb` | Debian/Ubuntu 包 |
 
 > **macOS 注意**：DMG 暂未签名，首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。
 

@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::ShellExt;
 use once_cell::sync::Lazy;
+use sysinfo::System;
 
 pub fn safe_preview(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -21,7 +24,7 @@ pub fn safe_preview(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+pub(crate) static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     // P0 修复：管理接口鉴权链路。
     // 引擎端 _require_admin_auth() 要求管理端点 Origin ∈ {tauri://localhost, http://tauri.localhost}，
     // 否则返回 403。此前 HTTP_CLIENT 从不发送 Origin 头，导致紧急逃生/灰度部署/模式切换/告警/
@@ -84,6 +87,8 @@ pub struct EngineState {
     // P0-5 修复：存储 ChildHandle，替代 std::mem::forget
     // P1-A 修复：已实现 Drop trait（见下方 impl Drop），drop 时自动 kill+wait 回收子进程
     child_handle: Option<std::process::Child>,
+    // 修复4：健康历史时间线，最多保留 100 条事件
+    health_history: VecDeque<(i64, String)>,
 }
 
 impl EngineState {
@@ -99,6 +104,7 @@ impl EngineState {
             engine_url: "http://localhost:18765".to_string(),
             child_pid: None,
             child_handle: None,
+            health_history: VecDeque::new(),
         }
     }
 
@@ -125,6 +131,19 @@ impl EngineState {
     pub fn record_result(&mut self, _text: &str, result: &ProtectResult) {
         self.total_requests += 1;
         if !result.allowed { self.total_blocked += 1; }
+    }
+
+    // 修复4：记录健康历史事件，最多 100 条
+    fn record_health_event(&mut self, event: &str) {
+        self.health_history.push_back((chrono::Utc::now().timestamp_millis(), event.to_string()));
+        if self.health_history.len() > 100 {
+            self.health_history.pop_front();
+        }
+    }
+
+    // 修复4：返回健康历史时间线
+    pub fn get_health_history(&self) -> Vec<(i64, String)> {
+        self.health_history.iter().cloned().collect()
     }
 }
 
@@ -440,7 +459,7 @@ fn log_engine(msg: &str) {
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().to_rfc3339(), msg);
         let _ = f.flush();
     }
-    eprintln!("[XuanDun:engine] {}", msg);
+    eprintln!("[XuanDun:engine] [INFO] {}", msg);
 }
 
 /// 返回当前平台引擎二进制文件名（与 build_engine.py 的 output-name 保持一致）。
@@ -562,6 +581,11 @@ fn apply_upstream_env(app: &AppHandle, cmd: &mut std::process::Command) {
         cmd.env("XUANDUN_UPSTREAM_MODEL", &model);
     }
     cmd.env("XUANDUN_UPSTREAM_TIMEOUT", timeout.to_string());
+    // R9 修复：注入 XUANDUN_ADMIN_TOKEN 到引擎子进程，
+    // 确保桌面端设置的管理令牌与 Flask 引擎同步
+    if let Ok(token) = std::env::var("XUANDUN_ADMIN_TOKEN") {
+        cmd.env("XUANDUN_ADMIN_TOKEN", &token);
+    }
     log_engine(&format!(
         "Upstream env applied: url={} model={} timeout={}",
         if url.is_empty() { "(空)" } else { "已配置" },
@@ -736,6 +760,7 @@ fn kill_process(pid: u32) -> Result<(), String> {
 pub async fn monitor_engine_health(app: &AppHandle) {
     let mut consecutive_failures: u32 = 0;
     const MAX_FAILURES: u32 = 5;
+    let mut was_healthy: bool = true;
 
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -753,32 +778,98 @@ pub async fn monitor_engine_health(app: &AppHandle) {
             s.map(|s| s.running).unwrap_or(false)
         };
 
+        // 修复4：健康状态变化时记录事件
+        if healthy != was_healthy {
+            let event = if healthy { "recovered" } else { "unhealthy" };
+            if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                s.record_health_event(event);
+            }
+        }
+        was_healthy = healthy;
+
+        // 修复3：引擎内存监控 —— 使用 sysinfo 获取子进程内存
+        let child_pid = {
+            let state = app.state::<StdMutex<EngineState>>();
+            state.lock().ok().and_then(|s| s.child_pid)
+        };
+        if let Some(pid) = child_pid {
+            let mut sys = System::new_all();
+            sys.refresh_all();
+            if let Some(process) = sys.process(sysinfo::Pid::from(pid as usize)) {
+                let rss_mb = process.memory() / (1024 * 1024);
+                if rss_mb > 1024 {
+                    // RSS > 1GB：发出桌面通知 + 自动重启
+                    eprintln!("[XuanDun] [CRITICAL] Engine memory usage {}MB > 1GB, auto-restarting", rss_mb);
+                    if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                        s.record_health_event(&format!("memory_critical: {}MB", rss_mb));
+                    }
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("玄盾引擎内存告警")
+                        .body(&format!("引擎内存占用 {}MB，超过 1GB 上限，正在自动重启", rss_mb))
+                        .show();
+                    let _ = stop_engine(app);
+                    let _ = start_engine_sidecar(app);
+                    consecutive_failures = 0;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    if check_engine_health(&engine_url).await {
+                        eprintln!("[XuanDun] [INFO] Engine restarted after memory limit");
+                        if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
+                            s.running = true;
+                            s.healthy = true;
+                            s.started_at = Some(Instant::now());
+                        }
+                    }
+                    continue;
+                } else if rss_mb > 500 {
+                    // RSS > 500MB：警告日志
+                    eprintln!("[XuanDun] [WARN] Engine memory usage {}MB > 500MB threshold", rss_mb);
+                }
+            }
+        }
+
         if was_running && !healthy {
             if consecutive_failures >= MAX_FAILURES {
                 // P0-6 修复：达到 MAX 后不再重置为 0 继续重试，而是真正放弃并派发事件
-                eprintln!("[XuanDun] Engine restart failed {} times, giving up permanently", MAX_FAILURES);
+                eprintln!("[XuanDun] [ERROR] Engine restart failed {} times, giving up permanently", MAX_FAILURES);
                 if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                     s.running = false;
                     s.healthy = false;
+                    s.record_health_event("permanently_failed");
                     s.startup_error = Some(format!("引擎连续 {} 次重启失败，已放弃自动重试", MAX_FAILURES));
                 }
                 // 派发全局事件通知前端
                 let _ = app.emit("engine-permanently-failed", ());
+                // R9 修复：桌面级通知告警用户引擎已永久失效
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("玄盾防护引擎已永久失效")
+                    .body("引擎连续重启失败，AI 安全检测已停止。请手动重启应用以恢复防护。")
+                    .show();
                 break;
             }
 
-            eprintln!("[XuanDun] Engine health check failed, attempting restart ({}/{})...",
+            // 首次失败不立即杀引擎，等连续失败 2 次（允许引擎短暂 busy 自愈）
+            if consecutive_failures < 2 {
+                consecutive_failures += 1;
+                eprintln!("[XuanDun] [WARN] Engine health check failed ({} consecutive), waiting for self-recovery...", consecutive_failures);
+                continue;
+            }
+            eprintln!("[XuanDun] [WARN] Engine health check failed, attempting restart ({}/{})...",
                 consecutive_failures + 1, MAX_FAILURES);
             let _ = stop_engine(app);
             if let Ok(()) = start_engine_sidecar(app) {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 if check_engine_health(&engine_url).await {
-                    eprintln!("[XuanDun] Engine restarted successfully");
+                    eprintln!("[XuanDun] [INFO] Engine restarted successfully");
                     consecutive_failures = 0;
                     // P0修复：重启成功后必须设置 running=true，否则所有依赖 is_running 的命令失效
                     if let Ok(mut s) = app.state::<StdMutex<EngineState>>().lock() {
                         s.running = true;
                         s.healthy = true;
+                        s.record_health_event("restarted");
                         s.started_at = Some(Instant::now());
                     }
                     continue;

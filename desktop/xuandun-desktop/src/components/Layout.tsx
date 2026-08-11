@@ -7,7 +7,6 @@ import {
   ShieldCheck,
   FileText,
   Settings,
-  HelpCircle,
 } from 'lucide-react';
 
 // K3-企业精简版：导航从9项→4项（按"用户任务"而非"代码模块"组织）
@@ -18,7 +17,7 @@ import {
 const navItems = [
   { to: '/', icon: <LayoutDashboard size={18} strokeWidth={1.5} />, label: '实时监控' },
   { to: '/detect', icon: <ShieldCheck size={18} strokeWidth={1.5} />, label: '安全检测' },
-  { to: '/logs', icon: <FileText size={18} strokeWidth={1.5} />, label: '拦截日志' },
+  { to: '/logs', icon: <FileText size={18} strokeWidth={1.5} />, label: '防护日志' },
   { to: '/settings', icon: <Settings size={18} strokeWidth={1.5} />, label: '系统设置' },
 ];
 
@@ -67,12 +66,6 @@ export default function Layout() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <NavLink to="/help" className="nav-item">
-            <span className="nav-icon">
-              <HelpCircle size={18} strokeWidth={1.5} />
-            </span>
-            <span className="nav-label">帮助中心</span>
-          </NavLink>
           {version && <div className="sidebar-version">{version}</div>}
         </div>
       </aside>

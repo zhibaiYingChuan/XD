@@ -1,14 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
-import { WifiOff, Database } from 'lucide-react';
+import { WifiOff, Database, ShieldOff } from 'lucide-react';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import Dashboard from './pages/Dashboard';
 import Detect from './pages/Detect';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
-import Help from './pages/Help';
 import { api, isTauriBridgeAvailable } from './services/tauriApi';
 import './App.css';
 
@@ -24,6 +23,9 @@ function AppContent() {
   const [ipcDead, setIpcDead] = useState(false);
   const ipcFailStreak = useRef(0);
   const ipcBannerRef = useRef<{ operation?: string; error?: string; hint?: string } | null>(null);
+
+  // R9 修复：引擎永久失效横幅——监听 Rust 端 engine-permanently-failed 事件
+  const [enginePermanentlyFailed, setEnginePermanentlyFailed] = useState(false);
 
   // P2-01 修复：全局错误处理器，捕获未处理的异常和Promise拒绝
   useEffect(() => {
@@ -171,16 +173,56 @@ function AppContent() {
     };
   }, []);
 
-  // Sprint1-P0-6/P0-7: 全局横幅渲染——DB损坏 / IPC桥接死亡 两条优先级最高的横幅
-  // 放在render树的最顶层（任何页面都能看到），红底白字无法忽略
+  // R9 修复：监听 engine-permanently-failed 事件，前端显示红色全局横幅
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await listen('engine-permanently-failed', () => {
+          console.error('[全局] 防护引擎已永久失效');
+          setEnginePermanentlyFailed(true);
+        });
+      } catch (e) {
+        console.warn('[App] 无法监听 engine-permanently-failed 事件:', e);
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // Sprint1-P0-6/P0-7 + R9: 全局横幅渲染
+  // 优先级：引擎永久失效 > DB损坏 > IPC桥接死亡
   const renderGlobalBanners = () => {
     const banners: JSX.Element[] = [];
+    // R9 修复：引擎永久失效——最高优先级红色横幅，覆盖一切页面
+    if (enginePermanentlyFailed) {
+      banners.push(
+        <div key="engine-fatal" style={{
+          position: 'sticky', top: 0, zIndex: 10000,
+          background: 'var(--dt-emergency-bg)', color: '#fff', padding: '12px 16px',
+          borderBottom: '3px solid var(--dt-emergency-border)', fontSize: '13px', lineHeight: 1.5,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+            <ShieldOff size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                ⚠ 防护引擎已永久失效，请重启应用
+              </div>
+              <div style={{ opacity: 0.9 }}>
+                引擎连续多次重启失败，AI 安全检测已完全停止。所有请求将不受防护保护。
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
     if (dbCorruptError) {
       banners.push(
         <div key="db-corrupt" style={{
           position: 'sticky', top: 0, zIndex: 9999,
-          background: '#7f1d1d', color: '#fff', padding: '10px 16px',
-          borderBottom: '2px solid #b91c1c', fontSize: '13px', lineHeight: 1.5,
+          background: 'var(--dt-emergency-bg)', color: '#fff', padding: '10px 16px',
+          borderBottom: '2px solid var(--dt-emergency-border)', fontSize: '13px', lineHeight: 1.5,
         }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
             <Database size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
@@ -203,8 +245,8 @@ function AppContent() {
       banners.push(
         <div key="ipc-dead" style={{
           position: 'sticky', top: dbCorruptError ? '60px' : 0, zIndex: 9998,
-          background: '#78350f', color: '#fff', padding: '10px 16px',
-          borderBottom: '2px solid #92400e', fontSize: '13px', lineHeight: 1.5,
+          background: 'var(--dt-fatal-bg)', color: '#fff', padding: '10px 16px',
+          borderBottom: '2px solid var(--dt-fatal-border)', fontSize: '13px', lineHeight: 1.5,
         }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
             <WifiOff size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
@@ -239,7 +281,6 @@ function AppContent() {
             <Route path="/detect" element={<Detect />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/help" element={<Help />} />
             {/* Cycle1-交互P0 404白屏修复：所有未匹配路由（#/wizard/#/agents/#/reports/#/yinyang等历史旧URL）
                  统一重定向到仪表盘，不显示白屏。企业用户收藏旧URL不会看到空白页 */}
             <Route path="*" element={<Navigate to="/" replace />} />

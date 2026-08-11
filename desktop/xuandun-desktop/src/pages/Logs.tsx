@@ -1,34 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { GraduationCap, AlertTriangle, RefreshCw } from 'lucide-react';
-import { api, LogEntry, OutputHistoryEntry, LearningStatus, formatInvokeError, formatTrustLevel } from '../services/tauriApi';
-
-// 输出侧处置动作 → 中文标签 + 颜色（与 Dashboard 输出护栏保持一致：拦截=朱砂红/打码=琥珀金/告警=水墨灰）
-const OUTPUT_ACTION_LABEL: Record<OutputHistoryEntry['action'], string> = {
-  block: '拦截',
-  redact: '打码',
-  alert: '告警',
-  pass: '放行',
-};
-const OUTPUT_ACTION_CLASS: Record<OutputHistoryEntry['action'], string> = {
-  block: 'output-action-block',
-  redact: 'output-action-redact',
-  alert: 'output-action-alert',
-  pass: 'output-action-pass',
-};
-
-// 输出侧风险等级：语义与输入侧"信任"相反（high=高风险=红/medium=中=黄/low=低=绿/pass=无=青）
-const OUTPUT_RISK_LABEL: Record<string, string> = {
-  high: '高风险',
-  medium: '中风险',
-  low: '低风险',
-  pass: '无风险',
-};
-const OUTPUT_RISK_CLASS: Record<string, string> = {
-  high: 'output-risk-high',
-  medium: 'output-risk-medium',
-  low: 'output-risk-low',
-  pass: 'output-risk-pass',
-};
+import { api, LogEntry, LearningStatus, formatInvokeError, formatTrustLevel } from '../services/tauriApi';
 
 const PAGE_SIZE = 20;
 
@@ -37,15 +9,10 @@ export default function Logs() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState<'all' | 'blocked' | 'allowed'>('all');
-  const [rejectStageFilter, setRejectStageFilter] = useState<string>('all');
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const [learning, setLearning] = useState<LearningStatus | null>(null);
-  // 日志来源：input=输入侧（用户→模型，SQLite 持久化）；output=输出护栏（模型→用户，引擎内存准实时）
-  const [source, setSource] = useState<'input' | 'output'>('input');
-  const [outputEntries, setOutputEntries] = useState<OutputHistoryEntry[]>([]);
-  const [outputLoading, setOutputLoading] = useState(false);
   // P1-06 修复：加载错误状态，区分"加载失败"和"无数据"
   const [loadError, setLoadError] = useState<string | null>(null);
   // P1-05 修复：请求序列号，防止快速翻页产生竞态导致旧请求覆盖新数据
@@ -59,7 +26,8 @@ export default function Logs() {
       // GAP-S5-06 修复：卸载后不更新 state
       if (!mountedRef.current) return;
       setLearning(l);
-    } catch {
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn('[Logs] fetchLearning failed:', e);
       // ignore
     }
   }, []);
@@ -86,32 +54,20 @@ export default function Logs() {
     setLoadError(null);
     try {
       const filterAllowed = filter === 'all' ? undefined : filter === 'allowed';
-      const hasClientFilter = rejectStageFilter !== 'all' || debouncedSearch.trim() !== '';
 
-      if (hasClientFilter) {
-        const res = await api.getLogs(filterAllowed, 10000, 0);
-        // P1-05 修复：竞态守卫，丢弃过时请求的结果
-        if (requestId !== requestIdRef.current) return;
-        let filtered = res.entries;
-        if (rejectStageFilter !== 'all') {
-          filtered = filtered.filter(e => e.reject_stage === rejectStageFilter);
-        }
-        if (debouncedSearch.trim()) {
-          const q = debouncedSearch.toLowerCase();
-          filtered = filtered.filter(e =>
-            e.text_preview.toLowerCase().includes(q) ||
-            (e.session_id && e.session_id.toLowerCase().includes(q))
-          );
-        }
-        setEntries(filtered.slice(offset, offset + PAGE_SIZE));
-        setTotal(filtered.length);
-      } else {
-        const res = await api.getLogs(filterAllowed, PAGE_SIZE, offset);
-        // P1-05 修复：竞态守卫
-        if (requestId !== requestIdRef.current) return;
-        setEntries(res.entries);
-        setTotal(res.total);
+      const res = await api.getLogs(filterAllowed, 10000, 0);
+      // P1-05 修复：竞态守卫，丢弃过时请求的结果
+      if (requestId !== requestIdRef.current) return;
+      let filtered = res.entries;
+      if (debouncedSearch.trim()) {
+        const q = debouncedSearch.toLowerCase();
+        filtered = filtered.filter(e =>
+          e.text_preview.toLowerCase().includes(q) ||
+          (e.session_id && e.session_id.toLowerCase().includes(q))
+        );
       }
+      setEntries(filtered.slice(offset, offset + PAGE_SIZE));
+      setTotal(filtered.length);
     } catch (e) {
       // P1-06 修复：不再静默吞错，记录错误状态供 UI 显示
       if (requestId !== requestIdRef.current) return;
@@ -124,48 +80,17 @@ export default function Logs() {
         setLoading(false);
       }
     }
-  }, [filter, offset, rejectStageFilter, debouncedSearch]);
-
-  // 输出侧处置记录：引擎内存准实时，最多 200 条，无分页
-  const fetchOutputHistory = useCallback(async () => {
-    setOutputLoading(true);
-    setLoadError(null);
-    try {
-      const res = await api.getOutputHistory(200);
-      if (!mountedRef.current) return;
-      setOutputEntries(res.history || []);
-    } catch (e) {
-      if (!mountedRef.current) return;
-      setLoadError(formatInvokeError(e, '加载输出护栏记录'));
-    } finally {
-      if (mountedRef.current) setOutputLoading(false);
-    }
-  }, []);
-
-  // 来源切换：input 走输入侧日志（支持分页/搜索/筛选），output 走输出护栏处置记录
-  const handleSourceChange = (s: 'input' | 'output') => {
-    setSource(s);
-    setOffset(0);
-  };
+  }, [filter, offset, debouncedSearch]);
 
   useEffect(() => {
-    if (source === 'input') {
-      fetchLogs();
-    } else {
-      fetchOutputHistory();
-    }
-  }, [source, fetchLogs, fetchOutputHistory]);
+    fetchLogs();
+  }, [fetchLogs]);
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
   const handleFilterChange = (f: 'all' | 'blocked' | 'allowed') => {
     setFilter(f);
-    setOffset(0);
-  };
-
-  const handleRejectStageChange = (stage: string) => {
-    setRejectStageFilter(stage);
     setOffset(0);
   };
 
@@ -196,18 +121,6 @@ export default function Logs() {
         <div className="card-header">
           <h3>日志查看</h3>
           <div className="filter-group">
-            {/* 日志来源：输入侧（持久化）/ 输出护栏（引擎内存准实时） */}
-            <div className="source-toggle" role="group" aria-label="日志来源">
-              {(['input', 'output'] as const).map((s) => (
-                <button
-                  key={s}
-                  className={`filter-btn ${source === s ? 'active' : ''}`}
-                  onClick={() => handleSourceChange(s)}
-                >
-                  {s === 'input' ? '输入侧' : '输出护栏'}
-                </button>
-              ))}
-            </div>
             {(['all', 'blocked', 'allowed'] as const).map((f) => (
               <button
                 key={f}
@@ -220,25 +133,7 @@ export default function Logs() {
           </div>
         </div>
         <div className="card-body">
-          {/* 输入侧日志筛选区：仅来源为「输入侧」时显示 */}
-          {source === 'input' && (
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-            <select
-              value={rejectStageFilter}
-              onChange={(e) => handleRejectStageChange(e.target.value)}
-              style={{
-                padding: '4px 8px',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--border)',
-                background: 'var(--bg-card)',
-                color: 'var(--text-primary)',
-                fontSize: '0.85em',
-              }}
-            >
-              <option value="all">全部阶段</option>
-              <option value="reject_gate">reject_gate</option>
-              <option value="timing_checker">timing_checker</option>
-            </select>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
             <input
               type="text"
               placeholder="搜索文本/会话ID..."
@@ -256,64 +151,22 @@ export default function Logs() {
               }}
             />
           </div>
-          )}
 
-          {/* P1-06 修复：加载失败时显示错误提示和重试按钮，区分"加载失败"和"无数据" */}
+          {/* 加载失败时显示错误提示和重试按钮 */}
           {loadError && (
             <div className="alert-banner alert-danger" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
               <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <AlertTriangle size={18} strokeWidth={1.5} />
                 <span>{loadError}</span>
               </span>
-              <button className="btn btn-sm btn-secondary" onClick={() => (source === 'input' ? fetchLogs() : fetchOutputHistory())}>
+              <button className="btn btn-sm btn-secondary" onClick={() => fetchLogs()}>
                 <RefreshCw size={14} strokeWidth={1.5} /> 重试
               </button>
             </div>
           )}
 
-          {/* ── 输出护栏处置记录（模型→用户，引擎内存准实时） ── */}
-          {source === 'output' && (
-            outputLoading && outputEntries.length === 0 ? (
-              <div className="empty-state">加载中...</div>
-            ) : !loadError && outputEntries.length === 0 ? (
-              <div className="empty-state">暂无输出护栏处置记录（打码/拦截/告警均未发生）</div>
-            ) : (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>处置动作</th>
-                    <th>风险等级</th>
-                    <th>处置原因</th>
-                    <th>输出预览（已脱敏）</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {outputEntries.map((entry, idx) => (
-                    <tr key={idx}>
-                      <td className="mono">{new Date(entry.time).toLocaleTimeString()}</td>
-                      <td>
-                        <span className={`output-action-badge ${OUTPUT_ACTION_CLASS[entry.action]}`}>
-                          {OUTPUT_ACTION_LABEL[entry.action]}
-                        </span>
-                      </td>
-                      <td>
-                        <span className={`output-risk-badge ${OUTPUT_RISK_CLASS[(entry.risk_level || 'pass').toLowerCase()] || 'output-risk-pass'}`}>
-                          {OUTPUT_RISK_LABEL[(entry.risk_level || 'pass').toLowerCase()] || entry.risk_level}
-                        </span>
-                      </td>
-                      <td className="text-preview" title={entry.reason}>{entry.reason}</td>
-                      <td className="mono text-preview" style={{ fontSize: '0.8em' }}>{entry.preview || '--'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )
-          )}
-
-          {/* ── 输入侧日志（用户→模型，SQLite 持久化） ── */}
-          {source === 'input' && (
-            loading && entries.length === 0 ? (
+          {/* 日志列表 */}
+          {loading && entries.length === 0 ? (
               <div className="empty-state">加载中...</div>
             ) : !loadError && entries.length === 0 ? (
               // P1 修复：区分"搜索无匹配"与"确实无日志"，避免用户误以为数据丢失
@@ -347,11 +200,11 @@ export default function Logs() {
                   ))}
                 </tbody>
               </table>
-            )
-          )}
+            )}
 
-          {/* 输入侧日志分页：仅输入侧显示 */}
-          {source === 'input' && totalPages > 1 && (
+
+          {/* 分页 */}
+          {totalPages > 1 && (
             <div className="pagination">
               <button
                 className="btn btn-secondary btn-sm"

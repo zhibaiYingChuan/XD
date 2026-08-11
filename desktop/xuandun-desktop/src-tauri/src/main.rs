@@ -18,7 +18,7 @@ fn write_crash_log(msg: &str) {
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().to_rfc3339(), msg);
     }
-    eprintln!("{}", msg);
+    eprintln!("[ERROR] {}", msg);
 }
 
 fn install_panic_hook() {
@@ -32,8 +32,12 @@ fn install_panic_hook() {
             .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
             .unwrap_or("<non-string panic payload>");
         let msg = format!(
-            "PANIC at {}\n  Message: {}\n  Backtrace:\n{}",
-            location, payload, std::backtrace::Backtrace::force_capture()
+            "PANIC at {}\n  Version: {}\n  OS: {}\n  Message: {}\n  Backtrace:\n{}",
+            location,
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            payload,
+            std::backtrace::Backtrace::force_capture()
         );
         write_crash_log(&msg);
 

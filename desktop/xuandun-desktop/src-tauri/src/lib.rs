@@ -25,7 +25,7 @@ pub fn show_message_box(title: &str, body: &str) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn show_message_box(title: &str, body: &str) {
-    eprintln!("{}: {}", title, body);
+    eprintln!("[ERROR] {}: {}", title, body);
 }
 
 fn setup_log(msg: &str) {
@@ -39,7 +39,7 @@ fn setup_log(msg: &str) {
         use std::io::Write;
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().to_rfc3339(), msg);
     }
-    eprintln!("[XuanDun] {}", msg);
+    eprintln!("[XuanDun] [INFO] {}", msg);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -111,8 +111,8 @@ pub fn run() {
                     let log_path = std::env::var_os("LOCALAPPDATA")
                         .map(|p| format!("{:?}\\com.daoti.xuandun-desktop\\engine.log", p))
                         .unwrap_or_else(|| "engine.log".to_string());
-                    eprintln!("[XuanDun] Engine start error: {}", e);
-                    eprintln!("[XuanDun] See {} for engine crash diagnostics", log_path);
+                    eprintln!("[XuanDun] [ERROR] Engine start error: {}", e);
+                    eprintln!("[XuanDun] [INFO] See {} for engine crash diagnostics", log_path);
                 }
             });
             let health_handle = app.handle().clone();
@@ -165,8 +165,15 @@ pub fn run() {
             // 上游模型可视化配置（设置页表单，引擎启动时注入环境变量）
             commands::get_upstream_config,
             commands::set_upstream_config,
+            // P2 平面端新命令（桌面端前端重构 V2）
+            commands::scan_model_server,
+            commands::connect_model,
+            commands::mark_as_safe,
+            commands::get_weekly_report_preview,
+            commands::generate_weekly_report,
             // Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令注册
             commands::noop_heartbeat,
+            commands::get_health_history,
             // UI修复：打开引擎日志文件（Dashboard启动失败时可点击跳转）
             commands::open_engine_log,
         ])

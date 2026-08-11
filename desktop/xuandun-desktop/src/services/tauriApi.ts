@@ -219,6 +219,23 @@ export interface UpstreamConfig {
   timeout: number;
 }
 
+// ── 平面端 V2 新增接口（P1 中期优化）──
+
+/** 模型服务器扫描结果 */
+export interface ModelScanResult {
+  success: boolean;
+  models: Array<{ name: string; port: number; type: string }>;
+  error?: string;
+}
+
+/** 周报预览数据 */
+export interface WeeklyReportPreview {
+  total_requests: number;
+  total_blocked: number;
+  block_rate: number;
+  high_risk_count: number;
+}
+
 export interface BypassStats {
   emergency_bypass: boolean;
   gray_deploy_ratio: number;
@@ -245,6 +262,14 @@ export interface HashChainReport {
 }
 
 import { invoke } from '@tauri-apps/api/core';
+
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: {
+      invoke?: (...args: unknown[]) => Promise<unknown>;
+    };
+  }
+}
 
 // ── P0-04 修复：invoke 超时包装器 ──
 // 所有 invoke 调用必须经过超时包装，防止 Rust 后端挂起导致 UI 永久冻结。
@@ -275,6 +300,9 @@ export const TIMEOUT = {
   // IPC noop 心跳用短超时，快速识别桥接是否还活着
   NOOP_HEARTBEAT: 3_000,
 } as const;
+
+/** Toast/消息自动消失时间(ms)，全项目统一 */
+export const MESSAGE_TIMEOUT_MS = 4000;
 
 // ── 浏览器环境 HTTP API 回退 ──
 // 当非 Tauri 环境（浏览器直接访问 Web Demo）时，
@@ -404,8 +432,8 @@ function invokeWithTimeout<T>(
 ): Promise<T> {
   // 非 Tauri 环境 → HTTP 回退
   if (typeof window === 'undefined' ||
-      !(window as any).__TAURI_INTERNALS__ ||
-      typeof (window as any).__TAURI_INTERNALS__.invoke !== 'function') {
+      !window.__TAURI_INTERNALS__ ||
+      typeof window.__TAURI_INTERNALS__?.invoke !== 'function') {
     return invokeHttp<T>(command, args, timeoutMs);
   }
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -423,8 +451,8 @@ function invokeWithTimeout<T>(
  */
 export function isTauriBridgeAvailable(): boolean {
   return typeof window !== 'undefined' &&
-    Boolean((window as any).__TAURI_INTERNALS__) &&
-    typeof (window as any).__TAURI_INTERNALS__.invoke === 'function';
+    Boolean(window.__TAURI_INTERNALS__) &&
+    typeof window.__TAURI_INTERNALS__?.invoke === 'function';
 }
 
 /**
@@ -581,4 +609,15 @@ export const api = {
   getUpstreamConfig: () => invokeWithTimeout<UpstreamConfig>('get_upstream_config', undefined, TIMEOUT.FAST),
   setUpstreamConfig: (config: UpstreamConfig) =>
     invokeWithTimeout<void>('set_upstream_config', { config }, TIMEOUT.NORMAL),
+  // ── 平面端 V2 新接口（P1 中期优化，P2 实现）──
+  scanModelServer: (ip: string) =>
+    invokeWithTimeout<ModelScanResult>('scan_model_server', { ip }, TIMEOUT.NORMAL),
+  connectModel: (modelName: string, port: number, ip?: string) =>
+    invokeWithTimeout<{ success: boolean }>('connect_model', { modelName, port, ip }, TIMEOUT.NORMAL),
+  markAsSafe: (text: string) =>
+    invokeWithTimeout<{ success: boolean }>('mark_as_safe', { text }, TIMEOUT.FAST),
+  getWeeklyReportPreview: () =>
+    invokeWithTimeout<WeeklyReportPreview>('get_weekly_report_preview', undefined, TIMEOUT.NORMAL),
+  generateWeeklyReport: () =>
+    invokeWithTimeout<{ file_path: string }>('generate_weekly_report', undefined, TIMEOUT.SLOW),
 };

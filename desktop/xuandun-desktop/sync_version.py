@@ -45,6 +45,8 @@ DAOTI_INIT_PY = PROJECT_ROOT / "src" / "daoti_xuandun" / "__init__.py"
 
 # v1.3.3-beta 扩展：docker-compose.yml 镜像标签
 DOCKER_COMPOSE = PROJECT_ROOT / "docker-compose.yml"
+# v1.3.3 正式版扩展：Dockerfile 镜像标签 + LABEL version
+DOCKERFILE = PROJECT_ROOT / "Dockerfile"
 
 # v1.3.3-beta 扩展：admin-console 构建注入由 vite.config.ts 自动读取 pyproject.toml，无需手动同步
 
@@ -186,6 +188,29 @@ def sync_docker_compose(version: str, check_only: bool) -> bool:
     return True
 
 
+def sync_dockerfile(version: str, check_only: bool) -> bool:
+    """同步 Dockerfile 中的版本标签。返回是否有变更。
+
+    覆盖以下模式：
+      - LABEL version="1.2.3"
+      - 注释中的 docker build / docker run 镜像标签
+    """
+    if not DOCKERFILE.exists():
+        return False
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    original = content
+    # LABEL version="1.2.3" 或 "1.2.3-beta"
+    content = re.sub(r'(LABEL version=")\d+\.\d+\.\d+(-\w+)?(")', rf'\g<1>{version}\g<3>', content)
+    # 注释中的 xuandun-gateway:<version>
+    content = re.sub(r'(xuandun-gateway:)\d+\.\d+\.\d+(-\w+)?', rf'\g<1>{version}', content)
+    if content == original:
+        return False
+    if check_only:
+        return True
+    DOCKERFILE.write_text(content, encoding="utf-8")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="版本号 SSOT 同步与校验")
     parser.add_argument("--check", action="store_true", help="仅校验，不修改（CI 门禁用）")
@@ -202,13 +227,15 @@ def main() -> int:
     changed |= sync_readme(cargo_version, args.check)
     changed |= sync_daoti_init(cargo_version, args.check)
     changed |= sync_docker_compose(cargo_version, args.check)
+    changed |= sync_dockerfile(cargo_version, args.check)
 
     if args.check:
         if changed:
             print(f"ERROR: Version mismatch detected! Run 'python sync_version.py' to sync.", file=sys.stderr)
             return 1
         print("OK: All version numbers are consistent across Cargo.toml, package.json, "
-              "tauri.conf.json, engine_flask.py, pyproject.toml, README.md, daoti_xuandun/__init__.py.")
+              "tauri.conf.json, engine_flask.py, pyproject.toml, README.md, "
+              "daoti_xuandun/__init__.py, docker-compose.yml, Dockerfile.")
         return 0
     else:
         if changed:

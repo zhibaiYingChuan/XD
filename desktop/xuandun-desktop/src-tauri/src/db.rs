@@ -30,15 +30,112 @@ pub struct HashChainReport {
 
 pub struct Database {
     pub(crate) conn: Mutex<Connection>,
+    db_path: std::path::PathBuf,
 }
 
 impl Database {
     pub fn open(db_path: &Path) -> Result<Self, String> {
-        let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+        let db_path_buf = db_path.to_path_buf();
+
+        // 修复5：SQLite 自动恢复 —— 启动时校验数据库完整性
+        let conn = match Connection::open(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[XuanDun] [ERROR] DB open failed: {} — attempting backup recovery", e);
+                if let Some(restored) = Self::try_restore_from_backup(&db_path_buf) {
+                    restored
+                } else {
+                    eprintln!("[XuanDun] [ERROR] DB backup also unavailable, creating fresh database");
+                    Self::create_fresh(&db_path_buf)?
+                }
+            }
+        };
+
+        // 执行完整性检查
+        let integrity_ok = conn.query_row("PRAGMA integrity_check", [], |row| {
+            let val: String = row.get(0)?;
+            Ok(val == "ok")
+        }).unwrap_or(false);
+
+        if !integrity_ok {
+            eprintln!("[XuanDun] [WARN] DB integrity_check failed, attempting WAL cleanup and recovery...");
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            let retry_ok = conn.query_row("PRAGMA integrity_check", [], |row| {
+                let val: String = row.get(0)?;
+                Ok(val == "ok")
+            }).unwrap_or(false);
+            if !retry_ok {
+                eprintln!("[XuanDun] [ERROR] DB still corrupted after WAL cleanup, attempting backup recovery");
+                drop(conn);
+                let _ = std::fs::remove_file(&db_path_buf);
+                if let Some(restored) = Self::try_restore_from_backup(&db_path_buf) {
+                    let db = Self { conn: Mutex::new(restored), db_path: db_path_buf.clone() };
+                    db.init_tables()?;
+                    if let Err(e) = db.insert_audit("db_recovery", "数据库从备份恢复，部分近期数据可能丢失") {
+                        eprintln!("[XuanDun] [WARN] Failed to log db_recovery audit: {}", e);
+                    }
+                    return Ok(db);
+                }
+                // 全部失败，创建新数据库
+                let new_conn = Self::create_fresh(&db_path_buf)?;
+                let db = Self { conn: Mutex::new(new_conn), db_path: db_path_buf.clone() };
+                db.init_tables()?;
+                if let Err(e) = db.insert_audit("db_recovery", "数据库已损坏且备份不可用，已创建全新数据库") {
+                    eprintln!("[XuanDun] [WARN] Failed to log db_reset audit: {}", e);
+                }
+                return Ok(db);
+            }
+        }
+
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").map_err(|e| e.to_string())?;
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self { conn: Mutex::new(conn), db_path: db_path_buf };
         db.init_tables()?;
         Ok(db)
+    }
+
+    /// 尝试从备份文件恢复数据库
+    fn try_restore_from_backup(db_path: &Path) -> Option<Connection> {
+        let backup_path = db_path.parent().map(|p| p.join("xuandun.db.bak"))?;
+        if !backup_path.exists() {
+            eprintln!("[XuanDun] [WARN] No backup file found at {}", backup_path.display());
+            return None;
+        }
+        eprintln!("[XuanDun] [INFO] Found backup at {}, attempting restore", backup_path.display());
+        // 删除损坏的数据库文件
+        let _ = std::fs::remove_file(db_path);
+        match std::fs::copy(&backup_path, db_path) {
+            Ok(_) => {
+                eprintln!("[XuanDun] [INFO] Database restored from backup");
+                Connection::open(db_path).ok()
+            }
+            Err(e) => {
+                eprintln!("[XuanDun] [ERROR] Failed to copy backup: {}", e);
+                None
+            }
+        }
+    }
+
+    /// 创建全新的空数据库
+    fn create_fresh(db_path: &Path) -> Result<Connection, String> {
+        // 删除损坏的文件
+        let _ = std::fs::remove_file(db_path);
+        let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").map_err(|e| e.to_string())?;
+        eprintln!("[XuanDun] [INFO] Created fresh database at {}", db_path.display());
+        Ok(conn)
+    }
+
+    /// 创建数据库备份（修复5：在写入失败或关键操作后自动备份）
+    fn backup_db(&self) {
+        let backup_path = self.db_path.with_extension("db.bak");
+        match std::fs::copy(&self.db_path, &backup_path) {
+            Ok(_) => {
+                eprintln!("[XuanDun] [INFO] Database backup created at {}", backup_path.display());
+            }
+            Err(e) => {
+                eprintln!("[XuanDun] [ERROR] Failed to create database backup: {}", e);
+            }
+        }
     }
 
     fn init_tables(&self) -> Result<(), String> {
@@ -94,7 +191,7 @@ impl Database {
         if !has_hash_version {
             conn.execute("ALTER TABLE logs ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 2", [])
                 .map_err(|e| format!("Failed to add hash_version column: {}", e))?;
-            eprintln!("[xuandun] Added hash_version column to logs table");
+            eprintln!("[xuandun] [INFO] Added hash_version column to logs table");
         }
 
         conn.execute_batch("
@@ -121,7 +218,7 @@ impl Database {
                 ALTER TABLE logs ADD COLUMN latency_ms REAL;
                 ALTER TABLE logs ADD COLUMN domain_distance REAL;
             ").map_err(|e| format!("Failed to add v1.2.0 columns: {}", e))?;
-            eprintln!("[xuandun] Added attack_category/latency_ms/domain_distance columns to logs table");
+            eprintln!("[xuandun] [INFO] Added attack_category/latency_ms/domain_distance columns to logs table");
         }
 
         // v1.2.0 聚合表
@@ -168,7 +265,7 @@ impl Database {
             .unwrap_or(0);
         if user_version < 2 {
             if let Err(e) = conn.execute("UPDATE logs SET hash_version = 1 WHERE hash_version = 2 AND length(hash) = 32", []) {
-                eprintln!("[xuandun] hash_version migration failed: {}", e);
+                eprintln!("[xuandun] [ERROR] hash_version migration failed: {}", e);
             }
             conn.execute_batch("PRAGMA user_version = 2;").map_err(|e| e.to_string())?;
         }
@@ -187,7 +284,7 @@ impl Database {
             Ok(hash) => hash,
             Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
             Err(e) => {
-                eprintln!("[XuanDun] DB error fetching prev_hash: {}", e);
+                eprintln!("[XuanDun] [ERROR] DB error fetching prev_hash: {}", e);
                 return Err(format!("DB error: {}", e));
             }
         };
@@ -201,7 +298,12 @@ impl Database {
         conn.execute(
             "INSERT INTO logs (timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, hash_version, attack_category, latency_ms, domain_distance) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11)",
             params![timestamp, text_preview, allowed as i32, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance],
-        ).map_err(|e| e.to_string())?;
+        ).map_err(|e| {
+            // 修复5：写入失败时自动创建备份，保留恢复机会
+            eprintln!("[XuanDun] [ERROR] insert_log failed, creating backup: {}", e);
+            self.backup_db();
+            e.to_string()
+        })?;
         Ok(())
     }
 
@@ -211,7 +313,12 @@ impl Database {
         conn.execute(
             "INSERT INTO audit (timestamp, event_type, detail) VALUES (?1, ?2, ?3)",
             params![timestamp, event_type, detail],
-        ).map_err(|e| e.to_string())?;
+        ).map_err(|e| {
+            // 修复5：写入失败时自动创建备份
+            eprintln!("[XuanDun] [ERROR] insert_audit failed, creating backup: {}", e);
+            self.backup_db();
+            e.to_string()
+        })?;
         Ok(())
     }
 
@@ -252,25 +359,75 @@ impl Database {
         }
         Ok(result)
     }
+}
 
+// ── 修复1：密钥体系 —— Keyring 占位符与敏感字段判断 ──
+
+const KEYRING_PLACEHOLDER: &str = "[KEYRING_PROTECTED]";
+const DB_SERVICE_NAME: &str = "XuanDun";
+
+/// 判断数据库配置 key 是否为敏感字段（需要 keyring 保护）
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.contains("api_key")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+}
+
+/// 将 DB config key 映射到 Keyring service 名称
+fn db_key_to_keyring_service(key: &str) -> String {
+    format!("{}_{}", DB_SERVICE_NAME, key)
+}
+
+impl Database {
     pub fn get_config(&self, key: &str) -> Result<Option<String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         match conn.query_row(
             "SELECT value FROM config WHERE key = ?1",
             [key], |row| row.get(0)
         ) {
-            Ok(value) => Ok(Some(value)),
+            Ok(value) => {
+                // 修复1：若 DB 中的值是 keyring 占位符，则从系统 Keyring 读取真实值
+                if value == KEYRING_PLACEHOLDER {
+                    let service = db_key_to_keyring_service(key);
+                    match crate::keyring::get_key_by_service(&service) {
+                        Ok(real_value) => Ok(Some(real_value)),
+                        Err(e) => {
+                            eprintln!("[XuanDun] [WARN] Keyring lookup failed for '{}': {}, returning placeholder", key, e);
+                            Ok(Some(value))
+                        }
+                    }
+                } else {
+                    Ok(Some(value))
+                }
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
     }
 
     pub fn set_config(&self, key: &str, value: &str) -> Result<(), String> {
+        // 修复1：敏感 key 的值通过系统 Keyring 存储，DB 中仅写入占位符
+        let (db_value, should_store_in_keyring) = if is_sensitive_key(key) && !value.is_empty() {
+            (KEYRING_PLACEHOLDER.to_string(), true)
+        } else {
+            (value.to_string(), false)
+        };
+
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
-            params![key, value],
+            params![key, db_value],
         ).map_err(|e| e.to_string())?;
+
+        if should_store_in_keyring {
+            let service = db_key_to_keyring_service(key);
+            if let Err(e) = crate::keyring::store_key_with_service(&service, value) {
+                eprintln!("[XuanDun] [ERROR] Failed to store '{}' in keyring: {}", key, e);
+            }
+        }
+
         Ok(())
     }
 

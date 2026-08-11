@@ -291,6 +291,15 @@ class LuoshuSymbolMapper:
 
     def compute_safe_distance(self, state: np.ndarray) -> float:
         """计算状态向量与安全域原型的最小距离（合并静态出厂+动态在线原型）。
+        
+        P2 权重过渡机制：出厂本能 → 后天学习
+        - Phase A/B：仅使用 _static_prototypes（出厂本能权重 100%）
+        - Phase C 初期（_total_learned < 2000）：出厂权重递减，后天学习权重递增
+        - Phase C 稳定期（_total_learned >= 2000）：后天学习权重 100%，逐步边缘化出厂本能
+        
+        权重计算公式（线性递减）：
+        - static_weight = max(0.1, 1.0 - (_total_learned - 1000) / 1000)
+        - online_weight = 1.0 - static_weight
 
         架构级指令4：配合新的50个良性簇心，正常文本距离簇心的距离
         会比旧的15条孤立点缩短约 30-50%，MEDIUM 判定数量急剧减少，
@@ -314,19 +323,40 @@ class LuoshuSymbolMapper:
                 )
 
         # 合并两部分原型（静态簇心优先，保证距离下界由出厂数据兜底）
+        # P2 权重过渡：出厂本能权重随学习进度递减
         best_sim = 0.0
         if self._static_prototypes:
             static = np.array(self._static_prototypes, dtype=np.float32)
             static_norm = static / np.maximum(np.linalg.norm(static, axis=1, keepdims=True), 1e-8)
             sims = static_norm @ query_vec
-            best_sim = max(best_sim, float(np.max(sims)))
+            static_sim = float(np.max(sims))
+            # P2 权重过渡：出厂静态原型权重随学习递减
+            # - _total_learned < 1000 (Phase B)：出厂权重 1.0（完全依赖出厂本能）
+            # - 1000~2000 (Phase C 初期)：出厂权重从 1.0 线性递减到 0.1
+            # - >= 2000 (Phase C 稳定期)：出厂权重 0.1（仅作兜底，让位给后天学习）
+            if self._total_learned >= 1000:
+                static_weight = max(0.1, 1.0 - (self._total_learned - 1000) / 1000)
+                # 加权后相似度 = 出厂相似度 × 权重 + 出厂相似度默认值 × (1-权重)
+                # 当权重低时，出厂原型的贡献退化为"取默认值"，不干扰后天学习
+                best_sim = max(best_sim, static_sim * static_weight + 0.5 * (1.0 - static_weight))
+            else:
+                best_sim = max(best_sim, static_sim)
         if self.safe_prototypes:
             protos = np.array(self.safe_prototypes, dtype=np.float32)
             norms = np.linalg.norm(protos, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             protos_norm = protos / norms
             sims = protos_norm @ query_vec
-            best_sim = max(best_sim, float(np.max(sims)))
+            online_sim = float(np.max(sims))
+            # P2 权重过渡：后天学习原型权重随学习递增
+            # - _total_learned < 1000 (Phase B)：无 safe_prototypes（跳过）
+            # - 1000~2000 (Phase C 初期)：后天权重从 0.0 递增到 0.9
+            # - >= 2000 (Phase C 稳定期)：后天权重 0.9（完全接管）
+            if self._total_learned >= 1000:
+                online_weight = min(0.9, (self._total_learned - 1000) / 1000)
+                best_sim = max(best_sim, online_sim * online_weight + 0.5 * (1.0 - online_weight))
+            else:
+                best_sim = max(best_sim, online_sim)
         return 1.0 - best_sim
 
     def compute_attack_distance(self, state: np.ndarray) -> float:

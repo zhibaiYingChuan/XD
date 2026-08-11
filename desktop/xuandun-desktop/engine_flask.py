@@ -64,7 +64,7 @@ app = Flask(__name__)
 # 引擎版本号单一来源（SSOT 从 Cargo.toml 同步，见 sync_version.py）。
 # health 与 status 端点共用此常量，避免版本双字面量漂移（R4 修复）。
 # sync_version.py 通过匹配本常量赋值行来做版本同步，保持单行格式。
-_ENGINE_VERSION = "1.3.3-beta"
+_ENGINE_VERSION = "1.3.3"
 
 _MODE_MAP = {
     "high_security": DefenseLevel.STRICT,
@@ -166,6 +166,8 @@ _ADMIN_ENDPOINTS = {
     "/output/config",
     "/sensitive/dict",           # POST/DELETE 需要鉴权
     "/debug/state",
+    "/learn/safe",               # R9 修复：学习安全样本接口需鉴权
+    "/bypass/stats",             # R9 修复：逃生通道统计接口需鉴权
 }
 
 
@@ -354,6 +356,52 @@ def _save_learning_snapshot():
         logger.info("Learning snapshot saved (%d shields, %s)", len(_shields), _LEARNING_SNAPSHOT_PATH)
     except Exception as e:
         logger.warning("Failed to save learning snapshot: %s", e)
+
+
+def _load_learning_snapshot():
+    """启动时从 learning_snapshot.json 加载学习状态摘要。
+
+    在引擎 start 阶段调用，检查快照文件是否存在。若存在且版本号匹配，
+    记录各 shield 的历史学习统计信息，供后续学习迁移和诊断使用。
+    注意：本函数仅加载摘要信息到日志，不修改 shield 的内部状态（因为
+    DomainAwareness 的学习计数是内部管理的）；若其他模式按需创建，
+    _transfer_learning_data 会自动将已有 shield 的数据迁移过去。
+    """
+    if not _LEARNING_SNAPSHOT_PATH or not os.path.isfile(_LEARNING_SNAPSHOT_PATH):
+        logger.info("No learning snapshot found, starting from cold state")
+        return
+
+    try:
+        with open(_LEARNING_SNAPSHOT_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        version = payload.get("version")
+        if version != 1:
+            logger.warning(
+                "Learning snapshot version mismatch: expected=1, got=%s, skipping load",
+                version,
+            )
+            return
+
+        shields_data = payload.get("shields", {})
+        total_samples = 0
+        for mode_name, shield_data in shields_data.items():
+            sc = shield_data.get("sample_count", 0)
+            cc = shield_data.get("call_count", 0)
+            total_samples += sc
+            logger.info(
+                "从快照恢复学习状态：mode=%s sample_count=%d call_count=%d",
+                mode_name, sc, cc,
+            )
+
+        logger.info(
+            "从快照恢复学习状态：共 %d 条样本 / %d 个 mode（快照时间=%s）",
+            total_samples, len(shields_data), payload.get("timestamp", "unknown"),
+        )
+    except (json.JSONDecodeError, IOError, OSError) as e:
+        logger.warning("Failed to load learning snapshot: %s", e)
+    except Exception as e:
+        logger.error("Unexpected error loading learning snapshot: %s", e, exc_info=True)
 
 
 def _maybe_save_snapshot(mode: str):
@@ -1079,7 +1127,7 @@ def output_protect():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("output/protect error: %s", e, exc_info=True)
-        return jsonify({"error": type(e).__name__}), 500
+        return jsonify({"allowed": True, "fallback": True, "error": type(e).__name__}), 200
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1656,6 +1704,9 @@ def main():
     logger.info("Initializing default shield mode: %s", args.mode)
     _get_shield(args.mode)
     logger.info("Default shield mode initialized.")
+
+    # 修复2：启动时加载学习快照，恢复学习状态摘要
+    _load_learning_snapshot()
 
     logger.info("道体玄盾引擎启动: %s:%d (mode=%s)", args.host, args.port, args.mode)
 

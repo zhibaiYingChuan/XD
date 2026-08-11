@@ -233,3 +233,25 @@ tools/license_manager/
 
 # TypeScript 增量编译缓存（构建生成，不入库）
 *.tsbuildinfo
+
+# ── v1.3.3 正式版发布前补充忽略规则 ──
+
+# AI 助手工作目录（本地开发辅助，不入仓库）
+.agents/
+.claude/
+skills-lock.json
+
+# 本地临时文件和下载
+_downloads/
+_t.json
+_t2.json
+
+# 桌面端本地启动脚本（开发调试用，不入仓库）
+desktop/launch_cdp.ps1
+desktop/launch_desktop.ps1
+desktop/stderr.txt
+desktop/stdout.txt
+
+# 本地设计资产和视频项目（不入仓库）
+dt-ass/
+video/

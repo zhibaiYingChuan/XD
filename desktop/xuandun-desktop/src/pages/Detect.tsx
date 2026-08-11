@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { api, ProtectResponse, OutputProtectResponse, formatInvokeError, InvokeTimeoutError, formatTrustLevel } from '../services/tauriApi';
+import { api, ProtectResponse, OutputProtectResponse, formatInvokeError, InvokeTimeoutError, formatTrustLevel, MESSAGE_TIMEOUT_MS } from '../services/tauriApi';
 import { AlertTriangle, Zap, Info, CheckCircle, ShieldX, Upload, Download, FileText, ShieldCheck, Eye, EyeOff } from 'lucide-react';
 
 // G-13 修复：Toast 队列类型定义
@@ -78,7 +78,7 @@ export default function Detect() {
       // 5 秒后自动移除
       setTimeout(() => {
         setToasts(p => p.filter(t => t.id !== id));
-      }, 5000);
+      }, MESSAGE_TIMEOUT_MS);
       return [...prev, { id, message, type }];
     });
   }, []);
@@ -296,6 +296,35 @@ export default function Detect() {
   // P1 修复：检测失败独立统计，不混入拦截数，避免安全语义误导
   const batchFailed = batchDone.filter((i) => i.status === 'error').length;
 
+  // ── 拦截理由"人话化"映射（严格对齐设计文档 §3.7）──
+  const humanReason = (res: ProtectResponse): string => {
+    if (res.allowed) {
+      const lat = res.latency_ms != null ? `（延迟 ${Math.round(res.latency_ms)}ms）` : '';
+      return `安全请求，已放行${lat}`;
+    }
+    if (res.fallback) return '引擎不可达，已启动保护性阻断';
+    const stage = res.reject_stage || '';
+    const category = res.attack_category || '';
+    const dist = res.domain_distance;
+
+    if (stage === 'outer_gate') {
+      if (category === 'chinese_harmful_content') return '检测到危险内容组合（外门拦截）';
+      if (category === 'strong_attack') return '检测到强攻击关键词（外门拦截）';
+      if (category === 'roleplay_attack') return '检测到异常角色扮演（外门拦截）';
+      return '检测到可疑内容（外门拦截）';
+    }
+    if (stage === 'inner_gate') {
+      if (dist != null && dist < 0.3) return '检测到已知攻击模式（内门精判）';
+      if (category && (category.includes('intent') || category.includes('jailbreak')))
+        return '检测到越狱攻击意图（内门精判）';
+      if ((res.trust_level || '').toLowerCase() === 'low') return '检测到异常行为模式（内门精判）';
+      return '检测到异常请求（内门精判）';
+    }
+    if (stage === 'timing_checker') return '检测到时序异常（时序检测）';
+    if (stage === 'output_guardrail') return '输出内容含违规信息（输出护栏）';
+    return '安全拦截';
+  };
+
   const modes = [
     { key: 'high_security', label: '高安全' },
     { key: 'balanced', label: '平衡' },
@@ -455,24 +484,18 @@ export default function Detect() {
           {result && (
             <div className={`result-card ${result.allowed ? 'pass' : 'block'}`}>
               <div className="result-header">
-                {/* G-14 修复：根据 fallback 标志显示不同图标和文案 */}
                 <span className="result-icon">
                   {result.allowed ? <CheckCircle size={18} strokeWidth={1.5} /> : result.fallback ? <AlertTriangle size={18} strokeWidth={1.5} /> : <ShieldX size={18} strokeWidth={1.5} />}
                 </span>
                 <span className="result-text">
-                  {result.allowed ? '通过' : result.fallback ? '引擎不可达（保护性阻断）' : '已拦截'}
+                  {humanReason(result)}
                 </span>
               </div>
-              <div className="result-details">
-                <span>信任等级: <span className={`trust-badge trust-${(result.trust_level || 'unknown').toLowerCase()}`}>{formatTrustLevel(result.trust_level)}</span></span>
-                {result.reject_stage && <span>拦截阶段: {result.reject_stage}</span>}
-                {result.domain_distance != null && (
-                  <span>域距离: {result.domain_distance.toFixed(4)}</span>
-                )}
-                {result.timing_distance != null && (
-                  <span>时序距离: {result.timing_distance.toFixed(4)}</span>
-                )}
-                {result.fallback && <span className="fallback-tag">回退模式</span>}
+              <div className="result-details" style={{ fontSize: '0.85em', opacity: 0.7 }}>
+                <span>信任: {formatTrustLevel(result.trust_level)}</span>
+                {result.reject_stage && <span>阶段: {result.reject_stage}</span>}
+                {result.latency_ms != null && <span>耗时: {result.latency_ms.toFixed(1)}ms</span>}
+                {result.fallback && <span className="fallback-tag">回退</span>}
               </div>
             </div>
           )}
@@ -596,7 +619,7 @@ export default function Detect() {
             <div style={{ marginTop: '12px', maxHeight: '320px', overflow: 'auto', border: '1px solid var(--dt-border)', borderRadius: '8px' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85em' }}>
                 <thead>
-                  <tr style={{ background: 'var(--dt-bg-secondary)', color: 'var(--text-secondary)' }}>
+                  <tr style={{ background: 'var(--dt-bg-panel)', color: 'var(--text-secondary)' }}>
                     <th style={{ padding: '8px 12px', textAlign: 'left' }}>文本</th>
                     <th style={{ padding: '8px 12px', textAlign: 'left', width: '90px' }}>结果</th>
                     <th style={{ padding: '8px 12px', textAlign: 'left', width: '110px' }}>信任等级</th>
