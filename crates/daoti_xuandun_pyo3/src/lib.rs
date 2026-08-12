@@ -21,6 +21,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rand::Rng;
 
+mod luoshu;
+
 /// 双梯形递归层
 ///
 /// 镜像梯形：同时具有正向（从上层到下层）和逆向（从下层到上层）的信息流。
@@ -600,5 +602,67 @@ impl BilateralLadderDetector {
 #[pymodule]
 fn daoti_xuandun_pyo3(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BilateralLadderDetector>()?;
+    m.add_class::<PyLuoshuMapper>()?;
     Ok(())
+}
+
+/// 洛书符号映射器（PyO3 Python 接口）
+///
+/// 将 LuoshuEngine 的计算能力暴露给 Python。
+/// 当前为 v1.3.4 MVP：只暴露 encode()，在线学习状态暂留 Python。
+#[pyclass]
+pub struct PyLuoshuMapper {
+    engine: luoshu::LuoshuEngine,
+}
+
+#[pymethods]
+impl PyLuoshuMapper {
+    /// 创建洛书映射器实例
+    ///
+    /// Args:
+    ///   native_dim: 原生编码维度（默认 176，必须与 Python 侧一致）
+    ///   seed: 确定性种子（用于可复现的编码结果）
+    #[new]
+    #[pyo3(signature = (native_dim = 176, seed = 42))]
+    fn new(native_dim: usize, seed: u64) -> Self {
+        Self { engine: luoshu::LuoshuEngine::new(native_dim, seed) }
+    }
+
+    /// 将文本编码为 native_dim 维浮点向量
+    ///
+    /// 与 Python LuoshuSymbolMapper.encode() 输出格式完全一致。
+    ///
+    /// Args:
+    ///   text: 输入文本
+    ///
+    /// Returns:
+    ///   List[float]: 176 维 L2 归一化向量
+    fn encode(&self, text: &str) -> Vec<f32> {
+        self.engine.encode_native(text)
+    }
+
+    /// 计算两个向量的余弦相似度
+    ///
+    /// Args:
+    ///   a: 向量 a
+    ///   b: 向量 b
+    ///
+    /// Returns:
+    ///   float: 余弦相似度 [-1, 1]
+    #[staticmethod]
+    fn cosine_similarity(a: Vec<f32>, b: Vec<f32>) -> f32 {
+        luoshu::LuoshuEngine::cosine_similarity(&a, &b)
+    }
+
+    /// 计算文本的香农字节熵
+    ///
+    /// Args:
+    ///   text: 输入文本
+    ///
+    /// Returns:
+    ///   float: 字节熵值 [0, 8]
+    #[staticmethod]
+    fn shannon_entropy(text: &str) -> f32 {
+        luoshu::LuoshuEngine::shannon_entropy(text)
+    }
 }

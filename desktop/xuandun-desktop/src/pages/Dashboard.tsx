@@ -301,17 +301,19 @@ export default function Dashboard() {
               return;
             }
             try {
-              const preview = await api.getWeeklyReportPreview();
-              alert(
-                `安全周报预览\n\n` +
-                `总请求数：${preview.total_requests}\n` +
-                `拦截数：${preview.total_blocked}\n` +
-                `拦截率：${(preview.block_rate * 100).toFixed(2)}%\n` +
-                `高危攻击：${preview.high_risk_count}\n\n` +
-                `（正式周报导出功能即将上线）`
+              // v1.3.4: 调用引擎生成周报 HTML 文件
+              const result = await api.generateWeeklyReport({
+                format: 'html',
+                sections: ['summary', 'trend', 'distribution'],
+              });
+              // 导出到用户指定位置
+              const savedPath = await api.exportReportFile(
+                result.file_path,
+                `xuandun_report_${new Date().toISOString().slice(0, 10)}.html`
               );
+              showMessage('success', `周报已导出到 ${savedPath}`);
             } catch (e: any) {
-              showMessage('error', `周报获取失败：${String(e?.message || e)}`);
+              showMessage('error', `周报生成失败：${String(e?.message || e)}`);
             }
           }}
         >

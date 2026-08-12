@@ -618,6 +618,15 @@ export const api = {
     invokeWithTimeout<{ success: boolean }>('mark_as_safe', { text }, TIMEOUT.FAST),
   getWeeklyReportPreview: () =>
     invokeWithTimeout<WeeklyReportPreview>('get_weekly_report_preview', undefined, TIMEOUT.NORMAL),
-  generateWeeklyReport: () =>
-    invokeWithTimeout<{ file_path: string }>('generate_weekly_report', undefined, TIMEOUT.SLOW),
+  generateWeeklyReport: (params: {
+    start_date?: string;
+    end_date?: string;
+    format?: string;
+    sections?: string[];
+  }) =>
+    invokeWithTimeout<{ file_path: string; file_size: number; format: string; summary: WeeklyReportPreview }>(
+      'generate_weekly_report', params, TIMEOUT.SLOW
+    ),
+  exportReportFile: (filePath: string, suggestedName?: string) =>
+    invokeWithTimeout<string>('export_report_file', { filePath, suggestedName }, TIMEOUT.NORMAL),
 };

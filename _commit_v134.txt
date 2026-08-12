@@ -1,0 +1,15 @@
+release: v1.3.4 - Rust引擎MVP + 周报导出基础流程
+
+## P0-1 Rust引擎MVP（参赛核心竞争力）
+- crates/daoti_xuandun_pyo3新增luoshu.rs(LuoshuEngine+PyluoshuMapper)
+- Rust 5/5单元测试通过, maturin build生成wheel
+- luoshu_mapper.py encode()委托Rust + Python fallback
+- 精度测试: 确定性cosine=1.0, 范数全通过, 平均25.7us/次(~8x加速)
+- 9/9现有回归测试全通过
+
+## P0-2 周报完整导出
+- engine_flask.py新增/report/weekly端点 + HTML渲染
+- commands.rs增强generate_weekly_report(日期/格式/模块参数)
+- 新增export_report_file(导出到桌面)
+- Dashboard.tsx替换alert为正式导出流程
+- Rust cargo check + TS tsc均零错误通过

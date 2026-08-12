@@ -1183,8 +1183,17 @@ pub async fn get_weekly_report_preview(
 
 /// 生成安全周报 — 调用引擎 /report/weekly 端点生成 PDF
 #[tauri::command]
+/// v1.3.4: 增强周报生成，支持日期范围/格式/模块参数。
+/// 参数对齐引擎 /report/weekly 端点：
+///   - start_date/end_date: 日期范围（YYYY-MM-DD）
+///   - format: "html" 或 "pdf"
+///   - sections: 内容模块列表 ["summary","trend","distribution"]
 pub async fn generate_weekly_report(
     state: State<'_, Mutex<EngineState>>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    format: Option<String>,
+    sections: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     let engine_url = {
         let s = state.lock().map_err(|e| e.to_string())?;
@@ -1193,6 +1202,28 @@ pub async fn generate_weekly_report(
         }
         s.get_engine_url()
     };
-    // POST 触发周报生成，引擎返回文件路径
-    engine_post(&engine_url, "/report/weekly", serde_json::json!({})).await
+    let body = serde_json::json!({
+        "start_date": start_date.unwrap_or_default(),
+        "end_date": end_date.unwrap_or_default(),
+        "format": format.unwrap_or_else(|| "html".to_string()),
+        "sections": sections.unwrap_or_else(|| vec!["summary".to_string()]),
+    });
+    engine_post(&engine_url, "/report/weekly", body).await
+}
+
+/// v1.3.4 新增：将引擎生成的报告文件导出到用户桌面。
+#[tauri::command]
+pub async fn export_report_file(
+    file_path: String,
+    suggested_name: Option<String>,
+) -> Result<String, String> {
+    let name = suggested_name.unwrap_or_else(|| "xuandun_report.html".to_string());
+    // 导出到用户桌面（Windows/macOS/Linux 通用）
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    let dest = std::path::PathBuf::from(&home).join("Desktop").join(&name);
+    std::fs::copy(&file_path, &dest)
+        .map_err(|e| format!("导出文件失败: {}", e))?;
+    Ok(dest.to_string_lossy().to_string())
 }

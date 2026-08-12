@@ -171,6 +171,7 @@ pub fn run() {
             commands::mark_as_safe,
             commands::get_weekly_report_preview,
             commands::generate_weekly_report,
+            commands::export_report_file,
             // Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令注册
             commands::noop_heartbeat,
             commands::get_health_history,

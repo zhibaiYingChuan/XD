@@ -110,6 +110,14 @@ class LuoshuSymbolMapper:
         self.state_dim = config.hidden_dim
         self.n_gua = 64
         self._seed = self._derive_seed(config.mapping_key or b"luoshu_default")
+
+        # ── v1.3.4: Rust 引擎加速（PyO3 绑定，可降级） ──
+        self._rust_mapper = None
+        try:
+            from daoti_xuandun_pyo3 import PyLuoshuMapper
+            self._rust_mapper = PyLuoshuMapper(self.native_dim, self._seed)
+        except Exception:
+            pass  # 静默降级：import 失败 → 全 Python 运行
         self._init_gua_prototypes()
         self._init_projection()
         self.safe_prototypes: List[np.ndarray] = []
@@ -258,12 +266,30 @@ class LuoshuSymbolMapper:
         3. 穿透门控：融合为洛书空间状态
         4. 无损投影：176维→hidden_dim
 
+        v1.3.4: 优先使用 Rust 加速编码（PyLuoshuMapper），
+        失败时自动降级到 Python numpy 路径。
+
         Args:
             text: 输入文本（任意语言/编码）。
 
         Returns:
             洛书空间状态向量，shape (state_dim,)。
         """
+        # ── v1.3.4: Rust 加速路径 ──
+        if self._rust_mapper is not None:
+            try:
+                rust_raw = self._rust_mapper.encode(text)
+                state_176 = np.array(rust_raw, dtype=np.float32)
+                if self.state_dim >= self.native_dim:
+                    padded = np.zeros(self.state_dim, dtype=np.float32)
+                    padded[:self.native_dim] = state_176
+                    return self._normalize(padded)
+                projected = self._proj @ state_176
+                return self._normalize(projected)
+            except Exception:
+                pass  # Rust 失败，回退 Python 路径
+
+        # ── Python fallback（永不删除）──
         state_176 = self._encode_native(text)
         if self.state_dim >= self.native_dim:
             padded = np.zeros(self.state_dim, dtype=np.float32)

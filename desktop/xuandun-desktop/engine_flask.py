@@ -769,6 +769,112 @@ def simulation_run():
         return jsonify({"error": f"Simulation failed: {type(e).__name__}: {e}"}), 500
 
 
+@app.route("/report/weekly", methods=["POST"])
+def report_weekly():
+    """周报生成端点：生成指定日期范围的安全周报（PDF/HTML）。
+
+    v1.3.4 新增。请求体：
+      { "start_date": "2026-08-04", "end_date": "2026-08-10",
+        "format": "pdf|html", "sections": ["summary","trend","distribution"] }
+
+    返回：
+      { "file_path": "...", "file_size": ..., "format": "...",
+        "summary": {"total_requests": ..., ...} }
+    """
+    data = request.get_json(silent=True) or {}
+    start_date = data.get("start_date", "")
+    end_date = data.get("end_date", "")
+    fmt = data.get("format", "html")
+    sections = data.get("sections", ["summary"])
+
+    # ── 行走的骨架：先返回硬编码摘要，验证端到端通路 ──
+    try:
+        import os, tempfile, sqlite3
+        from datetime import datetime
+
+        # 使用与 Rust 桌面端相同的数据库路径
+        db_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.environ.get("TEMP", "/tmp")),
+            "com.daoti.xuandun-desktop"
+        )
+        db_path = os.path.join(db_dir, "xuandun.db")
+        total_requests = 0
+        total_blocked = 0
+
+        if os.path.exists(db_path) and start_date and end_date:
+            try:
+                conn = sqlite3.connect(db_path)
+                row = conn.execute(
+                    "SELECT COUNT(*), SUM(CASE WHEN allowed=0 THEN 1 ELSE 0 END) "
+                    "FROM logs WHERE timestamp BETWEEN ? AND ?",
+                    (start_date, end_date)
+                ).fetchone()
+                conn.close()
+                if row:
+                    total_requests = row[0] or 0
+                    total_blocked = row[1] or 0
+            except Exception:
+                pass
+
+        block_rate = (total_blocked / total_requests * 100) if total_requests > 0 else 0.0
+
+        summary = {
+            "total_requests": total_requests,
+            "total_blocked": total_blocked,
+            "block_rate": round(block_rate, 2),
+            "period": {"start": start_date, "end": end_date},
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+
+        # 生成 HTML 报告
+        if fmt == "html":
+            html_content = _render_weekly_html(summary, sections)
+            fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            file_size = os.path.getsize(file_path)
+        else:
+            # PDF 暂未实现，返回占位信息
+            file_path = ""
+            file_size = 0
+
+        resp = jsonify({
+            "file_path": file_path,
+            "file_size": file_size,
+            "format": fmt,
+            "summary": summary,
+        })
+        return _attach_cors(resp)
+    except Exception as e:
+        logger.error("report_weekly error: %s", e, exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _render_weekly_html(summary: dict, sections: list) -> str:
+    """渲染周报 HTML 内容（简化版，后续用 Jinja2 模板替换）。"""
+    s = summary
+    lines = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+        "<title>道体玄盾 安全周报</title>",
+        "<style>body{font-family:'Microsoft YaHei',sans-serif;max-width:800px;margin:0 auto;padding:20px}",
+        "h1{color:#1e293b;border-bottom:2px solid #38bdf8;padding-bottom:10px}",
+        ".card{background:#f8fafc;border-radius:8px;padding:16px;margin:12px 0}",
+        ".num{font-size:28px;font-weight:bold;color:#0f172a}",
+        ".label{color:#64748b;font-size:14px}",
+        "</style></head><body>",
+        f"<h1>道体玄盾 安全周报</h1>",
+        f"<p>周期: {s['period']['start']} ~ {s['period']['end']} | 生成时间: {s['generated_at']}</p>",
+    ]
+    if "summary" in sections:
+        lines.append("<div class='card'>")
+        lines.append(f"<div class='num'>{s['total_requests']:,}</div><div class='label'>检测总数</div>")
+        lines.append(f"<div class='num'>{s['total_blocked']:,}</div><div class='label'>拦截次数</div>")
+        lines.append(f"<div class='num'>{s['block_rate']}%</div><div class='label'>拦截率</div>")
+        lines.append("</div>")
+    lines.append("</body></html>")
+    return "\n".join(lines)
+
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"pong": True, "ts": time.time()})
