@@ -368,10 +368,10 @@ jobs:
             else
               continue
             fi
-            # 生成真实 Ed25519 签名 (tauri signer sign 输出 base64 格式签名到 stdout)
-            echo "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/signing_key.pem
-            sig=$(npx @tauri-apps/cli signer sign -k /tmp/signing_key.pem -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$f" 2>/dev/null | tail -1 || echo "SIGN_FAILED")
-            rm -f /tmp/signing_key.pem
+            # 生成真实 Ed25519 签名
+            # tauri signer 自动读取 TAURI_SIGNING_PRIVATE_KEY 和 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 环境变量
+            # 避免命令行参数的交互式密码提示（CI 非交互式环境会卡死）
+            sig=$(npx @tauri-apps/cli signer sign "$f" 2>/dev/null | grep -A1 "Public signature:" | tail -1 || echo "SIGN_FAILED")
 
             # 签名失败也阻断
             if [ "$sig" = "SIGN_FAILED" ]; then
