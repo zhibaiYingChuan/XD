@@ -630,7 +630,7 @@ export const api = {
   exportReportFile: async (filePath: string, suggestedName?: string) => {
     // v1.3.4 修复: 改用 Tauri save dialog 让用户选择路径（非写死桌面）
     const { save } = await import('@tauri-apps/plugin-dialog');
-    const ext = suggestedName?.endsWith('.pdf') ? ['pdf'] : suggestedName?.endsWith('.csv') ? ['csv'] : ['html'];
+    const ext = suggestedName?.endsWith('.csv') ? ['csv'] : suggestedName?.endsWith('.json') ? ['json'] : suggestedName?.endsWith('.md') ? ['md'] : ['html'];
     const dest = await save({
       defaultPath: suggestedName,
       filters: [{ name: '报告', extensions: ext }],

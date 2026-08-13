@@ -873,13 +873,15 @@ def report_weekly():
             "top_sources": top_sources,
         }
 
-        # 生成报告（HTML / PDF / CSV）
+        # 生成报告（CSV / JSON / HTML / MD，全部零依赖）
         charts = _render_charts(daily_data, top_sources)
         html_content = _render_weekly_html(summary, sections, charts)
-        if fmt == "pdf":
-            file_path = _render_weekly_pdf(html_content)
-        elif fmt == "csv":
+        if fmt == "csv":
             file_path = _render_weekly_csv(summary, sections)
+        elif fmt == "json":
+            file_path = _render_weekly_json(summary, sections)
+        elif fmt == "md":
+            file_path = _render_weekly_md(summary, sections)
         else:
             fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1046,49 +1048,6 @@ h1{color:#1e293b;border-bottom:2px solid #38bdf8;padding-bottom:10px}
     return tmpl.render(summary=summary, sections=sections, charts=charts or {})
 
 
-_ZH_FONT_PATH = None  # 中文字体路径缓存
-
-
-def _get_zh_font() -> str:
-    """自动探测系统中文字体路径（微软雅黑 > 黑体 > 宋体）。"""
-    global _ZH_FONT_PATH
-    if _ZH_FONT_PATH and os.path.exists(_ZH_FONT_PATH):
-        return _ZH_FONT_PATH
-    fonts_dir = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts")
-    for name in ("msyh.ttc", "simhei.ttf", "simsun.ttc"):
-        p = os.path.join(fonts_dir, name)
-        if os.path.exists(p):
-            _ZH_FONT_PATH = p
-            return p
-    return ""
-
-
-def _render_weekly_pdf(html_content: str) -> str:
-    """将周报渲染为 PDF 文件。
-
-    优先 weasyprint（需 GTK3 运行时），回退 fpdf2（纯 Python）。
-    两者都失败时抛出明确错误，不静默回退到 HTML（避免生成内容为 HTML 源码的假 PDF）。
-    """
-    import tempfile
-
-    # ── 第一优先级：weasyprint（渲染质量最高）──
-    try:
-        from weasyprint import HTML
-        fd, pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="xuandun_report_")
-        os.close(fd)
-        HTML(string=html_content).write_pdf(pdf_path)
-        return pdf_path
-    except Exception:
-        pass  # 静默降级到 fpdf2
-
-    # ── 第二优先级：fpdf2 结构化 PDF ──
-    try:
-        return _render_weekly_pdf_fpdf2(html_content)
-    except Exception as e:
-        # 不再静默回退到 HTML 假装是 PDF（诚信底线）
-        raise RuntimeError(f"PDF 生成失败（weasyprint 和 fpdf2 均不可用）: {e}")
-
-
 def _render_weekly_csv(summary: dict, sections: dict) -> str:
     """生成 CSV 格式周报（Excel 可直接打开，便于统计分析）。
 
@@ -1160,131 +1119,99 @@ def _render_weekly_csv(summary: dict, sections: dict) -> str:
     return csv_path
 
 
-def _render_weekly_pdf_fpdf2(html_content: str) -> str:
-    """使用 fpdf2 生成结构化中文 PDF 周报。
+def _render_weekly_json(summary: dict, sections: dict) -> str:
+    """生成 JSON 格式周报（运维人员可编程分析，便于对接其他系统）。
 
-    由于 fpdf2 不支持 HTML 解析，需手动构建布局。
+    使用 Python 标准库 json 模块，无需额外依赖。
+    """
+    import json
+    import tempfile
+
+    report_data = {
+        "title": "道体玄盾 安全周报",
+        "period": summary.get("period", {}),
+        "generated_at": summary.get("generated_at", ""),
+        "summary": {
+            "total_requests": summary.get("total_requests", 0),
+            "total_blocked": summary.get("total_blocked", 0),
+            "block_rate": summary.get("block_rate", 0),
+            "avg_daily": summary.get("avg_daily", 0),
+        },
+        "daily_detail": sections.get("daily_detail", []),
+        "attack_distribution": sections.get("attack_distribution", []),
+        "top_sources": sections.get("top_sources", []),
+    }
+
+    fd, json_path = tempfile.mkstemp(suffix=".json", prefix="xuandun_report_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(report_data, f, ensure_ascii=False, indent=2)
+
+    return json_path
+
+
+def _render_weekly_md(summary: dict, sections: dict) -> str:
+    """生成 Markdown 格式周报（可读性好，适合文档/Notion/GitHub）。
+
+    使用纯字符串拼接，无需额外依赖。
     """
     import tempfile
-    from fpdf import FPDF
 
-    zh_font = _get_zh_font()
-    if not zh_font:
-        raise RuntimeError("未找到中文字体，无法生成 PDF")
+    period = summary.get("period", {})
+    lines = [
+        "# 道体玄盾 安全周报",
+        "",
+        f"> 周期: {period.get('start', '')} ~ {period.get('end', '')}  ",
+        f"> 生成时间: {summary.get('generated_at', '')}",
+        "",
+        "## 概览统计",
+        "",
+        "| 指标 | 数值 |",
+        "|------|------|",
+        f"| 检测总数 | {summary.get('total_requests', 0)} |",
+        f"| 拦截次数 | {summary.get('total_blocked', 0)} |",
+        f"| 拦截率(%) | {summary.get('block_rate', 0)} |",
+        f"| 日均检测量 | {summary.get('avg_daily', 0)} |",
+        "",
+    ]
 
-    # ── 从 HTML 中提取关键数据 ──
-    import re
-    period_match = re.search(r"周期:\s*(\S+)\s*~\s*(\S+)", html_content)
-    gen_match = re.search(r"生成时间:\s*(\S+)", html_content)
-    period_start = period_match.group(1) if period_match else "未知"
-    period_end = period_match.group(2) if period_match else "未知"
-    gen_time = gen_match.group(1) if gen_match else "未知"
+    daily_data = sections.get("daily_detail", [])
+    if daily_data:
+        lines.append("## 每日明细")
+        lines.append("")
+        lines.append("| 日期 | 检测数 | 拦截数 | 拦截率(%) |")
+        lines.append("|------|--------|--------|----------|")
+        for row in daily_data:
+            lines.append(f"| {row.get('date', '')} | {row.get('total', 0)} | {row.get('blocked', 0)} | {row.get('rate', '')} |")
+        lines.append("")
 
-    # 提取概览数字
-    nums = re.findall(r'<div class="num">([\d,\.%]+)</div>', html_content)
-    labels = re.findall(r'<div class="label">([^<]+)</div>', html_content)
+    attack_dist = sections.get("attack_distribution", [])
+    if attack_dist:
+        lines.append("## 攻击类型分布")
+        lines.append("")
+        lines.append("| 攻击类型 | 次数 | 占比(%) |")
+        lines.append("|----------|------|---------|")
+        for row in attack_dist:
+            lines.append(f"| {row.get('category', '')} | {row.get('count', 0)} | {row.get('percentage', '')} |")
+        lines.append("")
 
-    # 提取表格行
-    rows = []
-    table_match = re.search(r"<tbody>(.*?)</tbody>", html_content, re.DOTALL)
-    if table_match:
-        for tr in re.findall(r"<tr>(.*?)</tr>", table_match.group(1), re.DOTALL):
-            tds = re.findall(r"<td>([^<]*)</td>", tr)
-            if tds:
-                rows.append(tds)
+    top_sources = sections.get("top_sources", [])
+    if top_sources:
+        lines.append("## 来源 Top")
+        lines.append("")
+        lines.append("| 来源 | 请求数 | 拦截数 |")
+        lines.append("|------|---------|--------|")
+        for row in top_sources:
+            lines.append(f"| {row.get('source', '')} | {row.get('requests', 0)} | {row.get('blocked', 0)} |")
+        lines.append("")
 
-    # ── 构建 PDF ──
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.add_font("zh", "", zh_font, uni=True)
+    lines.append("---")
+    lines.append("*道体玄盾 v1.3.4 · AI 安全引擎 · 自动生成*")
 
-    # 页头
-    pdf.set_fill_color(15, 23, 42)
-    pdf.rect(0, 0, 210, 32, "F")
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("zh", "", 18)
-    pdf.set_xy(12, 6)
-    pdf.cell(0, 10, "道体玄盾 安全周报", ln=True)
-    pdf.set_font("zh", "", 9)
-    pdf.set_text_color(148, 163, 184)
-    pdf.set_x(12)
-    pdf.cell(0, 5, "AI 驱动的安全检测引擎 · 自动化威胁分析报告", ln=True)
-    pdf.set_text_color(203, 213, 225)
-    pdf.set_x(12)
-    pdf.cell(0, 5, f"周期: {period_start} ~ {period_end}   生成时间: {gen_time}", ln=True)
-    pdf.ln(10)
+    fd, md_path = tempfile.mkstemp(suffix=".md", prefix="xuandun_report_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
-    # 概览卡片（summary）
-    pdf.set_text_color(15, 23, 42)
-    pdf.set_font("zh", "", 13)
-    pdf.set_x(12)
-    pdf.cell(0, 8, "概览", ln=True)
-    pdf.ln(2)
-
-    # 四卡片布局
-    card_y = pdf.get_y()
-    card_w = 42
-    card_h = 22
-    card_gap = 3
-    card_x_start = 12
-    for i, (label, num) in enumerate(zip(labels[:4], nums[:4])):
-        cx = card_x_start + i * (card_w + card_gap)
-        pdf.set_fill_color(248, 250, 252)
-        pdf.set_draw_color(226, 232, 240)
-        pdf.rect(cx, card_y, card_w, card_h, "DF")
-        pdf.set_text_color(15, 23, 42)
-        pdf.set_font("zh", "", 16)
-        pdf.set_xy(cx, card_y + 3)
-        pdf.cell(card_w, 8, num, align="C")
-        pdf.set_font("zh", "", 9)
-        pdf.set_text_color(100, 116, 139)
-        pdf.set_xy(cx, card_y + 12)
-        pdf.cell(card_w, 5, label, align="C")
-    pdf.set_y(card_y + card_h + 8)
-
-    # 每日明细表
-    if rows:
-        pdf.set_text_color(15, 23, 42)
-        pdf.set_font("zh", "", 13)
-        pdf.set_x(12)
-        pdf.cell(0, 8, "每日明细", ln=True)
-        pdf.ln(2)
-
-        col_w = [28, 28, 28, 24, 24]
-        headers = ["日期", "检测总数", "拦截次数", "拦截率", "状态"]
-        col_x = [12, 40, 68, 96, 120]
-
-        # 表头
-        pdf.set_fill_color(241, 245, 249)
-        pdf.set_text_color(71, 85, 105)
-        pdf.set_font("zh", "", 9)
-        for h, cx, cw in zip(headers, col_x, col_w):
-            pdf.set_xy(cx, pdf.get_y())
-            pdf.cell(cw, 7, h, align="C", fill=True)
-        pdf.ln(8)
-
-        # 表体
-        pdf.set_text_color(30, 41, 59)
-        pdf.set_font("zh", "", 9)
-        for row in rows[:60]:  # 最多 60 行防溢出
-            if len(row) < 5:
-                continue
-            for v, cx, cw in zip(row, col_x, col_w):
-                pdf.set_xy(cx, pdf.get_y())
-                pdf.cell(cw, 6, str(v).strip(), align="C")
-            pdf.ln(7)
-
-    # 页脚
-    pdf.set_y(-20)
-    pdf.set_text_color(148, 163, 184)
-    pdf.set_font("zh", "", 8)
-    pdf.cell(0, 5, "道体玄盾 v1.3.4 · AI 安全引擎 · 自动生成", align="C", ln=True)
-    pdf.cell(0, 5, "本报告由系统自动生成", align="C")
-
-    fd, pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="xuandun_report_")
-    os.close(fd)
-    pdf.output(pdf_path)
-    return pdf_path
+    return md_path
 
 
 @app.route("/ping", methods=["GET"])

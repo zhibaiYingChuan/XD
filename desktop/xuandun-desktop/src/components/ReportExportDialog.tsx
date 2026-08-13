@@ -9,7 +9,7 @@ import { api, WeeklyReportPreview } from '../services/tauriApi';
  * 引擎 /report/weekly 端点 + Rust export_report_file 命令完成端到端导出。
  */
 
-type ReportFormat = 'html' | 'pdf' | 'csv';
+type ReportFormat = 'csv' | 'json' | 'html' | 'md';
 type ReportSection = 'summary' | 'trend' | 'distribution' | 'detail' | 'top_sources';
 
 interface ReportExportDialogProps {
@@ -40,7 +40,7 @@ export default function ReportExportDialog({
   const { start, end } = defaultDateRange();
   const [startDate, setStartDate] = useState(start);
   const [endDate, setEndDate] = useState(end);
-  const [format, setFormat] = useState<ReportFormat>('html');
+  const [format, setFormat] = useState<ReportFormat>('csv');
   const [sections, setSections] = useState<ReportSection[]>([
     'summary', 'trend', 'distribution', 'detail', 'top_sources',
   ]);
@@ -60,7 +60,7 @@ export default function ReportExportDialog({
       const d = defaultDateRange();
       setStartDate(d.start);
       setEndDate(d.end);
-      setFormat('html');
+      setFormat('csv');
       setSections(['summary', 'trend', 'distribution', 'detail', 'top_sources']);
       setStep('form');
       setSummary(null);
@@ -132,7 +132,7 @@ export default function ReportExportDialog({
     if (processingRef.current || !filePath) return;
     processingRef.current = true;
     try {
-      const ext = format === 'pdf' ? 'pdf' : format === 'csv' ? 'csv' : 'html';
+      const ext = format === 'csv' ? 'csv' : format === 'json' ? 'json' : format === 'md' ? 'md' : 'html';
       const suggested = `xuandun_report_${endDate}.${ext}`;
       // v1.3.4 修复: exportReportFile 内部打开 save dialog，用户选路径后写入
       const savedPath = await api.exportReportFile(filePath, suggested);
@@ -250,7 +250,7 @@ export default function ReportExportDialog({
               </button>
               <button style={s.btnPrimary} onClick={handleExport}>
                 <Download size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                导出{format === 'pdf' ? 'PDF' : format === 'csv' ? 'CSV' : 'HTML'}
+                导出{format.toUpperCase()}
               </button>
             </div>
           </div>
@@ -323,7 +323,7 @@ export default function ReportExportDialog({
             <div style={{ marginBottom: 16 }}>
               <label style={s.label}>导出格式</label>
               <div style={{ display: 'flex', gap: 8 }}>
-                {(['html', 'pdf', 'csv'] as ReportFormat[]).map((f) => (
+                {(['csv', 'json', 'html', 'md'] as ReportFormat[]).map((f) => (
                   <button
                     key={f}
                     style={s.chip(format === f)}

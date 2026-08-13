@@ -28,7 +28,7 @@ Repository = "https://github.com/zhibaiYingChuan/XD.git"
 
 [project.optional-dependencies]
 torch = ["torch>=2.0.0"]
-engine = ["flask>=3.0", "waitress>=3.0", "fpdf2>=2.7"]
+engine = ["flask>=3.0", "waitress>=3.0"]
 # Sprint 2b: 反向代理网关依赖（FastAPI + uvicorn + httpx 流式透传）
 # POC 结论：waitress 同步 WSGI 无法透传 SSE（hop-by-hop header 限制），
 # 必须使用 FastAPI + uvicorn + httpx.AsyncClient(stream=True) 异步方案

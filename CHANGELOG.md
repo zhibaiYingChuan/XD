@@ -58,9 +58,13 @@
 - **F-5 Settings 版本与更新区域**：Settings.tsx 新增"版本与更新"卡片，版本号从 @tauri-apps/api/app.getVersion() 运行时读取，含手动"检查更新"按钮
 - **CDP 回归测试**：桌面端 WebView2 12/12 PASS + 网关管理控制台 23/23 PASS
 
-#### 周报导出修复（PDF 内容为 HTML 源码 + 新增 CSV 格式）
-- **PDF 生成修复**：fpdf2 未在 pyproject.toml 依赖中声明，导致引擎环境无 fpdf2/weasyprint 时回退到写 HTML 源码到 .pdf 文件；修复：添加 fpdf2>=2.7 依赖 + 移除不诚实的 HTML 回退（直接抛错而非假装是 PDF）
-- **新增 CSV 格式**：周报导出新增 CSV 格式选项（Excel 可直接打开），含概览统计 + 每日明细 + 攻击类型分布 + 来源 Top，便于统计分析；使用 Python 标准库 csv 模块，无需额外依赖
+#### 周报导出重构（移除 PDF + 新增 CSV/JSON/MD 格式）
+- **移除 PDF 格式**：fpdf2/weasyprint 在打包引擎二进制中无法保证可用，导致用户导出 PDF 内容全是 HTML 源码；移除 PDF 选项和 fpdf2 依赖，避免给用户增加安装依赖的负担
+- **新增 CSV 格式**：Excel 可直接打开，含概览统计 + 每日明细 + 攻击类型分布 + 来源 Top，使用 Python 标准库 csv 模块
+- **新增 JSON 格式**：运维人员可编程分析，便于对接其他系统，使用 Python 标准库 json 模块
+- **新增 MD 格式**：Markdown 表格，适合文档/Notion/GitHub，纯字符串拼接
+- **默认格式改为 CSV**：零依赖、Excel 友好、最通用的统计分析格式
+- **全部格式零依赖**：CSV/JSON/MD/HTML 均使用 Python 标准库，无需任何额外安装
 
 ### 变更
 - 开发计划 v1.3.4 从"P0+P1 全部完成"修正为"P0+P1 核心功能已完成，3 项验收标准待优化"
