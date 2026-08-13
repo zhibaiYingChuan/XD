@@ -11,7 +11,8 @@ fn is_punct(ch: char) -> bool {
 pub struct LuoshuEngine {
     /// 原生维度（固定 176）
     native_dim: usize,
-    /// 确定性种子（从 config 派生，保证可复现）
+    /// 确定性种子（从 config 派生，保证可复现；预留字段，未来用于哈希盐值）
+    #[allow(dead_code)]
     seed: u64,
 }
 
