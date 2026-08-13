@@ -156,12 +156,21 @@ class MetricsRegistry:
     def __init__(self):
         self.start_time = time.time()
         self.requests_total = self.blocks_total = self.passes_total = self.errors_total = 0
+        self.proxy_requests = self.proxy_blocks = 0
+        self.manual_requests = self.manual_blocks = 0
         self.latencies_ms = []; self._max_samples = 10000
 
-    def record_request(self, blocked, latency_ms):
+    def record_request(self, blocked, latency_ms, source="proxy"):
         self.requests_total += 1
         if blocked: self.blocks_total += 1
         else: self.passes_total += 1
+        # 分来源统计
+        if source == "proxy":
+            self.proxy_requests += 1
+            if blocked: self.proxy_blocks += 1
+        else:
+            self.manual_requests += 1
+            if blocked: self.manual_blocks += 1
         self.latencies_ms.append(latency_ms)
         if len(self.latencies_ms) > self._max_samples:
             self.latencies_ms = self.latencies_ms[-self._max_samples:]
@@ -263,6 +272,7 @@ class ProtectReq(BaseModel):
     session_id: Optional[str] = None
     model_id: Optional[str] = None
     direction: str = Field("input", pattern="^(input|output)$")  # 检测方向：input=输入护栏，output=模型输出护栏
+    source: str = Field("proxy", pattern="^(proxy|manual|batch)$")  # 检测来源：proxy=实时流量, manual=手动检测, batch=批量检测
 
 class ProtectResp(BaseModel):
     allowed: bool; reason: Optional[str] = None
@@ -401,7 +411,7 @@ async def protect_input(request: ProtectReq, req: Request):
             result = shield.protect(request.text)
         ms = (time.time() - t0) * 1000
         blocked = not result.allowed
-        metrics.record_request(blocked=blocked, latency_ms=ms)
+        metrics.record_request(blocked=blocked, latency_ms=ms, source=request.source)
 
         if state_store:
             state_store.incr_counter("requests_total")
@@ -435,13 +445,20 @@ async def protect_input(request: ProtectReq, req: Request):
 
 @app.get("/api/v1/stats")
 async def get_stats():
-    return {"requests_total": metrics.requests_total, "blocks_total": metrics.blocks_total,
-            "passes_total": metrics.passes_total, "errors_total": metrics.errors_total,
-            "block_rate": round(metrics.rate, 2), "p50_latency_ms": round(metrics.p50, 2),
+    # 仪表盘只显示 proxy（实时流量）数据，manual 数据独立呈现
+    proxy_rate = (metrics.proxy_blocks / max(metrics.proxy_requests, 1) * 100) if metrics.proxy_requests > 0 else 0.0
+    return {"requests_total": metrics.proxy_requests, "blocks_total": metrics.proxy_blocks,
+            "passes_total": metrics.proxy_requests - metrics.proxy_blocks,
+            "errors_total": metrics.errors_total,
+            "block_rate": round(proxy_rate, 2),
+            "p50_latency_ms": round(metrics.p50, 2),
             "p95_latency_ms": round(metrics.p95, 2), "uptime_seconds": metrics.uptime,
             "engine_version": VERSION, "engine_ready": shield is not None,
             "redis": state_store.get_status() if state_store else {},
-            "audit_log": audit_store.get_status() if audit_store else {}}
+            "audit_log": audit_store.get_status() if audit_store else {},
+            # 手动检测数据（独立呈现，不计入仪表盘主指标）
+            "manual_requests": metrics.manual_requests,
+            "manual_blocks": metrics.manual_blocks}
 
 @app.get("/api/v1/status")
 async def cluster_status():

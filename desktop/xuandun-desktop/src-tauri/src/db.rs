@@ -17,7 +17,11 @@ pub struct LogEntry {
     pub attack_category: Option<String>,
     pub latency_ms: Option<f64>,
     pub domain_distance: Option<f64>,
+    #[serde(default = "default_source")]
+    pub source: String,
 }
+
+fn default_source() -> String { "proxy".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashChainReport {
@@ -221,6 +225,27 @@ impl Database {
             eprintln!("[xuandun] [INFO] Added attack_category/latency_ms/domain_distance columns to logs table");
         }
 
+        // v1.3.5 迁移：logs 表新增 source 列，标识检测来源（proxy/manual/batch）
+        let has_source: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(logs)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            }).map_err(|e| e.to_string())?;
+            let names: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+            names.iter().any(|name| name == "source")
+        };
+        if !has_source {
+            conn.execute(
+                "ALTER TABLE logs ADD COLUMN source TEXT NOT NULL DEFAULT 'proxy'",
+                []
+            ).map_err(|e| format!("Failed to add source column: {}", e))?;
+            eprintln!("[xuandun] [INFO] Added source column to logs table");
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source);"
+        ).map_err(|e| e.to_string())?;
+
         // v1.2.0 聚合表
         conn.execute_batch("
             CREATE TABLE IF NOT EXISTS stats_hourly (
@@ -273,7 +298,7 @@ impl Database {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_log(&self, text_preview: &str, allowed: bool, trust_level: &str, reject_stage: Option<&str>, session_id: Option<&str>, attack_category: Option<&str>, latency_ms: Option<f64>, domain_distance: Option<f64>) -> Result<(), String> {
+    pub fn insert_log(&self, text_preview: &str, allowed: bool, trust_level: &str, reject_stage: Option<&str>, session_id: Option<&str>, attack_category: Option<&str>, latency_ms: Option<f64>, domain_distance: Option<f64>, source: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let timestamp = chrono::Utc::now().to_rfc3339();
 
@@ -296,8 +321,8 @@ impl Database {
         let hash = sha256_hash(&hash_input);
 
         conn.execute(
-            "INSERT INTO logs (timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, hash_version, attack_category, latency_ms, domain_distance) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11)",
-            params![timestamp, text_preview, allowed as i32, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance],
+            "INSERT INTO logs (timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, hash_version, attack_category, latency_ms, domain_distance, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12)",
+            params![timestamp, text_preview, allowed as i32, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance, source],
         ).map_err(|e| {
             // 修复5：写入失败时自动创建备份，保留恢复机会
             eprintln!("[XuanDun] [ERROR] insert_log failed, creating backup: {}", e);
@@ -322,15 +347,23 @@ impl Database {
         Ok(())
     }
 
-    pub fn query_logs(&self, filter_allowed: Option<bool>, limit: usize, offset: usize) -> Result<Vec<LogEntry>, String> {
+    pub fn query_logs(&self, filter_allowed: Option<bool>, limit: usize, offset: usize, source_filter: Option<&str>) -> Result<Vec<LogEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let (sql, params): (_, Vec<Box<dyn rusqlite::types::ToSql>>) = match filter_allowed {
-            Some(a) => (
-                "SELECT id, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance FROM logs WHERE allowed = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3".to_string(),
+        let (sql, params): (_, Vec<Box<dyn rusqlite::types::ToSql>>) = match (filter_allowed, source_filter) {
+            (Some(a), Some(s)) => (
+                "SELECT id, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance, source FROM logs WHERE allowed = ?1 AND source = ?2 ORDER BY id DESC LIMIT ?3 OFFSET ?4".to_string(),
+                vec![Box::new(a as i32), Box::new(s.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
+            ),
+            (Some(a), None) => (
+                "SELECT id, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance, source FROM logs WHERE allowed = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(a as i32), Box::new(limit as i64), Box::new(offset as i64)],
             ),
-            None => (
-                "SELECT id, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance FROM logs ORDER BY id DESC LIMIT ?1 OFFSET ?2".to_string(),
+            (None, Some(s)) => (
+                "SELECT id, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance, source FROM logs WHERE source = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3".to_string(),
+                vec![Box::new(s.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
+            ),
+            (None, None) => (
+                "SELECT id, timestamp, text_preview, allowed, trust_level, reject_stage, session_id, prev_hash, hash, attack_category, latency_ms, domain_distance, source FROM logs ORDER BY id DESC LIMIT ?1 OFFSET ?2".to_string(),
                 vec![Box::new(limit as i64), Box::new(offset as i64)],
             ),
         };
@@ -350,6 +383,7 @@ impl Database {
                 attack_category: row.get(9).unwrap_or(None),
                 latency_ms: row.get(10).unwrap_or(None),
                 domain_distance: row.get(11).unwrap_or(None),
+                source: row.get(12).unwrap_or_else(|_| "proxy".to_string()),
             })
         }).map_err(|e| e.to_string())?;
 
@@ -492,14 +526,22 @@ impl Database {
         Ok(())
     }
 
-    pub fn count_logs(&self, filter_allowed: Option<bool>) -> Result<usize, String> {
+    pub fn count_logs(&self, filter_allowed: Option<bool>, source_filter: Option<&str>) -> Result<usize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let count: i64 = match filter_allowed {
-            Some(a) => conn.query_row(
+        let count: i64 = match (filter_allowed, source_filter) {
+            (Some(a), Some(s)) => conn.query_row(
+                "SELECT COUNT(*) FROM logs WHERE allowed = ?1 AND source = ?2",
+                params![a as i32, s], |row| row.get(0)
+            ).map_err(|e| e.to_string())?,
+            (Some(a), None) => conn.query_row(
                 "SELECT COUNT(*) FROM logs WHERE allowed = ?1",
                 [a as i32], |row| row.get(0)
             ).map_err(|e| e.to_string())?,
-            None => conn.query_row(
+            (None, Some(s)) => conn.query_row(
+                "SELECT COUNT(*) FROM logs WHERE source = ?1",
+                params![s], |row| row.get(0)
+            ).map_err(|e| e.to_string())?,
+            (None, None) => conn.query_row(
                 "SELECT COUNT(*) FROM logs",
                 [], |row| row.get(0)
             ).map_err(|e| e.to_string())?,
@@ -686,8 +728,8 @@ mod tests {
     #[test]
     fn test_insert_and_query_log() {
         let db = test_db();
-        db.insert_log("hello world", true, "HIGH", None, Some("sess1"), None, None, None).unwrap();
-        db.insert_log("malicious input", false, "LOW", Some("reject_gate"), Some("sess2"), None, None, None).unwrap();
+        db.insert_log("hello world", true, "HIGH", None, Some("sess1"), None, None, None, "manual").unwrap();
+        db.insert_log("malicious input", false, "LOW", Some("reject_gate"), Some("sess2"), None, None, None, "manual").unwrap();
         let all = db.query_logs(None, 10, 0).unwrap();
         assert_eq!(all.len(), 2);
         assert!(!all[0].allowed);
@@ -697,8 +739,8 @@ mod tests {
     #[test]
     fn test_query_logs_filter() {
         let db = test_db();
-        db.insert_log("safe", true, "HIGH", None, None, None, None, None).unwrap();
-        db.insert_log("attack", false, "LOW", Some("reject_gate"), None, None, None, None).unwrap();
+        db.insert_log("safe", true, "HIGH", None, None, None, None, None, "manual").unwrap();
+        db.insert_log("attack", false, "LOW", Some("reject_gate"), None, None, None, None, "manual").unwrap();
         let blocked = db.query_logs(Some(false), 10, 0).unwrap();
         assert_eq!(blocked.len(), 1);
         let allowed = db.query_logs(Some(true), 10, 0).unwrap();
@@ -708,7 +750,7 @@ mod tests {
     #[test]
     fn test_pagination() {
         let db = test_db();
-        for i in 0..5 { db.insert_log(&format!("e{}", i), true, "HIGH", None, None, None, None, None).unwrap(); }
+        for i in 0..5 { db.insert_log(&format!("e{}", i), true, "HIGH", None, None, None, None, None, "manual").unwrap(); }
         assert_eq!(db.query_logs(None, 2, 0).unwrap().len(), 2);
         assert_eq!(db.query_logs(None, 2, 4).unwrap().len(), 1);
     }
@@ -716,8 +758,8 @@ mod tests {
     #[test]
     fn test_count_logs() {
         let db = test_db();
-        db.insert_log("a", true, "HIGH", None, None, None, None, None).unwrap();
-        db.insert_log("b", false, "LOW", Some("reject_gate"), None, None, None, None).unwrap();
+        db.insert_log("a", true, "HIGH", None, None, None, None, None, "manual").unwrap();
+        db.insert_log("b", false, "LOW", Some("reject_gate"), None, None, None, None, "manual").unwrap();
         assert_eq!(db.count_logs(None).unwrap(), 2);
         assert_eq!(db.count_logs(Some(true)).unwrap(), 1);
         assert_eq!(db.count_logs(Some(false)).unwrap(), 1);
@@ -736,8 +778,8 @@ mod tests {
     #[test]
     fn test_hash_chain_intact() {
         let db = test_db();
-        db.insert_log("entry1", true, "HIGH", None, None, None, None, None).unwrap();
-        db.insert_log("entry2", false, "LOW", Some("reject_gate"), None, None, None, None).unwrap();
+        db.insert_log("entry1", true, "HIGH", None, None, None, None, None, "manual").unwrap();
+        db.insert_log("entry2", false, "LOW", Some("reject_gate"), None, None, None, None, "manual").unwrap();
         let report = db.verify_hash_chain().unwrap();
         assert!(report.chain_intact);
         assert_eq!(report.total_entries, 2);
@@ -747,7 +789,7 @@ mod tests {
     #[test]
     fn test_hash_chain_broken() {
         let db = test_db();
-        db.insert_log("entry1", true, "HIGH", None, None, None, None, None).unwrap();
+        db.insert_log("entry1", true, "HIGH", None, None, None, None, None, "manual").unwrap();
         {
             let conn = db.conn.lock().unwrap();
             conn.execute("UPDATE logs SET text_preview = 'tampered' WHERE id = 1", []).unwrap();

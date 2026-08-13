@@ -122,7 +122,7 @@ export default function Detect() {
     detectingRef.current = true;
     setLoading(true);
     try {
-      const res = await api.protect(actualText, 'default', mode);
+      const res = await api.protect(actualText, 'default', mode, 'manual');
       setResult(res);
       // G-14 修复：根据 fallback 标志区分"引擎不可达"和"实际拦截"
       if (!res.allowed && res.fallback) {
@@ -240,7 +240,7 @@ export default function Detect() {
         const chunk = pending.slice(i, i + BATCH_CONCURRENCY);
         await Promise.allSettled(chunk.map(async (item) => {
           try {
-            const res = await api.protect(item.text, 'batch', mode);
+            const res = await api.protect(item.text, 'batch', mode, 'batch');
             setBatchItems((prev) => prev.map((p) =>
               p.id === item.id
                 ? {

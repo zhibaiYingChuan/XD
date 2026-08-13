@@ -37,10 +37,13 @@ pub struct ProtectRequest {
     pub session: String,
     #[serde(default = "default_mode")]
     pub mode: String,
+    #[serde(default = "default_source")]
+    pub source: String,
 }
 
 fn default_session() -> String { "default".to_string() }
 fn default_mode() -> String { "balanced".to_string() }
+fn default_source() -> String { "proxy".to_string() }
 
 #[derive(Serialize)]
 pub struct ProtectResponse {
@@ -162,6 +165,7 @@ pub async fn protect(
                 r.attack_category.as_deref(),
                 r.latency_ms,
                 r.domain_distance,
+                &req.source,
             ) {
                 eprintln!("[xuandun] [ERROR] insert_log failed: {}", e);
                 let err_msg = format!("insert_log: {}", e);
@@ -319,11 +323,13 @@ pub async fn get_logs(
     filter_allowed: Option<bool>,
     limit: Option<usize>,
     offset: Option<usize>,
+    source_filter: Option<String>,
 ) -> Result<LogResponse, String> {
     let limit = limit.unwrap_or(100);
     let offset = offset.unwrap_or(0);
-    let entries = db.query_logs(filter_allowed, limit, offset)?;
-    let total = db.count_logs(filter_allowed)?;
+    let sf = source_filter.as_deref();
+    let entries = db.query_logs(filter_allowed, limit, offset, sf)?;
+    let total = db.count_logs(filter_allowed, sf)?;
     Ok(LogResponse { entries, total })
 }
 

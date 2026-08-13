@@ -517,7 +517,7 @@ export const api = {
   getStatus: () => invokeWithTimeout<StatusResponse>('get_status', undefined, TIMEOUT.FAST),
   // Sprint1-P0-5: protect冷启动假超时修复——首次调用需初始化拒绝门四元组/KMeans（最坏28s），
   // 使用独立的PROTECT_COLD=35s超时，避免NORMAL=15s假截断
-  protect: (text: string, session: string = 'default', mode: string = 'balanced') => {
+  protect: (text: string, session: string = 'default', mode: string = 'balanced', source: string = 'proxy') => {
     // Cycle1-L5-2 修复：HCSE超时真实性测试注入点。
     // CDP测试通过设置window.__HCSE_HANG_PROTECT=true模拟后端protect永不返回的场景，
     // 返回一个永久pending的Promise，让前端35s setTimeout的InvokeTimeoutError真实触发，
@@ -535,11 +535,11 @@ export const api = {
       });
       return Promise.race([hangPromise, timeoutPromise]) as Promise<ProtectResponse>;
     }
-    return invokeWithTimeout<ProtectResponse>('protect', { req: { text, session, mode } }, TIMEOUT.PROTECT_COLD);
+    return invokeWithTimeout<ProtectResponse>('protect', { req: { text, session, mode, source } }, TIMEOUT.PROTECT_COLD);
   },
   setMode: (mode: string) => invokeWithTimeout<void>('set_mode', { mode }, TIMEOUT.NORMAL),
-  getLogs: (filterAllowed?: boolean, limit?: number, offset?: number) =>
-    invokeWithTimeout<LogResponse>('get_logs', { filterAllowed, limit, offset }, TIMEOUT.FAST),
+  getLogs: (filterAllowed?: boolean, limit?: number, offset?: number, sourceFilter?: string) =>
+    invokeWithTimeout<LogResponse>('get_logs', { filterAllowed, limit, offset, sourceFilter }, TIMEOUT.FAST),
   getConfig: (key: string) => invokeWithTimeout<string | null>('get_config', { key }, TIMEOUT.FAST),
   setConfig: (key: string, value: string) => invokeWithTimeout<void>('set_config', { key, value }, TIMEOUT.FAST),
   // Sprint1-P0-1: restartEngine永不返回修复——stop(快)+sleep+ensure_running(最坏60s)≈61s，

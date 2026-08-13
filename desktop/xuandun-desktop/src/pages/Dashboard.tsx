@@ -73,7 +73,7 @@ export default function Dashboard() {
   // 实时流量看板 — 拉取最近50条日志
   const fetchTrafficFeed = useCallback(async () => {
     try {
-      const res = await api.getLogs(undefined, 50, 0);
+      const res = await api.getLogs(undefined, 50, 0, 'proxy');
       if (!mountedRef.current) return;
       setTrafficEvents(res.entries);
       setTrafficError(null);
@@ -299,7 +299,7 @@ export default function Dashboard() {
           className="btn btn-primary"
           onClick={() => setReportDialogOpen(true)}
         >
-          生成周报
+          生成报告
         </button>
         <a href="#/logs" className="btn btn-secondary">
           查看全部日志

@@ -151,8 +151,8 @@ export const api = {
   reloadConfig: () => post<{ success: boolean; previous_models: number; current_models: number }>('api/config/reload'),
   saveModels: (data: { models: ModelItemConfig[]; routing: RoutingConfig }) =>
     post<ModelsSaveResult>('api/config/models', data),
-  protect: (text: string, direction?: 'input' | 'output', sessionId?: string, modelId?: string) =>
-    post<ProtectResponse>('api/v1/protect', { text, direction: direction || 'input', session_id: sessionId, model_id: modelId }),
+  protect: (text: string, direction?: 'input' | 'output', sessionId?: string, modelId?: string, source?: string) =>
+    post<ProtectResponse>('api/v1/protect', { text, direction: direction || 'input', session_id: sessionId, model_id: modelId, source: source || 'manual' }),
   getMode: () => get<{ mode: string; version: number; available: string[] }>('api/v1/mode'),
   switchMode: (mode: string, version?: number) =>
     post<{ mode: string; previous: string; version: number; message: string }>('api/v1/mode', { mode, version }),

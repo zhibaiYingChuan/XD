@@ -137,7 +137,7 @@ export default function ReportExportDialog({
       // v1.3.4 修复: exportReportFile 内部打开 save dialog，用户选路径后写入
       const savedPath = await api.exportReportFile(filePath, suggested);
       setStep('done');
-      onShowMessage('success', `周报已导出到 ${savedPath}`);
+      onShowMessage('success', `安全报告已导出到 ${savedPath}`);
     } catch (e: any) {
       setError(String(e?.message || e));
       // 用户取消 save dialog 不算错误，不弹错误提示
@@ -197,7 +197,7 @@ export default function ReportExportDialog({
         {/* 标题栏 */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
           <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary, #e0e0e0)', margin: 0 }}>
-            导出安全周报
+            导出安全报告
           </h2>
           <button
             onClick={onClose}
@@ -260,7 +260,7 @@ export default function ReportExportDialog({
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
             <FileText size={36} style={{ color: 'var(--success, #22c55e)' }} />
             <p style={{ color: 'var(--text-primary, #e0e0e0)', marginTop: 12, fontWeight: 500 }}>
-              周报已导出成功
+              安全报告已导出成功
             </p>
             <p style={{ color: 'var(--text-secondary, #a0a0a0)', fontSize: 13, marginTop: 4 }}>
               文件保存至指定位置，可在文件管理器中查看
@@ -296,6 +296,34 @@ export default function ReportExportDialog({
                 {error}
               </div>
             )}
+
+            {/* 快捷时间选择 */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              {([
+                { label: '今日', days: 0 },
+                { label: '本周', days: 6 },
+                { label: '本月', days: 29 },
+              ] as const).map(({ label, days }) => (
+                <button
+                  key={label}
+                  onClick={() => {
+                    const end = new Date();
+                    const start = new Date(end);
+                    start.setDate(start.getDate() - days);
+                    setStartDate(start.toISOString().slice(0, 10));
+                    setEndDate(end.toISOString().slice(0, 10));
+                  }}
+                  style={{
+                    padding: '4px 12px', borderRadius: 6, fontSize: 12,
+                    border: '1px solid var(--border-color, #333)',
+                    background: 'var(--bg-secondary, #16213e)',
+                    color: 'var(--text-secondary, #a0a0a0)', cursor: 'pointer',
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
 
             {/* 日期范围 */}
             <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>

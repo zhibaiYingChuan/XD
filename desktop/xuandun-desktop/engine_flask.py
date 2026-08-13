@@ -808,21 +808,21 @@ def report_weekly():
         if os.path.exists(db_path) and start_date and end_date:
             try:
                 conn = sqlite3.connect(db_path)
-                # 总览统计
+                # 总览统计 — 只统计 proxy（实时流量）来源
                 row = conn.execute(
                     "SELECT COUNT(*), SUM(CASE WHEN allowed=0 THEN 1 ELSE 0 END) "
-                    "FROM logs WHERE timestamp BETWEEN ? AND ?",
+                    "FROM logs WHERE timestamp BETWEEN ? AND ? AND source = 'proxy'",
                     (start_date, end_date)
                 ).fetchone()
                 if row:
                     total_requests = row[0] or 0
                     total_blocked = row[1] or 0
 
-                # 每日明细（按日期分组）
+                # 每日明细（按日期分组）— 只统计 proxy 来源
                 for drow in conn.execute(
                     "SELECT substr(timestamp,1,10) AS day, COUNT(*), "
                     "SUM(CASE WHEN allowed=0 THEN 1 ELSE 0 END) "
-                    "FROM logs WHERE timestamp BETWEEN ? AND ? "
+                    "FROM logs WHERE timestamp BETWEEN ? AND ? AND source = 'proxy' "
                     "GROUP BY day ORDER BY day",
                     (start_date, end_date)
                 ):
@@ -836,11 +836,12 @@ def report_weekly():
                         "rate": round(day_rate, 2),
                     })
 
-                # Top 攻击来源（按 source 分组）
+                # Top 攻击类型分布（按 attack_category 分组，只统计 proxy 来源）
                 for srow in conn.execute(
-                    "SELECT source, COUNT(*) AS cnt FROM logs "
-                    "WHERE timestamp BETWEEN ? AND ? AND allowed=0 "
-                    "GROUP BY source ORDER BY cnt DESC LIMIT 10",
+                    "SELECT attack_category, COUNT(*) AS cnt FROM logs "
+                    "WHERE timestamp BETWEEN ? AND ? AND allowed=0 AND source = 'proxy' "
+                    "AND attack_category IS NOT NULL AND attack_category != '' "
+                    "GROUP BY attack_category ORDER BY cnt DESC LIMIT 10",
                     (start_date, end_date)
                 ):
                     pct = (srow[1] / total_blocked * 100) if total_blocked > 0 else 0.0
@@ -888,7 +889,7 @@ def report_weekly():
                 conn2 = sqlite3.connect(db_path)
                 for arow in conn2.execute(
                     "SELECT attack_category, COUNT(*) AS cnt FROM logs "
-                    "WHERE timestamp BETWEEN ? AND ? AND allowed=0 "
+                    "WHERE timestamp BETWEEN ? AND ? AND allowed=0 AND source = 'proxy' "
                     "AND attack_category IS NOT NULL AND attack_category != '' "
                     "GROUP BY attack_category ORDER BY cnt DESC LIMIT 10",
                     (start_date, end_date)
