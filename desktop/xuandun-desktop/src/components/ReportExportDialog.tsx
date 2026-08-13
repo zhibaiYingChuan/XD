@@ -9,7 +9,7 @@ import { api, WeeklyReportPreview } from '../services/tauriApi';
  * 引擎 /report/weekly 端点 + Rust export_report_file 命令完成端到端导出。
  */
 
-type ReportFormat = 'html' | 'pdf';
+type ReportFormat = 'html' | 'pdf' | 'csv';
 type ReportSection = 'summary' | 'trend' | 'distribution' | 'detail' | 'top_sources';
 
 interface ReportExportDialogProps {
@@ -132,7 +132,7 @@ export default function ReportExportDialog({
     if (processingRef.current || !filePath) return;
     processingRef.current = true;
     try {
-      const ext = format === 'pdf' ? 'pdf' : 'html';
+      const ext = format === 'pdf' ? 'pdf' : format === 'csv' ? 'csv' : 'html';
       const suggested = `xuandun_report_${endDate}.${ext}`;
       // v1.3.4 修复: exportReportFile 内部打开 save dialog，用户选路径后写入
       const savedPath = await api.exportReportFile(filePath, suggested);
@@ -250,7 +250,7 @@ export default function ReportExportDialog({
               </button>
               <button style={s.btnPrimary} onClick={handleExport}>
                 <Download size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                导出{format === 'pdf' ? 'PDF' : 'HTML'}
+                导出{format === 'pdf' ? 'PDF' : format === 'csv' ? 'CSV' : 'HTML'}
               </button>
             </div>
           </div>
@@ -323,7 +323,7 @@ export default function ReportExportDialog({
             <div style={{ marginBottom: 16 }}>
               <label style={s.label}>导出格式</label>
               <div style={{ display: 'flex', gap: 8 }}>
-                {(['html', 'pdf'] as ReportFormat[]).map((f) => (
+                {(['html', 'pdf', 'csv'] as ReportFormat[]).map((f) => (
                   <button
                     key={f}
                     style={s.chip(format === f)}

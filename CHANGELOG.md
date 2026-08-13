@@ -58,6 +58,10 @@
 - **F-5 Settings 版本与更新区域**：Settings.tsx 新增"版本与更新"卡片，版本号从 @tauri-apps/api/app.getVersion() 运行时读取，含手动"检查更新"按钮
 - **CDP 回归测试**：桌面端 WebView2 12/12 PASS + 网关管理控制台 23/23 PASS
 
+#### 周报导出修复（PDF 内容为 HTML 源码 + 新增 CSV 格式）
+- **PDF 生成修复**：fpdf2 未在 pyproject.toml 依赖中声明，导致引擎环境无 fpdf2/weasyprint 时回退到写 HTML 源码到 .pdf 文件；修复：添加 fpdf2>=2.7 依赖 + 移除不诚实的 HTML 回退（直接抛错而非假装是 PDF）
+- **新增 CSV 格式**：周报导出新增 CSV 格式选项（Excel 可直接打开），含概览统计 + 每日明细 + 攻击类型分布 + 来源 Top，便于统计分析；使用 Python 标准库 csv 模块，无需额外依赖
+
 ### 变更
 - 开发计划 v1.3.4 从"P0+P1 全部完成"修正为"P0+P1 核心功能已完成，3 项验收标准待优化"
 - 参赛话术从"13x 加速"修正为"3.1x 加速"（实测 Python 基线 22.2μs，Rust 端到端 7.2μs）

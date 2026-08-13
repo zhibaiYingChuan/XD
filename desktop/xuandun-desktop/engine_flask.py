@@ -772,11 +772,11 @@ def simulation_run():
 
 @app.route("/report/weekly", methods=["POST"])
 def report_weekly():
-    """周报生成端点：生成指定日期范围的安全周报（PDF/HTML）。
+    """周报生成端点：生成指定日期范围的安全周报（PDF/HTML/CSV）。
 
-    v1.3.4 新增。请求体：
+    v1.3.4 新增，v1.3.4 健康修复：新增 CSV 格式（Excel 可直接打开）。请求体：
       { "start_date": "2026-08-04", "end_date": "2026-08-10",
-        "format": "pdf|html", "sections": ["summary","trend","distribution"] }
+        "format": "pdf|html|csv", "sections": ["summary","trend","distribution"] }
 
     返回：
       { "file_path": "...", "file_size": ..., "format": "...",
@@ -873,11 +873,13 @@ def report_weekly():
             "top_sources": top_sources,
         }
 
-        # 生成报告（HTML / PDF）
+        # 生成报告（HTML / PDF / CSV）
         charts = _render_charts(daily_data, top_sources)
         html_content = _render_weekly_html(summary, sections, charts)
         if fmt == "pdf":
             file_path = _render_weekly_pdf(html_content)
+        elif fmt == "csv":
+            file_path = _render_weekly_csv(summary, sections)
         else:
             fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1065,6 +1067,7 @@ def _render_weekly_pdf(html_content: str) -> str:
     """将周报渲染为 PDF 文件。
 
     优先 weasyprint（需 GTK3 运行时），回退 fpdf2（纯 Python）。
+    两者都失败时抛出明确错误，不静默回退到 HTML（避免生成内容为 HTML 源码的假 PDF）。
     """
     import tempfile
 
@@ -1082,11 +1085,79 @@ def _render_weekly_pdf(html_content: str) -> str:
     try:
         return _render_weekly_pdf_fpdf2(html_content)
     except Exception as e:
-        logger.warning("fpdf2 PDF 渲染失败，回退 HTML: %s", e)
-        fd, html_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(html_content)
-        return html_path
+        # 不再静默回退到 HTML 假装是 PDF（诚信底线）
+        raise RuntimeError(f"PDF 生成失败（weasyprint 和 fpdf2 均不可用）: {e}")
+
+
+def _render_weekly_csv(summary: dict, sections: dict) -> str:
+    """生成 CSV 格式周报（Excel 可直接打开，便于统计分析）。
+
+    使用 Python 标准库 csv 模块，无需额外依赖。
+    包含概览统计 + 每日明细 + 攻击类型分布。
+    """
+    import csv
+    import tempfile
+
+    fd, csv_path = tempfile.mkstemp(suffix=".csv", prefix="xuandun_report_")
+
+    with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+
+        # 标题行
+        writer.writerow(["道体玄盾 安全周报"])
+        writer.writerow([f"周期: {summary.get('period', {}).get('start', '')} ~ {summary.get('period', {}).get('end', '')}"])
+        writer.writerow([f"生成时间: {summary.get('generated_at', '')}"])
+        writer.writerow([])
+
+        # 概览统计
+        writer.writerow(["=== 概览统计 ==="])
+        writer.writerow(["指标", "数值"])
+        writer.writerow(["检测总数", summary.get("total_requests", 0)])
+        writer.writerow(["拦截次数", summary.get("total_blocked", 0)])
+        writer.writerow(["拦截率(%)", summary.get("block_rate", 0)])
+        writer.writerow(["日均检测量", summary.get("avg_daily", 0)])
+        writer.writerow([])
+
+        # 每日明细
+        daily_data = sections.get("daily_detail", [])
+        if daily_data:
+            writer.writerow(["=== 每日明细 ==="])
+            writer.writerow(["日期", "检测数", "拦截数", "拦截率(%)"])
+            for row in daily_data:
+                writer.writerow([
+                    row.get("date", ""),
+                    row.get("total", 0),
+                    row.get("blocked", 0),
+                    row.get("rate", ""),
+                ])
+            writer.writerow([])
+
+        # 攻击类型分布
+        attack_dist = sections.get("attack_distribution", [])
+        if attack_dist:
+            writer.writerow(["=== 攻击类型分布 ==="])
+            writer.writerow(["攻击类型", "次数", "占比(%)"])
+            for row in attack_dist:
+                writer.writerow([
+                    row.get("category", ""),
+                    row.get("count", 0),
+                    row.get("percentage", ""),
+                ])
+            writer.writerow([])
+
+        # 来源 Top
+        top_sources = sections.get("top_sources", [])
+        if top_sources:
+            writer.writerow(["=== 来源 Top ==="])
+            writer.writerow(["来源", "请求数", "拦截数"])
+            for row in top_sources:
+                writer.writerow([
+                    row.get("source", ""),
+                    row.get("requests", 0),
+                    row.get("blocked", 0),
+                ])
+
+    return csv_path
 
 
 def _render_weekly_pdf_fpdf2(html_content: str) -> str:
