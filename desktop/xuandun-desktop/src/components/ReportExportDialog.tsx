@@ -5,7 +5,7 @@ import { api, WeeklyReportPreview } from '../services/tauriApi';
 /**
  * ReportExportDialog — 周报导出对话框
  *
- * v1.3.4 P0-2.4 新增。提供日期范围选择、格式(HTML/PDF)、模块选择及导出流程。
+ * v1.3.4 P0-2.4 新增。提供日期范围选择、格式(CSV/JSON/HTML/MD)、模块选择及导出流程。
  * 引擎 /report/weekly 端点 + Rust export_report_file 命令完成端到端导出。
  */
 

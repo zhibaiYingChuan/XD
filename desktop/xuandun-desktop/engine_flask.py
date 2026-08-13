@@ -772,11 +772,11 @@ def simulation_run():
 
 @app.route("/report/weekly", methods=["POST"])
 def report_weekly():
-    """周报生成端点：生成指定日期范围的安全周报（PDF/HTML/CSV）。
+    """周报生成端点：生成指定日期范围的安全周报（CSV/JSON/HTML/MD）。
 
-    v1.3.4 新增，v1.3.4 健康修复：新增 CSV 格式（Excel 可直接打开）。请求体：
+    v1.3.4 新增，v1.3.4 健康修复：移除PDF(依赖问题)，新增CSV/JSON/MD(零依赖)。请求体：
       { "start_date": "2026-08-04", "end_date": "2026-08-10",
-        "format": "pdf|html|csv", "sections": ["summary","trend","distribution"] }
+        "format": "csv|json|html|md", "sections": ["summary","trend","distribution"] }
 
     返回：
       { "file_path": "...", "file_size": ..., "format": "...",
@@ -875,13 +875,46 @@ def report_weekly():
 
         # 生成报告（CSV / JSON / HTML / MD，全部零依赖）
         charts = _render_charts(daily_data, top_sources)
+
+        # 构造 sections_data 字典（含实际数据），供 CSV/JSON/MD 使用
+        # 注意：sections 变量是 API 请求的模块名列表（如 ["summary","trend"]），供 HTML 模板条件判断用
+        # sections_data 是实际数据字典，供 CSV/JSON/MD 函数提取数据用
+
+        # 查询攻击类型分布
+        attack_distribution = []
+        if os.path.exists(db_path) and start_date and end_date:
+            try:
+                conn2 = sqlite3.connect(db_path)
+                for arow in conn2.execute(
+                    "SELECT attack_category, COUNT(*) AS cnt FROM logs "
+                    "WHERE timestamp BETWEEN ? AND ? AND allowed=0 "
+                    "AND attack_category IS NOT NULL AND attack_category != '' "
+                    "GROUP BY attack_category ORDER BY cnt DESC LIMIT 10",
+                    (start_date, end_date)
+                ):
+                    pct = (arow[1] / total_blocked * 100) if total_blocked > 0 else 0.0
+                    attack_distribution.append({
+                        "category": arow[0],
+                        "count": arow[1],
+                        "percentage": round(pct, 2),
+                    })
+                conn2.close()
+            except Exception:
+                pass
+
+        sections_data = {
+            "daily_detail": daily_data,
+            "attack_distribution": attack_distribution,
+            "top_sources": top_sources,
+        }
+
         html_content = _render_weekly_html(summary, sections, charts)
         if fmt == "csv":
-            file_path = _render_weekly_csv(summary, sections)
+            file_path = _render_weekly_csv(summary, sections_data)
         elif fmt == "json":
-            file_path = _render_weekly_json(summary, sections)
+            file_path = _render_weekly_json(summary, sections_data)
         elif fmt == "md":
-            file_path = _render_weekly_md(summary, sections)
+            file_path = _render_weekly_md(summary, sections_data)
         else:
             fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -904,7 +937,7 @@ def _render_charts(daily_data: list, top_sources: list) -> dict:
     """使用 Chart.js 生成 Base64 编码的图表（趋势图 + 分布图）。
 
     在 HTML 渲染阶段，先通过 Jinja2 模板内的 <canvas> 占位，
-    但 weasyprint 无法渲染 JS 图表，所以此处用静态 SVG 替代。
+    但静态 SVG 图表在所有格式（HTML/CSV/JSON/MD）中通用，不依赖 JS 渲染。
     """
     charts = {"trend": "", "distribution": ""}
 

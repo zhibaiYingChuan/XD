@@ -1175,12 +1175,12 @@ pub async fn get_weekly_report_preview(
     }))
 }
 
-/// 生成安全周报 — 调用引擎 /report/weekly 端点生成 PDF
+/// 生成安全周报 — 调用引擎 /report/weekly 端点生成报告文件
 #[tauri::command]
 /// v1.3.4: 增强周报生成，支持日期范围/格式/模块参数。
 /// 参数对齐引擎 /report/weekly 端点：
 ///   - start_date/end_date: 日期范围（YYYY-MM-DD）
-///   - format: "html" 或 "pdf"
+///   - format: "csv" 或 "json" 或 "html" 或 "md"
 ///   - sections: 内容模块列表 ["summary","trend","distribution"]
 pub async fn generate_weekly_report(
     state: State<'_, Mutex<EngineState>>,
