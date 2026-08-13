@@ -417,7 +417,7 @@ pub async fn warmup(
         (s.get_engine_url(), s.running)
     };
     if !is_running {
-        return Err("Engine not running".to_string());
+        return Err("引擎未运行".to_string());
     }
 
     // P1修复：复用全局 HTTP_CLIENT 连接池，检查HTTP状态码
@@ -686,7 +686,7 @@ pub async fn set_emergency_bypass(
         (s.get_engine_url(), s.running)
     };
     if !is_running {
-        return Err("Engine not running".to_string());
+        return Err("引擎未运行".to_string());
     }
     let body = serde_json::json!({ "enabled": enabled });
     engine_post(&engine_url, "/emergency/bypass", body).await

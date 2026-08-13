@@ -701,6 +701,39 @@ fn start_engine_sidecar(app: &AppHandle) -> Result<(), String> {
             log_engine(&msg);
             msg
         })?;
+
+    // sidecar 回退路径也需要注入上游环境变量（与主路径 apply_upstream_env 对齐）
+    let (url, api_key, model, timeout) = {
+        let db = app.state::<crate::db::Database>();
+        let url = db.get_config("upstream_url").ok().flatten().unwrap_or_default();
+        let api_key = db.get_config("upstream_api_key").ok().flatten().unwrap_or_default();
+        let model = db.get_config("upstream_model").ok().flatten().unwrap_or_default();
+        let timeout = db.get_config("upstream_timeout").ok().flatten()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(300.0);
+        (url, api_key, model, timeout)
+    };
+    let mut sidecar_command = sidecar_command;
+    if !url.is_empty() {
+        sidecar_command = sidecar_command.env("XUANDUN_UPSTREAM_URL", &url);
+    }
+    if !api_key.is_empty() {
+        sidecar_command = sidecar_command.env("XUANDUN_UPSTREAM_API_KEY", &api_key);
+    }
+    if !model.is_empty() {
+        sidecar_command = sidecar_command.env("XUANDUN_UPSTREAM_MODEL", &model);
+    }
+    sidecar_command = sidecar_command.env("XUANDUN_UPSTREAM_TIMEOUT", timeout.to_string());
+    if let Ok(token) = std::env::var("XUANDUN_ADMIN_TOKEN") {
+        sidecar_command = sidecar_command.env("XUANDUN_ADMIN_TOKEN", &token);
+    }
+    log_engine(&format!(
+        "Sidecar upstream env applied: url={} model={} timeout={}",
+        if url.is_empty() { "(空)" } else { "已配置" },
+        if model.is_empty() { "(空)" } else { &model },
+        timeout
+    ));
+
     let (_rx, child) = sidecar_command.spawn().map_err(|e| {
         let msg = format!("Failed to spawn engine via sidecar: {}", e);
         log_engine(&msg);

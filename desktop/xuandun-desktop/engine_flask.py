@@ -1239,7 +1239,7 @@ def _render_weekly_md(summary: dict, sections: dict) -> str:
         lines.append("")
 
     lines.append("---")
-    lines.append("*道体玄盾 v1.3.4 · AI 安全引擎 · 自动生成*")
+    lines.append(f"*道体玄盾 v{_ENGINE_VERSION} · AI 安全引擎 · 自动生成*")
 
     fd, md_path = tempfile.mkstemp(suffix=".md", prefix="xuandun_report_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
