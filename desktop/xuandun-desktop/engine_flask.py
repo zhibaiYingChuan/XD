@@ -794,8 +794,9 @@ def report_weekly():
         from datetime import datetime
 
         # 使用与 Rust 桌面端相同的数据库路径
+        # Rust 用 app.path().app_data_dir() → Windows 上是 APPDATA\Roaming
         db_dir = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.environ.get("TEMP", "/tmp")),
+            os.environ.get("APPDATA", os.environ.get("LOCALAPPDATA", os.environ.get("TEMP", "/tmp"))),
             "com.daoti.xuandun-desktop"
         )
         db_path = os.path.join(db_dir, "xuandun.db")
