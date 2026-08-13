@@ -255,3 +255,8 @@ desktop/stdout.txt
 # 本地设计资产和视频项目（不入仓库）
 dt-ass/
 video/
+
+# ── v1.3.4 健康修复补充忽略规则 ──
+
+# 本地 cargo 镜像配置（仅本地网络环境使用，CI 用默认 crates.io，入库会导致 CI 构建失败）
+desktop/xuandun-desktop/src-tauri/.cargo/config.toml

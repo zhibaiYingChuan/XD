@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { WifiOff, Database, ShieldOff } from 'lucide-react';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
+import UpdateBanner from './components/UpdateBanner';  // v1.3.4 P1-2: 自动更新横幅
 import Dashboard from './pages/Dashboard';
 import Detect from './pages/Detect';
 import Logs from './pages/Logs';
@@ -272,6 +273,8 @@ function AppContent() {
     <>
       {/* Sprint1-P0-6/P0-7: 全局横幅优先于任何页面——DB损坏/IPC桥接死亡 顶层最高优先级显示 */}
       {renderGlobalBanners()}
+      {/* v1.3.4 P1-2: 自动更新横幅 */}
+      <UpdateBanner />
       <HashRouter>
         <Routes>
           <Route element={<Layout />}>

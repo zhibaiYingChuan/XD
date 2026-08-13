@@ -612,6 +612,18 @@ impl Database {
         Ok(result)
     }
 
+    /// 获取高危攻击数量（按 attack_category 高危类别统计）
+    /// v1.3.4 修复 F-4: high_risk_count 从 DB 真实数据源统计，不得固定 0
+    pub fn get_high_risk_count(&self, start: &str, end: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let row = conn.query_row(
+            "SELECT COUNT(*) FROM logs WHERE timestamp >= ?1 AND timestamp < ?2 AND attack_category IN ('sqli','xss','prompt_injection','data_exfiltration')",
+            params![start, end],
+            |row| row.get::<_, i64>(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(row)
+    }
+
     /// 获取周期对比统计
     pub fn get_period_stats(&self, start: &str, end: &str) -> Result<PeriodStats, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;

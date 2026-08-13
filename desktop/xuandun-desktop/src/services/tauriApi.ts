@@ -627,6 +627,24 @@ export const api = {
     invokeWithTimeout<{ file_path: string; file_size: number; format: string; summary: WeeklyReportPreview }>(
       'generate_weekly_report', params, TIMEOUT.SLOW
     ),
-  exportReportFile: (filePath: string, suggestedName?: string) =>
-    invokeWithTimeout<string>('export_report_file', { filePath, suggestedName }, TIMEOUT.NORMAL),
+  exportReportFile: async (filePath: string, suggestedName?: string) => {
+    // v1.3.4 修复: 改用 Tauri save dialog 让用户选择路径（非写死桌面）
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const ext = suggestedName?.endsWith('.pdf') ? ['pdf'] : ['html'];
+    const dest = await save({
+      defaultPath: suggestedName,
+      filters: [{ name: '报告', extensions: ext }],
+    });
+    if (!dest) throw new Error('用户取消了保存');
+    return invokeWithTimeout<string>('export_report_file', { filePath, destPath: dest }, TIMEOUT.NORMAL);
+  },
+  // v1.3.4 P1-2: 自动更新 — 网络 IO 用 SLOW 超时，避免 GitHub 访问慢导致前端假超时
+  checkUpdate: () =>
+    invokeWithTimeout<{ available: boolean; version?: string; body?: string; current_version?: string }>(
+      'check_update', undefined, TIMEOUT.SLOW
+    ),
+  downloadAndInstallUpdate: () =>
+    invokeWithTimeout<{ status: string }>('download_and_install_update', undefined, TIMEOUT.SLOW),
+  dismissUpdate: (version?: string) =>
+    invokeWithTimeout<void>('dismiss_update', { version }, TIMEOUT.FAST),
 };

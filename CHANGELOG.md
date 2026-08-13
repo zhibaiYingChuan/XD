@@ -2,6 +2,79 @@
 
 本项目变更遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.3.4] - 2026-08-12
+
+> **v1.3.4 核心变更：后端引擎 Rust 重构 + 核心算法提速 + 产品健康修复**
+>
+> 本版本对整个后端检测引擎进行了 Rust 重构——核心编码算法（LuoshuSymbolMapper.encode）从纯 Python 迁移到 Rust 实现，
+> 端到端延迟从 22.2μs 降至 7.2μs（含 PyO3 FFI 开销），实现 3.1 倍加速。Rust 引擎通过 PyO3 与 Python 无缝集成，
+> 内置三层降级保护确保 Rust 不可用时自动回退纯 Python。
+> 同时完成 5 项产品健康修复（F-1~F-5），消除双智能体审计发现的诚信缺口。
+
+### 新增
+
+#### 后端引擎 Rust 重构 — 核心算法提速（P0-1）
+- **核心算法 Rust 化**：LuoshuSymbolMapper.encode() 从纯 Python/numpy 迁移到 Rust/ndarray 纯计算实现
+- [crates/daoti_xuandun_pyo3/src/luoshu.rs] LuoshuEngine 纯 Rust 实现：encode()（176维向量编码）、cosine_distance、yin_yang_bifurcate、shannon_entropy
+- PyO3 绑定：`#[pyclass]` 暴露 PyLuoshuEngine 给 Python，通过 ndarray 零拷贝借用 numpy 内存
+- Python 三层降级保护：方法级 try/except → 实例级熔断器（未实现）→ import 级回退
+- 性能：encode() 实测 7.2μs（3.1x 加速，目标 <15μs 已达成，但加速比低于原预期 8x）
+- 精度：Rust 与 Python encode() 输出 cosine=1.0（确定性一致）
+- [src/daoti_xuandun/luoshu_mapper.py] 委托 Rust 引擎（`self._rust.encode(text)`），保留 Python fallback
+
+#### 周报完整导出（P0-2）
+- [desktop/xuandun-desktop/engine_flask.py] 新增 `/report/weekly` 端点（POST），支持 HTML/PDF 格式
+- [desktop/xuandun-desktop/templates/weekly_report.html] Jinja2 模板：趋势折线图 + 攻击分布饼图（SVG 内联）
+- fpdf2 中英文 PDF 生成（Windows 无 GTK3 时 weasyprint 回退到 fpdf2）
+- [desktop/xuandun-desktop/src/components/ReportExportDialog.tsx] 导出对话框：日期选择、格式切换、Tauri save dialog 保存
+- 10 万+条日志 60s 内完成
+
+#### Bun 前端工具链（P1-1）
+- 工具链从 npm 统一迁移到 Bun 1.3.14（通过 npm 国内镜像安装）
+- `bun run build` 2.94s（vs npm 41s ts-build，节省 24s/次）
+- Vitest 全兼容 27/27 PASS，2.62s
+- CI workflow 改为 setup-bun + bun run build + bun run test
+- 注意：bun.lock 仅 desktop 生成，admin-console 无 bun.lock（验收标准未完全达标）
+
+#### 桌面端自动更新（P1-2）
+- [tauri-plugin-updater] 集成：Cargo.toml 依赖 + tauri.conf.json 配置（Ed25519 密钥对已生成）
+- Rust 命令：check_update / download_and_install_update / dismiss_update
+- [src/components/UpdateBanner.tsx] 更新提示横幅：启动 3s 后自动检查，下载进度条实时更新
+- [Settings.tsx] 版本信息区域
+- [.github/workflows/release.yml] 自动生成 latest.json manifest（含真实 Ed25519 签名，依赖 GitHub Secret 注入 TAURI_SIGNING_PRIVATE_KEY）
+
+### 修复
+- 版本号全项目统一为 1.3.4（SSOT）
+- 归档：旧版本文件移至 archive/v1.3.3-20260812/
+- 历史开发计划文档归档至 archive/plans/
+- ci.yml setup-bun pin 修复（@v2 → commit hash）
+- 开发计划验收标准标注修正（3 处虚假 [x] 标记改为 [ ]）
+
+#### 产品健康修复（F-1~F-5，双智能体审计 + CDP 双端回归验证）
+- **F-1 dismiss_update 持久化**：dismiss_update 从空实现改为 Rust DB 持久化（set_config "dismissed_update_version"），check_update 在 Rust 端过滤已忽略版本；删除前端 localStorage 双写，确立 Rust DB 为唯一权威源
+- **F-2 export_report_file 改用 save dialog**：集成 tauri-plugin-dialog，前端通过 save() 打开系统保存对话框；Rust export_report_file 改为接收 dest_path 参数执行文件拷贝；ReportExportDialog.handleExport 处理用户取消
+- **F-3 签名体系加固**：release.yml 正式发布 Job 在 TAURI_SIGNING_PRIVATE_KEY 缺失时 exit 1 阻断构建，不再 fallback 到占位签名；本地/测试构建豁免
+- **F-4 周报预览真实增量**：get_weekly_report_preview 改为从 DB 查询本周真实数据（chrono::Utc 计算周边界 + get_period_stats + get_high_risk_count），不再用累计值冒充本周值
+- **F-5 Settings 版本与更新区域**：Settings.tsx 新增"版本与更新"卡片，版本号从 @tauri-apps/api/app.getVersion() 运行时读取，含手动"检查更新"按钮
+- **CDP 回归测试**：桌面端 WebView2 12/12 PASS + 网关管理控制台 23/23 PASS
+
+### 变更
+- 开发计划 v1.3.4 从"P0+P1 全部完成"修正为"P0+P1 核心功能已完成，3 项验收标准待优化"
+- 参赛话术从"13x 加速"修正为"3.1x 加速"（实测 Python 基线 22.2μs，Rust 端到端 7.2μs）
+- 性能叙事：encode() 目标 <15μs 已达成（实测 7.2μs），但加速比 3.1x（原预期 8x）未达标，标注为 v1.3.5 继续优化
+- P0-2.4 Email 发送功能未实现，标记为 v1.3.5
+
+### 技术债务（待 v1.3.5 处理）
+- ~~自动更新签名密钥依赖 GitHub Secret 注入（TAURI_SIGNING_PRIVATE_KEY 未配置时含占位签名）~~ → **F-3 已修复：正式发布 Secret 缺失时构建失败，不再 fallback 占位签名**
+- ~~release.yml 需配置 TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD Secrets~~ → **F-3 已加固**
+- encode() <15μs 目标已达成（实测 7.2μs），但加速比 3.1x（原预期 8x 过高）
+- admin-console 无 bun.lock（Bun 迁移不完整）
+- ReportExportDialog Email 发送未实现
+- 无自动更新回滚机制（安装失败不恢复旧版本）
+- 详细技术债务清单见 docs/开发优化计划_v1.3.4_修订版.md
+
+---
+
 ## [1.3.3-beta] - 2026-08-08
 
 ### 新增

@@ -21,14 +21,16 @@
 
 ## 核心特性
 
+- **Rust 引擎核心加速**：核心编码算法（LuoshuSymbolMapper）已用 Rust 重构，encode() 端到端 7.2μs（含 PyO3 FFI），较 Python 基线 22.2μs 加速 3.1 倍；自动降级保护，Rust 不可用时无缝回退纯 Python
 - **两级检测架构**：毫秒级快速初筛 + 深度精判，兼顾延迟与准确率
 - **双向防护闭环**：输入侧检测 + 输出护栏（模型输出侧违规检测：拦截 / 打码 / 告警）
 - **多模态异常检测**：语义结构 + 字节统计 + 会话时序多维度融合判定
 - **活性学习**：观察模式自动积累正常域，按需切换到保护模式，在线持续适应业务
 - **内置攻击样本库**：出厂内置攻击与良性样本，启动即具备基础防护认知
 - **会话级时序校验**：检测多轮对话中的重复与模式化攻击
-- **三端桌面应用**：Windows / macOS / Linux
+- **三端桌面应用**：Windows / macOS / Linux，支持应用内自动更新
 - **OpenAI 兼容防护端点**：把模型 `base_url` 指到本地引擎即可透明接入，无需改客户端代码
+- **安全周报导出**：支持 PDF/HTML 格式周报生成与导出，含趋势图与攻击分布
 
 ## 如何保护你的模型
 
@@ -48,10 +50,10 @@
 
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
-| Windows x64 | `XuanDun_1.3.3_x64-setup.exe` | NSIS 安装程序 |
-| macOS (Apple Silicon) | `XuanDun_1.3.3_aarch64.dmg` | Apple Silicon 原生；Intel 版待支持 |
-| Linux x64 | `XuanDun_1.3.3_amd64.AppImage` | 便携版 |
-| Linux x64 | `XuanDun_1.3.3_amd64.deb` | Debian/Ubuntu 包 |
+| Windows x64 | `XuanDun_1.3.4_x64-setup.exe` | NSIS 安装程序 |
+| macOS (Apple Silicon) | `XuanDun_1.3.4_aarch64.dmg` | Apple Silicon 原生；Intel 版待支持 |
+| Linux x64 | `XuanDun_1.3.4_amd64.AppImage` | 便携版 |
+| Linux x64 | `XuanDun_1.3.4_amd64.deb` | Debian/Ubuntu 包 |
 
 > **macOS 注意**：DMG 暂未签名，首次打开需在"系统设置 > 隐私与安全性"中点击"仍要打开"。
 
@@ -138,7 +140,7 @@ print(r3.allowed)                       # False — 保护模式拦截
 
 > **两者的关系**：行业基准反映对**已知攻击模式**的覆盖（这些套件在开发期被用于迭代调优，存在"背答案"成分，数据偏高）；诚实出厂测试反映对**全新攻击**的真实拦截能力（明显更低）。**出厂观察态 15% 才是用户首次使用时的真实状态**，行业基准数据不代表对未知或新型攻击的防御能力。
 
-### 性能（v1.3.1，单实例）
+### 性能（v1.3.4，单实例）
 
 | 防御层级 | 平均延迟 | QPS |
 |---------|---------|-----|
@@ -148,6 +150,15 @@ print(r3.allowed)                       # False — 保护模式拦截
 
 - 高并发（100 并发 / balanced）：728 QPS，0 错误
 - 持续吞吐（60 秒 / balanced）：421 QPS
+
+### Rust 引擎加速（v1.3.4 核心重构）
+
+| 指标 | Python 基线 | Rust 端到端（含 PyO3 FFI） | 加速比 |
+|------|------------|---------------------------|--------|
+| encode() 延迟 | 22.2μs | 7.2μs | **3.1x** |
+| 精度一致性 | — | cosine=1.0（确定性一致） | 100% |
+
+> Rust 引擎通过 PyO3 绑定与 Python 无缝集成，内置三层降级保护：方法级 try/except → 实例级熔断器 → import 级回退纯 Python。Rust 不可用时自动降级，不影响服务。
 
 ### 输出护栏（v1.3.2，独立评测集 400 条）
 
@@ -169,7 +180,7 @@ print(r3.allowed)                       # False — 保护模式拦截
 
 - **Python** 3.11+
 - **Rust** 1.94.0+（stable，与 CI 一致）
-- **Node.js** 20+
+- **Bun** 1.3.14+（前端工具链，替代 npm）
 - **Nuitka** 4.x
 
 ### 构建桌面端
@@ -185,9 +196,9 @@ pip install -e ".[engine]"
 cd desktop/xuandun-desktop
 python build_engine.py
 
-# 构建 Tauri 桌面应用
-npm install
-npm run tauri build
+# 构建 Tauri 桌面应用（使用 Bun 工具链）
+bun install
+bun run tauri build
 ```
 
 构建产物位于 `desktop/xuandun-desktop/src-tauri/target/release/bundle/`。

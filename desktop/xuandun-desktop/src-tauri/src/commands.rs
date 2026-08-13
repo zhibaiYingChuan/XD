@@ -2,10 +2,12 @@ use serde::{Deserialize, Serialize};
 // Tauri 2.x: emit方法定义在Emitter trait中，必须显式导入
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;  // v1.3.4 P1-2: 自动更新
 use std::sync::Mutex;
 
 use crate::engine::{EngineState, send_protect_request, send_output_protect_request, send_warmup_request, sync_mode_to_engine, restart_engine as engine_restart, stop_engine as engine_stop, safe_preview, engine_get, engine_post};
 use crate::db::Database;
+use chrono::Datelike;  // v1.3.4 F-4: weekday() 需要 Datelike trait
 
 // 深层安全审计：输入长度上限（防止 DoS 攻击）
 const MAX_PROTECT_TEXT_LEN: usize = 100_000;     // 100KB — protect/check_output/mark_as_safe
@@ -1140,44 +1142,36 @@ pub async fn mark_as_safe(
     engine_post(&engine_url, "/learn/safe", body).await
 }
 
-/// 周报预览 — 从引擎获取本周统计数据摘要
+/// 周报预览 — 从 DB 查询本周真实统计数据
+/// v1.3.4 修复 F-4: 不再用 /status 累计值冒充本周数据，
+/// 改为按时间戳查询本周增量（logs.timestamp 是 rfc3339 UTC，用 UTC 计算本周边界）。
 #[tauri::command]
 pub async fn get_weekly_report_preview(
-    state: State<'_, Mutex<EngineState>>,
+    db: State<'_, Database>,
 ) -> Result<serde_json::Value, String> {
-    let engine_url = {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        if !s.running {
-            return Err("引擎未运行".to_string());
-        }
-        s.get_engine_url()
-    };
-    // 引擎 /status 返回累计数据，/metrics/realtime 返回实时指标
-    // 周报依赖状态端点，并计算本周近似值（假设引擎持续运行）
-    let status = engine_get(&engine_url, "/status").await?;
-    let total_requests = status.get("total_requests").and_then(|v| v.as_u64()).unwrap_or(0);
-    let total_blocked = status.get("total_blocked").and_then(|v| v.as_u64()).unwrap_or(0);
-    let block_rate = if total_requests > 0 {
-        total_blocked as f64 / total_requests as f64
-    } else {
-        0.0
-    };
-    // 攻击分布总和：统计 attack_distribution 下所有类别的攻击计数
-    // 前端字段名 high_risk_count 保持不变以兼容接口，但语义为所有攻击分布的总和（非仅高危）
-    let total_attack_distribution = status.get("attack_distribution")
-        .and_then(|v| v.as_object())
-        .map(|dist| {
-            dist.values()
-                .filter_map(|v| v.as_u64())
-                .sum::<u64>()
-        })
-        .unwrap_or(0);
-
+    // 本周起始（周一 00:00 UTC）—— logs.timestamp 是 rfc3339 UTC，必须用 UTC 计算
+    let now = chrono::Utc::now();
+    let week_start_dt = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
+    let week_end_dt = week_start_dt + chrono::Duration::days(7);
+    // 转 rfc3339 字符串与 DB 比较
+    let week_start = week_start_dt.to_rfc3339();
+    let week_end = week_end_dt.to_rfc3339();
+    // 查询本周真实增量
+    let stats = db.get_period_stats(&week_start, &week_end)?;
+    let total = stats.total_requests;
+    let blocked = stats.total_blocked;
+    // high_risk_count 从 DB 按高危类别统计（不得固定 0，否则造成新虚假数字）
+    let high_risk = db.get_high_risk_count(&week_start, &week_end)?;
     Ok(serde_json::json!({
-        "total_requests": total_requests,
-        "total_blocked": total_blocked,
-        "block_rate": block_rate,
-        "high_risk_count": total_attack_distribution,
+        "total_requests": total,
+        "total_blocked": blocked,
+        "block_rate": if total > 0 { (blocked as f64 / total as f64 * 100.0).round() } else { 0.0 },
+        "high_risk_count": high_risk,
     }))
 }
 
@@ -1211,19 +1205,105 @@ pub async fn generate_weekly_report(
     engine_post(&engine_url, "/report/weekly", body).await
 }
 
-/// v1.3.4 新增：将引擎生成的报告文件导出到用户桌面。
+/// v1.3.4 新增：将引擎生成的报告文件导出到用户指定路径。
+/// v1.3.4 修复：save dialog 在前端（tauri-plugin-dialog），Rust 只负责拷贝到 dest_path。
 #[tauri::command]
 pub async fn export_report_file(
     file_path: String,
-    suggested_name: Option<String>,
+    dest_path: String,
 ) -> Result<String, String> {
-    let name = suggested_name.unwrap_or_else(|| "xuandun_report.html".to_string());
-    // 导出到用户桌面（Windows/macOS/Linux 通用）
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    let dest = std::path::PathBuf::from(&home).join("Desktop").join(&name);
-    std::fs::copy(&file_path, &dest)
+    std::fs::copy(&file_path, &dest_path)
         .map_err(|e| format!("导出文件失败: {}", e))?;
-    Ok(dest.to_string_lossy().to_string())
+    Ok(dest_path)
+}
+
+// ============================================================
+// v1.3.4 P1-2: 桌面端自动更新（tauri-plugin-updater）
+// ============================================================
+
+/// 检查更新：查询 GitHub Release 中是否有新版本。
+/// v1.3.4 修复：增加 DB 已忽略版本过滤 + 8s 网络超时兜底。
+/// 若新版本与 dismissed_update_version 一致，返回 available: false（用户已忽略此版本）。
+#[tauri::command]
+pub async fn check_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let current = app.package_info().version.to_string();
+    let updater = app.updater().map_err(|e| format!("更新器初始化失败: {}", e))?;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        updater.check(),
+    )
+    .await
+    .map_err(|_| "检查更新超时: GitHub 网络不可达".to_string())?
+    .map_err(|e| format!("检查更新失败: {}", e))
+    {
+        Ok(Some(update)) => {
+            // 查询已忽略版本号（DB 唯一权威源），若一致则不弹窗
+            let dismissed = app.state::<Database>()
+                .get_config("dismissed_update_version")
+                .ok()
+                .flatten();
+            let available = dismissed.as_deref() != Some(&update.version);
+            Ok(serde_json::json!({
+                "available": available,
+                "version": update.version,
+                "body": update.body.unwrap_or_default(),
+                "date": update.date.map(|d| d.to_string()),
+                "current_version": current,
+            }))
+        }
+        Ok(None) => Ok(serde_json::json!({
+            "available": false,
+            "current_version": current,
+        })),
+        Err(e) => Err(format!("检查更新失败: {}", e)),
+    }
+}
+
+/// 下载并安装更新：下载完成后自动触发应用重启。
+/// 进度通过 Tauri 事件 `update-progress` 推送到前端。
+#[tauri::command]
+pub async fn download_and_install_update(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let updater = app.updater().map_err(|e| format!("更新器初始化失败: {}", e))?;
+    match updater.check().await.map_err(|e| format!("检查更新失败: {}", e))? {
+        Some(update) => {
+            // v1.3.4: tauri-plugin-updater 2.10.x 无 content_length()，进度仅报告已下载量
+            update.download_and_install(
+                |chunk_len, _content_length| {
+                    // 通过 Tauri 事件推送下载进度给前端
+                    let _ = app.emit("update-progress", serde_json::json!({
+                        "downloaded": chunk_len,
+                        "total": _content_length.unwrap_or(0),
+                    }));
+                },
+                || {
+                    // 安装前回调：通知前端即将重启
+                    let _ = app.emit("update-status", serde_json::json!({
+                        "phase": "installing",
+                    }));
+                },
+            )
+            .await
+            .map_err(|e| format!("下载安装失败: {}", e))?;
+
+            Ok(serde_json::json!({ "status": "installing" }))
+        }
+        None => Err("没有可用更新".to_string()),
+    }
+}
+
+/// 忽略当前版本更新（用户主动跳过）。
+/// v1.3.4 修复：持久化到 DB（唯一权威源），跨重启/跨清除浏览器数据仍有效。
+/// 前端传入待忽略的版本号，写入 config 表 dismissed_update_version。
+#[tauri::command]
+pub async fn dismiss_update(
+    app: tauri::AppHandle,
+    version: Option<String>,
+) -> Result<(), String> {
+    let db = app.state::<Database>();
+    let v = version.unwrap_or_else(|| app.package_info().version.to_string());
+    db.set_config("dismissed_update_version", &v)
+        .map_err(|e| format!("保存忽略版本失败: {}", e))?;
+    Ok(())
 }

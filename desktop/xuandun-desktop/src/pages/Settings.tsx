@@ -4,7 +4,7 @@ import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
 // 设计系统规范：图标统一使用 lucide-react，strokeWidth=1.5，禁止 emoji
 import {
   CheckCircle, AlertTriangle, Lightbulb, RefreshCw, Square,
-  Zap,
+  Zap, Download, Info,
 } from 'lucide-react';
 import { ConfirmModal, useConfirmModal } from '../components/ConfirmModal';
 
@@ -13,6 +13,8 @@ export default function Settings() {
   const { modalProps: confirmModalProps, confirm } = useConfirmModal();
   const [autoStart, setAutoStart] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // v1.3.4 F-5: 版本与更新区域 — 版本号从运行时读取（不硬编码，避免版本漂移）
+  const [appVersion, setAppVersion] = useState('');
   const [stopping, setStopping] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [auditReport, setAuditReport] = useState<string>('');
@@ -85,6 +87,16 @@ export default function Settings() {
       // [1] hasSecretKey
       if (mainCfgResults[1].status === 'fulfilled') {
         setHasKey(mainCfgResults[1].value);
+      }
+
+      // v1.3.4 F-5: 从运行时读取版本号，不硬编码
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app');
+        const v = await getVersion();
+        if (settingsMountedRef.current) setAppVersion(v);
+      } catch {
+        // 非 Tauri 环境或 API 不可用时，fallback 到 package.json 中的版本
+        if (settingsMountedRef.current) setAppVersion('1.3.4');
       }
 
       // Sprint1-P0-3: 运维卡并行加载 + 独立错误（Promise.allSettled 互不阻塞）
@@ -837,6 +849,42 @@ export default function Settings() {
           </div>
         </div>
       )}
+      {/* v1.3.4 F-5: 版本与更新区域 — 主动入口，与 UpdateBanner（后台自动检查）职责不同可共存 */}
+      <div className="card general-card">
+        <div className="card-header">
+          <h3>版本与更新</h3>
+          <span className="card-subtitle">当前版本 · 手动检查更新</span>
+        </div>
+        <div className="card-body">
+          <div className="setting-item">
+            <div className="setting-info">
+              <div className="setting-label">应用版本</div>
+              <div className="setting-desc">
+                <Info size={13} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: 4 }} />
+                道体玄盾 v{appVersion || '...'}
+              </div>
+            </div>
+            <button
+              className="btn btn-primary"
+              onClick={async () => {
+                try {
+                  const result = await api.checkUpdate();
+                  if ((result as any).available) {
+                    showMessage('success', `发现新版本 ${(result as any).version}，请查看右下角更新提示`);
+                  } else {
+                    showMessage('success', `当前已是最新版本 v${appVersion}`);
+                  }
+                } catch (e: any) {
+                  showMessage('error', `检查更新失败：${e?.message || e}`);
+                }
+              }}
+            >
+              <Download size={14} strokeWidth={1.5} style={{ verticalAlign: '-2px', marginRight: 4 }} />
+              检查更新
+            </button>
+          </div>
+        </div>
+      </div>
       <ConfirmModal {...confirmModalProps} />
     </div>
   );

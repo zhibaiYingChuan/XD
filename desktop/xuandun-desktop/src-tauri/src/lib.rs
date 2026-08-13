@@ -58,6 +58,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())  // v1.3.4 P1-2: 自动更新
+        .plugin(tauri_plugin_dialog::init())  // v1.3.4 修复: F-2 导出报告 save dialog
         .manage(std::sync::Mutex::new(engine::EngineState::new()))
         .setup(|app| {
             setup_log("Setup: start");
@@ -172,6 +174,10 @@ pub fn run() {
             commands::get_weekly_report_preview,
             commands::generate_weekly_report,
             commands::export_report_file,
+            // v1.3.4 P1-2: 自动更新命令
+            commands::check_update,
+            commands::download_and_install_update,
+            commands::dismiss_update,
             // Sprint1-P0-7: IPC析构散落报错修复——noop心跳命令注册
             commands::noop_heartbeat,
             commands::get_health_history,

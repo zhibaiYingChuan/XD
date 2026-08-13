@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>道体玄盾 安全周报</title>
+<style>
+  @page {
+    size: A4;
+    margin: 20mm 15mm;
+    @bottom-center {
+      content: "道体玄盾 v1.3.4 | 第 " counter(page) " 页";
+      font-size: 9px;
+      color: #94a3b8;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    color: #1e293b; background: #fff; line-height: 1.6;
+    padding: 0;
+  }
+  .header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: #fff; padding: 32px 24px; border-radius: 0 0 16px 16px;
+    margin-bottom: 24px;
+  }
+  .header h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+  .header .sub { font-size: 13px; color: #94a3b8; }
+  .header .meta { display: flex; gap: 24px; margin-top: 12px; font-size: 12px; color: #cbd5e1; }
+  .section { margin-bottom: 24px; }
+  .section-title { font-size: 16px; font-weight: 600; color: #0f172a; border-left: 4px solid #38bdf8; padding-left: 12px; margin-bottom: 12px; }
+  .card-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card {
+    flex: 1; min-width: 140px; background: #f8fafc; border-radius: 10px;
+    padding: 16px; text-align: center; border: 1px solid #e2e8f0;
+  }
+  .card .num { font-size: 28px; font-weight: 700; color: #0f172a; }
+  .card .label { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .card .trend { font-size: 12px; margin-top: 4px; }
+  .trend-up { color: #ef4444; }
+  .trend-down { color: #22c55e; }
+  .chart-container { background: #f8fafc; border-radius: 10px; padding: 16px; border: 1px solid #e2e8f0; text-align: center; }
+  .chart-container img { max-width: 100%; height: auto; }
+  .chart-container .caption { font-size: 11px; color: #94a3b8; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #f1f5f9; color: #475569; padding: 8px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #e2e8f0; }
+  td { padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
+  tr:hover { background: #f8fafc; }
+  .footer { text-align: center; font-size: 11px; color: #94a3b8; margin-top: 32px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: #dcfce7; color: #166534; }
+  .badge-red { background: #fef2f2; color: #991b1b; }
+  .badge-yellow { background: #fef9c3; color: #854d0e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>道体玄盾 安全周报</h1>
+  <div class="sub">AI 驱动的安全检测引擎 · 自动化威胁分析报告</div>
+  <div class="meta">
+    <span>周期: {{ summary.period.start }} ~ {{ summary.period.end }}</span>
+    <span>生成时间: {{ summary.generated_at }}</span>
+  </div>
+</div>
+
+{% if 'summary' in sections %}
+<div class="section">
+  <div class="section-title">概览</div>
+  <div class="card-grid">
+    <div class="card">
+      <div class="num">{{ summary.total_requests | default(0) | comma }}</div>
+      <div class="label">检测总数</div>
+    </div>
+    <div class="card">
+      <div class="num">{{ summary.total_blocked | default(0) | comma }}</div>
+      <div class="label">拦截次数</div>
+    </div>
+    <div class="card">
+      <div class="num">{{ summary.block_rate | default(0) }}%</div>
+      <div class="label">拦截率</div>
+    </div>
+    <div class="card">
+      <div class="num">{{ summary.avg_daily | default(0) | comma }}</div>
+      <div class="label">日均检测量</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if 'trend' in sections and charts.trend %}
+<div class="section">
+  <div class="section-title">趋势分析</div>
+  <div class="chart-container">
+    <img src="{{ charts.trend }}" alt="检测趋势图">
+    <div class="caption">每日检测量与拦截量趋势（{{ summary.period.start }} ~ {{ summary.period.end }}）</div>
+  </div>
+</div>
+{% endif %}
+
+{% if 'distribution' in sections and charts.distribution %}
+<div class="section">
+  <div class="section-title">攻击分布</div>
+  <div class="chart-container">
+    <img src="{{ charts.distribution }}" alt="攻击类型分布">
+    <div class="caption">各类攻击占比分布</div>
+  </div>
+</div>
+{% endif %}
+
+{% if 'detail' in sections and summary.daily_data %}
+<div class="section">
+  <div class="section-title">每日明细</div>
+  <table>
+    <thead>
+      <tr>
+        <th>日期</th>
+        <th>检测总数</th>
+        <th>拦截次数</th>
+        <th>拦截率</th>
+        <th>状态</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for day in summary.daily_data %}
+      <tr>
+        <td>{{ day.date }}</td>
+        <td>{{ day.total | comma }}</td>
+        <td>{{ day.blocked | comma }}</td>
+        <td>{{ day.rate }}%</td>
+        <td>
+          {% if day.rate > 5 %}
+          <span class="badge badge-red">偏高</span>
+          {% elif day.rate > 2 %}
+          <span class="badge badge-yellow">正常</span>
+          {% else %}
+          <span class="badge badge-green">安全</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if 'top_sources' in sections and summary.top_sources %}
+<div class="section">
+  <div class="section-title">Top 攻击来源</div>
+  <table>
+    <thead>
+      <tr>
+        <th>排名</th>
+        <th>来源</th>
+        <th>请求次数</th>
+        <th>占比</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for src in summary.top_sources %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ src.source }}</td>
+        <td>{{ src.count | comma }}</td>
+        <td>{{ src.percentage }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="footer">
+  <p>道体玄盾 v1.3.4 · AI 安全引擎 · 自动生成</p>
+  <p>本报告由系统自动生成，如有疑问请联系管理员</p>
+</div>
+
+</body>
+</html>

@@ -23,6 +23,7 @@ import urllib.request
 import uuid
 from collections import deque, Counter
 
+import math
 import numpy as np
 
 
@@ -64,7 +65,7 @@ app = Flask(__name__)
 # 引擎版本号单一来源（SSOT 从 Cargo.toml 同步，见 sync_version.py）。
 # health 与 status 端点共用此常量，避免版本双字面量漂移（R4 修复）。
 # sync_version.py 通过匹配本常量赋值行来做版本同步，保持单行格式。
-_ENGINE_VERSION = "1.3.3"
+_ENGINE_VERSION = "1.3.4"
 
 _MODE_MAP = {
     "high_security": DefenseLevel.STRICT,
@@ -801,42 +802,87 @@ def report_weekly():
         total_requests = 0
         total_blocked = 0
 
+        daily_data = []
+        top_sources = []
         if os.path.exists(db_path) and start_date and end_date:
             try:
                 conn = sqlite3.connect(db_path)
+                # 总览统计
                 row = conn.execute(
                     "SELECT COUNT(*), SUM(CASE WHEN allowed=0 THEN 1 ELSE 0 END) "
                     "FROM logs WHERE timestamp BETWEEN ? AND ?",
                     (start_date, end_date)
                 ).fetchone()
-                conn.close()
                 if row:
                     total_requests = row[0] or 0
                     total_blocked = row[1] or 0
+
+                # 每日明细（按日期分组）
+                for drow in conn.execute(
+                    "SELECT substr(timestamp,1,10) AS day, COUNT(*), "
+                    "SUM(CASE WHEN allowed=0 THEN 1 ELSE 0 END) "
+                    "FROM logs WHERE timestamp BETWEEN ? AND ? "
+                    "GROUP BY day ORDER BY day",
+                    (start_date, end_date)
+                ):
+                    day_total = drow[1] or 0
+                    day_blocked = drow[2] or 0
+                    day_rate = (day_blocked / day_total * 100) if day_total > 0 else 0.0
+                    daily_data.append({
+                        "date": drow[0],
+                        "total": day_total,
+                        "blocked": day_blocked,
+                        "rate": round(day_rate, 2),
+                    })
+
+                # Top 攻击来源（按 source 分组）
+                for srow in conn.execute(
+                    "SELECT source, COUNT(*) AS cnt FROM logs "
+                    "WHERE timestamp BETWEEN ? AND ? AND allowed=0 "
+                    "GROUP BY source ORDER BY cnt DESC LIMIT 10",
+                    (start_date, end_date)
+                ):
+                    pct = (srow[1] / total_blocked * 100) if total_blocked > 0 else 0.0
+                    top_sources.append({
+                        "source": srow[0] if srow[0] else "未知",
+                        "count": srow[1],
+                        "percentage": round(pct, 2),
+                    })
+                conn.close()
             except Exception:
                 pass
 
         block_rate = (total_blocked / total_requests * 100) if total_requests > 0 else 0.0
+        period_days = 1
+        try:
+            from datetime import date as _date
+            d0 = _date.fromisoformat(start_date)
+            d1 = _date.fromisoformat(end_date)
+            period_days = max(1, (d1 - d0).days + 1)
+        except Exception:
+            pass
 
         summary = {
             "total_requests": total_requests,
             "total_blocked": total_blocked,
             "block_rate": round(block_rate, 2),
+            "avg_daily": round(total_requests / period_days) if period_days else 0,
             "period": {"start": start_date, "end": end_date},
             "generated_at": datetime.utcnow().isoformat(),
+            "daily_data": daily_data,
+            "top_sources": top_sources,
         }
 
-        # 生成 HTML 报告
-        if fmt == "html":
-            html_content = _render_weekly_html(summary, sections)
+        # 生成报告（HTML / PDF）
+        charts = _render_charts(daily_data, top_sources)
+        html_content = _render_weekly_html(summary, sections, charts)
+        if fmt == "pdf":
+            file_path = _render_weekly_pdf(html_content)
+        else:
             fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(html_content)
-            file_size = os.path.getsize(file_path)
-        else:
-            # PDF 暂未实现，返回占位信息
-            file_path = ""
-            file_size = 0
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
 
         resp = jsonify({
             "file_path": file_path,
@@ -850,29 +896,324 @@ def report_weekly():
         return jsonify({"error": str(e)}), 500
 
 
-def _render_weekly_html(summary: dict, sections: list) -> str:
-    """渲染周报 HTML 内容（简化版，后续用 Jinja2 模板替换）。"""
-    s = summary
-    lines = [
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
-        "<title>道体玄盾 安全周报</title>",
-        "<style>body{font-family:'Microsoft YaHei',sans-serif;max-width:800px;margin:0 auto;padding:20px}",
-        "h1{color:#1e293b;border-bottom:2px solid #38bdf8;padding-bottom:10px}",
-        ".card{background:#f8fafc;border-radius:8px;padding:16px;margin:12px 0}",
-        ".num{font-size:28px;font-weight:bold;color:#0f172a}",
-        ".label{color:#64748b;font-size:14px}",
-        "</style></head><body>",
-        f"<h1>道体玄盾 安全周报</h1>",
-        f"<p>周期: {s['period']['start']} ~ {s['period']['end']} | 生成时间: {s['generated_at']}</p>",
-    ]
-    if "summary" in sections:
-        lines.append("<div class='card'>")
-        lines.append(f"<div class='num'>{s['total_requests']:,}</div><div class='label'>检测总数</div>")
-        lines.append(f"<div class='num'>{s['total_blocked']:,}</div><div class='label'>拦截次数</div>")
-        lines.append(f"<div class='num'>{s['block_rate']}%</div><div class='label'>拦截率</div>")
-        lines.append("</div>")
-    lines.append("</body></html>")
-    return "\n".join(lines)
+def _render_charts(daily_data: list, top_sources: list) -> dict:
+    """使用 Chart.js 生成 Base64 编码的图表（趋势图 + 分布图）。
+
+    在 HTML 渲染阶段，先通过 Jinja2 模板内的 <canvas> 占位，
+    但 weasyprint 无法渲染 JS 图表，所以此处用静态 SVG 替代。
+    """
+    charts = {"trend": "", "distribution": ""}
+
+    # ── 趋势图（折线图）：每日检测量 + 拦截量 ──
+    if daily_data:
+        dates = [d["date"] for d in daily_data]
+        totals = [d["total"] for d in daily_data]
+        blocked = [d["blocked"] for d in daily_data]
+        max_val = max(totals) if totals else 1
+        h = 200
+        w = 600
+        points_total = []
+        points_blocked = []
+        for i, (t, b) in enumerate(zip(totals, blocked)):
+            x = 40 + (i * (w - 80) / max(1, len(dates) - 1))
+            y_total = h - 20 - (t / max_val * (h - 40))
+            y_blocked = h - 20 - (b / max_val * (h - 40))
+            points_total.append(f"{x:.1f},{y_total:.1f}")
+            points_blocked.append(f"{x:.1f},{y_blocked:.1f}")
+
+        # 生成 SVG 折线图
+        svg_parts = [
+            f'<svg width="{w}" height="{h+40}" xmlns="http://www.w3.org/2000/svg" style="font-family:Microsoft YaHei,sans-serif;font-size:11px">',
+            f'<rect width="100%" height="100%" fill="#f8fafc" rx="4"/>',
+            # Y 轴网格线
+            *[f'<line x1="40" y1="{h-20-(i*(h-40)/4):.0f}" x2="{w-40}" y2="{h-20-(i*(h-40)/4):.0f}" stroke="#e2e8f0" stroke-width="1"/>'
+              for i in range(5)],
+            # Y 轴标签
+            *[f'<text x="35" y="{h-15-(i*(h-40)/4):.0f}" text-anchor="end" fill="#64748b">{max_val*i//4}</text>'
+              for i in range(5)],
+            # 折线 - 检测总数
+            f'<polyline points="{" ".join(points_total)}" fill="none" stroke="#3b82f6" stroke-width="2"/>',
+            # 折线 - 拦截量
+            f'<polyline points="{" ".join(points_blocked)}" fill="none" stroke="#ef4444" stroke-width="2"/>',
+            # 数据点
+            *[f'<circle cx="{p.split(",")[0]}" cy="{p.split(",")[1]}" r="3" fill="#3b82f6"/>' for p in points_total],
+            *[f'<circle cx="{p.split(",")[0]}" cy="{p.split(",")[1]}" r="3" fill="#ef4444"/>' for p in points_blocked],
+            # X 轴标签
+            *[f'<text x="{40+i*(w-80)/max(1,len(dates)-1):.0f}" y="{h+15}" text-anchor="middle" fill="#64748b">{d[-5:]}</text>'
+              for i, d in enumerate(dates)],
+            # 图例
+            f'<rect x="{w-160}" y="8" width="12" height="12" fill="#3b82f6" rx="2"/>',
+            f'<text x="{w-144}" y="18" fill="#475569">检测总数</text>',
+            f'<rect x="{w-80}" y="8" width="12" height="12" fill="#ef4444" rx="2"/>',
+            f'<text x="{w-64}" y="18" fill="#475569">拦截量</text>',
+            '</svg>',
+        ]
+        import base64
+        charts["trend"] = "data:image/svg+xml;base64," + base64.b64encode(
+            "\n".join(svg_parts).encode("utf-8")
+        ).decode("ascii")
+
+    # ── 分布图（饼图）：攻击类型占比 ──
+    if top_sources:
+        pie_colors = ["#3b82f6", "#ef4444", "#f59e0b", "#22c55e", "#8b5cf6",
+                      "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16"]
+        total = sum(s["count"] for s in top_sources) or 1
+        cx, cy, r = 120, 120, 100
+        pie_parts = [f'<svg width="300" height="240" xmlns="http://www.w3.org/2000/svg" style="font-family:Microsoft YaHei,sans-serif;font-size:11px">']
+        angle = 0
+        for i, src in enumerate(top_sources):
+            pct = src["count"] / total
+            if pct <= 0:
+                continue
+            a2 = angle + pct * 360
+            mid = angle + pct * 180
+            rad = mid * 3.14159 / 180
+            lx = cx + r * 0.6 * math.cos(rad)
+            ly = cy + r * 0.6 * math.sin(rad)
+            x1 = cx + r * math.cos(angle * 3.14159 / 180)
+            y1 = cy + r * math.sin(angle * 3.14159 / 180)
+            x2 = cx + r * math.cos(a2 * 3.14159 / 180)
+            y2 = cy + r * math.sin(a2 * 3.14159 / 180)
+            large = 1 if pct > 0.5 else 0
+            color = pie_colors[i % len(pie_colors)]
+            pie_parts.append(
+                f'<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} A{r},{r} 0 {large},1 {x2:.1f},{y2:.1f} Z" '
+                f'fill="{color}" stroke="#fff" stroke-width="2"/>'
+            )
+            # 标签（在扇形外）
+            label_r = r + 20
+            lx2 = cx + label_r * math.cos(rad)
+            ly2 = cy + label_r * math.sin(rad)
+            label = src["source"][:8] + ".." if len(src["source"]) > 8 else src["source"]
+            pie_parts.append(
+                f'<text x="{lx2:.0f}" y="{ly2:.0f}" text-anchor="middle" fill="#475569" font-size="10">{label} {src["percentage"]:.0f}%</text>'
+            )
+            angle = a2
+        pie_parts.append('</svg>')
+        import base64
+        charts["distribution"] = "data:image/svg+xml;base64," + base64.b64encode(
+            "\n".join(pie_parts).encode("utf-8")
+        ).decode("ascii")
+
+    return charts
+
+
+def _render_weekly_html(summary: dict, sections: list, charts: dict = None) -> str:
+    """使用 Jinja2 模板渲染周报 HTML。"""
+    from jinja2 import Environment, BaseLoader, FileSystemLoader
+
+    # 自定义过滤器：千分位逗号
+    def _comma(n):
+        try:
+            return f"{int(n):,}"
+        except (ValueError, TypeError):
+            return str(n or 0)
+
+    # 优先使用模板文件，fallback 到内联模板
+    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+    tmpl_file = os.path.join(tmpl_dir, "weekly_report.html")
+    if os.path.exists(tmpl_file):
+        env = Environment(loader=FileSystemLoader(tmpl_dir))
+        env.filters["comma"] = _comma
+        tmpl = env.get_template("weekly_report.html")
+    else:
+        # 内联模板（模板文件不存在时的 fallback）
+        env = Environment(loader=BaseLoader())
+        env.filters["comma"] = _comma
+        tmpl = env.from_string("""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>道体玄盾 安全周报</title>
+<style>
+body{font-family:'Microsoft YaHei',sans-serif;max-width:800px;margin:0 auto;padding:20px;color:#1e293b}
+h1{color:#1e293b;border-bottom:2px solid #38bdf8;padding-bottom:10px}
+.card{background:#f8fafc;border-radius:8px;padding:16px;margin:12px 0;border:1px solid #e2e8f0}
+.num{font-size:28px;font-weight:bold;color:#0f172a}
+.label{color:#64748b;font-size:14px}
+</style></head><body>
+<h1>道体玄盾 安全周报</h1>
+<p>周期: {{ summary.period.start }} ~ {{ summary.period.end }} | {{ summary.generated_at }}</p>
+{% if 'summary' in sections %}
+<div class="card">
+<div class="num">{{ summary.total_requests | comma }}</div><div class="label">检测总数</div>
+<div class="num">{{ summary.total_blocked | comma }}</div><div class="label">拦截次数</div>
+<div class="num">{{ summary.block_rate }}%</div><div class="label">拦截率</div>
+</div>
+{% endif %}
+</body></html>""")
+
+    return tmpl.render(summary=summary, sections=sections, charts=charts or {})
+
+
+_ZH_FONT_PATH = None  # 中文字体路径缓存
+
+
+def _get_zh_font() -> str:
+    """自动探测系统中文字体路径（微软雅黑 > 黑体 > 宋体）。"""
+    global _ZH_FONT_PATH
+    if _ZH_FONT_PATH and os.path.exists(_ZH_FONT_PATH):
+        return _ZH_FONT_PATH
+    fonts_dir = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts")
+    for name in ("msyh.ttc", "simhei.ttf", "simsun.ttc"):
+        p = os.path.join(fonts_dir, name)
+        if os.path.exists(p):
+            _ZH_FONT_PATH = p
+            return p
+    return ""
+
+
+def _render_weekly_pdf(html_content: str) -> str:
+    """将周报渲染为 PDF 文件。
+
+    优先 weasyprint（需 GTK3 运行时），回退 fpdf2（纯 Python）。
+    """
+    import tempfile
+
+    # ── 第一优先级：weasyprint（渲染质量最高）──
+    try:
+        from weasyprint import HTML
+        fd, pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="xuandun_report_")
+        os.close(fd)
+        HTML(string=html_content).write_pdf(pdf_path)
+        return pdf_path
+    except Exception:
+        pass  # 静默降级到 fpdf2
+
+    # ── 第二优先级：fpdf2 结构化 PDF ──
+    try:
+        return _render_weekly_pdf_fpdf2(html_content)
+    except Exception as e:
+        logger.warning("fpdf2 PDF 渲染失败，回退 HTML: %s", e)
+        fd, html_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        return html_path
+
+
+def _render_weekly_pdf_fpdf2(html_content: str) -> str:
+    """使用 fpdf2 生成结构化中文 PDF 周报。
+
+    由于 fpdf2 不支持 HTML 解析，需手动构建布局。
+    """
+    import tempfile
+    from fpdf import FPDF
+
+    zh_font = _get_zh_font()
+    if not zh_font:
+        raise RuntimeError("未找到中文字体，无法生成 PDF")
+
+    # ── 从 HTML 中提取关键数据 ──
+    import re
+    period_match = re.search(r"周期:\s*(\S+)\s*~\s*(\S+)", html_content)
+    gen_match = re.search(r"生成时间:\s*(\S+)", html_content)
+    period_start = period_match.group(1) if period_match else "未知"
+    period_end = period_match.group(2) if period_match else "未知"
+    gen_time = gen_match.group(1) if gen_match else "未知"
+
+    # 提取概览数字
+    nums = re.findall(r'<div class="num">([\d,\.%]+)</div>', html_content)
+    labels = re.findall(r'<div class="label">([^<]+)</div>', html_content)
+
+    # 提取表格行
+    rows = []
+    table_match = re.search(r"<tbody>(.*?)</tbody>", html_content, re.DOTALL)
+    if table_match:
+        for tr in re.findall(r"<tr>(.*?)</tr>", table_match.group(1), re.DOTALL):
+            tds = re.findall(r"<td>([^<]*)</td>", tr)
+            if tds:
+                rows.append(tds)
+
+    # ── 构建 PDF ──
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("zh", "", zh_font, uni=True)
+
+    # 页头
+    pdf.set_fill_color(15, 23, 42)
+    pdf.rect(0, 0, 210, 32, "F")
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("zh", "", 18)
+    pdf.set_xy(12, 6)
+    pdf.cell(0, 10, "道体玄盾 安全周报", ln=True)
+    pdf.set_font("zh", "", 9)
+    pdf.set_text_color(148, 163, 184)
+    pdf.set_x(12)
+    pdf.cell(0, 5, "AI 驱动的安全检测引擎 · 自动化威胁分析报告", ln=True)
+    pdf.set_text_color(203, 213, 225)
+    pdf.set_x(12)
+    pdf.cell(0, 5, f"周期: {period_start} ~ {period_end}   生成时间: {gen_time}", ln=True)
+    pdf.ln(10)
+
+    # 概览卡片（summary）
+    pdf.set_text_color(15, 23, 42)
+    pdf.set_font("zh", "", 13)
+    pdf.set_x(12)
+    pdf.cell(0, 8, "概览", ln=True)
+    pdf.ln(2)
+
+    # 四卡片布局
+    card_y = pdf.get_y()
+    card_w = 42
+    card_h = 22
+    card_gap = 3
+    card_x_start = 12
+    for i, (label, num) in enumerate(zip(labels[:4], nums[:4])):
+        cx = card_x_start + i * (card_w + card_gap)
+        pdf.set_fill_color(248, 250, 252)
+        pdf.set_draw_color(226, 232, 240)
+        pdf.rect(cx, card_y, card_w, card_h, "DF")
+        pdf.set_text_color(15, 23, 42)
+        pdf.set_font("zh", "", 16)
+        pdf.set_xy(cx, card_y + 3)
+        pdf.cell(card_w, 8, num, align="C")
+        pdf.set_font("zh", "", 9)
+        pdf.set_text_color(100, 116, 139)
+        pdf.set_xy(cx, card_y + 12)
+        pdf.cell(card_w, 5, label, align="C")
+    pdf.set_y(card_y + card_h + 8)
+
+    # 每日明细表
+    if rows:
+        pdf.set_text_color(15, 23, 42)
+        pdf.set_font("zh", "", 13)
+        pdf.set_x(12)
+        pdf.cell(0, 8, "每日明细", ln=True)
+        pdf.ln(2)
+
+        col_w = [28, 28, 28, 24, 24]
+        headers = ["日期", "检测总数", "拦截次数", "拦截率", "状态"]
+        col_x = [12, 40, 68, 96, 120]
+
+        # 表头
+        pdf.set_fill_color(241, 245, 249)
+        pdf.set_text_color(71, 85, 105)
+        pdf.set_font("zh", "", 9)
+        for h, cx, cw in zip(headers, col_x, col_w):
+            pdf.set_xy(cx, pdf.get_y())
+            pdf.cell(cw, 7, h, align="C", fill=True)
+        pdf.ln(8)
+
+        # 表体
+        pdf.set_text_color(30, 41, 59)
+        pdf.set_font("zh", "", 9)
+        for row in rows[:60]:  # 最多 60 行防溢出
+            if len(row) < 5:
+                continue
+            for v, cx, cw in zip(row, col_x, col_w):
+                pdf.set_xy(cx, pdf.get_y())
+                pdf.cell(cw, 6, str(v).strip(), align="C")
+            pdf.ln(7)
+
+    # 页脚
+    pdf.set_y(-20)
+    pdf.set_text_color(148, 163, 184)
+    pdf.set_font("zh", "", 8)
+    pdf.cell(0, 5, "道体玄盾 v1.3.4 · AI 安全引擎 · 自动生成", align="C", ln=True)
+    pdf.cell(0, 5, "本报告由系统自动生成", align="C")
+
+    fd, pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="xuandun_report_")
+    os.close(fd)
+    pdf.output(pdf_path)
+    return pdf_path
 
 
 @app.route("/ping", methods=["GET"])

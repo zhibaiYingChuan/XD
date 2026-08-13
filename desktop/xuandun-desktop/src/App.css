@@ -1969,6 +1969,12 @@ body {
   50% { opacity: 0.85; transform: scale(1.03); }
 }
 
+/* Toast 动画（右下角更新提示） */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* ==================== Dashboard V2 四层结构样式（P1 重构） ==================== */
 
 /* 第1层：状态行 */

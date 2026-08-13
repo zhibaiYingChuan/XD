@@ -57,6 +57,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Setup Bun 1.3.14 (v1.3.4 P1-1 工具链统一)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.0.0
+        with:
+          bun-version: '1.3.14'
+
       - name: Setup Rust 1.94.0 (与 CI 构建环境对齐，P0-A 发布阻断修复)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
         with:
@@ -89,13 +94,13 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: desktop/xuandun-desktop
-        run: npm ci
+        run: bun install
 
       - name: Build Tauri app
         working-directory: desktop/xuandun-desktop
         # 【2026-08-09 定论】Linux 仅打包 .deb（tauri.conf.json 已移除 appimage 目标）。
         #   详见上方 "Install Linux system dependencies" 注释，禁止重新加回 AppImage 打包。
-        run: npm run tauri build
+        run: bun run tauri build
 
       - name: Rename bundle files to ASCII
         shell: bash
@@ -324,6 +329,76 @@ jobs:
           echo "=== SHA256 Checksums ==="
           cat checksums-sha256.txt
 
+      # v1.3.4 P1-2: 生成 Tauri updater 所需的 latest.json manifest
+      # v1.3.4 修复: 用真实 Ed25519 签名替换 SHA256 hash (创始者审计 P0-1)
+      # v1.3.4 修复 F-3: 正式发布时 Secret 缺失直接阻断构建，不发布无签名/占位签名的版本
+      - name: Generate updater latest.json
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # F-3: Secret 缺失时直接阻断正式发布（安全底线）
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY 未配置，自动更新签名不可用，正式发布失败"
+            echo "::error::请先在 GitHub Secrets 中配置 TAURI_SIGNING_PRIVATE_KEY 和 TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+            exit 1
+          fi
+
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          REPO="${{ github.repository }}"
+
+          cd artifacts
+          # 先安装 tauri-cli 用于 signer sign
+          npm install -g @tauri-apps/cli 2>/dev/null || true
+
+          # 构建平台信息 JSON 数组
+          PLATFORMS=""
+          for f in $(find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.deb" \) | sort); do
+            fname=$(basename "$f")
+            if [[ "$fname" == *.exe ]]; then
+              plt="windows-x86_64"
+            elif [[ "$fname" == *.dmg ]]; then
+              plt="darwin-aarch64"
+            elif [[ "$fname" == *.deb ]]; then
+              plt="linux-x86_64"
+            else
+              continue
+            fi
+            # 生成真实 Ed25519 签名 (tauri signer sign 输出 base64 格式签名到 stdout)
+            echo "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/signing_key.pem
+            sig=$(npx @tauri-apps/cli signer sign -k /tmp/signing_key.pem -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$f" 2>/dev/null | tail -1 || echo "SIGN_FAILED")
+            rm -f /tmp/signing_key.pem
+
+            # 签名失败也阻断
+            if [ "$sig" = "SIGN_FAILED" ]; then
+              echo "::error::Ed25519 签名生成失败: $f"
+              exit 1
+            fi
+
+            url="https://github.com/${REPO}/releases/download/${TAG}/${fname}"
+            PLATFORMS="${PLATFORMS}    \"${plt}\": { \"signature\": \"${sig}\", \"url\": \"${url}\" },"
+          done
+          # 去掉最后一个逗号
+          PLATFORMS="${PLATFORMS%,}"
+
+          cat > latest.json << JSONEOF
+          {
+            "version": "${VERSION}",
+            "notes": "Release ${TAG} — ${VERSION} 详见 https://github.com/${REPO}/releases/tag/${TAG}",
+            "pub_date": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "platforms": {
+          ${PLATFORMS}
+            }
+          }
+          JSONEOF
+
+          echo "=== latest.json ==="
+          cat latest.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -334,6 +409,7 @@ jobs:
             artifacts/**/*.AppImage
             artifacts/**/*.deb
             artifacts/**/checksums-sha256.txt
+            artifacts/**/latest.json
 
   # B-04 修复：verify job — 下载 Release 资产并验证 SHA256
   verify:

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, StatusResponse, LearningStatus, LogEntry, RealtimeMetrics, MESSAGE_TIMEOUT_MS } from '../services/tauriApi';
 import { AlertTriangle, Zap, ShieldCheck, Clock, Activity } from 'lucide-react';
+import ReportExportDialog from '../components/ReportExportDialog';
 
 const formatUptime = (s: number) => {
   const h = Math.floor(s / 3600);
@@ -17,6 +18,7 @@ export default function Dashboard() {
   const [trafficEvents, setTrafficEvents] = useState<LogEntry[]>([]);
   const [trafficError, setTrafficError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [reportDialogOpen, setReportDialogOpen] = useState(false);
 
   const showMessage = useCallback((type: 'success' | 'error', text: string) => {
     setMessage({ type, text });
@@ -295,27 +297,7 @@ export default function Dashboard() {
         </button>
         <button
           className="btn btn-primary"
-          onClick={async () => {
-            if (!status?.running) {
-              showMessage('error', '引擎未运行，无法生成周报');
-              return;
-            }
-            try {
-              // v1.3.4: 调用引擎生成周报 HTML 文件
-              const result = await api.generateWeeklyReport({
-                format: 'html',
-                sections: ['summary', 'trend', 'distribution'],
-              });
-              // 导出到用户指定位置
-              const savedPath = await api.exportReportFile(
-                result.file_path,
-                `xuandun_report_${new Date().toISOString().slice(0, 10)}.html`
-              );
-              showMessage('success', `周报已导出到 ${savedPath}`);
-            } catch (e: any) {
-              showMessage('error', `周报生成失败：${String(e?.message || e)}`);
-            }
-          }}
+          onClick={() => setReportDialogOpen(true)}
         >
           生成周报
         </button>
@@ -323,6 +305,14 @@ export default function Dashboard() {
           查看全部日志
         </a>
       </div>
+
+      {/* v1.3.4: 周报导出对话框 */}
+      <ReportExportDialog
+        open={reportDialogOpen}
+        onClose={() => setReportDialogOpen(false)}
+        engineRunning={!!status?.running}
+        onShowMessage={showMessage}
+      />
     </div>
   );
 }
