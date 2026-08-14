@@ -48,6 +48,7 @@ describe('tauriApi', () => {
           text: 'hello',
           session: 'sess1',
           mode: 'balanced',
+          source: 'proxy',
         },
       });
       expect(result.allowed).toBe(true);
