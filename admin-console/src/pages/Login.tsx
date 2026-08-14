@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 interface Props {
   onAuth: (key: string) => void
@@ -8,10 +8,15 @@ export default function Login({ onAuth }: Props) {
   const [key, setKey] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  // 网关端 P1 修复「登录双提交」：state 更新是异步的，快速连点/连按 Enter 时
+  // loading 闭包值尚未翻转，会重复发起验证请求 —— 用 ref 同步防重入
+  const submittingRef = useRef(false)
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent | React.KeyboardEvent) => {
     e.preventDefault()
+    if (submittingRef.current) return
     if (!key.trim()) { setError('请输入 API Key'); return }
+    submittingRef.current = true
     setLoading(true)
     setError('')
     try {
@@ -30,6 +35,7 @@ export default function Login({ onAuth }: Props) {
     } catch (e) {
       setError(`验证失败: ${e}`)
     } finally {
+      submittingRef.current = false
       setLoading(false)
     }
   }

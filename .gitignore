@@ -177,6 +177,11 @@ _run_nuitka.py
 hcse_test_*.py
 hcse_resilience_tester/
 
+# TRAE-debugger 会话文件（本地调试工具，不公开）
+debug-*.md
+.dbg/
+trae-debug-log-*.ndjson
+
 # 临时截图和页面快照
 /pages/
 poc/

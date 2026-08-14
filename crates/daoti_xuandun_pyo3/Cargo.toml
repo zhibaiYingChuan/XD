@@ -1,6 +1,6 @@
 [package]
 name = "daoti_xuandun_pyo3"
-version = "1.3.4"
+version = "1.3.5-beta"
 edition = "2021"
 description = "双梯形镜像递归网络 - 玄盾灵魂级底层算法"
 

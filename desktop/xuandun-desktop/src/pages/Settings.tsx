@@ -32,7 +32,8 @@ export default function Settings() {
   const [scanning, setScanning] = useState(false);
   const [scanResults, setScanResults] = useState<Array<{ name: string; port: number; type: string }>>([]);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState(false);
+  // D-P1-3: 记录正在连接的模型名（替代全局 boolean），避免一行连接时所有行都显示"连接中"的状态串扰
+  const [connectingModel, setConnectingModel] = useState<string | null>(null);
   // P0修复：补全紧急逃生、灰度部署的状态
   const [emergencyBypass, setEmergencyBypass] = useState(false);
   const [grayRatio, setGrayRatio] = useState(1.0);
@@ -47,6 +48,9 @@ export default function Settings() {
   const [verifying, setVerifying] = useState(false);
   // P1-21 修复：生成密钥按钮 loading 状态，防止用户重复点击
   const [generatingKey, setGeneratingKey] = useState(false);
+  // D-P1-4: 同步 ref 守卫——state 异步性导致快速双击在 re-render 前都读到 false 而穿透，
+  // ref 同步置位确保同一时刻只有一次生成（与 Detect 的 detectingRef 同模式）
+  const generatingKeyRef = useRef(false);
   // Sprint1-P0-3: 运维卡独立错误状态（Promise.allSettled + 独立报错，不再串行吞错）
   const [opsBypassLoadError, setOpsBypassLoadError] = useState<string | null>(null);
   const [opsGrayLoadError, setOpsGrayLoadError] = useState<string | null>(null);
@@ -347,7 +351,9 @@ export default function Settings() {
 
   const handleGenerateKey = async () => {
     // P1-21 修复：防并发守卫，避免重复点击生成多个密钥
-    if (generatingKey) return;
+    // D-P1-4: ref 同步守卫优先（state 判断保留作双保险）
+    if (generatingKeyRef.current || generatingKey) return;
+    generatingKeyRef.current = true;
     setGeneratingKey(true);
     try {
       const key = crypto.randomUUID();
@@ -357,6 +363,7 @@ export default function Settings() {
     } catch (e: any) {
       showMessage('error', `密钥存储失败: ${e}`);
     } finally {
+      generatingKeyRef.current = false;
       setGeneratingKey(false);
     }
   };
@@ -578,19 +585,20 @@ export default function Settings() {
                   <button
                     className="btn btn-sm btn-primary"
                     onClick={async () => {
-                      setConnecting(true);
+                      // D-P1-3: 仅目标行显示"连接中"，其余行文案不变（仍禁用防并发）
+                      setConnectingModel(model.name);
                       try {
                         await api.connectModel(model.name, model.port, modelIp.trim());
                         showMessage('success', `已连接到 ${model.name}（${modelIp.trim()}:${model.port}）`);
                       } catch (e: any) {
                         showMessage('error', `连接失败：${String(e?.message || e)}`);
                       } finally {
-                        setConnecting(false);
+                        setConnectingModel(null);
                       }
                     }}
-                    disabled={connecting}
+                    disabled={connectingModel !== null}
                   >
-                    {connecting ? '连接中...' : '连接'}
+                    {connectingModel === model.name ? '连接中...' : '连接'}
                   </button>
                 </div>
               ))}

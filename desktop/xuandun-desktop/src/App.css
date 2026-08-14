@@ -2031,6 +2031,12 @@ body {
   border-bottom: 1px solid var(--dt-divider);
   font-size: 13px;
   transition: background 0.15s;
+  cursor: pointer;
+}
+/* D-P0-1: 流量列表行选中态（List-Detail-Action 交互修复） */
+.traffic-selected {
+  background: var(--dt-primary-50);
+  box-shadow: inset 2px 0 0 var(--dt-primary);
 }
 .traffic-event:hover {
   background: var(--dt-bg-hover);

@@ -19,6 +19,9 @@ export default function Dashboard() {
   const [trafficError, setTrafficError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
+  // D-P0-1: 流量列表选中条目（List-Detail-Action —— 标记为安全必须先有对象）
+  const [selectedEntryId, setSelectedEntryId] = useState<number | null>(null);
+  const [marking, setMarking] = useState(false);
 
   const showMessage = useCallback((type: 'success' | 'error', text: string) => {
     setMessage({ type, text });
@@ -250,7 +253,9 @@ export default function Dashboard() {
               {trafficEvents.slice(0, 20).map((event, idx) => (
                 <div
                   key={idx}
-                  className={`traffic-event ${event.allowed ? 'traffic-pass' : 'traffic-block'}`}
+                  className={`traffic-event ${event.allowed ? 'traffic-pass' : 'traffic-block'} ${selectedEntryId === event.id ? 'traffic-selected' : ''}`}
+                  onClick={() => setSelectedEntryId(selectedEntryId === event.id ? null : event.id)}
+                  title="点击选中后，可在下方「标记为安全」对该条记录操作"
                 >
                   <span className="traffic-time">
                     {new Date(event.timestamp).toLocaleTimeString()}
@@ -278,22 +283,29 @@ export default function Dashboard() {
       <div className="dashboard-actions">
         <button
           className="btn btn-danger"
+          disabled={!selectedEntryId || !status?.running || marking}
+          title={!status?.running
+            ? '引擎未运行，无法标记'
+            : !selectedEntryId
+              ? '请先在上方实时流量列表点击选择一条记录'
+              : '将选中记录的文本上报引擎，加入良性原型库'}
           onClick={async () => {
-            if (!status?.running) {
-              showMessage('error', '引擎未运行，无法标记');
-              return;
-            }
-            const text = prompt('请输入要标记为安全的文本内容：');
-            if (!text || !text.trim()) return;
+            // D-P0-1: 无选中对象时按钮不可用（此前 prompt() 手输任意文本属投毒入口）
+            if (!selectedEntryId) return;
+            if (!status?.running) { showMessage('error', '引擎未运行，无法标记'); return; }
+            if (marking) return;
+            setMarking(true);
             try {
-              await api.markAsSafe(text.trim());
-              showMessage('success', '已上报引擎，该样本将加入良性原型库');
+              await api.markAsSafeById(selectedEntryId);
+              showMessage('success', `已上报引擎，日志 #${selectedEntryId} 的样本将加入良性原型库`);
             } catch (e: any) {
               showMessage('error', `标记失败：${String(e?.message || e)}`);
+            } finally {
+              setMarking(false);
             }
           }}
         >
-          标记为安全
+          {marking ? '标记中...' : selectedEntryId ? `标记为安全 #${selectedEntryId}` : '标记为安全（先选择上方记录）'}
         </button>
         <button
           className="btn btn-primary"

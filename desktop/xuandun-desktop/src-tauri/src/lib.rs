@@ -171,6 +171,7 @@ pub fn run() {
             commands::scan_model_server,
             commands::connect_model,
             commands::mark_as_safe,
+            commands::mark_as_safe_by_id,
             commands::get_weekly_report_preview,
             commands::generate_weekly_report,
             commands::export_report_file,

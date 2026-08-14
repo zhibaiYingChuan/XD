@@ -19,6 +19,40 @@ export default function Logs() {
   const requestIdRef = useRef(0);
   // GAP-S5-06 修复：mountedRef 守卫，组件卸载后不再 setState（与 Dashboard 一致）
   const mountedRef = useRef(true);
+  // D-P0-1: 按日志条目「标记为安全」—— 行内两步确认（首点变确认态，3 秒未确认自动复位）
+  const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [markingId, setMarkingId] = useState<number | null>(null);
+  const [markMsg, setMarkMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => { if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current); };
+  }, []);
+
+  const handleMarkSafe = useCallback(async (entry: LogEntry) => {
+    if (markingId) return;
+    // 第一步：进入行内确认态；再次点击才真正执行（防误触投毒良性库）
+    if (confirmId !== entry.id) {
+      setConfirmId(entry.id);
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = setTimeout(() => {
+        if (mountedRef.current) setConfirmId(null);
+      }, 3000);
+      return;
+    }
+    setConfirmId(null);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    setMarkingId(entry.id);
+    setMarkMsg(null);
+    try {
+      await api.markAsSafeById(entry.id);
+      if (mountedRef.current) setMarkMsg({ type: 'success', text: `日志 #${entry.id} 已上报引擎，该样本将加入良性原型库` });
+    } catch (e: any) {
+      if (mountedRef.current) setMarkMsg({ type: 'error', text: `标记失败（#${entry.id}）：${formatInvokeError(e, '标记为安全')}` });
+    } finally {
+      if (mountedRef.current) setMarkingId(null);
+    }
+  }, [confirmId, markingId]);
 
   const fetchLearning = useCallback(async () => {
     try {
@@ -165,6 +199,14 @@ export default function Logs() {
             </div>
           )}
 
+          {/* D-P0-1: 标记为安全的结果反馈（成功/失败） */}
+          {markMsg && (
+            <div className={`alert-banner ${markMsg.type === 'success' ? 'alert-success' : 'alert-danger'}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>{markMsg.text}</span>
+              <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} onClick={() => setMarkMsg(null)}>关闭</button>
+            </div>
+          )}
+
           {/* 日志列表 */}
           {loading && entries.length === 0 ? (
               <div className="empty-state">加载中...</div>
@@ -181,6 +223,7 @@ export default function Logs() {
                     <th>信任等级</th>
                     <th>拦截阶段</th>
                     <th>会话</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -196,6 +239,17 @@ export default function Logs() {
                       <td><span className={`trust-badge trust-${(entry.trust_level || 'unknown').toLowerCase()}`}>{formatTrustLevel(entry.trust_level)}</span></td>
                       <td>{entry.reject_stage ?? '--'}</td>
                       <td className="mono" style={{ fontSize: '0.8em' }}>{entry.session_id ?? '--'}</td>
+                      <td>
+                        {/* D-P0-1: 按条目标记为安全（行内两步确认），取代仪表盘 prompt() 手输入口 */}
+                        <button
+                          className={`btn btn-sm ${confirmId === entry.id ? 'btn-danger' : 'btn-secondary'}`}
+                          disabled={markingId !== null}
+                          title="将该条日志文本上报引擎，加入良性原型库（二次点击确认）"
+                          onClick={() => handleMarkSafe(entry)}
+                        >
+                          {markingId === entry.id ? '标记中...' : confirmId === entry.id ? '确认标记？' : '标记安全'}
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { api, ProtectResponse, OutputProtectResponse, formatInvokeError, InvokeTimeoutError, formatTrustLevel, MESSAGE_TIMEOUT_MS } from '../services/tauriApi';
 import { AlertTriangle, Zap, Info, CheckCircle, ShieldX, Upload, Download, FileText, ShieldCheck, Eye, EyeOff } from 'lucide-react';
+import { ConfirmModal, useConfirmModal } from '../components/ConfirmModal';
 
 // G-13 修复：Toast 队列类型定义
 interface ToastItem {
@@ -38,6 +39,8 @@ export default function Detect() {
   const [mode, setMode] = useState('balanced');
   const [result, setResult] = useState<ProtectResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  // D-P1-1: 批量列表清空确认弹窗（已有检测结果时防误清）
+  const { modalProps: confirmModalProps, confirm } = useConfirmModal();
   // G-13 修复：使用 Toast 队列替代单个 error，多错误不覆盖
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   // G-11 修复：useRef 同步守卫，防止 React 状态更新异步性导致的重复点击
@@ -61,6 +64,8 @@ export default function Detect() {
   const outputCheckingRef = useRef(false);
   // 组件挂载守卫：批量检测循环内校验，用户中途切页时中止后续 setState 与网络请求
   const mountedRef = useRef(true);
+  // D-P1-2: 批量检测用户中止标志（同步 ref，点击「中止检测」立即置位）
+  const batchAbortRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
@@ -232,11 +237,17 @@ export default function Detect() {
       addToast('请先上传文件添加待检测文本', 'info');
       return;
     }
+    batchAbortRef.current = false;
     setBatchLoading(true);
     try {
       for (let i = 0; i < pending.length; i += BATCH_CONCURRENCY) {
         // 中途切页（组件卸载）时中止后续批次，避免对已卸载组件 setState
         if (!mountedRef.current) return;
+        // D-P1-2: 用户点击「中止检测」后停止后续批次，已完成结果保留
+        if (batchAbortRef.current) {
+          addToast(`批量检测已中止：本次完成 ${i} 条，剩余 ${pending.length - i} 条保持待检测`, 'info');
+          break;
+        }
         const chunk = pending.slice(i, i + BATCH_CONCURRENCY);
         await Promise.allSettled(chunk.map(async (item) => {
           try {
@@ -593,8 +604,13 @@ export default function Detect() {
               <Upload size={16} strokeWidth={1.5} style={{ marginRight: '6px' }} />
               上传文件
             </button>
-            <button className="btn btn-primary" onClick={runBatchDetect} disabled={batchLoading || batchItems.length === 0}>
-              {batchLoading ? '检测中...' : '开始批量检测'}
+            {/* D-P1-2: 检测中按钮切换为「中止检测」，长任务可随时停止，已完成结果保留 */}
+            <button
+              className={batchLoading ? 'btn btn-danger' : 'btn btn-primary'}
+              onClick={() => { if (batchLoading) { batchAbortRef.current = true; } else { runBatchDetect(); } }}
+              disabled={!batchLoading && batchItems.length === 0}
+            >
+              {batchLoading ? '中止检测' : '开始批量检测'}
             </button>
             {batchDone.length > 0 && (
               <button className="btn btn-secondary" onClick={exportReport}>
@@ -603,7 +619,22 @@ export default function Detect() {
               </button>
             )}
             {batchItems.length > 0 && (
-              <button className="btn btn-sm btn-secondary" onClick={() => setBatchItems([])} disabled={batchLoading}>
+              <button
+                className="btn btn-sm btn-secondary"
+                onClick={async () => {
+                  // D-P1-1: 已有检测结果时二次确认，防止误清全部结果（破坏性操作三件套）
+                  if (batchDone.length > 0) {
+                    const ok = await confirm(
+                      `确定清空当前批量列表吗？\n\n` +
+                      `将丢弃 ${batchItems.length} 条文本及 ${batchDone.length} 条检测结果` +
+                      `（通过 ${batchPassed} / 拦截 ${batchBlocked}${batchFailed > 0 ? ` / 失败 ${batchFailed}` : ''}），清除后无法恢复。`
+                    );
+                    if (!ok) return;
+                  }
+                  setBatchItems([]);
+                }}
+                disabled={batchLoading}
+              >
                 清空
               </button>
             )}
@@ -655,6 +686,8 @@ export default function Detect() {
           )}
         </div>
       </div>
+      {/* D-P1-1: 批量清空二次确认弹窗 */}
+      <ConfirmModal {...confirmModalProps} />
     </div>
   );
 }

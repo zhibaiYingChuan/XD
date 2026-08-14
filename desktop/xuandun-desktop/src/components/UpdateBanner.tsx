@@ -28,6 +28,8 @@ export default function UpdateBanner() {
   const [phase, setPhase] = useState<UpdatePhase>('idle');
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [progress, setProgress] = useState(0);
+  // D-P1-7: 下载/安装失败原因（用户可见），成功开始新一轮下载时清除
+  const [error, setError] = useState<string | null>(null);
 
   // ── 启动后 3s 后台自动检查更新 ──
   useEffect(() => {
@@ -76,13 +78,16 @@ export default function UpdateBanner() {
 
   const handleDownload = useCallback(async () => {
     if (phase === 'downloading') return;
+    setError(null);
     setPhase('downloading');
     setProgress(0);
     try {
       await api.downloadAndInstallUpdate();
       setPhase('installing');
-    } catch {
-      // 下载/安装失败：回退到"可更新"状态，用户可再次尝试
+    } catch (e: any) {
+      // D-P1-7: 下载/安装失败必须告知用户（错误路径三要素：明确提示 + 状态恢复 + 可重试），
+      // 此前仅静默回退到 available，用户对失败毫无感知
+      setError(`更新失败：${e?.message || '网络或更新服务异常'}`);
       setPhase('available');
     }
   }, [phase]);
@@ -121,11 +126,18 @@ export default function UpdateBanner() {
     <div style={{ ...toastStyle, ...phaseStyle[phase] }}>
       {phase === 'available' && info && (
         <>
-          <Download size={14} style={{ color: '#60a5fa', flexShrink: 0 }} />
-          <span>
-            发现新版本 <strong>{info.version}</strong>
-            {info.current_version && <>（当前 {info.current_version}）</>}
-          </span>
+          <Download size={14} style={{ color: error ? '#f87171' : '#60a5fa', flexShrink: 0 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+            <span>
+              发现新版本 <strong>{info.version}</strong>
+              {info.current_version && <>（当前 {info.current_version}）</>}
+            </span>
+            {error && (
+              <span style={{ color: '#f87171', fontSize: 12 }}>
+                {error}，可点击“更新”重试
+              </span>
+            )}
+          </div>
           <button
             onClick={handleDownload}
             style={{

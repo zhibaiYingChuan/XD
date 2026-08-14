@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../services/api'
+import ConfirmModal from '../components/ConfirmModal'
 
 interface MetricsData {
   requests_total: number; blocks_total: number; passes_total: number
@@ -73,7 +74,18 @@ export default function Settings() {
 
   // ── B. 灰度部署 ──
   const [grayRatio, setGrayRatio] = useState(1.0)
+  // G-P1-7 修复：跟踪已保存值，滑块拖动未应用时给出未保存提示
+  const [savedGrayRatio, setSavedGrayRatio] = useState(1.0)
   const [graySaving, setGraySaving] = useState(false)
+  const grayDirty = Math.abs(grayRatio - savedGrayRatio) > 1e-9
+
+  // G-P1-7：存在未应用的灰度修改时，离开/刷新页面给出 beforeunload 提示
+  useEffect(() => {
+    if (!grayDirty) return
+    const h = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', h)
+    return () => window.removeEventListener('beforeunload', h)
+  }, [grayDirty])
 
   // ── C. 告警通道 ──
   const [notifiers, setNotifiers] = useState<Record<string, any>>({})
@@ -128,6 +140,7 @@ export default function Settings() {
       }
       if (results[1].status === 'fulfilled') {
         setGrayRatio(results[1].value.ratio)
+        setSavedGrayRatio(results[1].value.ratio)
       } else {
         showMsg('error', `灰度比例加载失败: ${String(results[1].reason)}`)
       }
@@ -144,6 +157,9 @@ export default function Settings() {
   // A. 保存护栏开关
   const saveGuardrails = async (og?: boolean, sl?: boolean) => {
     if (guardSaving) return
+    // G-P1-8 修复：记录旧值，保存失败时回滚 UI —— 开关是"即时生效"型，
+    // 若失败后 UI 停留在已切换状态，会与网关实际配置脱节（用户误以为已生效）
+    const prevOg = outputGuardOn, prevSl = sensitiveOn
     setGuardSaving(true)
     try {
       const r = await api.setGuardrails({
@@ -153,7 +169,11 @@ export default function Settings() {
       setOutputGuardOn(r.output_guardrail)
       setSensitiveOn(r.sensitive_leak)
       showMsg('success', r.message)
-    } catch (e) { showMsg('error', `保存护栏配置失败: ${e}`) }
+    } catch (e) {
+      setOutputGuardOn(prevOg)
+      setSensitiveOn(prevSl)
+      showMsg('error', `保存护栏配置失败（开关已还原为实际状态）: ${e}`)
+    }
     finally { setGuardSaving(false) }
   }
 
@@ -164,6 +184,7 @@ export default function Settings() {
     try {
       const r = await api.setGrayRatio(grayRatio)
       setGrayRatio(r.ratio)
+      setSavedGrayRatio(r.ratio)
       showMsg('success', r.message)
     } catch (e) { showMsg('error', `保存灰度比例失败: ${e}`) }
     finally { setGraySaving(false) }
@@ -205,6 +226,8 @@ export default function Settings() {
     } catch (e) { showMsg('error', `创建快照失败: ${e}`) }
     finally { setSnapshotSaving(false) }
   }
+  // G-P0-2 修复：恢复快照属破坏性操作（覆盖当前配置），必须二次确认
+  const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null)
   const restoreSnapshot = async (id: string) => {
     if (restoringId) return
     setRestoringId(id)
@@ -344,15 +367,31 @@ export default function Settings() {
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b', marginBottom: 12 }}>
             <span>仅观察</span><span>全量拦截</span>
           </div>
+          {/* G-P1-7：未保存提示 —— 滑块改动未应用时明确告知，防止用户误以为已生效 */}
+          {grayDirty && (
+            <div style={{ padding: '8px 12px', marginBottom: 12, background: '#2a2315', border: '1px solid #f59e0b', borderRadius: 6, fontSize: 12, color: '#fbbf24' }}>
+              拦截比例已调整为 {Math.round(grayRatio * 100)}%（当前生效 {Math.round(savedGrayRatio * 100)}%），尚未应用 —— 请点击「应用灰度比例」保存，否则离开页面修改将丢失。
+            </div>
+          )}
           <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>
             灰度部署按比例拦截攻击请求（例如 50% = 一半攻击被拦截，一半仅观察）。调整后点击「应用」即时生效。
           </div>
-          <button
-            onClick={saveGray}
-            disabled={graySaving}
-            style={{ padding: '8px 24px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: graySaving ? 'not-allowed' : 'pointer', opacity: graySaving ? 0.6 : 1 }}>
-            {graySaving ? '应用中...' : '应用灰度比例'}
-          </button>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <button
+              onClick={saveGray}
+              disabled={graySaving}
+              style={{ padding: '8px 24px', background: grayDirty ? '#16a34a' : '#14532d', color: '#fff', border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: graySaving ? 'not-allowed' : 'pointer', opacity: graySaving ? 0.6 : 1 }}>
+              {graySaving ? '应用中...' : '应用灰度比例'}
+            </button>
+            {grayDirty && (
+              <button
+                onClick={() => setGrayRatio(savedGrayRatio)}
+                disabled={graySaving}
+                style={{ padding: '8px 16px', background: 'transparent', color: '#94a3b8', border: '1px solid #475569', borderRadius: 6, fontSize: 13, cursor: graySaving ? 'not-allowed' : 'pointer' }}>
+                放弃修改
+              </button>
+            )}
+          </div>
         </div>
       </section>
 
@@ -467,7 +506,7 @@ export default function Settings() {
                     <td style={{ padding: '8px 12px', color: '#94a3b8' }}>{s.sample_count}</td>
                     <td style={{ padding: '8px 12px' }}>
                       <button
-                        onClick={() => restoreSnapshot(s.id)}
+                        onClick={() => setConfirmRestoreId(s.id)}
                         disabled={restoringId !== null}
                         style={{ padding: '4px 12px', background: 'transparent', border: '1px solid #7f1d1d', borderRadius: 4, fontSize: 12, color: '#f87171', cursor: restoringId !== null ? 'not-allowed' : 'pointer' }}>
                         {restoringId === s.id ? '恢复中...' : '恢复'}
@@ -520,6 +559,14 @@ export default function Settings() {
           </ol>
         </div>
       </section>
+
+      {/* G-P0-2：恢复快照二次确认弹窗 */}
+      <ConfirmModal
+        open={confirmRestoreId !== null}
+        message={`确定要恢复快照 ${confirmRestoreId ?? ''} 吗？\n\n当前引擎配置与学习状态将被快照内容覆盖，此操作不可撤销。建议恢复前先创建新快照备份当前配置。`}
+        onConfirm={() => { const id = confirmRestoreId; setConfirmRestoreId(null); if (id) restoreSnapshot(id) }}
+        onCancel={() => setConfirmRestoreId(null)}
+      />
     </div>
   )
 }

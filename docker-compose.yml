@@ -1,4 +1,4 @@
-# 玄盾 v1.3.3-beta Docker Compose 统一部署
+# 玄盾 v1.3.5-beta Docker Compose 统一部署
 # 启动: docker compose up -d
 # 停止: docker compose down
 # 日志: docker compose logs -f
@@ -54,7 +54,7 @@ services:
     build:
       context: .
       dockerfile: admin-console/Dockerfile
-    image: xuandun-console:1.3.4
+    image: xuandun-console:1.3.5-beta
     container_name: xuandun-console
     ports:
       - "8080:80"

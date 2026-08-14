@@ -65,7 +65,7 @@ app = Flask(__name__)
 # 引擎版本号单一来源（SSOT 从 Cargo.toml 同步，见 sync_version.py）。
 # health 与 status 端点共用此常量，避免版本双字面量漂移（R4 修复）。
 # sync_version.py 通过匹配本常量赋值行来做版本同步，保持单行格式。
-_ENGINE_VERSION = "1.3.4"
+_ENGINE_VERSION = "1.3.5-beta"
 
 _MODE_MAP = {
     "high_security": DefenseLevel.STRICT,
@@ -588,6 +588,43 @@ def learning_details():
         return _attach_cors(resp)
     except Exception as e:
         logger.error("learning_details error: %s", e)
+        return jsonify({"error": type(e).__name__}), 500
+
+
+@app.route("/learn/safe", methods=["POST", "OPTIONS"])
+def learn_safe():
+    """管理员标记某条文本为安全（误报纠正）。
+
+    Body: {"text": "..."}
+
+    将文本加入良性原型库（输入侧），并从攻击原型库中移除最相似条目，
+    使后续类似文本不再被误判。HCSE P1：管理接口，需 _require_admin_auth()。
+    """
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        return _attach_cors(resp)
+
+    _auth = _require_admin_auth("/learn/safe")
+    if _auth is not None:
+        body, code = _auth
+        return _attach_cors(body), code
+
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+
+    try:
+        shield = _get_shield(_default_mode)
+        result = shield.correct_false_positive(text, side="input")
+        logger.info("learn/safe corrected=%s preview=%s",
+                    result.get("corrected"), _redact_pii_for_log(text))
+        return _attach_cors(jsonify({
+            "success": bool(result.get("corrected")),
+            "detail": result.get("detail", {}),
+        }))
+    except Exception as e:
+        logger.error("learn/safe error: %s", e, exc_info=True)
         return jsonify({"error": type(e).__name__}), 500
 
 

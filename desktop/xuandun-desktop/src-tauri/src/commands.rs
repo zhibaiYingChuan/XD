@@ -1148,6 +1148,32 @@ pub async fn mark_as_safe(
     engine_post(&engine_url, "/learn/safe", body).await
 }
 
+/// D-P0-1: 按日志条目 ID 标记为安全 —— 修复交互语义断裂。
+/// 此前仪表盘「标记为安全」用 prompt() 手输任意文本，与流量列表无关联（投毒入口）。
+/// 现改为从日志列表选中条目 → 按其链内 text_preview 上报引擎，标记对象可审计。
+#[tauri::command]
+pub async fn mark_as_safe_by_id(
+    state: State<'_, Mutex<EngineState>>,
+    db: State<'_, Database>,
+    entry_id: i64,
+) -> Result<serde_json::Value, String> {
+    // 先校验引擎状态，再取条目（引擎未运行时直接失败，不产生半途状态）
+    let engine_url = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.running {
+            return Err("引擎未运行，无法标记".to_string());
+        }
+        s.get_engine_url()
+    };
+    let text = db.get_log_text(entry_id)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("该日志条目文本为空，无法标记".to_string());
+    }
+    let body = serde_json::json!({ "text": text });
+    engine_post(&engine_url, "/learn/safe", body).await
+}
+
 /// 周报预览 — 从 DB 查询本周真实统计数据
 /// v1.3.4 修复 F-4: 不再用 /status 累计值冒充本周数据，
 /// 改为按时间戳查询本周增量（logs.timestamp 是 rfc3339 UTC，用 UTC 计算本周边界）。

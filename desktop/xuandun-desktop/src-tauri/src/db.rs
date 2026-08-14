@@ -349,6 +349,20 @@ impl Database {
         Ok(())
     }
 
+    /// D-P0-1: 按日志条目 ID 取链内文本 —— 供「标记为安全」按日志条目标记。
+    /// text_preview 参与哈希链防篡改，标记对象可审计（不引入链外旁路数据）。
+    pub fn get_log_text(&self, entry_id: i64) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT text_preview FROM logs WHERE id = ?1",
+            params![entry_id],
+            |row| row.get::<_, String>(0),
+        ).map_err(|e| match &e {
+            rusqlite::Error::QueryReturnedNoRows => format!("日志条目 {} 不存在", entry_id),
+            _ => format!("DB error: {}", e),
+        })
+    }
+
     pub fn insert_audit(&self, event_type: &str, detail: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let timestamp = chrono::Utc::now().to_rfc3339();

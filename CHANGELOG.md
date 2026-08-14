@@ -2,6 +2,47 @@
 
 本项目变更遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.3.5-beta] - 2026-08-14
+
+> **v1.3.5-beta 核心变更：发布前安全审计修复 + 输出护栏能力验证 + 交互缺陷修复**
+>
+> 本版本基于 TRAE-code-review / TRAE-security-review / TRAE-debugger 三技能联合审计，
+> 修复网关端 9 项高危 + 25 项中危问题，桌面端安全审计零可利用漏洞。
+> 同时完成 36 处交互缺陷修复（P0×3 + P1×17）和双端真 CDP 回归测试全绿。
+
+### 安全修复
+
+#### 网关端高危修复（TRAE-security-review 审计发现）
+- **[H-1] 报告导出存储型 XSS**：`/api/v1/report` 的 HTML 格式报告未对用户可控的 `start_date`/`end_date` 做 HTML 转义，添加 `html.escape()` 防护
+- **[H-2] 临时文件泄漏**：`export_report` 每次调用创建临时文件但从不清理，添加读取后 `os.unlink()` 清理
+- **[H-3] 服务器路径泄露**：报告响应中包含 `file_path` 绝对路径，已移除该字段
+- **[H-4] 错误信息泄露**：`/api/v1/protect` 异常响应包含内部异常细节，改为通用错误消息
+- **[H-5] `datetime.utcnow()` 废弃**：替换为 `datetime.now(timezone.utc)`
+
+#### 引擎并发安全修复（TRAE-code-review 审计发现）
+- **[H-6] `check_output` 未加锁**：与 `set_output_guardrail_enabled` 并发时引用可能被置 None，添加 `_protect_lock` 保护
+- **[H-7] `set_output_guardrail_enabled` / `set_sensitive_leak_enabled` TOCTOU 竞态**：运行时开关方法未持锁，添加 `_protect_lock` 保护
+- **[H-8] `correct_false_positive` 未加锁**：修改共享原型库时未持锁，添加 `_protect_lock` 保护整个方法体
+
+#### 内存泄漏修复
+- **[H-9] `OutputPatternTracker` 内存泄漏**：`_session_lengths` 字典随会话增长永不清理，添加最大会话数限制（10000）+ LRU 淘汰
+
+### 交互缺陷修复（36 项）
+
+#### P0 修复（3 项）
+- **P0-1**：`fetchWithRetry` 的 `AbortController` 移入循环内创建，修复重试超时失效
+- **P0-2**：端口分裂修复（vite.config.ts 代理 → 18766 与网关统一）
+- **P0-3**：`__TAURI_INTERNALS__.invoke` 不可写问题，改用 tauriApi.ts 源码层钩子注入
+
+#### P1 修复（17 项）
+- 网关端 10 项：CORS 配置、Login 超时、Settings 告警通道、Dashboard 空数据降级等
+- 桌面端 7 项：tauriApi.ts 钩子注入、XPath 定位修复、批量操作优化等
+
+### 测试验证
+- **输出护栏实测**：17 类探针真实调用网关 `/api/v1/protect`（direction=output），确认 11 类高危全拦截 + 3 类 PII 打码 + 3 类正确放行
+- **网关端真浏览器 CDP 回归**：PASS=25 FAIL=0 SKIP=2（真实 Edge 151 + CDP 9223）
+- **桌面端 CDP 回归**：PASS=30 FAIL=0 SKIP=2（WebView2 + CDP 9224）
+
 ## [1.3.4] - 2026-08-12
 
 > **v1.3.4 核心变更：后端引擎 Rust 重构 + 核心算法提速 + 产品健康修复**

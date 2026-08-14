@@ -553,7 +553,21 @@ export const api = {
   warmup: (safeTexts: string[], attackTexts: string[]) =>
     invokeWithTimeout<any>('warmup', { req: { safeTexts, attackTexts } }, TIMEOUT.SLOW),
   verifyAudit: () => invokeWithTimeout<HashChainReport>('verify_audit', undefined, TIMEOUT.NORMAL),
-  storeSecretKey: (key: string) => invokeWithTimeout<void>('store_secret_key', { key }, TIMEOUT.FAST),
+  storeSecretKey: (key: string) => {
+    // Cycle2-D-P1-4: HCSE 密钥存储延迟注入点。
+    // CDP 测试通过 window.__HCSE_SLOW_STORE_KEY=true 模拟"存储挂起 2s"，
+    // 用于验证 Settings 生成密钥防双提交（连点仅触发一次）。
+    // 注：__TAURI_INTERNALS__.invoke 不可写，无法运行时替换，故采用应用层注入点。
+    if (typeof window !== 'undefined' &&
+        (window as any).__HCSE_SLOW_STORE_KEY === true) {
+      // 计数器供 CDP 测试断言防双提交（连点 N 次应仅 +1）
+      (window as any).__HCSE_STORE_KEY_HITS = ((window as any).__HCSE_STORE_KEY_HITS || 0) + 1;
+      return new Promise<void>(resolve => {
+        setTimeout(resolve, 2000);
+      });
+    }
+    return invokeWithTimeout<void>('store_secret_key', { key }, TIMEOUT.FAST);
+  },
   getSecretKey: () => invokeWithTimeout<string>('get_secret_key', undefined, TIMEOUT.FAST),
   deleteSecretKey: () => invokeWithTimeout<void>('delete_secret_key', undefined, TIMEOUT.FAST),
   hasSecretKey: () => invokeWithTimeout<boolean>('has_secret_key', undefined, TIMEOUT.FAST),
@@ -616,6 +630,9 @@ export const api = {
     invokeWithTimeout<{ success: boolean }>('connect_model', { modelName, port, ip }, TIMEOUT.NORMAL),
   markAsSafe: (text: string) =>
     invokeWithTimeout<{ success: boolean }>('mark_as_safe', { text }, TIMEOUT.FAST),
+  // D-P0-1: 按日志条目 ID 标记为安全（取代手输文本的投毒入口）
+  markAsSafeById: (entryId: number) =>
+    invokeWithTimeout<{ success: boolean }>('mark_as_safe_by_id', { entryId }, TIMEOUT.NORMAL),
   getWeeklyReportPreview: () =>
     invokeWithTimeout<WeeklyReportPreview>('get_weekly_report_preview', undefined, TIMEOUT.NORMAL),
   generateWeeklyReport: (params: {
@@ -623,15 +640,28 @@ export const api = {
     end_date?: string;
     format?: string;
     sections?: string[];
-  }) =>
-    invokeWithTimeout<{ file_path: string; file_size: number; format: string; summary: WeeklyReportPreview }>(
+  }) => {
+    // Cycle2-D-P1-6: HCSE 报告生成故障注入点。
+    // CDP 测试通过 window.__HCSE_FAIL_REPORT=true 模拟"报告生成 5s 后失败"，
+    // 用于验证 ReportExportDialog 生成中关闭守卫（X disabled/title/遮罩）与失败反馈、回 form 态。
+    // 注：window.__TAURI_INTERNALS__.invoke 为不可写(non-writable)冻结属性，运行时无法替换，
+    // 故采用应用层注入点，与 protect 的 __HCSE_HANG_PROTECT 同构。
+    if (typeof window !== 'undefined' &&
+        (window as any).__HCSE_FAIL_REPORT === true) {
+      return new Promise<{ file_path: string; file_size: number; format: string; summary: WeeklyReportPreview }>(
+        (_, reject) => {
+          setTimeout(() => reject(new Error('HCSE注入: 报告生成失败（模拟引擎异常）')), 5000);
+        });
+    }
+    return invokeWithTimeout<{ file_path: string; file_size: number; format: string; summary: WeeklyReportPreview }>(
       'generate_weekly_report', {
         startDate: params.start_date,
         endDate: params.end_date,
         format: params.format,
         sections: params.sections,
       }, TIMEOUT.SLOW
-    ),
+    );
+  },
   exportReportFile: async (filePath: string, suggestedName?: string) => {
     // v1.3.4 修复: 改用 Tauri save dialog 让用户选择路径（非写死桌面）
     const { save } = await import('@tauri-apps/plugin-dialog');

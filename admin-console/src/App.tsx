@@ -39,16 +39,27 @@ const modeColor: Record<string, string> = {
   blocking: '#f87171',
 }
 
-function MainApp() {
+function MainApp({ onLogout }: { onLogout: () => void }) {
   // P0-A-2: window.confirm -> ConfirmModal, alert -> Toast
-  const [confirmModal, setConfirmModal] = useState<{open:boolean,message:string}>({open:false,message:''})
-  const confirmResolveRef = useRef<((v:boolean)=>void)|null>(null)
+  // G-P1-1/2 扩展：支持必填输入模式（替代 window.prompt，取消时返回 null 而非静默空值继续）
+  const [confirmModal, setConfirmModal] = useState<{open:boolean,message:string,withInput?:boolean,inputPlaceholder?:string}>({open:false,message:''})
+  // 统一解析器约定：调用侧只会传 boolean / string / null 字面量（见下方 onConfirm/onCancel），
+  // Promise resolve 参数类型逆变导致的 TS2322 在赋值处用断言归一
+  const confirmResolveRef = useRef<((v: boolean | string | null) => void) | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
 
   const showConfirm = async (message: string): Promise<boolean> => {
     return new Promise((resolve) => {
-      confirmResolveRef.current = resolve
+      confirmResolveRef.current = resolve as (v: boolean | string | null) => void
       setConfirmModal({open:true, message})
+    })
+  }
+
+  /** 带必填输入的确认：确认返回输入值（非空），取消返回 null */
+  const showConfirmWithInput = async (message: string, inputPlaceholder: string): Promise<string | null> => {
+    return new Promise((resolve) => {
+      confirmResolveRef.current = resolve as (v: boolean | string | null) => void
+      setConfirmModal({open:true, message, withInput:true, inputPlaceholder})
     })
   }
 
@@ -97,8 +108,10 @@ function MainApp() {
       <ConfirmModal
         open={confirmModal.open}
         message={confirmModal.message}
-        onConfirm={() => { confirmResolveRef.current?.(true); setConfirmModal({open:false,message:''}) }}
-        onCancel={() => { confirmResolveRef.current?.(false); setConfirmModal({open:false,message:''}) }}
+        withInput={confirmModal.withInput}
+        inputPlaceholder={confirmModal.inputPlaceholder}
+        onConfirm={(input) => { confirmResolveRef.current?.(confirmModal.withInput ? (input ?? null) : true); setConfirmModal({open:false,message:''}) }}
+        onCancel={() => { confirmResolveRef.current?.(confirmModal.withInput ? null : false); setConfirmModal({open:false,message:''}) }}
       />
       {toasts.length > 0 && (
         <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -138,12 +151,26 @@ function MainApp() {
           onClick={async () => {
             const newState = !emergencyOn
             if (newState) {
-              const ok = await showConfirm('确认启用紧急逃生通道？\n\n所有请求将绕过安全检测直接放行。\n此操作会产生审计记录，仅限紧急情况使用。')
-              if (!ok) return
+              // G-P1-1/2 修复：逃生原因为必填项；用户取消（返回 null）则整个操作放弃，
+              // 不再像 window.prompt 那样取消后仍以空原因静默开启逃生通道
+              const reason = await showConfirmWithInput(
+                '确认启用紧急逃生通道？\n\n所有请求将绕过安全检测直接放行。\n此操作会产生审计记录，仅限紧急情况使用。\n\n必须填写逃生原因（将记录到审计日志）：',
+                '例如：上游引擎故障，临时放行以保障业务连续性'
+              )
+              if (reason === null) return
+              try {
+                await api.toggleEmergency(true, reason)
+                setEmergencyOn(true)
+                addToast('逃生通道已启用（已记录原因），安全检测暂停', 'info')
+              } catch (e) { addToast(`逃生通道操作失败: ${e}`) }
+              return
             }
+            const ok = await showConfirm('确认关闭紧急逃生通道？\n\n安全检测将恢复对所有请求的正常拦截。')
+            if (!ok) return
             try {
-              await api.toggleEmergency(newState, newState ? prompt('逃生原因（将记录到审计日志）:') || '' : '')
-              setEmergencyOn(newState)
+              await api.toggleEmergency(false, '')
+              setEmergencyOn(false)
+              addToast('逃生通道已关闭，安全检测已恢复', 'info')
             } catch (e) { addToast(`逃生通道操作失败: ${e}`) }
           }}
           style={{
@@ -164,6 +191,11 @@ function MainApp() {
             <option value="observing">观察模式</option>
             <option value="blocking">封锁模式</option>
           </select>
+          {/* 网关端 P1 修复「API Key 无法清除」：提供退出登录入口，清除会话中的管理密钥 */}
+          <button onClick={onLogout} title="清除当前会话保存的管理密钥并返回登录页"
+            style={{ padding: '4px 12px', background: '#334155', color: '#94a3b8', border: '1px solid #475569', borderRadius: 4, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+            退出登录
+          </button>
         </div>
       </header>
       <main style={{ maxWidth: 1280, margin: '0 auto', padding: '24px' }}>
@@ -188,6 +220,13 @@ function AppInner() {
     sessionStorage.setItem(AUTH_KEY_STORAGE, key)
     api.setApiKey(key)
     setApiKey(key)
+  }, [])
+
+  // 网关端 P1「API Key 无法清除」：退出登录 = 清除 sessionStorage 与运行时密钥
+  const handleLogout = useCallback(() => {
+    sessionStorage.removeItem(AUTH_KEY_STORAGE)
+    api.setApiKey(null)
+    setApiKey(null)
   }, [])
 
   // 启动时验证已保存的 key
@@ -216,7 +255,7 @@ function AppInner() {
     return <Login onAuth={handleAuth} />
   }
 
-  return <MainApp />
+  return <MainApp onLogout={handleLogout} />
 }
 
 // P0-A-1: ErrorBoundary 外层保护

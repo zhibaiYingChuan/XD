@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../services/api'
+import ConfirmModal from '../components/ConfirmModal'
 
 interface KeyEntry {
   jti: string
@@ -21,6 +22,8 @@ export default function AdminKeys() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
+  // G-P1-3 修复：吊销改用统一 ConfirmModal（window.confirm 属原生阻塞弹窗，样式/语义与控制台不一致）
+  const [revokeTarget, setRevokeTarget] = useState<KeyEntry | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -39,9 +42,7 @@ export default function AdminKeys() {
   useEffect(() => { load() }, [load])
 
   const handleRevoke = async (entry: KeyEntry) => {
-    const ok = window.confirm(
-      `确认吊销企业「${entry.sub || entry.jti}」的授权（${tierLabel[entry.tier] || entry.tier}）？\n\n吊销后该企业密钥立即失效，不可恢复。请先联系对方确认。`)
-    if (!ok) return
+    // 由 ConfirmModal 确认后调用；此处不再直接触发
     try {
       await api.revokeKey(entry.jti)
       setMsg(`已吊销企业「${entry.sub || entry.jti}」的授权`)
@@ -132,7 +133,7 @@ export default function AdminKeys() {
                 </td>
                 <td style={{ padding: '10px 14px', textAlign: 'right' }}>
                   {!k.revoked && (
-                    <button onClick={() => handleRevoke(k)} style={{
+                    <button onClick={() => setRevokeTarget(k)} style={{
                       padding: '5px 12px', background: '#3f1d1d', color: '#fca5a5',
                       border: '1px solid #7f1d1d', borderRadius: 5, fontSize: 12, cursor: 'pointer',
                     }}>吊销</button>
@@ -143,6 +144,15 @@ export default function AdminKeys() {
           </tbody>
         </table>
       </div>
+
+      {/* G-P1-3: 吊销二次确认弹窗 */}
+      <ConfirmModal
+        open={revokeTarget !== null}
+        message={revokeTarget ? `确认吊销企业「${revokeTarget.sub || revokeTarget.jti}」的授权（${tierLabel[revokeTarget.tier] || revokeTarget.tier}）？\n\n吊销后该企业密钥立即失效，不可恢复。请先联系对方确认。` : ''}
+        confirmLabel="确认吊销"
+        onConfirm={() => { const t = revokeTarget; setRevokeTarget(null); if (t) handleRevoke(t) }}
+        onCancel={() => setRevokeTarget(null)}
+      />
     </div>
   )
 }

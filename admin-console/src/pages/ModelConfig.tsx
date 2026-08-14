@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, type ReactNode } from 'react'
 import { api, ModelInfo, ModelItemConfig, RoutingConfig } from '../services/api'
+import ConfirmModal from '../components/ConfirmModal'
 
 // 轻量 YAML 语法高亮：注释灰色、键名青色、键值浅青色，提升配置示例可读性
 function yamlHighlight(src: string): ReactNode[] {
@@ -144,6 +145,17 @@ export default function ModelConfig() {
   }
 
   const removeModel = (index: number) => {
+    const item = editingModels[index]
+    // 网关端 P1 修复「模型删除无确认」：删除已生效模型（保存后真实下线）需二次确认；
+    // 新添加尚未保存的行（id 不在已生效列表中）直接移除，不打断操作流
+    if (item && models[item.id.trim()]) {
+      setConfirmRemoveIndex(index)
+      return
+    }
+    setEditingModels(prev => prev.filter((_, i) => i !== index))
+  }
+  const [confirmRemoveIndex, setConfirmRemoveIndex] = useState<number | null>(null)
+  const doRemove = (index: number) => {
     setEditingModels(prev => prev.filter((_, i) => i !== index))
   }
 
@@ -318,6 +330,18 @@ routing:
           你也可以点击上方「重新加载配置」或调用 <code>POST /api/config/reload</code> 手动刷新已生效配置，无需重启。
         </div>
       </div>
+
+      {/* 模型删除二次确认（网关端 P1） */}
+      <ConfirmModal
+        open={confirmRemoveIndex !== null}
+        message={(() => {
+          const it = confirmRemoveIndex !== null ? editingModels[confirmRemoveIndex] : null
+          return it ? `确定删除模型「${it.id}」（${it.name || '未命名'}）吗？\n\n点击「保存配置」后该模型路由将从网关下线，依赖它的调用将失败。未保存前可通过重新添加挽回。` : ''
+        })()}
+        confirmLabel="确认删除"
+        onConfirm={() => { const i = confirmRemoveIndex; setConfirmRemoveIndex(null); if (i !== null) doRemove(i) }}
+        onCancel={() => setConfirmRemoveIndex(null)}
+      />
     </div>
   )
 }

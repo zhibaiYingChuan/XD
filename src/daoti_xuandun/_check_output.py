@@ -93,6 +93,8 @@ class OutputPatternTracker:
         self._sigma_threshold = sigma_threshold
         # 每个会话的输出长度历史
         self._session_lengths: dict = {}
+        # v1.3.5 修复：最大会话数限制，防止长期运行内存泄漏
+        self._max_sessions = 10000
 
     def update(self, session_id: str, length: int) -> None:
         """记录一轮的输出长度。
@@ -102,6 +104,10 @@ class OutputPatternTracker:
             length: 输出文本长度。
         """
         if session_id not in self._session_lengths:
+            # v1.3.5 修复：会话数超限时淘汰最旧的会话，防止内存无限增长
+            if len(self._session_lengths) >= self._max_sessions:
+                oldest = next(iter(self._session_lengths))
+                del self._session_lengths[oldest]
             self._session_lengths[session_id] = deque(maxlen=self._window_size)
         self._session_lengths[session_id].append(length)
 

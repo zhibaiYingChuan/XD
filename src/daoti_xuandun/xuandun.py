@@ -444,12 +444,14 @@ class XuanDun:
         动态初始化；关闭时置为 None，protect 流程通过 `self.output_guardrail is not None`
         判断是否生效，无需重建 shield。
         """
-        if enabled and self.output_guardrail is None:
-            from daoti_xuandun._check_output import OutputGuardrail
-            self.output_guardrail = OutputGuardrail(self.config)
-        elif not enabled:
-            self.output_guardrail = None
-        self.config.enable_output_guardrail = enabled
+        # v1.3.5 安全修复：加锁防止与 check_output/protect 并发时的 TOCTOU 竞态
+        with self._protect_lock:
+            if enabled and self.output_guardrail is None:
+                from daoti_xuandun._check_output import OutputGuardrail
+                self.output_guardrail = OutputGuardrail(self.config)
+            elif not enabled:
+                self.output_guardrail = None
+            self.config.enable_output_guardrail = enabled
         return {"ok": True, "output_guardrail": enabled}
 
     def get_sensitive_leak_enabled(self) -> bool:
@@ -462,13 +464,15 @@ class XuanDun:
         protect 流程通过 `self.sensitive_detector is not None` 判断是否执行检测，
         本方法在运行期动态初始化或置空，无需重建 shield。
         """
-        if enabled and self.sensitive_detector is None:
-            from daoti_xuandun.sensitive_leak import SensitiveLeakDetector
-            self.sensitive_detector = SensitiveLeakDetector(
-                custom_dict_path=getattr(self.config, "sensitive_dict_path", None))
-        elif not enabled:
-            self.sensitive_detector = None
-        self.config.enable_sensitive_leak = enabled
+        # v1.3.5 安全修复：加锁防止与 protect 并发时的 TOCTOU 竞态
+        with self._protect_lock:
+            if enabled and self.sensitive_detector is None:
+                from daoti_xuandun.sensitive_leak import SensitiveLeakDetector
+                self.sensitive_detector = SensitiveLeakDetector(
+                    custom_dict_path=getattr(self.config, "sensitive_dict_path", None))
+            elif not enabled:
+                self.sensitive_detector = None
+            self.config.enable_sensitive_leak = enabled
         return {"ok": True, "sensitive_leak": enabled}
 
     def get_bypass_stats(self) -> dict:
@@ -544,12 +548,17 @@ class XuanDun:
         if self.output_guardrail is None:
             return {"enabled": False, "allowed": True, "risk_level": "pass",
                     "action": "pass", "reason": "输出护栏未启用"}
-        # 读取输入侧会话状态，传递给输出侧护栏
-        session_state = self.get_session_state(session_id)
-        decision = self.output_guardrail.check_output(text, session_state=session_state, session_id=session_id)
-        # ── 攻击样本回灌：输出侧拦截的内容自动回灌到输入侧攻击原型库 ──
-        if decision.action == "block" and text:
-            self.feedback_blocked_output(text)
+        # v1.3.5 安全修复：加锁保护，防止与 set_output_guardrail_enabled 并发时引用被置 None
+        with self._protect_lock:
+            if self.output_guardrail is None:
+                return {"enabled": False, "allowed": True, "risk_level": "pass",
+                        "action": "pass", "reason": "输出护栏已关闭"}
+            # 读取输入侧会话状态，传递给输出侧护栏
+            session_state = self.get_session_state(session_id)
+            decision = self.output_guardrail.check_output(text, session_state=session_state, session_id=session_id)
+            # ── 攻击样本回灌：输出侧拦截的内容自动回灌到输入侧攻击原型库 ──
+            if decision.action == "block" and text:
+                self.feedback_blocked_output(text)
         return {
             "enabled": True,
             "allowed": decision.allowed,
@@ -611,65 +620,67 @@ class XuanDun:
         if not text or not text.strip():
             return {"corrected": False, "side": side, "message": "空文本，无需纠正"}
 
-        result = {"corrected": False, "side": side, "detail": {}}
+        # v1.3.5 安全修复：加锁保护，防止与 protect/check_output 并发修改共享原型库
+        with self._protect_lock:
+            result = {"corrected": False, "side": side, "detail": {}}
 
-        if side not in ("input", "output", "both"):
-            return {"corrected": False, "side": side,
-                    "error": f"无效的 side 参数: {side}，应为 input/output/both"}
+            if side not in ("input", "output", "both"):
+                return {"corrected": False, "side": side,
+                        "error": f"无效的 side 参数: {side}，应为 input/output/both"}
 
-        corrected_any = False
+            corrected_any = False
 
-        # ── 输入侧纠正 ──
-        if side in ("input", "both"):
-            mapper = None
-            if self.domain_awareness is not None and hasattr(self.domain_awareness, '_luoshu'):
-                mapper = self.domain_awareness._luoshu
-            if mapper is not None:
+            # ── 输入侧纠正 ──
+            if side in ("input", "both"):
+                mapper = None
+                if self.domain_awareness is not None and hasattr(self.domain_awareness, '_luoshu'):
+                    mapper = self.domain_awareness._luoshu
+                if mapper is not None:
+                    try:
+                        state = mapper.encode(text)
+                        # 加入安全原型
+                        mapper.learn_safe(state)
+
+                        # 从攻击原型中移除最相似的条目
+                        removed = self._remove_nearest_attack_prototype(state)
+
+                        # 误报反馈闭环：将误报文本播种为安全域原型，
+                        # 使后续类似文本的距离检测不再误判为域外攻击
+                        if self.domain_awareness is not None:
+                            try:
+                                self.domain_awareness.seed_prototype(text)
+                            except Exception:
+                                pass
+
+                        result["detail"]["input"] = {
+                            "learned_safe": True,
+                            "removed_attack": removed,
+                            "seeded_prototype": True,
+                        }
+                        corrected_any = True
+                    except Exception as e:
+                        result["detail"]["input"] = {"error": str(e)}
+                else:
+                    result["detail"]["input"] = {"error": "洛书映射器未初始化"}
+
+            # ── 输出侧纠正 ──
+            if side in ("output", "both") and self.output_guardrail is not None:
                 try:
-                    state = mapper.encode(text)
-                    # 加入安全原型
-                    mapper.learn_safe(state)
+                    # 加入安全输出原型
+                    self.output_guardrail.learn_safe_output(text)
 
-                    # 从攻击原型中移除最相似的条目
-                    removed = self._remove_nearest_attack_prototype(state)
-
-                    # 误报反馈闭环：将误报文本播种为安全域原型，
-                    # 使后续类似文本的距离检测不再误判为域外攻击
-                    if self.domain_awareness is not None:
-                        try:
-                            self.domain_awareness.seed_prototype(text)
-                        except Exception:
-                            pass
-
-                    result["detail"]["input"] = {
+                    # 从违规原型中移除最相似的条目
+                    removed = self._remove_nearest_violation_prototype(text)
+                    result["detail"]["output"] = {
                         "learned_safe": True,
-                        "removed_attack": removed,
-                        "seeded_prototype": True,
+                        "removed_violation": removed,
                     }
                     corrected_any = True
                 except Exception as e:
-                    result["detail"]["input"] = {"error": str(e)}
-            else:
-                result["detail"]["input"] = {"error": "洛书映射器未初始化"}
+                    result["detail"]["output"] = {"error": str(e)}
 
-        # ── 输出侧纠正 ──
-        if side in ("output", "both") and self.output_guardrail is not None:
-            try:
-                # 加入安全输出原型
-                self.output_guardrail.learn_safe_output(text)
-
-                # 从违规原型中移除最相似的条目
-                removed = self._remove_nearest_violation_prototype(text)
-                result["detail"]["output"] = {
-                    "learned_safe": True,
-                    "removed_violation": removed,
-                }
-                corrected_any = True
-            except Exception as e:
-                result["detail"]["output"] = {"error": str(e)}
-
-        result["corrected"] = corrected_any
-        return result
+            result["corrected"] = corrected_any
+            return result
 
     def detect_tool_call(self, user_input: str, tool_name: str,
                          arguments: Optional[dict] = None,

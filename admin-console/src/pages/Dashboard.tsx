@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts'
 import { api, Stats, Health, Status } from '../services/api'
 
-type DataPoint = { time: string; blocks: number; passes: number; latency: number }
+type DataPoint = { time: string; blocks: number; passes: number; latency: number; _bt: number; _pt: number }
 
 export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null)
@@ -12,15 +12,35 @@ export default function Dashboard() {
   const [error, setError] = useState('')
   const [reportOpen, setReportOpen] = useState(false)
 
+  // 网关端 P1 修复「仪表盘单点白屏」：三个请求任一失败不再导致整页错误，
+  // 改用 allSettled 部分容错 —— 成功的部分照常渲染，失败的在顶部警告条提示
   const fetchAll = useCallback(async () => {
-    try {
-      const [s, h, st] = await Promise.all([api.getStats(), api.getHealth(), api.getStatus()])
-      setStats(s); setHealth(h); setStatus(st); setError('')
+    const results = await Promise.allSettled([api.getStats(), api.getHealth(), api.getStatus()])
+    const errs: string[] = []
+    if (results[0].status === 'fulfilled') {
+      const s = results[0].value
+      setStats(s)
+      // 网关端 P1 修复「趋势图画累计值」：blocks_total/passes_total 是单调累计计数器，
+      // 直接画会一直递增失真，改为画相邻两次采样之间的增量（每周期新增量）
       setHistory(prev => {
-        const next = [...prev, { time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }), blocks: s.blocks_total, passes: s.passes_total, latency: s.p50_latency_ms }]
+        const last = prev[prev.length - 1]
+        const dBlocks = last ? Math.max(0, s.blocks_total - last._bt) : 0
+        const dPasses = last ? Math.max(0, s.passes_total - last._pt) : 0
+        const next: DataPoint[] = [...prev, {
+          time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          blocks: dBlocks, passes: dPasses, latency: s.p50_latency_ms,
+          _bt: s.blocks_total, _pt: s.passes_total,
+        }]
         return next.length > 30 ? next.slice(-30) : next
       })
-    } catch (e) { setError(String(e)) }
+    } else {
+      errs.push(`统计数据加载失败: ${String((results[0] as PromiseRejectedResult).reason)}`)
+    }
+    if (results[1].status === 'fulfilled') setHealth(results[1].value)
+    else errs.push(`引擎健康: ${String((results[1] as PromiseRejectedResult).reason)}`)
+    if (results[2].status === 'fulfilled') setStatus(results[2].value)
+    else errs.push(`集群状态: ${String((results[2] as PromiseRejectedResult).reason)}`)
+    setError(errs.join('；'))
   }, [])
 
   useEffect(() => { fetchAll(); const t = setInterval(fetchAll, 5000); return () => clearInterval(t) }, [fetchAll])
@@ -32,13 +52,28 @@ export default function Dashboard() {
     </div>
   )
 
-  if (error) return <div style={{ padding: 24, color: '#f87171' }}>连接网关失败: {error} <button onClick={fetchAll} style={{ marginLeft: 12, padding: '4px 12px', borderRadius: 4, background: '#334155', border: 'none', color: '#e2e8f0', cursor: 'pointer' }}>重试</button></div>
+  // 单点白屏修复配套：错误改为顶部警告条（部分数据仍可渲染），仅完全无数据时显示重试大块
+  if (error && !stats && !health && !status) {
+    return (
+      <div style={{ padding: 24, color: '#f87171' }}>
+        连接网关失败: {error}
+        <button onClick={fetchAll} style={{ marginLeft: 12, padding: '4px 12px', borderRadius: 4, background: '#334155', border: 'none', color: '#e2e8f0', cursor: 'pointer' }}>重试</button>
+      </div>
+    )
+  }
 
   // 首次加载无数据时显示引导提示
   const isFirstLoad = !stats || stats.requests_total === 0
 
   return (
     <div>
+      {/* 部分加载失败警告条（数据仍可用的降级展示） */}
+      {error && (
+        <div style={{ marginBottom: 20, padding: '10px 16px', background: '#7f1d1d33', borderRadius: 8, border: '1px solid #7f1d1d', fontSize: 13, color: '#fca5a5', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ flex: 1 }}>{error}</span>
+          <button onClick={fetchAll} style={{ padding: '2px 10px', borderRadius: 4, background: '#334155', border: 'none', color: '#e2e8f0', cursor: 'pointer', fontSize: 12 }}>重试</button>
+        </div>
+      )}
       {isFirstLoad && (
         <div style={{ marginBottom: 20, padding: '14px 20px', background: '#1e3a5f', borderRadius: 8, border: '1px solid #1d4ed8', fontSize: 13, color: '#93c5fd', display: 'flex', alignItems: 'center', gap: 10 }}>
           <img src="/logo.png" alt="玄盾" style={{ width: 18, height: 18, objectFit: 'contain' }} />
@@ -168,8 +203,12 @@ function ReportDialog({ onClose }: { onClose: () => void }) {
   }
 
   const download = () => {
-    if (!result?.file_path) return
-    const blob = new Blob([format === 'json' ? JSON.stringify(result.summary, null, 2) : '报告已生成'], { type: 'text/plain' })
+    // G-P0-1 修复：使用后端返回的真实报告内容生成文件（此前硬编码"报告已生成"伪造内容属于假报告）
+    if (!result?.content) return
+    const mimeMap: Record<string, string> = {
+      csv: 'text/csv', json: 'application/json', html: 'text/html', md: 'text/markdown',
+    }
+    const blob = new Blob(['\ufeff' + result.content], { type: `${mimeMap[format] || 'text/plain'};charset=utf-8` })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url; a.download = `xuandun_report.${format}`; a.click()

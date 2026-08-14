@@ -441,7 +441,8 @@ async def protect_input(request: ProtectReq, req: Request):
         if err_name == "RateLimitError" or "quota" in str(e).lower() or "limit" in str(e).lower():
             raise HTTPException(status_code=429, detail=str(e))
         logger.error("检测异常", extra={"event": "protect_error", "error": str(e)}, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Detection error: {str(e)}")
+        # v1.3.5 安全修复：对外返回通用错误消息，不泄露内部异常细节
+        raise HTTPException(status_code=500, detail="Internal detection error")
 
 @app.get("/api/v1/stats")
 async def get_stats():
@@ -484,7 +485,7 @@ async def export_report(request: Request):
         "block_rate": round(proxy_rate, 2),
         "avg_daily": round(metrics.proxy_requests / max(1, metrics.uptime / 86400)) if metrics.uptime > 0 else 0,
         "period": {"start": start_date, "end": end_date},
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "manual_requests": metrics.manual_requests,
         "manual_blocks": metrics.manual_blocks,
         "p50_latency_ms": round(metrics.p50, 2),
@@ -529,8 +530,11 @@ async def export_report(request: Request):
     else:
         fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # v1.3.5 安全修复：对用户可控的日期参数做 HTML 转义，防止存储型 XSS
+            sd_esc = html.escape(str(start_date))
+            ed_esc = html.escape(str(end_date))
             f.write(f"<html><head><meta charset='utf-8'><title>玄盾安全报告</title></head><body>")
-            f.write(f"<h1>玄盾安全报告</h1><p>报告周期: {start_date} ~ {end_date}</p>")
+            f.write(f"<h1>玄盾安全报告</h1><p>报告周期: {sd_esc} ~ {ed_esc}</p>")
             f.write(f"<h2>概览</h2><table border='1' cellpadding='8'>")
             for k, v in [("检测总数", summary["total_requests"]), ("拦截次数", summary["total_blocked"]),
                          ("拦截率", f"{summary['block_rate']}%"), ("P50延迟", f"{summary['p50_latency_ms']}ms"),
@@ -542,7 +546,16 @@ async def export_report(request: Request):
             f.write(f"</table></body></html>")
 
     file_size = os.path.getsize(file_path)
-    return {"file_path": file_path, "file_size": file_size, "format": fmt, "summary": summary}
+    # G-P0-1 修复：返回真实文件内容，供前端生成真实报告文件下载（此前前端伪造 Blob 导致假报告）
+    with open(file_path, "r", encoding="utf-8-sig") as f:
+        content = f.read()
+    # v1.3.5 安全修复：读取后清理临时文件，防止磁盘泄漏；移除 file_path 字段防止服务器路径泄露
+    try:
+        os.unlink(file_path)
+    except OSError:
+        pass
+    return {"file_size": file_size, "format": fmt,
+            "content": content, "summary": summary}
 
 @app.get("/api/v1/status")
 async def cluster_status():

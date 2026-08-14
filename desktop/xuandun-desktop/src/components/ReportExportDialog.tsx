@@ -104,6 +104,20 @@ export default function ReportExportDialog({
       setError('至少选择一个报告模块');
       return;
     }
+    // D-P1-5: 日期范围校验（空值/顺序颠倒/超长范围），避免生成空报告或引擎侧全表扫描
+    if (!startDate || !endDate) {
+      setError('请选择开始日期和结束日期');
+      return;
+    }
+    if (startDate > endDate) {
+      setError('开始日期不能晚于结束日期');
+      return;
+    }
+    const rangeDays = Math.round((new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000);
+    if (rangeDays > 366) {
+      setError('日期范围不能超过 366 天，请缩小范围后重试');
+      return;
+    }
     processingRef.current = true;
     setStep('generating');
     setError(null);
@@ -193,7 +207,8 @@ export default function ReportExportDialog({
   };
 
   return (
-    <div style={s.overlay} onClick={onClose}>
+    // D-P1-6: 生成/导出进行中禁止点击遮罩关闭（processingRef 同步锁），防止流程中断后状态悬挂
+    <div style={s.overlay} onClick={() => { if (!processingRef.current) onClose(); }}>
       <div style={s.dialog} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         {/* 标题栏 */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
@@ -201,8 +216,13 @@ export default function ReportExportDialog({
             导出安全报告
           </h2>
           <button
-            onClick={onClose}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: 0, fontSize: 18 }}
+            onClick={() => { if (!processingRef.current) onClose(); }}
+            disabled={processingRef.current}
+            title={processingRef.current ? '报告处理中，暂不能关闭' : '关闭'}
+            style={{
+              background: 'none', border: 'none', cursor: processingRef.current ? 'not-allowed' : 'pointer',
+              color: '#94a3b8', padding: 0, fontSize: 18, opacity: processingRef.current ? 0.4 : 1,
+            }}
             aria-label="关闭"
           >
             x
