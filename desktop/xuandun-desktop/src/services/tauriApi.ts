@@ -625,7 +625,12 @@ export const api = {
     sections?: string[];
   }) =>
     invokeWithTimeout<{ file_path: string; file_size: number; format: string; summary: WeeklyReportPreview }>(
-      'generate_weekly_report', params, TIMEOUT.SLOW
+      'generate_weekly_report', {
+        startDate: params.start_date,
+        endDate: params.end_date,
+        format: params.format,
+        sections: params.sections,
+      }, TIMEOUT.SLOW
     ),
   exportReportFile: async (filePath: string, suggestedName?: string) => {
     // v1.3.4 修复: 改用 Tauri save dialog 让用户选择路径（非写死桌面）
