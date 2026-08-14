@@ -1,8 +1,8 @@
 # 玄盾企业级安全网关 Docker 镜像
 # 支持两种模式: engine (Flask 桌面端引擎) / gateway (FastAPI 网关)
 #
-# 构建: docker build -t xuandun-gateway:1.3.4 .
-# 运行: docker run -p 18766:18766 xuandun-gateway:1.3.4
+# 构建: docker build -t xuandun-gateway:1.3.5-beta .
+# 运行: docker run -p 18766:18766 xuandun-gateway:1.3.5-beta
 # Compose: docker compose up -d
 
 # ── 构建阶段 ──
@@ -32,7 +32,7 @@ FROM python:3.11-slim AS runtime
 
 LABEL maintainer="DaoTi XuanDun Team"
 LABEL description="XuanDun AI Security Gateway - Enterprise-grade LLM Runtime Protection"
-LABEL version="1.3.4"
+LABEL version="1.3.5-beta"
 LABEL org.opencontainers.image.source="https://github.com/zhibaiYingChuan/XD"
 LABEL org.opencontainers.image.title="玄盾 AI安全网关"
 
