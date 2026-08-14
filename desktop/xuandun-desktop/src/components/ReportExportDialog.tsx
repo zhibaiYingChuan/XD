@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { X, Download, Loader2, FileText, Calendar } from 'lucide-react';
+import { Download, Loader2, FileText, Calendar } from 'lucide-react';
 import { api, WeeklyReportPreview } from '../services/tauriApi';
 
 /**
@@ -151,43 +151,44 @@ export default function ReportExportDialog({
 
   if (!open) return null;
 
-  // ── 样式常量 ──
+  // ── 样式常量（对齐网关端深色主题） ──
   const s = {
     overlay: {
       position: 'fixed' as const,
       top: 0, left: 0, right: 0, bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
+      backgroundColor: 'rgba(0,0,0,0.6)',
       zIndex: 10000,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
     },
     dialog: {
-      background: 'var(--bg-primary, #1a1a2e)',
-      border: '1px solid var(--border-color, #333)',
-      borderRadius: 12, padding: 24, maxWidth: 520, width: '92%',
+      background: '#1e293b',
+      border: '1px solid #475569',
+      borderRadius: 12, padding: 24, maxWidth: 460, width: '92%',
       boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
       maxHeight: '85vh', overflow: 'auto',
     },
-    title: { fontSize: 16, fontWeight: 600, color: 'var(--text-primary, #e0e0e0)', marginBottom: 20 },
-    label: { display: 'block' as const, fontSize: 13, fontWeight: 500, color: 'var(--text-secondary, #a0a0a0)', marginBottom: 6 },
+    title: { fontSize: 16, fontWeight: 600, color: '#e2e8f0', marginBottom: 20 },
+    label: { display: 'block' as const, fontSize: 12, fontWeight: 500, color: '#94a3b8', marginBottom: 6 },
     input: {
-      width: '100%', padding: '8px 12px', borderRadius: 6,
-      background: 'var(--bg-secondary, #16213e)', color: 'var(--text-primary, #e0e0e0)',
-      border: '1px solid var(--border-color, #333)', fontSize: 13, outline: 'none',
+      width: '100%', padding: '6px', borderRadius: 6,
+      background: '#0f172a', color: '#e2e8f0',
+      border: '1px solid #475569', fontSize: 13, outline: 'none',
     },
     btnPrimary: {
-      padding: '8px 20px', borderRadius: 6, border: 'none', cursor: 'pointer',
-      background: 'var(--btn-primary-bg, #3b82f6)', color: '#fff', fontSize: 13, fontWeight: 500,
+      padding: '8px 16px', borderRadius: 6, border: 'none', cursor: 'pointer',
+      background: '#2563eb', color: '#fff', fontSize: 13, fontWeight: 500,
     },
     btnSecondary: {
-      padding: '8px 20px', borderRadius: 6, border: '1px solid var(--border-color, #333)', cursor: 'pointer',
-      background: 'transparent', color: 'var(--text-secondary, #a0a0a0)', fontSize: 13,
+      padding: '8px 16px', borderRadius: 6, border: '1px solid #475569', cursor: 'pointer',
+      background: 'transparent', color: '#94a3b8', fontSize: 13,
     },
     chip: (active: boolean) => ({
-      display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px',
+      display: 'inline-flex', alignItems: 'center', gap: 4, padding: '6px 14px',
       borderRadius: 6, border: '1px solid', fontSize: 12, cursor: 'pointer', userSelect: 'none' as const,
-      background: active ? 'var(--btn-primary-bg, #3b82f6)' : 'transparent',
-      color: active ? '#fff' : 'var(--text-secondary, #a0a0a0)',
-      borderColor: active ? 'var(--btn-primary-bg, #3b82f6)' : 'var(--border-color, #333)',
+      textTransform: 'uppercase' as const,
+      background: active ? '#0c4a6e' : '#334155',
+      color: active ? '#38bdf8' : '#94a3b8',
+      borderColor: active ? '#38bdf8' : '#475569',
     }),
   };
 
@@ -195,51 +196,33 @@ export default function ReportExportDialog({
     <div style={s.overlay} onClick={onClose}>
       <div style={s.dialog} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         {/* 标题栏 */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary, #e0e0e0)', margin: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, color: '#e2e8f0', margin: 0 }}>
             导出安全报告
           </h2>
           <button
             onClick={onClose}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: 0 }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: 0, fontSize: 18 }}
             aria-label="关闭"
           >
-            <X size={18} strokeWidth={1.5} />
+            x
           </button>
         </div>
 
         {/* 状态：生成中 / 导出中 / 完成 */}
         {step === 'generating' && (
           <div style={{ textAlign: 'center', padding: '32px 0' }}>
-            <Loader2 size={32} style={{ animation: 'spin 1s linear infinite', color: 'var(--btn-primary-bg, #3b82f6)' }} />
-            <p style={{ color: 'var(--text-secondary, #a0a0a0)', marginTop: 12 }}>正在生成报告...</p>
+            <Loader2 size={32} style={{ animation: 'spin 1s linear infinite', color: '#2563eb' }} />
+            <p style={{ color: '#94a3b8', marginTop: 12 }}>正在生成报告...</p>
           </div>
         )}
 
         {step === 'exporting' && summary && (
           <div>
             {/* 生成成功摘要 */}
-            <div style={{ background: 'var(--bg-secondary, #16213e)', borderRadius: 8, padding: 12, marginBottom: 16 }}>
-              <div style={{ display: 'flex', gap: 16 }}>
-                <div>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>
-                    {summary.total_requests?.toLocaleString() ?? 0}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>检测总数</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>
-                    {summary.total_blocked?.toLocaleString() ?? 0}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>拦截次数</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>
-                    {summary.block_rate ?? 0}%
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>拦截率</div>
-                </div>
-              </div>
+            <div style={{ background: '#0f172a', borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13 }}>
+              <div style={{ color: '#4ade80', marginBottom: 6 }}>报告已生成</div>
+              <div style={{ color: '#94a3b8' }}>检测总数: {summary.total_requests?.toLocaleString() ?? 0} | 拦截: {summary.total_blocked?.toLocaleString() ?? 0} | 拦截率: {summary.block_rate ?? 0}%</div>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button
@@ -258,11 +241,11 @@ export default function ReportExportDialog({
 
         {step === 'done' && (
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
-            <FileText size={36} style={{ color: 'var(--success, #22c55e)' }} />
-            <p style={{ color: 'var(--text-primary, #e0e0e0)', marginTop: 12, fontWeight: 500 }}>
+            <FileText size={36} style={{ color: '#4ade80' }} />
+            <p style={{ color: '#e2e8f0', marginTop: 12, fontWeight: 500 }}>
               安全报告已导出成功
             </p>
-            <p style={{ color: 'var(--text-secondary, #a0a0a0)', fontSize: 13, marginTop: 4 }}>
+            <p style={{ color: '#94a3b8', fontSize: 13, marginTop: 4 }}>
               文件保存至指定位置，可在文件管理器中查看
             </p>
             <div style={{ marginTop: 16 }}>
@@ -277,10 +260,10 @@ export default function ReportExportDialog({
             {/* 引擎未运行提示 */}
             {!engineRunning && (
               <div style={{
-                background: 'var(--bg-warning, rgba(245,158,11,0.1))',
-                border: '1px solid var(--warning, #f0ad4e)',
-                borderRadius: 6, padding: '8px 12px', marginBottom: 16,
-                color: 'var(--warning, #f0ad4e)', fontSize: 12,
+                background: 'rgba(245,158,11,0.1)',
+                border: '1px solid #f0ad4e',
+                borderRadius: 6, padding: '8px 12px', marginBottom: 12,
+                color: '#f0ad4e', fontSize: 12,
               }}>
                 引擎未运行，无法生成报告。请先启动引擎。
               </div>
@@ -289,9 +272,9 @@ export default function ReportExportDialog({
             {/* 错误提示 */}
             {error && (
               <div style={{
-                background: 'rgba(220,53,69,0.1)', border: '1px solid #dc3545',
-                borderRadius: 6, padding: '8px 12px', marginBottom: 16,
-                color: '#dc3545', fontSize: 12,
+                background: 'rgba(220,53,69,0.1)', border: '1px solid #f87171',
+                borderRadius: 6, padding: '8px 12px', marginBottom: 12,
+                color: '#f87171', fontSize: 12,
               }}>
                 {error}
               </div>
@@ -315,9 +298,9 @@ export default function ReportExportDialog({
                   }}
                   style={{
                     padding: '4px 12px', borderRadius: 6, fontSize: 12,
-                    border: '1px solid var(--border-color, #333)',
-                    background: 'var(--bg-secondary, #16213e)',
-                    color: 'var(--text-secondary, #a0a0a0)', cursor: 'pointer',
+                    border: '1px solid #475569',
+                    background: '#334155',
+                    color: '#94a3b8', cursor: 'pointer',
                   }}
                 >
                   {label}
