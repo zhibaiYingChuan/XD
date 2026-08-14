@@ -242,6 +242,23 @@ impl Database {
             ).map_err(|e| format!("Failed to add source column: {}", e))?;
             eprintln!("[xuandun] [INFO] Added source column to logs table");
         }
+        // 数据修复：把历史数据中 source='proxy' 但 session_id 不是代理的记录改为 manual/batch
+        // 桌面端没有代理服务器，所有历史数据都是手动检测或批量检测
+        let fixed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM logs WHERE source = 'proxy' AND session_id != 'batch'",
+            [], |row| row.get(0)
+        ).unwrap_or(0);
+        if fixed > 0 {
+            conn.execute(
+                "UPDATE logs SET source = 'batch' WHERE source = 'proxy' AND session_id = 'batch'",
+                []
+            ).map_err(|e| format!("Failed to fix batch source: {}", e))?;
+            conn.execute(
+                "UPDATE logs SET source = 'manual' WHERE source = 'proxy' AND session_id != 'batch'",
+                []
+            ).map_err(|e| format!("Failed to fix manual source: {}", e))?;
+            eprintln!("[xuandun] [INFO] Fixed {} historical log entries source field", fixed);
+        }
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source);"
         ).map_err(|e| e.to_string())?;
