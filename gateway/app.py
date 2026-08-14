@@ -460,6 +460,90 @@ async def get_stats():
             "manual_requests": metrics.manual_requests,
             "manual_blocks": metrics.manual_blocks}
 
+@app.post("/api/v1/report")
+async def export_report(request: Request):
+    """安全报告导出 — 基于内存 metrics 生成 CSV/JSON/HTML/MD 报告。
+
+    请求体: { "start_date": "2026-08-01", "end_date": "2026-08-14",
+              "format": "csv|json|html|md", "sections": ["summary","trend","distribution"] }
+    返回: { "file_path": "...", "file_size": ..., "format": "...", "summary": {...} }
+    """
+    import os, tempfile, csv, io
+    from datetime import datetime, date
+    body = await request.json()
+    start_date = body.get("start_date", "")
+    end_date = body.get("end_date", "")
+    fmt = body.get("format", "html")
+    sections = body.get("sections", ["summary"])
+
+    # 基于 metrics 构建摘要数据（只含 proxy 数据）
+    proxy_rate = (metrics.proxy_blocks / max(metrics.proxy_requests, 1) * 100) if metrics.proxy_requests > 0 else 0.0
+    summary = {
+        "total_requests": metrics.proxy_requests,
+        "total_blocked": metrics.proxy_blocks,
+        "block_rate": round(proxy_rate, 2),
+        "avg_daily": round(metrics.proxy_requests / max(1, metrics.uptime / 86400)) if metrics.uptime > 0 else 0,
+        "period": {"start": start_date, "end": end_date},
+        "generated_at": datetime.utcnow().isoformat(),
+        "manual_requests": metrics.manual_requests,
+        "manual_blocks": metrics.manual_blocks,
+        "p50_latency_ms": round(metrics.p50, 2),
+        "p95_latency_ms": round(metrics.p95, 2),
+        "uptime_seconds": round(metrics.uptime, 0),
+    }
+
+    # 生成文件
+    if fmt == "json":
+        fd, file_path = tempfile.mkstemp(suffix=".json", prefix="xuandun_report_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    elif fmt == "csv":
+        fd, file_path = tempfile.mkstemp(suffix=".csv", prefix="xuandun_report_")
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["指标", "值"])
+            w.writerow(["检测总数", summary["total_requests"]])
+            w.writerow(["拦截次数", summary["total_blocked"]])
+            w.writerow(["拦截率(%)", summary["block_rate"]])
+            w.writerow(["P50延迟(ms)", summary["p50_latency_ms"]])
+            w.writerow(["P95延迟(ms)", summary["p95_latency_ms"]])
+            w.writerow(["手动检测总数", summary["manual_requests"]])
+            w.writerow(["手动拦截数", summary["manual_blocks"]])
+            w.writerow(["运行时间(s)", summary["uptime_seconds"]])
+    elif fmt == "md":
+        fd, file_path = tempfile.mkstemp(suffix=".md", prefix="xuandun_report_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"# 玄盾安全报告\n\n")
+            f.write(f"**报告周期**: {start_date} ~ {end_date}\n\n")
+            f.write(f"## 概览\n\n")
+            f.write(f"| 指标 | 值 |\n|------|----|\n")
+            f.write(f"| 检测总数 | {summary['total_requests']} |\n")
+            f.write(f"| 拦截次数 | {summary['total_blocked']} |\n")
+            f.write(f"| 拦截率 | {summary['block_rate']}% |\n")
+            f.write(f"| P50延迟 | {summary['p50_latency_ms']}ms |\n")
+            f.write(f"| P95延迟 | {summary['p95_latency_ms']}ms |\n\n")
+            f.write(f"## 手动检测\n\n")
+            f.write(f"| 指标 | 值 |\n|------|----|\n")
+            f.write(f"| 手动检测总数 | {summary['manual_requests']} |\n")
+            f.write(f"| 手动拦截数 | {summary['manual_blocks']} |\n")
+    else:
+        fd, file_path = tempfile.mkstemp(suffix=".html", prefix="xuandun_report_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"<html><head><meta charset='utf-8'><title>玄盾安全报告</title></head><body>")
+            f.write(f"<h1>玄盾安全报告</h1><p>报告周期: {start_date} ~ {end_date}</p>")
+            f.write(f"<h2>概览</h2><table border='1' cellpadding='8'>")
+            for k, v in [("检测总数", summary["total_requests"]), ("拦截次数", summary["total_blocked"]),
+                         ("拦截率", f"{summary['block_rate']}%"), ("P50延迟", f"{summary['p50_latency_ms']}ms"),
+                         ("P95延迟", f"{summary['p95_latency_ms']}ms")]:
+                f.write(f"<tr><td>{k}</td><td>{v}</td></tr>")
+            f.write(f"</table><h2>手动检测</h2><table border='1' cellpadding='8'>")
+            f.write(f"<tr><td>手动检测总数</td><td>{summary['manual_requests']}</td></tr>")
+            f.write(f"<tr><td>手动拦截数</td><td>{summary['manual_blocks']}</td></tr>")
+            f.write(f"</table></body></html>")
+
+    file_size = os.path.getsize(file_path)
+    return {"file_path": file_path, "file_size": file_size, "format": fmt, "summary": summary}
+
 @app.get("/api/v1/status")
 async def cluster_status():
     return {

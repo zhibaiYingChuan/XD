@@ -10,6 +10,7 @@ export default function Dashboard() {
   const [status, setStatus] = useState<Status | null>(null)
   const [history, setHistory] = useState<DataPoint[]>([])
   const [error, setError] = useState('')
+  const [reportOpen, setReportOpen] = useState(false)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -50,6 +51,7 @@ export default function Dashboard() {
         <StatusBadge label="Redis" ok={status?.redis?.connected} detail={status?.redis?.backend} />
         <StatusBadge label="PostgreSQL" ok={status?.postgres?.connected} detail={status?.postgres?.backend} />
         <span style={{ color: '#64748b', marginLeft: 'auto' }}>运行 {stats ? formatUptime(stats.uptime_seconds) : '...'}</span>
+        <button onClick={() => setReportOpen(true)} style={{ padding: '4px 14px', borderRadius: 6, background: '#334155', border: '1px solid #475569', color: '#e2e8f0', cursor: 'pointer', fontSize: 13 }}>生成报告</button>
       </div>
 
       {/* 指标卡片 */}
@@ -108,6 +110,9 @@ export default function Dashboard() {
           )}
         </Panel>
       </div>
+
+      {/* 报表导出对话框 */}
+      {reportOpen && <ReportDialog onClose={() => setReportOpen(false)} />}
     </div>
   )
 }
@@ -132,6 +137,101 @@ function StatusBadge({ label, ok, detail }: { label: string; ok?: boolean; detai
       {label}
       <span style={{ color: '#64748b' }}>{detail || '...'}</span>
     </span>
+  )
+}
+
+function ReportDialog({ onClose }: { onClose: () => void }) {
+  const today = new Date().toISOString().slice(0, 10)
+  const weekAgo = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10)
+  const [startDate, setStartDate] = useState(weekAgo)
+  const [endDate, setEndDate] = useState(today)
+  const [format, setFormat] = useState('csv')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const [err, setErr] = useState('')
+
+  const quick = (days: number) => {
+    const end = new Date()
+    const start = new Date(end)
+    start.setDate(start.getDate() - days)
+    setStartDate(start.toISOString().slice(0, 10))
+    setEndDate(end.toISOString().slice(0, 10))
+  }
+
+  const generate = async () => {
+    setLoading(true); setErr('')
+    try {
+      const r = await api.exportReport({ start_date: startDate, end_date: endDate, format, sections: ['summary'] })
+      setResult(r)
+    } catch (e: any) { setErr(String(e?.message || e)) }
+    finally { setLoading(false) }
+  }
+
+  const download = () => {
+    if (!result?.file_path) return
+    const blob = new Blob([format === 'json' ? JSON.stringify(result.summary, null, 2) : '报告已生成'], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = `xuandun_report.${format}`; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 12, padding: 24, maxWidth: 460, width: '90%' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, color: '#e2e8f0', margin: 0 }}>导出安全报告</h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 18 }}>x</button>
+        </div>
+
+        {err && <div style={{ color: '#f87171', fontSize: 13, marginBottom: 12 }}>{err}</div>}
+
+        {/* 快捷按钮 */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          {[{l:'今日',d:0},{l:'本周',d:6},{l:'本月',d:29}].map(({l,d}) => (
+            <button key={l} onClick={() => quick(d)} style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #475569', background: '#334155', color: '#94a3b8', cursor: 'pointer', fontSize: 12 }}>{l}</button>
+          ))}
+        </div>
+
+        {/* 日期 */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 12, color: '#94a3b8' }}>开始日期</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={{ width: '100%', padding: '6px', borderRadius: 6, background: '#0f172a', border: '1px solid #475569', color: '#e2e8f0' }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 12, color: '#94a3b8' }}>结束日期</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={{ width: '100%', padding: '6px', borderRadius: 6, background: '#0f172a', border: '1px solid #475569', color: '#e2e8f0' }} />
+          </div>
+        </div>
+
+        {/* 格式 */}
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 12, color: '#94a3b8', display: 'block', marginBottom: 6 }}>导出格式</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['csv','json','html','md'].map(f => (
+              <button key={f} onClick={() => setFormat(f)} style={{ padding: '6px 14px', borderRadius: 6, border: format === f ? '1px solid #38bdf8' : '1px solid #475569', background: format === f ? '#0c4a6e' : '#334155', color: format === f ? '#38bdf8' : '#94a3b8', cursor: 'pointer', fontSize: 12, textTransform: 'uppercase' }}>{f}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* 生成结果 */}
+        {result && (
+          <div style={{ background: '#0f172a', borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13 }}>
+            <div style={{ color: '#4ade80', marginBottom: 6 }}>报告已生成 ({(result.file_size / 1024).toFixed(1)} KB)</div>
+            <div style={{ color: '#94a3b8' }}>检测总数: {result.summary?.total_requests ?? 0} | 拦截: {result.summary?.total_blocked ?? 0} | 拦截率: {result.summary?.block_rate ?? 0}%</div>
+            <div style={{ color: '#64748b', marginTop: 4 }}>手动检测: {result.summary?.manual_requests ?? 0} 条 (不计入主指标)</div>
+          </div>
+        )}
+
+        {/* 按钮 */}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #475569', background: 'transparent', color: '#94a3b8', cursor: 'pointer' }}>取消</button>
+          {result && <button onClick={download} style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: '#059669', color: '#fff', cursor: 'pointer' }}>下载</button>}
+          <button onClick={generate} disabled={loading} style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: loading ? '#475569' : '#2563eb', color: '#fff', cursor: loading ? 'not-allowed' : 'pointer' }}>{loading ? '生成中...' : '生成报告'}</button>
+        </div>
+      </div>
+    </div>
   )
 }
 

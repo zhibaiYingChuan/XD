@@ -146,6 +146,8 @@ export const api = {
   getMetrics: () => get<string>('metrics'),
   getHealth: () => get<Health>('health'),
   getStats: () => get<Stats>('api/v1/stats'),
+  exportReport: (params: { start_date: string; end_date: string; format: string; sections?: string[] }) =>
+    post<any>('api/v1/report', params),
   getStatus: () => get<Status>('api/v1/status'),
   getModels: () => get<{ models: Record<string, ModelInfo> } & Record<string, unknown>>('api/v1/models'),
   reloadConfig: () => post<{ success: boolean; previous_models: number; current_models: number }>('api/config/reload'),
