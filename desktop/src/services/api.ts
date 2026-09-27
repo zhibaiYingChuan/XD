@@ -37,6 +37,14 @@ export interface StateResponse {
   upstream?: string;
   today?: TodayStats;
   paused_remaining_s?: number;
+  /**
+   * 只读模式（未激活 / 已过期）。
+   *
+   * ★ 这时 state 仍可能是 protecting、KPI 也会照常统计 ——
+   *   但请求实际全部直通。界面必须显式提示，
+   *   否则用户会以为防护在正常工作。
+   */
+  read_only?: boolean;
 }
 
 export interface DailyStat {
@@ -177,6 +185,42 @@ export interface Diagnostics {
   relay_domain: string;
 }
 
+/**
+ * 激活状态。
+ *
+ * ★ 字段名是 **camelCase**，不是 snake_case。
+ *   Rust 侧 `LicenseStatus` 标了 `#[serde(rename_all = "camelCase")]`
+ *   （src-tauri/src/license.rs），序列化后就是 camelCase。
+ *   写成 snake_case 时 TypeScript 不会报错（那只是本地 interface），
+ *   但运行时字段全是 undefined —— 界面会把机器码渲染成空白，
+ *   而用户恰恰靠它去申请激活码。踩过一次，别再改回去。
+ *
+ * ★ `verifierAvailable=false` 与 `activated=false` 是两件不同的事：
+ *   前者表示「引擎没能执行校验」（缺公钥 / 引擎未启动），
+ *   结论不可信；后者表示「确实没通过」。UI 必须分开显示 ——
+ *   把「验不了」说成「码无效」会让用户反复换码却永远激活不了。
+ */
+export interface LicenseStatus {
+  activated: boolean;
+  expiresAt: number | null;
+  tier: string | null;
+  subject: string | null;
+  jti: string | null;
+  /** 未激活原因（已激活时为 null） */
+  reason: string | null;
+  /** 本机机器码哈希 —— 用户报障时要报给签发方的东西 */
+  machineCode: string;
+  remainingDays: number;
+  /** 引擎是否成功执行了校验（false = 结论不可信） */
+  verifierAvailable: boolean;
+}
+
+/** 换绑请求串（用户发给售后即可完成换机绑定） */
+export interface RebindRequest {
+  request: string;
+  machine_code_hash: string;
+}
+
 // ══════════════════════════════════════════════════════════════
 // HTTP 层
 // ══════════════════════════════════════════════════════════════
@@ -229,6 +273,13 @@ export function setProxyBase(base: string | null): void {
 
 function proxyBase(): string {
   return _baseOverride ?? `http://127.0.0.1:${_proxyPort}`;
+}
+
+/** 依赖 Rust 侧的能力在浏览器模式下不可用。 */
+function requireTauriFor(what: string): void {
+  if (!isTauri()) {
+    throw new Error(`${what} 需要桌面版（机器码只能在本机采集）`);
+  }
 }
 
 async function httpGet<T>(path: string, timeoutMs = TIMEOUT.NORMAL): Promise<T> {
@@ -438,6 +489,35 @@ export const api = {
       { duration_min: durationMin },
     ),
   resume: () => call<{ ok: boolean }>('resume_protection', 'POST', '/api/resume'),
+
+  // ── 激活 ──
+  //
+  // ★ 机器码必须由 Rust 侧采集（sysinfo），Python/浏览器都算不出来。
+  //   浏览器开发模式下没有 Tauri IPC，因此这三项直接抛错而不是
+  //   返回一个假的「未激活」—— 假的未激活会让人以为码坏了。
+  getLicenseStatus: async (): Promise<LicenseStatus> => {
+    requireTauriFor('getLicenseStatus');
+    return invoke<LicenseStatus>('get_license_status');
+  },
+  activate: async (code: string): Promise<LicenseStatus> => {
+    requireTauriFor('activate');
+    return invoke<LicenseStatus>('activate_license', { code });
+  },
+  clearLicense: async (): Promise<LicenseStatus> => {
+    requireTauriFor('clearLicense');
+    return invoke<LicenseStatus>('clear_license');
+  },
+  /**
+   * 生成换绑请求串。
+   *
+   * 换机后原码在新机上必然验不过（一码一机绑的是旧机器）。
+   * 把「原码 + 新机器码」打包成一个可复制的串发给售后，
+   * 签发方验签后只改机器码重签即可，不需要用户再牵扯旧机器。
+   */
+  buildRebindRequest: async (code: string): Promise<RebindRequest> => {
+    requireTauriFor('buildRebindRequest');
+    return invoke<RebindRequest>('build_rebind_request', { code });
+  },
 };
 
 // ══════════════════════════════════════════════════════════════

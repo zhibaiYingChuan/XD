@@ -12,9 +12,10 @@ import {
   FileText,
   Settings as SettingsIcon,
   HelpCircle,
+  KeyRound,
 } from 'lucide-react';
 import { api, STATE_LABELS, currentProxyPort, syncProxyPort } from '../services/api';
-import type { StateResponse } from '../services/api';
+import type { StateResponse, LicenseStatus } from '../services/api';
 import { getAppVersion, setTrayState, type TrayState } from '../lib/tauriShim';
 
 // ══════════════════════════════════════════════════════════════
@@ -141,6 +142,15 @@ function StatusBar() {
       <span className="status-label">{STATE_LABELS[s]}</span>
       {state?.message && <span className="status-meta">{state.message}</span>}
 
+      {/* ★ 只读模式必须显式说出来。
+          这时状态点仍可能是绿色、KPI 也在涨，但请求其实全部直通 ——
+          不说就是谎报「正在保护你」。 */}
+      {state?.read_only && (
+        <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
+          未激活，当前为只读模式（不执行拦截）
+        </span>
+      )}
+
       <span className="status-bar-spacer" />
 
       {today && today.total_calls > 0 && (
@@ -174,11 +184,33 @@ function StatusBar() {
 export default function Layout() {
   const location = useLocation();
   const [version, setVersion] = useState('0.1.0-alpha');
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     getAppVersion().then(setVersion).catch(() => undefined);
   }, []);
+
+  // 激活状态：侧边栏「激活」入口上显示角标，
+  // 让用户不用点进去就知道还没激活。
+  // ★ 读不到时保持 null（不显示角标）而非当成「未激活」——
+  //   引擎一抖动就到处报警是噪声，不是提示。
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      api
+        .getLicenseStatus()
+        .then((s) => {
+          if (!cancelled) setLicense(s);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    // 激活成功后会切页，回来时自然重新读取
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname]);
 
   // 路由切换时滚动到顶部
   useEffect(() => {
@@ -213,6 +245,18 @@ export default function Layout() {
               </NavLink>
             );
           })}
+          <NavLink
+            to="/activate"
+            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+          >
+            <KeyRound size={17} strokeWidth={1.5} />
+            激活
+            {license && !license.activated && (
+              <span className="badge suspect" style={{ marginLeft: 'auto' }}>
+                未激活
+              </span>
+            )}
+          </NavLink>
         </nav>
 
         <div className="sidebar-footer">

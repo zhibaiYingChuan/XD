@@ -261,6 +261,43 @@ async fn clear_license(app: tauri::AppHandle) -> Result<LicenseStatus, String> {
     Ok(build_license_status(&app).await)
 }
 
+/// 换绑请求串（用户换电脑后发给售后即可完成换绑）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RebindRequest {
+    /// XDRB.<base64url(json)>，整段发给售后
+    request: String,
+    /// 本机机器码哈希（报障时可直接发这一段）
+    machine_code_hash: String,
+}
+
+/// 生成换绑请求串。
+///
+/// ★ 为什么是「客户端生成、售后重签」而不是纯自助：
+///   一码一机意味着新机必然验不过（码里绑的是旧机器），
+///   而新机上没有任何东西能证明「我拥有这张码」——除了签名本身。
+///   所以只要把「原码 + 新机器码」交给售后，售后验签后改机器码重签。
+#[tauri::command]
+async fn build_rebind_request(app: tauri::AppHandle, code: String) -> Result<RebindRequest, String> {
+    ensure_engine_running(&app).await?;
+    let trimmed = code.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("请先填写原激活码".into());
+    }
+    let body = serde_json::json!({
+        "code": trimmed,
+        "machine_code": license::machine_code(),
+    });
+    let v = proxy_call(
+        reqwest::Method::POST,
+        "/api/license/rebind_request",
+        Some(body),
+        REQ_NORMAL,
+    )
+    .await?;
+    serde_json::from_value(v).map_err(|e| format!("换绑请求串生成失败: {e}"))
+}
+
 // ══════════════════════════════════════════════════════════════
 // 引擎状态
 // ══════════════════════════════════════════════════════════════
@@ -1514,6 +1551,7 @@ pub fn run() {
             get_license_status,
             activate_license,
             clear_license,
+            build_rebind_request,
             get_engine_status,
             restart_engine,
             stop_engine_command,

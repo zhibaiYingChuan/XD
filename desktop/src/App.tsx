@@ -14,6 +14,7 @@ import Dashboard from './pages/Dashboard';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
 import Help from './pages/Help';
+import Activate from './pages/Activate';
 import { api } from './services/api';
 import type { PersonalConfig } from './services/api';
 
@@ -75,6 +76,7 @@ function AppRoutes() {
         <Route index element={<Dashboard />} />
         <Route path="logs" element={<Logs />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="activate" element={<Activate />} />
         <Route path="help" element={<Help />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

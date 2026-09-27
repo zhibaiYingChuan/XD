@@ -1,17 +1,33 @@
 /* SPDX-License-Identifier: DaoTi-Research-1.0
    Copyright (c) 2026 独立研究者，知白
 
-   首次启动向导（3 步引导）— 消费级文案，不含技术术语。
+   首次启动向导（4 步引导）— 消费级文案，不含技术术语。
 
    步骤 1：欢迎（说明玄盾做什么）
-   步骤 2：配置 AI 工具（选择工具 + 填写中转站）
-   步骤 3：完成
+   步骤 2：激活（拿机器码 → 填激活码）
+   步骤 3：配置 AI 工具（选择工具 + 填写中转站）
+   步骤 4：完成
+
+   ★ 激活放在配置之前：用户第一时间就需要机器码去申请激活码，
+     放在最后等于让他先配完一整套再发现用不了。
 */
 
 import { useEffect, useState } from 'react';
-import { Shield, ShieldCheck, CheckCircle2, ArrowRight, ArrowLeft, Sparkles } from 'lucide-react';
-import { api, currentProxyPort, syncProxyPort, type PersonalConfig } from '../services/api';
+import {
+  Shield,
+  ShieldCheck,
+  CheckCircle2,
+  ArrowRight,
+  ArrowLeft,
+  Sparkles,
+  KeyRound,
+  Copy,
+  Laptop,
+} from 'lucide-react';
+import { api, currentProxyPort, syncProxyPort } from '../services/api';
+import type { PersonalConfig, LicenseStatus } from '../services/api';
 import { useToast } from '../components/Toast';
+import { copyToClipboard } from '../lib/tauriShim';
 
 type ToolChoice = 'cursor' | 'claude' | 'other';
 
@@ -23,6 +39,7 @@ const TOOL_INFO: Record<ToolChoice, { name: string; where: string }> = {
 
 export default function Onboarding({ onFinish }: { onFinish: () => void }) {
   const toast = useToast();
+  // 0 欢迎 / 1 激活 / 2 配置 / 3 完成
   const [step, setStep] = useState(0);
   const [tool, setTool] = useState<ToolChoice>('cursor');
   const [relayName, setRelayName] = useState('我的中转站');
@@ -31,16 +48,73 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
   const [model, setModel] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const canNext = step !== 1 || (relayUrl.trim() && relayKey.trim() && model.trim());
+  // ── 激活 ──
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
+  const [code, setCode] = useState('');
+  const [activating, setActivating] = useState(false);
+  const [rebindOpen, setRebindOpen] = useState(false);
+  const [rebindText, setRebindText] = useState('');
+
+  // ★ 不强制激活：允许「先看看」，但会一直提醒。
+  //   强制拦住不让进，等于在用户还没了解产品时就要掏钱，
+  //   那是把试用变成了付费墙。
+  const canNext = step !== 2 || (relayUrl.trim() && relayKey.trim() && model.trim());
 
   // ★ P1-10：向导在 Layout 之外，需自行同步实际运行端口，
-  //   否则步骤 3 会显示一个还没生效的地址。
+  //   否则步骤 4 会显示一个还没生效的地址。
   useEffect(() => {
     api
       .getActivePort()
       .then((p) => syncProxyPort(p))
       .catch(() => undefined);
   }, []);
+
+  // 进入激活步骤时才拉状态（此时引擎已由 Layout 拉起）
+  useEffect(() => {
+    if (step !== 1) return;
+    api
+      .getLicenseStatus()
+      .then(setLicense)
+      .catch(() => undefined);
+  }, [step]);
+
+  const handleActivate = async () => {
+    const trimmed = code.trim();
+    if (!trimmed) {
+      toast.error('请输入激活码');
+      return;
+    }
+    setActivating(true);
+    try {
+      const s = await api.activate(trimmed);
+      setLicense(s);
+      setCode('');
+      toast.success('激活成功，玄盾已解锁完整防护');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  const handleGenerateRebind = async () => {
+    const trimmed = code.trim();
+    if (!trimmed) {
+      toast.error('请先在上方填写原激活码');
+      return;
+    }
+    setActivating(true);
+    try {
+      const r = await api.buildRebindRequest(trimmed);
+      setRebindText(r.request);
+      const ok = await copyToClipboard(r.request);
+      if (ok) toast.success('换机申请已复制，发给玄盾官方即可');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setActivating(false);
+    }
+  };
 
   const handleSaveAndFinish = async () => {
     setSaving(true);
@@ -84,7 +158,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
       <div className="wizard-card">
         {/* 步骤条 */}
         <div className="wizard-steps">
-          {[0, 1, 2].map((i) => (
+          {[0, 1, 2, 3].map((i) => (
             <div
               key={i}
               className={`wizard-step-dot ${i === step ? 'active' : i < step ? 'done' : ''}`}
@@ -115,15 +189,151 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             <div className="wizard-actions">
               <span />
               <button className="btn" onClick={() => setStep(1)}>
-                开始配置
+                开始
                 <ArrowRight size={15} strokeWidth={1.5} />
               </button>
             </div>
           </>
         )}
 
-        {/* 步骤 2：配置 */}
+        {/* 步骤 2：激活 */}
         {step === 1 && (
+          <>
+            <div className="wizard-icon">
+              <KeyRound size={28} strokeWidth={1.5} />
+            </div>
+            <h1 className="wizard-title">激活玄盾</h1>
+
+            {license?.activated ? (
+              <>
+                <div className="wizard-text">
+                  <span className="badge safe">已激活</span>
+                  {license.subject && <span className="muted"> 授权给 {license.subject}</span>}
+                  {license.expiresAt && (
+                    <div className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+                      有效期至 {new Date(license.expiresAt * 1000).toLocaleDateString('zh-CN')}
+                    </div>
+                  )}
+                </div>
+                <div className="wizard-actions">
+                  <button className="btn secondary" onClick={() => setStep(0)}>
+                    <ArrowLeft size={15} strokeWidth={1.5} />
+                    上一步
+                  </button>
+                  <button className="btn" onClick={() => setStep(2)}>
+                    下一步
+                    <ArrowRight size={15} strokeWidth={1.5} />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="wizard-text">
+                  玄盾个人版需要激活码才能使用。
+                  <br />
+                  先把你的机器码发给玄盾官方，拿到激活码后填在下面。
+                </div>
+
+                <div className="field">
+                  <label className="field-label">你的机器码</label>
+                  <div className="code-box">{license?.machineCode ?? '（正在获取…）'}</div>
+                  <div className="field-hint">复制这段发给玄盾官方，即可为你签发激活码</div>
+                  {license && (
+                    <div className="btn-row mt-8">
+                      <button
+                        className="btn secondary"
+                        onClick={async () => {
+                          const ok = await copyToClipboard(license.machineCode);
+                          if (ok) toast.success('机器码已复制');
+                          else toast.error('复制失败，请手动选中复制');
+                        }}
+                      >
+                        <Copy size={14} strokeWidth={1.5} />
+                        复制机器码
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="field">
+                  <label className="field-label" htmlFor="ob-code">
+                    激活码
+                  </label>
+                  <textarea
+                    id="ob-code"
+                    className="input mono"
+                    rows={2}
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    placeholder="XDACT-..."
+                    spellCheck={false}
+                  />
+                </div>
+
+                {license?.reason && (
+                  <div
+                    className="mt-8"
+                    style={{ fontSize: 13, color: license.verifierAvailable ? 'var(--xd-suspect)' : 'var(--xd-danger)' }}
+                  >
+                    {license.reason}
+                  </div>
+                )}
+
+                <div className="wizard-actions">
+                  <button className="btn secondary" onClick={() => setStep(0)}>
+                    <ArrowLeft size={15} strokeWidth={1.5} />
+                    上一步
+                  </button>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="btn secondary"
+                      onClick={() => setRebindOpen((v) => !v)}
+                    >
+                      <Laptop size={14} strokeWidth={1.5} />
+                      换过电脑？
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => void handleActivate()}
+                      disabled={activating || !code.trim()}
+                    >
+                      {activating ? '激活中...' : '激活'}
+                    </button>
+                  </div>
+                </div>
+
+                {rebindOpen && (
+                  <div className="field">
+                    <div className="field-label">换机申请</div>
+                    <div className="field-hint">
+                      原激活码绑定了旧机器，换电脑后需要重新绑定。
+                      在上方填入原激活码后生成，把整段发给玄盾官方。
+                    </div>
+                    <div className="code-box mt-8">{rebindText || '（尚未生成）'}</div>
+                    <div className="btn-row mt-8">
+                      <button
+                        className="btn secondary"
+                        onClick={() => void handleGenerateRebind()}
+                        disabled={activating || !code.trim()}
+                      >
+                        生成换机申请
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
+                  <button className="btn ghost" onClick={() => setStep(2)}>
+                    暂不激活，先看看
+                  </button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* 步骤 3：配置 */}
+        {step === 2 && (
           <>
             <div className="wizard-icon">
               <Sparkles size={28} strokeWidth={1.5} />
@@ -219,13 +429,13 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             </div>
 
             <div className="wizard-actions">
-              <button className="btn secondary" onClick={() => setStep(0)}>
+              <button className="btn secondary" onClick={() => setStep(1)}>
                 <ArrowLeft size={15} strokeWidth={1.5} />
                 上一步
               </button>
               <button
                 className="btn"
-                onClick={() => setStep(2)}
+                onClick={() => setStep(3)}
                 disabled={!canNext}
               >
                 下一步
@@ -235,8 +445,8 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
           </>
         )}
 
-        {/* 步骤 3：完成 */}
-        {step === 2 && (
+        {/* 步骤 4：完成 */}
+        {step === 3 && (
           <>
             <div className="wizard-icon" style={{ background: 'linear-gradient(135deg, #00D4AA, #2B5FD7)' }}>
               <CheckCircle2 size={30} strokeWidth={1.5} />
@@ -258,7 +468,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             <div className="wizard-actions">
               <button
                 className="btn secondary"
-                onClick={() => setStep(1)}
+                onClick={() => setStep(2)}
                 disabled={saving}
               >
                 <ArrowLeft size={15} strokeWidth={1.5} />

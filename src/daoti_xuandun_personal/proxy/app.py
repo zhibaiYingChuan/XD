@@ -142,6 +142,74 @@ def create_app() -> FastAPI:
     # 中转站代理端点
     # ══════════════════════════════════════════════════════════
 
+    # ══════════════════════════════════════════════════════════
+    # 激活状态（只读模式判定）
+    # ══════════════════════════════════════════════════════════
+    #
+    # ★ 为什么是「只读」而不是「锁死」
+    #   未激活就完全拒绝代理，等于把用户挡在门外。若他其实已经付过钱
+    #   只是码过期了或机器换了，用户会彻底无法使用，投诉成本极高。
+    #   只读模式下界面、日志、设置全部可用，只是不再执行脱敏与拦截 ——
+    #   用户仍能看清玄盾在做什么，价值可感知。
+    #
+    # ★ 但「验不了」不等于「没激活」
+    #   验签组件故障（缺公钥 / 缺 jwt 依赖）时把用户降级成只读，
+    #   等于用我方故障惩罚已付费用户。所以只有**明确判定为未激活**
+    #   才降级；组件不可用时继续正常防护。
+    #
+    # ★ 机器码绑定为什么不在这里查（如实说明能力边界）
+    #   机器码由 Rust 侧用 sysinfo 采集，引擎是**独立进程**，
+    #   拿不到那个值。引擎若自己用别的方式重算，两侧算法必然漂移，
+    #   结果是所有用户的码都验不过、全部被降级成只读。
+    #   所以引擎侧只做它能正确做的判定：签名 / 有效期 / 吊销。
+    #   机器码绑定由 Rust 在 activate 时强制校验（见 license.rs）。
+    def _protection_enabled() -> bool:
+        """未激活 / 已过期时返回 False（进入只读模式）。"""
+        try:
+            from .. import license as lic
+
+            if not lic.load_public_key():
+                # 验签组件不可用 → 不能据此断定用户没付过钱
+                logger.warning("公钥缺失，跳过激活校验（按已授权处理）")
+                return True
+
+            import jwt  # noqa: F401
+
+            code = _load_saved_code()
+            if not code:
+                return False
+
+            # ★ mch 传空串：引擎无从复现 Rust 采集的机器码，
+            #   传一个编造的值会让合法码全部验不过。
+            #   verify() 对空 mch 的处理是「不比对机器码」——
+            #   机器码绑定由 Rust 侧负责，这里不越权判定。
+            r = lic.verify(code, "", machine_check=False)
+            return r.ok
+        except Exception as e:  # 任何异常都不得让防护静默消失
+            logger.warning("激活状态读取失败（%s），按已授权处理", e)
+            return True
+
+    def _load_saved_code() -> str:
+        """读取用户已保存的激活码。
+
+        落盘位置与 Rust 侧 license.rs::license_file 一致，
+        两边必须读同一个文件，否则会出现「界面说已激活、引擎说没激活」。
+        """
+        import os as _os
+
+        path = _os.path.join(
+            _os.getenv("LOCALAPPDATA") or _os.path.expanduser("~/.config"),
+            "com.daoti.xuandun-personal",
+            "license.json",
+        )
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                import json as _json
+
+                return str(_json.load(f).get("code", "") or "")
+        except (OSError, ValueError):
+            return ""
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         """OpenAI 兼容代理端点（三层检测管道）。"""
@@ -162,6 +230,13 @@ def create_app() -> FastAPI:
         # 防护已暂停 → 直通
         if time.time() < _paused_until:
             return await _relay_passthrough(body, stream, session_id)
+
+        # ★ 未激活 / 已过期 → 只读模式（直通，但如实记录「未经检测」）
+        if not _protection_enabled():
+            return await _relay_passthrough(
+                body, stream, session_id,
+                note="未激活，本次请求未经检测直接转发",
+            )
 
         # ══════ 第一层：请求侧脱敏 ══════
         redaction_records = []
@@ -281,8 +356,13 @@ def create_app() -> FastAPI:
             },
         )
 
-    async def _relay_passthrough(body: Dict[str, Any], stream: bool, session_id: str):
-        """防护暂停时的直通转发。"""
+    async def _relay_passthrough(
+        body: Dict[str, Any],
+        stream: bool,
+        session_id: str,
+        note: str = "防护已暂停，本次请求未经检测直接转发",
+    ):
+        """未经检测的直通转发（防护暂停 / 未激活只读模式）。"""
         try:
             upstream = await _forward_to_relay(body, stream)
         except httpx.HTTPError as e:
@@ -292,7 +372,7 @@ def create_app() -> FastAPI:
             )
         # ★ P2-17 修复：LogType.RELAY（正常转发）原先在整个代码库中
         #   从未被产生，导致日志页「正常转发」筛选项恒为空 ——
-        #   一个用户看得见、却永远无结果的选项。防护暂停期间正是
+        #   一个用户看得见、却永远无结果的选项。防护暂停/未激活期间正是
         #   「未经检测的转发」，如实记录反而是透明度要求。
         _record_log(
             LogType.RELAY.value,
@@ -304,7 +384,7 @@ def create_app() -> FastAPI:
             None,
             session_id,
             [],
-            text_preview="防护已暂停，本次请求未经检测直接转发",
+            text_preview=note,
         )
         if stream:
             return StreamingResponse(
@@ -619,6 +699,11 @@ def create_app() -> FastAPI:
             "security_level": _config.guard.security_level,
             "upstream": _config.relay.name,
             "today": today,
+            # ★ 只读模式必须显式告诉前端。
+            #   若只在 message 里塞一句话，首页 KPI（"今日已检查 N 次"）
+            #   仍会照常显示，用户会以为防护在正常工作 ——
+            #   而实际上请求都在直通。这是对用户的谎报。
+            "read_only": not _protection_enabled(),
         }
 
     @app.get("/api/stats")
@@ -903,6 +988,30 @@ def create_app() -> FastAPI:
             "has_public_key": bool(pub),
             "has_jwt": has_jwt,
             "last_seen": lic.read_last_seen(),
+        }
+
+    @app.post("/api/license/rebind_request")
+    async def license_rebind_request(payload: Dict[str, Any] = Body(...)):
+        """生成换绑请求串。
+
+        ★ 用户换电脑/换硬盘后，原码在新机上必然验证失败
+          （mch 绑的是旧机器）。此端点把「原码 + 新机器码」
+          打包成一个可复制的串，用户发给售后即可完成换绑 ——
+          签发方只需验签后改 mch 重签，不需要用户再牵扯旧机器。
+
+        刻意不加密：内容是「一张已签名的码 + 一个机器码哈希」，
+        不含隐私；加密反而需要客户端持有解密密钥，那才是泄露点。
+        """
+        from .. import license as lic
+
+        code = str(payload.get("code") or "")
+        mc = str(payload.get("machine_code") or "")
+        if not code.strip():
+            raise HTTPException(status_code=400, detail="缺少原激活码")
+        return {
+            "request": lic.build_rebind_request(code, mc),
+            # 机器码一并回传，用户报障时直接发这一段即可
+            "machine_code_hash": lic.machine_code_hash(mc),
         }
 
     @app.get("/api/diagnostics")

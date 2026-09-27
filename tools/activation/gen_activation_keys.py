@@ -181,6 +181,7 @@ def issue(args) -> int:
         "iat": now,
         "exp": now + args.days * 86400,
         "jti": "a_" + uuid.uuid4().hex,
+        "gen": 0,
         "tier": args.tier,
         "scope": "activate",
         "mch": machine_code_hash(args.mch),
@@ -207,6 +208,7 @@ def issue(args) -> int:
         Path(args.log) if args.log else DEFAULT_LOG,
         {
             "jti": claims["jti"],
+            "gen": claims.get("gen", 0),
             "name": args.name,
             "tier": args.tier,
             "mch": claims["mch"],
@@ -231,6 +233,199 @@ def _append_log(path: Path, entry: dict) -> None:
         json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"[已记录] {path}  ★ 含明文激活码，勿入库")
+
+
+# ══════════════════════════════════════════════════════════════
+# 吊销
+# ══════════════════════════════════════════════════════════════
+
+
+def rebind(args) -> int:
+    """换机重签：同一张码换一个机器码，保持 jti/有效期/档位不变。
+
+    为什么需要
+    ────────────────────────────────────────────────────────────
+    严格一码一机意味着用户换电脑/换硬盘后，
+    新机器上验证必然失败（码里的 mch 是旧机器的）。
+    纯客户端无法自助完成 —— 新机器上没有任何能证明「我拥有这张码」
+    的东西，除了**签名本身**。
+
+    ★ 关键认识：一张通过验签的码，其签名就是所有权证明。
+      用户持有它，就能在任何地方证明自己合法，
+      不需要旧机器参与。所以换绑只需「旧码 + 新机器码」两个字符串。
+
+    保持 jti 不变的意义：
+      · 吊销名单按 jti 索引，换绑后仍能被正确吊销
+      · 出问题时能追溯到同一张订单
+      · 避免「换绑成为绕过吊销的后门」——
+        若换绑换新 jti，被吊销的码换个机器就复活了
+
+    用法
+    ────────────────────────────────────────────────────────────
+        # 客户端会给出换绑请求串，直接粘贴即可
+        python gen_activation_keys.py rebind --pub <公钥> --request "<请求串>"
+    """
+    import jwt
+
+    pub = _load_public_key(Path(args.pub))
+
+    # 解析客户端给出的请求串：XDRB.<base64url(json)>
+    raw = args.request.strip()
+    if not raw.startswith("XDRB."):
+        print(
+            "✗ 请求串格式不对（应以 XDRB. 开头）\n"
+            "  从客户端「激活」页复制完整的换绑请求串",
+            file=sys.stderr,
+        )
+        return 1
+    import base64
+
+    body = raw[5:]
+    body += "=" * (-len(body) % 4)
+    try:
+        info = json.loads(base64.urlsafe_b64decode(body).decode("utf-8"))
+    except Exception as e:
+        print(f"✗ 无法解析请求串: {e}", file=sys.stderr)
+        return 1
+
+    old_code = str(info.get("code", ""))
+    new_mch_raw = str(info.get("mch", ""))
+    if not old_code.startswith(_PREFIX):
+        print("✗ 请求串中缺少有效的原激活码", file=sys.stderr)
+        return 1
+    if not new_mch_raw:
+        print("✗ 请求串中缺少新机器码", file=sys.stderr)
+        return 1
+
+    # ★ 必须验签通过才允许换绑：
+    #   否则任何人都能拿一个乱写的 jti 来换绑
+    try:
+        claims = jwt.decode(
+            old_code[len(_PREFIX):], pub, algorithms=["RS256"],
+            options={"verify_aud": False, "verify_exp": False},
+        )
+    except jwt.InvalidTokenError as e:
+        print(f"✗ 原激活码签名无效，拒绝换绑: {e}", file=sys.stderr)
+        return 1
+
+    if claims.get("iss") != _ISSUER:
+        print(f"✗ iss 不符: {claims.get('iss')}", file=sys.stderr)
+        return 1
+
+    new_mch = machine_code_hash(new_mch_raw)
+    old_mch = str(claims.get("mch", ""))
+    if new_mch == old_mch:
+        print("· 新旧机器码相同，无需换绑")
+        return 0
+
+    # 检查是否已被吊销 —— 换绑不能成为绕过吊销的后门
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+    try:
+        from daoti_xuandun_personal import license as lic
+
+        # ★ 按**原码的代次**查：若这张码已被作废（gen 0 写了 jti#1），
+        #   就不该再拿它换绑出新码 —— 那等于复活一张已死的码。
+        old_gen = int(claims.get("gen", 0) or 0)
+        if lic.is_revoked(str(claims.get("jti", "")), old_gen) is True:
+            print(f"✗ 该激活码已被吊销，拒绝换绑", file=sys.stderr)
+            print("  （换绑不改 jti，所以吊销状态依然有效）", file=sys.stderr)
+            return 1
+    except ImportError:
+        print("[WARN] 无法导入 license 模块，跳过吊销检查")
+
+    # 重新签发：只改 mch，jti/exp/sub/tier 全部保持
+    new_claims = dict(claims)
+    new_claims["mch"] = new_mch
+    # ★ gen 递增：这是「能单独作废旧码」的唯一依据。
+    #   jti 不变 + gen 递增 → 吊销可以精确到代次。
+    new_claims["gen"] = int(claims.get("gen", 0) or 0) + 1
+    # iat 刷新为当前时刻（便于排查换绑发生时间），exp 不变
+    new_claims["iat"] = int(time.time())
+
+    private_key = _load_private_key(Path(args.key))
+    new_code = _PREFIX + jwt.encode(new_claims, private_key, algorithm="RS256")
+
+    new_gen = int(new_claims["gen"])
+
+    print(new_code)
+    print()
+    print(f"授权给  : {claims.get('sub')}")
+    print(f"档位    : {claims.get('tier')}")
+    print(f"jti     : {claims.get('jti')}  （不变，吊销仍有效）")
+    print(f"代次    : {claims.get('gen', 0)} → {new_gen}")
+    print(f"机器码  : {old_mch} → {new_mch}")
+    print(
+        f"到期    : {datetime.fromtimestamp(claims['exp'], tz=timezone.utc).isoformat()}"
+        f"  （不变）"
+    )
+    print()
+    print("★ 下一步：让用户把新码重新粘贴进客户端。若旧码可能外泄，")
+    print("  单独作废旧码（只杀 gen < 新代次，新码不受影响）：")
+    print(f"  python gen_activation_keys.py revoke {claims.get('jti')} --before-gen {new_gen}")
+    return 0
+
+
+def revoke(args) -> int:
+    """把已签发的激活码加入吊销名单。
+
+    ★ 为什么要做：激活码一旦发出，收据里就躺着明文码。
+      用户退款、手误签发、或码被公开泄露时，必须有手段让它失效。
+      没有吊销 = 一旦泄漏就永远可用。
+
+    ★ ``--before-gen`` 为什么必要（换绑场景下的陷阱）：
+      换绑保持 jti 不变，只有 gen 递增。此时同一 jti 下同时存在
+      多张码（分别绑不同机器）。若按 jti 吊销，新旧两张码会**一起**
+      被杀死 —— 而新码往往是用户唯一剩下的凭据，执行即永久锁死。
+      指定 ``--before-gen N`` 表示「只作废 gen < N 的码」。
+
+    名单落在**用户机器**上（%LOCALAPPDATA%\\com.daoti.xuandun-personal\\
+    revoked_jtis.json）—— 这是本实现的已知限制，见下方说明。
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+    try:
+        from daoti_xuandun_personal import license as lic
+    except ImportError as e:
+        print(f"✗ 无法导入个人版 license 模块: {e}", file=sys.stderr)
+        return 2
+
+    if args.before_gen is not None and args.before_gen < 0:
+        print("✗ --before-gen 不能为负", file=sys.stderr)
+        return 1
+
+    added = lic.revoke(args.jti, before_gen=args.before_gen)
+    if added:
+        scope = f"gen < {args.before_gen} 的码" if args.before_gen is not None else "全部代次"
+        print(f"✓ 已吊销 {args.jti}  （范围：{scope}）")
+    else:
+        print(f"· {args.jti} 已在吊销名单中（无需重复）")
+    print(f"  名单文件: {lic._revoked_path()}")
+
+    if not args.deploy:
+        print()
+        print("⚠ 重要：本次吊销只写到了**当前这台机器**的名单。")
+        print("  要让该码在用户机器上真正失效，还需要：")
+        print("    1) 把 revoked_jtis.json 随下一次版本更新分发，或")
+        print("    2) 客户端在验签时联网拉取吊销列表（尚未实现）")
+        print("  加 --deploy 可把名单同步到分发目录（若已配置）")
+    return 0
+
+
+def list_revoked(args) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+    from daoti_xuandun_personal import license as lic
+
+    revoked = lic.load_revoked()
+    if revoked is None:
+        print("✗ 吊销名单不可读（文件损坏？）—— 已吊销的码可能全部复活")
+        print(f"  路径: {lic._revoked_path()}")
+        return 1
+    if not revoked:
+        print("（暂无吊销记录）")
+        return 0
+    print(f"已吊销 {len(revoked)} 个：")
+    for j in sorted(revoked):
+        print(f"  {j}")
+    return 0
 
 
 # ══════════════════════════════════════════════════════════════
@@ -273,7 +468,7 @@ def verify(args) -> int:
         ok = False
 
     print("── 激活码内容 ──")
-    for k in ("sub", "tier", "jti", "mch", "features"):
+    for k in ("sub", "tier", "jti", "gen", "mch", "features"):
         if k in claims:
             print(f"  {k:9} = {claims[k]}")
     print(f"  签发     = {datetime.fromtimestamp(claims['iat'], tz=timezone.utc).isoformat()}")
@@ -312,6 +507,21 @@ def main() -> int:
     h = sub.add_parser("hash", help="由原始机器码算激活码内使用的哈希")
     h.add_argument("machine_code")
 
+    rb = sub.add_parser("rebind", help="换机重签（同一张码换一个机器码）")
+    rb.add_argument("--key", required=True, help="RSA 私钥 PEM（用于重签）")
+    rb.add_argument("--pub", required=True, help="RSA 公钥 PEM（用于校验原码）")
+    rb.add_argument("--request", required=True,
+                    help="客户端给出的换绑请求串（XDRB.…）")
+
+    rv = sub.add_parser("revoke", help="吊销一个已签发的激活码")
+    rv.add_argument("jti", help="激活码的 jti（在签发日志/用户报障信息里）")
+    rv.add_argument("--before-gen", type=int, default=None,
+                    help="只作废该 jti 中 gen 小于此值的码（换绑后作废旧码用）")
+    rv.add_argument("--deploy", action="store_true",
+                    help="同步名单到分发目录（需自行配置目标）")
+
+    ls = sub.add_parser("revoked", help="列出已吊销的 jti")
+
     args = ap.parse_args()
     if args.cmd == "genkeypair":
         return gen_keypair(Path(args.out_dir), args.force)
@@ -322,6 +532,12 @@ def main() -> int:
     if args.cmd == "hash":
         print(machine_code_hash(args.machine_code))
         return 0
+    if args.cmd == "rebind":
+        return rebind(args)
+    if args.cmd == "revoke":
+        return revoke(args)
+    if args.cmd == "revoked":
+        return list_revoked(args)
     return 1
 
 

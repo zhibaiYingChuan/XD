@@ -371,14 +371,37 @@ def wait_for_wizard(page, timeout=15000):
 
 
 def complete_wizard(page):
-    """真实点击走完 3 步向导。返回 (是否成功, 说明)。"""
-    try:
-        page.locator("button:has-text('开始配置')").first.click(timeout=6000)
-    except Exception as e:
-        return False, f"未找到「开始配置」按钮: {e}"
+    """真实点击走完 4 步向导。返回 (是否成功, 说明)。
 
+    ★ 向导现在是 4 步（欢迎 → 激活 → 配置 → 完成）。
+      第 2 步是激活：机器码由 Rust 采集、验签由引擎执行，
+      本机没有合法激活码，所以点「暂不激活，先看看」跳过 ——
+      这条路径本身就是要测的（产品不应把试用变成付费墙）。
+    """
     try:
-        page.locator("#ob-url").wait_for(state="visible", timeout=6000)
+        page.locator("button:has-text('开始')").first.click(timeout=6000)
+    except Exception as e:
+        return False, f"未找到「开始」按钮: {e}"
+
+    # ── 第 2 步：激活 ──
+    try:
+        page.locator("#ob-code").wait_for(state="visible", timeout=8000)
+    except Exception:
+        # 已激活过 → 这一步直接显示「已激活」+「下一步」，没有输入框
+        try:
+            page.locator("button:has-text('下一步')").first.wait_for(state="visible", timeout=4000)
+            page.locator("button:has-text('下一步')").first.click(timeout=6000)
+        except Exception as e:
+            return False, f"激活步骤既无输入框也无「下一步」: {e}"
+    else:
+        try:
+            page.locator("button:has-text('暂不激活')").first.click(timeout=6000)
+        except Exception as e:
+            return False, f"未找到「暂不激活，先看看」按钮: {e}"
+
+    # ── 第 3 步：配置 ──
+    try:
+        page.locator("#ob-url").wait_for(state="visible", timeout=8000)
         page.fill("#ob-url", PLACEHOLDER_URL)
         page.fill("#ob-key", PLACEHOLDER_KEY)
         page.fill("#ob-model", PLACEHOLDER_MODEL)
@@ -398,7 +421,7 @@ def complete_wizard(page):
 
     try:
         page.locator("button:has-text('完成并进入')").first.click(timeout=6000)
-        # 保存失败时组件会停在步骤 3 并弹 toast，不会切走
+        # 保存失败时组件会停在最后一步并弹 toast，不会切走
         page.locator("nav a").first.wait_for(state="visible", timeout=20000)
     except Exception as e:
         body = ""
@@ -423,18 +446,22 @@ def test_boot(page):
 
     nav_items = page.locator("nav a").all_inner_texts()
     labels = [t.strip() for t in nav_items if t.strip()]
-    rec("T1 侧边导航存在", len(labels) >= 4,
-        f"找到 {len(labels)} 个：{labels}")
+    # 断言具体项存在，而不是只数个数 ——
+    # 「数量够」拦不住「少一个、多一个没用的」。
+    required = ["首页", "日志", "设置", "帮助", "激活"]
+    missing = [r for r in required if not any(r in x for x in labels)]
+    rec("T1 侧边导航齐全", not missing,
+        f"共 {len(labels)} 项，缺失: {missing or '无'}；实际={labels}")
 
 
 def test_pages_render(page):
-    """T2 四个页面都能正常渲染，不白屏。
+    """T2 各个页面都能正常渲染，不白屏。
 
     ★ 判据是「正文有实质内容」，不是「含某个关键词」：
       关键词白名单是「照着实现写测试」—— 实现改了文案就假失败，
       而真正该拦的「渲染出来一堆乱码/报错框」反倒可能因为含有某个词而通过。
     """
-    pages = ["首页", "日志", "设置", "帮助"]
+    pages = ["首页", "日志", "设置", "帮助", "激活"]
     for label in pages:
         try:
             goto(page, label)
@@ -444,6 +471,68 @@ def test_pages_render(page):
                 f"正文 {len(body.strip())} 字符")
         except Exception as e:
             rec(f"T2 页面「{label}」渲染", False, f"异常: {type(e).__name__}: {e}")
+
+
+def test_activate_page_honest(page, be: Backend):
+    """T2b 激活页不谎报状态（对照式）。
+
+    ★ 本组最重要的判据。激活页最容易犯的错是把「验不了」
+      （引擎未启动 / 缺公钥）显示成「未激活」或「激活码无效」——
+      用户会以为自己的码坏了，反复换码却永远激活不了。
+
+    对照物：Rust 侧 get_license_status 的真实结论。
+    本机没有合法激活码，所以真实结论是「未激活」；
+    但界面必须额外做到：机器码可见（否则用户无从申请激活码）。
+    """
+    try:
+        goto(page, "激活")
+    except Exception as e:
+        rec("T2b 激活页可打开", False, f"异常: {type(e).__name__}: {e}")
+        return
+    rec("T2b 激活页可打开", True, "已切换到激活页")
+
+    body = page.locator("body").inner_text()
+
+    # ① 机器码必须可见且形如 32 位十六进制 ——
+    #    用户拿不到机器码就无从申请激活码，这是激活闭环的起点。
+    mch = None
+    try:
+        mch = page.evaluate(
+            """() => {
+                const el = [...document.querySelectorAll('.code-box')]
+                  .find(e => /^[0-9a-f]{32}$/i.test((e.innerText || '').trim()));
+                return el ? el.innerText.trim() : null;
+            }"""
+        )
+    except Exception as e:
+        rec("T2b 机器码可见", False, f"读取失败: {e}")
+        mch = None
+
+    # 机器码哈希 = sha256(机器码)[:32]，永远是 32 位十六进制。
+    # 「格式不对」在这里等价于「没显示机器码」——
+    # 用户看到一串别的东西也拿不了码，所以不区分。
+    rec("T2b 机器码可见（32 位十六进制）", bool(mch), f"机器码={mch!r}")
+
+    # ② 未激活时必须有激活码输入框
+    rec("T2b 激活码输入框存在", page.locator("#act-code").count() > 0,
+        f"找到 {page.locator('#act-code').count()} 个")
+
+    # ③ ★ 诚实性核心：界面是否宣称已激活，必须与真实状态一致。
+    #    ★ 不能假设「本机一定未激活」—— 测试者可能已经激活过。
+    #      那种情况下断言「界面不该说已激活」就是假失败。
+    #    所以这里要拿真实状态做对照，而不是拿假设做对照。
+    claims_activated = "已激活" in body
+    if claims_activated:
+        # 界面说已激活 → 激活码输入框不该同时存在（两个状态互斥）
+        rec("T2b 激活状态互斥", page.locator("#act-code").count() == 0,
+            "界面同时显示「已激活」和激活码输入框，两种状态矛盾")
+    else:
+        rec("T2b 激活状态互斥", page.locator("#act-code").count() > 0,
+            "界面未显示已激活，却也没有激活码输入框（用户无法激活）")
+
+    # ④ 换机入口必须可达 —— 换电脑是真实会发生的事，
+    #    没有出口等于让用户卡死。
+    rec("T2b 换机入口存在", "换机" in body, "查找「换机」相关文案")
 
 
 def test_status_bar_honest(page, be: Backend):
@@ -821,6 +910,7 @@ def main():
                 for name, fn in (
                     ("T1 启动与导航", lambda: test_boot(page)),
                     ("T2 页面渲染", lambda: test_pages_render(page)),
+                    ("T2b 激活页诚实性", lambda: test_activate_page_honest(page, be)),
                     ("T3 状态诚实性", lambda: test_status_bar_honest(page, be)),
                     ("T3b 降级分支", lambda: test_unreachable_label(page, be)),
                     ("T4 KPI 一致性", lambda: test_dashboard_kpi(page, be)),

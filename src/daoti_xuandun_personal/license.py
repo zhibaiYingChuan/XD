@@ -74,6 +74,165 @@ def now_unix() -> int:
     return int(time.time())
 
 
+# ══════════════════════════════════════════════════════════════
+# 吊销名单
+# ══════════════════════════════════════════════════════════════
+#
+# ★ 为什么必须做（这不是可选项）
+#   激活码一旦发出，收据里就躺着明文码。用户退款、你手误签发、
+#   或码被公开泄露（贴到论坛/社交媒体）时，必须有手段让它失效。
+#   没有吊销 = 一旦泄漏就永远可用，只能等过期。
+#
+# ★ 形态选择：JSON 文件而非 SQLite
+#   名单规模是「已售出数量」量级，几十到几千条 JSON 足够，
+#   且可以直接用文本编辑器/Git 审阅改动 —— 吊销是低频高危操作，
+#   必须能被人眼核对。写入用原子替换（临时文件 + os.replace），
+#   避免半截文件导致名单失效。
+_REVOKED_FILE = "revoked_jtis.json"
+
+
+def _revoked_path() -> str:
+    return os.path.join(
+        os.getenv("LOCALAPPDATA") or os.path.expanduser("~/.config"),
+        "com.daoti.xuandun-personal",
+        _REVOKED_FILE,
+    )
+
+
+def load_revoked() -> Optional[set]:
+    """读吊销名单。
+
+    返回三态，**这个区分是本模块的关键**：
+
+    * ``set()``      —— 名单可读，**无人被吊销**（含「文件不存在」）
+    * ``set{...}``   —— 名单可读，含若干已吊销 jti
+    * ``None``       —— **名单不可读**，结论不可信
+
+    ★ 为什么「文件不存在」要算「无人被吊销」而不是「不可读」：
+      全新安装的用户机器上根本没有这个文件。若把它当「不可读」
+      并据此拒绝，那么每个新用户在第一次激活时都会看到
+      「无法校验激活码状态」—— 功能完全不可用。
+
+    ★ 为什么「文件损坏」才算不可读：
+      名单损坏时若当成「无人被吊销」，所有已吊销的码会集体复活
+      （退款过的、泄露过的全都重新生效）。那比拒绝更糟。
+    """
+    path = _revoked_path()
+    if not os.path.exists(path):
+        # 首次运行：还没有吊销过任何人
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            import json
+
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+
+    if not isinstance(data, list):
+        # 内容不是列表 = 文件被改坏或格式不对，结论不可信
+        return None
+
+    entries = {str(x).strip() for x in data if str(x).strip()}
+    for e in entries:
+        if "#" in e and not _valid_before_gen(e):
+            # ★ 条目带代次后缀但代次不是非负整数 = 名单被改坏。
+            #   判为「不可读」而非「这条不匹配」——后者是 fail-open，
+            #   一条写坏的记录就能让本该被吊销的码复活。
+            return None
+    return entries
+
+
+def _valid_before_gen(entry: str) -> bool:
+    """``jti#N`` 中的 N 是否为合法代次。"""
+    try:
+        return int(entry.rsplit("#", 1)[1]) >= 0
+    except (ValueError, IndexError):
+        return False
+
+
+def _entry_revokes(entry: str, jti: str, gen: int) -> bool:
+    """名单里的一条记录是否命中（jti, gen）。
+
+    两种记录形态：
+
+    * ``a_xxx``      —— 全代次核弹：该 jti 的任何代次都已被吊销
+    * ``a_xxx#2``    —— 作废代次：该 jti 中 gen < 2 的码已吊销，
+                        gen ≥ 2（更晚换绑出来的）仍然有效
+
+    ★ 代次机制解决的是「换绑后如何单独作废旧码」：
+      换绑保持 jti 不变（否则吊销可被绕过），于是同一个 jti
+      先后可能存在多张码，分别绑定不同机器。若只有 jti 粒度，
+      唯一能做的吊销会把新旧两张码一起杀死 ——
+      而新码往往是用户唯一剩下的凭据，执行即永久锁死。
+    """
+    if "#" in entry:
+        e_jti, _, e_gen = entry.rpartition("#")
+        try:
+            return e_jti == jti and gen < int(e_gen)
+        except ValueError:
+            return False  # 正常路径不会到这里（load_revoked 已拦）
+    return entry == jti
+
+
+def is_revoked(jti: str, gen: int = 0) -> Optional[bool]:
+    """该 jti（指定代次）是否已被吊销。
+
+    返回值三态：
+
+    * ``True``  —— 已吊销
+    * ``False`` —— 未吊销
+    * ``None``  —— **名单不可读，结论不可信**
+
+    ★ 那个 ``None`` 是关键。调用方拿到 None 时必须按「拒绝」处理：
+      把「查不到吊销记录」当成「没被吊销」，等于让名单文件
+      一损坏，所有已吊销的码集体复活。
+    """
+    if not jti:
+        return False
+    revoked = load_revoked()
+    if revoked is None:
+        return None
+    return any(_entry_revokes(e, jti, gen) for e in revoked)
+
+
+def revoke(jti: str, before_gen: Optional[int] = None) -> bool:
+    """把一个 jti 加入吊销名单（供管理端调用）。
+
+    Args:
+        jti: 激活码唯一 ID
+        before_gen: 只作废该 jti 中 gen 小于此值的码（换绑后作废旧码用）。
+                    ``None`` 表示作废全部代次。
+    """
+    entry = jti if before_gen is None else f"{jti}#{int(before_gen)}"
+    revoked = load_revoked()
+    if revoked is None:
+        revoked = set()
+    if entry in revoked:
+        return False
+    revoked.add(entry)
+
+    path = _revoked_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    import json
+    import tempfile
+
+    # 原子写：先写临时文件再 os.replace，
+    # 避免进程中断留下半截 JSON（那会让名单整体失效）
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(sorted(revoked), f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
+
+
 @dataclass
 class VerifyResult:
     """验签结论。
@@ -219,7 +378,12 @@ def check_clock_rollback(now: int, last_seen: Optional[int]) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════
 
 
-def verify(code: str, mch: str, now: Optional[int] = None) -> VerifyResult:
+def verify(
+    code: str,
+    mch: str,
+    now: Optional[int] = None,
+    machine_check: bool = True,
+) -> VerifyResult:
     """校验激活码。
 
     Args:
@@ -227,6 +391,13 @@ def verify(code: str, mch: str, now: Optional[int] = None) -> VerifyResult:
         mch: 本机机器码哈希（由调用方用本模块的
              ``machine_code_hash`` 算出）
         now: 当前 Unix 秒。显式传入便于测试确定性。
+        machine_check: 是否比对机器码。
+
+    ★ ``machine_check=False`` 只给**引擎侧**用。
+      机器码由 Rust 用 sysinfo 采集，引擎是独立进程拿不到那个值；
+      若它自己用别的方式重算，两侧算法必然漂移，结果是所有用户的
+      码都验不过。引擎因此只校验签名/有效期/吊销，
+      机器码绑定由 Rust 在激活入口强制执行（两处都过才算激活）。
 
     ★ ``verifier_available=False`` 的每一条路径都必须让 ``ok=False``。
       「验不了」绝不能被当成「验过了」—— 那是授权系统最危险的失效方向。
@@ -293,21 +464,94 @@ def verify(code: str, mch: str, now: Optional[int] = None) -> VerifyResult:
         return VerifyResult(False, "bad_signature", "激活码无效，请确认是玄盾官方发出的码")
 
     got_mch = str(claims.get("mch", ""))
-    if got_mch != mch:
+    # ★ 只要**任一侧**没有机器码，就不比对。
+    #   引擎侧传空串（独立进程拿不到 Rust 采集的机器码）。
+    #   若把空串当成一个真实哈希去比，没有任何码能通过 ——
+    #   结果是所有用户都被降级成只读，防护整体失效。
+    #   机器码绑定由 Rust 在激活入口强制执行，两处都过才算激活。
+    if machine_check and mch and got_mch != mch:
         return VerifyResult(
             False,
             "machine_mismatch",
             "激活码与本机不匹配（一码一机）。若更换了硬件，请联系售后",
         )
 
+    # ④ 吊销检查
+    #
+    # ★ 必须放在**验签之后**：jti 来自未经验证的 payload 时，
+    #   任何人都能构造 {"jti": "<别人的 jti>"} 把别人的码吊销掉。
+    #   只有签名通过的 jti 才是可信的。
+    jti = str(claims.get("jti", ""))
+    # gen 是换绑代次：同一 jti 换绑后 jti 不变，只有 gen 递增。
+    # 缺失时按 0 处理（首版签发的码都没有这个字段）。
+    try:
+        gen = int(claims.get("gen", 0) or 0)
+        if gen < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return VerifyResult(
+            False, "malformed", "激活码数据异常，请重新获取"
+        )
+    revoked = is_revoked(jti, gen)
+    if revoked is None:
+        # 名单不可读 → 按「拒绝」处理。
+        # 把「查不到吊销记录」当成「没被吊销」，
+        # 等于名单文件一损坏，所有已吊销的码集体复活。
+        return VerifyResult(
+            False,
+            "revocation_unavailable",
+            "无法校验激活码状态，请稍后重试或联系售后",
+            verifier_available=False,
+        )
+    if revoked:
+        return VerifyResult(
+            False,
+            "revoked",
+            "该激活码已失效（可能已退款或被撤销），请重新获取",
+            jti=jti,
+        )
+
     return VerifyResult(
         True,
         subject=str(claims.get("sub", "")),
         tier=str(claims.get("tier", "personal")),
-        jti=str(claims.get("jti", "")),
+        jti=jti,
         exp=int(claims.get("exp", 0)),
         features=list(claims.get("features", []) or []),
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# 换机重绑请求
+# ══════════════════════════════════════════════════════════════
+
+
+def build_rebind_request(code: str, machine_code_raw: str) -> str:
+    """生成换绑请求串（客户端 → 签发方）。
+
+    ★ 为什么是「客户端生成、签发方重签」而不是纯自助：
+      严格一码一机下，新机器上验证必然失败（码里的 mch 是旧机器的）。
+      新机器上没有任何东西能证明「我拥有这张码」——除了**签名本身**。
+      所以流程是：用户把「原码 + 新机器码」一起发给你，
+      你验签通过后只改 mch 重签。
+
+    格式：``XDRB.<base64url(json)>``
+    base64url 而非 base64：避免复制过程中 ``+`` / ``/`` / ``=``
+    被聊天软件转义或截断。实测这是长串传输最常见的失败原因。
+
+    刻意**不加密** —— 内容是「一个已签名的码 + 一个机器码哈希」，
+    本身不含隐私；而加密会引入一个「客户端解密密钥」，
+    那才是真正的泄露点。
+    """
+    import base64
+    import json as _json
+
+    payload = _json.dumps(
+        {"code": (code or "").strip(), "mch": (machine_code_raw or "").strip()},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "XDRB." + base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
 
 # ══════════════════════════════════════════════════════════════
