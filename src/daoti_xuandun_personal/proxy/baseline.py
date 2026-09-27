@@ -330,9 +330,9 @@ _MODEL_VENDOR_PREFIXES = (
     "us.anthropic.", "openrouter/", "azure/",
 )
 
-# 快照版本后缀：-2024-11-01 / @20240513 / -2024-08-06-preview
+# 快照版本后缀：-2024-11-01 / @20240513 / -2024-08-06-preview / -002
 _MODEL_SNAPSHOT_RE = re.compile(
-    r"[@\-](\d{8}|\d{4}-\d{2}-\d{2})(-preview)?$|[-:]latest$|"
+    r"[@\-](\d{8}|\d{4}-\d{2}-\d{2}|\d{3})(-preview)?$|[-:]latest$|"
     r"[-:]v\d+(?:\.\d+)*$|-instruct$|-chat$|-it$|-hf$",
     re.IGNORECASE,
 )
@@ -367,19 +367,54 @@ def _normalize_model(name: Optional[str]) -> str:
 def _model_compatible(req: str, resp: str) -> bool:
     """判断两个归一化后的模型名是否可能指向同一个模型。
 
-    宁可放过也不误报 —— 误报会阻断用户正常使用。
+    ★★★ 曾经的严重缺陷（实测复现，勿改回 startswith）：
+        这里曾用「一方是另一方的前缀」判兼容，于是
+        gpt-4o → gpt-4o-mini、gemini-1.5-pro → gemini-1.5-pro-flash
+        这类**降级牟利**全部 compatible=True、零 finding。
+        而「把便宜模型冒充贵模型」恰恰是中转站最典型的牟利手法，
+        model_downgrade 这条判据等于形同虚设。
+
+        前缀规则是为了「顺手覆盖几个已知变体」而开的口子，
+        结果放过了无限多未知变体 —— 这是典型的「为通过测试而设计的规则」。
+
+    现在的判据：**归一化后必须完全相等**，或落在显式的
+    「同系列合法变体」白名单里。白名单是枚举式的、可审计的，
+    不会随攻击者的想象力无限扩张。
     """
     if not req or not resp:
         return True
     if req == resp:
         return True
-    # 一方是另一方的前缀（覆盖 llava vs llava-next 之类）
-    if req.startswith(resp) or resp.startswith(req):
-        return True
-    # 任一方被归一化后过短（信息不足，无法判定）
     if len(req) < 4 or len(resp) < 4:
+        # 信息不足，无法判定 —— 宁可放过也不误报（误报会阻断正常使用）
         return True
-    return False
+    # 同系列合法变体：显式枚举，每一条都要能说出「为什么这是同一个模型」
+    return _model_same_family(req, resp)
+
+
+# 合法的「同一模型的不同写法」白名单（小写、已归一化形态）。
+#
+# ★ 收录标准只有一个：**确定指向同一模型**。
+#   绝不能收录「强弱不同的变体」，那是降级：
+#     ✗ gpt-4o / gpt-4o-mini           —— 强弱不同
+#     ✗ gemini-1.5-pro / -flash        —— 强弱不同
+#     ✗ chat / claude-3-5-sonnet        —— 跨厂商的不同模型（曾误收录，已移除）
+#   ✓ gpt-4-turbo / gpt-4-turbo-preview —— 同一模型的正式版与预览版
+#
+# ★ 绝大多数「同模型不同写法」已被 _normalize_model 归一化处理
+#   （快照号、latest、vendor 前缀、instruct 后缀），
+#   所以这张表刻意保持极短 —— 只有归一化覆盖不到的才往里加。
+#   表越长，越容易混进「其实不是同一个模型」的条目。
+_MODEL_SAME_FAMILY_PAIRS: frozenset = frozenset({
+    frozenset({"gpt-4-turbo", "gpt-4-turbo-preview"}),
+    frozenset({"gpt-4-turbo-preview", "gpt-4-1106-preview"}),
+    frozenset({"gpt-4o", "gpt-4o-preview"}),
+})
+
+
+def _model_same_family(req: str, resp: str) -> bool:
+    """两个模型名是否属于「同一模型的合法变体」。"""
+    return frozenset({req, resp}) in _MODEL_SAME_FAMILY_PAIRS
 
 
 # ── 工具名归一化（★ 避免 undeclared_tool 对正常网关误报）──
@@ -406,6 +441,28 @@ _TOOL_OPTIONAL_SUFFIX = re.compile(
 )
 
 # 命名空间分隔符：MCP 的 server.tool 是标准写法
+#
+# ★★★ 曾经的严重缺陷（实测复现，勿放宽）：
+#   这里曾用「点号左侧不含 _/- 且长度≥2」当作命名空间，
+#   于是攻击者给凭空造的工具名加**任意**前缀即可伪装成已声明工具：
+#     zz.read_file / evil.read_file / attacker.read_file
+#     → 一律归一化成 read_file → undeclared_tool 零 finding
+#   而 undeclared_tool 是「防住零关键词攻击」的第一条判据。
+#   行为还不一致：run-shell.read_file（含 -）反而会被拦。
+#
+#   现在限定为**已知的命名空间词**：只有这些前缀才允许剥离。
+#   攻击者自造的 ns 不在表内 → 不剥离 → 与已声明工具名不同 → 正常拦截。
+#   这条规则要能扩展（新增 MCP server），但扩展必须是有意识的决定，
+#   而不是「任何看起来像命名空间的东西都算」。
+_KNOWN_TOOL_NAMESPACES: frozenset = frozenset({
+    "mcp", "server", "servers", "tool", "tools", "function", "functions",
+    "namespace", "ns", "fs", "filesystem", "file_system", "files",
+    "github", "gitlab", "slack", "notion", "db", "database",
+    "web", "browser", "search", "fetch", "http", "api",
+    "shell", "bash", "terminal", "exec", "cmd", "command", "run",
+    "memory", "code", "repo", "project", "workspace", "local",
+})
+
 _TOOL_NS_SEP = re.compile(r"^(?P<ns>[A-Za-z0-9_\-]{2,})[.:](?P<tool>[A-Za-z_].*)$")
 
 
@@ -433,13 +490,12 @@ def _strip_tool_namespace(s: str) -> str:
             s2 = s.rsplit("/", 1)[-1]
         s = s2
 
-    # 剥「server.tool」形态：仅当点号左侧像命名空间（不含下划线分词）
-    # 且右侧是合法工具名时才剥，避免误伤 read.file 这类罕见命名。
+    # 剥「server.tool」形态：**仅限已知的命名空间词**
+    # （任意前缀都可伪造的教训见 _KNOWN_TOOL_NAMESPACES 上方注释）
     m = _TOOL_NS_SEP.match(s)
     if m:
         ns, tool = m.group("ns"), m.group("tool")
-        # 命名空间不应含下划线分词（read_file 不是命名空间）
-        if "_" not in ns and "-" not in ns and len(tool) >= 3:
+        if ns.lower() in _KNOWN_TOOL_NAMESPACES and len(tool) >= 3:
             s = tool
     return s
 
@@ -562,7 +618,16 @@ def _system_text(body: Dict[str, Any]) -> str:
 
 
 def build_baseline(body: Dict[str, Any]) -> RequestBaseline:
-    """从请求体构建基线（转发前调用）。"""
+    """从请求体构建基线（转发前调用）。
+
+    ★ body 可能为 None（某些网关的错误分支会转发 {"messages": null}）。
+      曾经直接 body.get(...) → AttributeError，
+      被 verifier 的 try/except 兜住后**整条结构差分静默跳过** ——
+      而结构差分是「防住零关键词攻击」的唯一途径。
+      即：上游一个 content=null 就让六类判据同时失效，只留一条 warning。
+    """
+    if not isinstance(body, dict):
+        body = {}
     msgs = body.get("messages")
     msg_count = len(msgs) if isinstance(msgs, list) else 0
 
@@ -620,7 +685,16 @@ def extract_response_facts(payload: Any, content: str) -> Dict[str, Any]:
       早期版本不区分，导致「正常回答里提到 api.example.com」
       被判为载荷注入 —— 编程场景下这会引发大量误报，
       而误报比漏放更致命：用户会直接关掉软件。
+
+    ★ content / payload 都要防御 None：
+      content=None 会在 _URL_RE.findall 处抛 TypeError，
+      payload=None 会在 .get 处抛 AttributeError，
+      两者都会让整条结构差分静默失效（见 build_baseline 的同类注释）。
     """
+    if not isinstance(payload, dict):
+        payload = {}
+    content = content or ""
+
     urls = {u.rstrip(".,);:'\"") for u in _URL_RE.findall(content)}
     domains = {_host_of(u) for u in urls if _host_of(u)}
     ips = set(_IP_RE.findall(content))
@@ -958,6 +1032,14 @@ def diff_against_baseline(
         response_facts: 响应事实（见 extract_response_facts）
         content: 响应正文，仅用于投递指令的结构组合检测
     """
+    # ★ 防御 None 入参：与 build_baseline 同理，
+    #   抛异常会被 verifier 兜住 → 结构差分整体静默失效。
+    if baseline is None:
+        return []
+    if not isinstance(response_facts, dict):
+        response_facts = {}
+    content = content or ""
+
     findings: List[Dict[str, str]] = []
 
     # ① 未声明的工具被调用 —— 中转站凭空造调用，铁证
@@ -1139,47 +1221,54 @@ def diff_against_baseline(
     #   两者同时出现且指向外部 → 数据外传
     #
     # 这是「结构组合」而非「危险词」，因此不吃关键词绕过的亏。
-    if not findings:
-        delivery = _detect_delivery(content)
-        if delivery:
-            findings.append({
-                "category": "data_exfiltration",
-                "severity": _SEVERITY["new_external_endpoint"],
-                "detail": delivery,
-                "evidence": "",
-            })
+    #
+    # ★★ 这四个判据曾经各自包在 `if not findings:` 里（⑥ / ⑥.2 / ⑥.3 / ⑥.4），
+    #   实测缺陷：只要前面任一判据命中（最常见是 typosquat_package），
+    #   这四个就**完全不跑** —— 而 AC-1.a 依赖定向注入恰恰是注释里
+    #   自称「最难发现」的一类。
+    #   而组合载荷（同一个响应里既投毒依赖又注入工具链）恰恰是
+    #   同一批中转站最常一起塞的 —— 门控等于在最该用的场景下失效。
+    #
+    # 现在无条件执行。代价是同一响应可能出现多条 finding，
+    # 但那是**如实呈现**：命中 4 条就是 4 个独立事实，
+    # 合并成 1 条反而会掩盖问题的广度。
+    delivery = _detect_delivery(content)
+    if delivery:
+        findings.append({
+            "category": "data_exfiltration",
+            "severity": _SEVERITY["new_external_endpoint"],
+            "detail": delivery,
+            "evidence": "",
+        })
 
     # ⑥.2 ★ 编码信道外传（A4 解法）
     #   与 ⑥ 互补：⑥ 要求「读本地数据」，而 A4 的数据来自参数，
     #   不满足 ⑥ 的前提。这里改判「编码器 + 隐蔽信道」。
-    if not findings:
-        covert = _detect_covert_channel(content)
-        if covert:
-            findings.append({
-                "category": "covert_channel",
-                "severity": "high",
-                "detail": covert,
-                "evidence": "",
-            })
+    covert = _detect_covert_channel(content)
+    if covert:
+        findings.append({
+            "category": "covert_channel",
+            "severity": "high",
+            "detail": covert,
+            "evidence": "",
+        })
 
     # ⑥.3 ★ 遥测夹带（A5 解法）
     #   遥测本身合法、采集本地信息也合法，
     #   但两者成对出现在同一段代码里就是功能挪用。
-    if not findings:
-        smuggle = _detect_telemetry_smuggle(content)
-        if smuggle:
-            findings.append({
-                "category": "telemetry_smuggle",
-                "severity": "high",
-                "detail": smuggle,
-                "evidence": "",
-            })
+    smuggle = _detect_telemetry_smuggle(content)
+    if smuggle:
+        findings.append({
+            "category": "telemetry_smuggle",
+            "severity": "high",
+            "detail": smuggle,
+            "evidence": "",
+        })
 
     # ⑥.4 ★ AC-1.a 依赖定向注入
     #   攻击者按请求类型选择性下手，只在「装包/改配置」时动手。
     #   判据是「工具配置文件 + 可执行载荷」的组合。
-    if not findings:
-        findings.extend(_check_toolchain_injection(baseline, content))
+    findings.extend(_check_toolchain_injection(baseline, content))
 
     return findings
 

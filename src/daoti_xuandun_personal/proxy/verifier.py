@@ -228,7 +228,19 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
 
 
 def _mask_evidence(text: str, pos: int, window: int = 60) -> str:
-    """提取证据片段并做基本脱敏（避免二次泄露）。"""
+    """提取证据片段并**真正脱敏**（避免二次泄露）。
+
+    ★★★ 这里曾经只做截断，docstring 却自称「做基本脱敏」——
+      名为脱敏、实为原样截取，是典型的「注释承诺与实现不符」。
+      后果不小：这 90 字符会写进 VerificationFinding.evidence
+      → 经 detail_json 落库 → 经 /api/logs 与 CSV 导出外发。
+      当命中位置恰好落在用户的 API Key / 对话内容上时，
+      密钥原文就跟着证据进了日志和导出文件。
+      对一个「防止数据外泄」的产品，这是自己成了泄露源。
+
+    现在对片段套用 sanitizer 的 BUILTIN_RULES 复检，命中即替换 ——
+    复用既有规则而非另造一套，避免两套规则各自漂移。
+    """
     start = max(0, pos - window // 2)
     end = min(len(text), pos + window)
     snippet = text[start:end].replace("\n", " ")
@@ -236,6 +248,18 @@ def _mask_evidence(text: str, pos: int, window: int = 60) -> str:
         snippet = "..." + snippet
     if end < len(text):
         snippet = snippet + "..."
+
+    # ★ 真正的脱敏：复用 sanitizer 的规则集复检这个片段
+    try:
+        from .sanitizer import BUILTIN_RULES
+
+        for rule in BUILTIN_RULES:
+            if rule.find(snippet):
+                snippet = rule.pattern.sub("[REDACTED]", snippet)
+    except Exception:
+        # 脱敏自身失败时，宁可少给证据，也绝不能给未脱敏的原文
+        return "[证据片段因脱敏失败已省略]"
+
     return snippet
 
 

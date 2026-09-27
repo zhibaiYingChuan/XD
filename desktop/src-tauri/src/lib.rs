@@ -156,6 +156,26 @@ pub struct EngineState {
     ///   若一律自动重启，用户点了停止也会被立刻复活 —— 托盘转瞬回绿，
     ///   「防护已停」这个事实只存在了不到一秒。
     user_stopped: std::sync::atomic::AtomicBool,
+    /// 启动/停止引擎的互斥锁。
+    ///
+    /// ★★ 只保护「决策 + 拉起」这个临界区，**不保护健康等待**。
+    ///   曾经的回归（勿改回）：
+    ///   原实现让 ensure_engine_running 全程持锁，而它内部有最长
+    ///   60s 的渐进式健康等待。而全部 19 个命令都先调 ensure，
+    ///   于是首页一次加载（get_state + get_stats + get_logs）会把
+    ///   三个请求完全串行化，引擎故障时各等 60s ——
+    ///   用「修双拉起的锁」制造了比原 bug 更严重的队头阻塞。
+    ///
+    ///   现在改为：持锁只做「判断 + spawn」，等就绪在锁外进行；
+    ///   并发调用方靠 starting 标志避免重复 spawn（等同一个引擎就绪）。
+    lifecycle: tokio::sync::Mutex<()>,
+
+    /// 是否正处在「拉起后等待就绪」的阶段。
+    ///
+    /// ★ 与 lifecycle 锁配套：锁保证同一时刻只有一个 spawn，
+    ///   本标志保证后来者知道「已经有人在拉了，直接等就行」，
+    ///   而不是自己也去 spawn 一个抢端口。
+    starting: std::sync::atomic::AtomicBool,
 }
 
 // Drop 时回收子进程（避免孤儿进程）
@@ -209,28 +229,43 @@ pub async fn post_local(
 /// 真正退出：停引擎 + 退进程。
 /// 与「关闭窗口」的区分至关重要 —— 关闭窗口只隐藏，托盘常驻继续防护。
 pub fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    // ★ 必须走 stop_engine（内含 taskkill 兜底），不能只 child.kill()：
+    // ★ 必须用 taskkill 强杀，不能只 child.kill()：
     //   实测 Nuitka 引擎用 Child::kill() 杀不掉，会留下监听 18765 的孤儿进程。
-    //   这里不能 await，用独立线程执行阻塞版强杀。
-    if let Some(pid) = app
+    //
+    // ★★ 顺序必须是「先 taskkill，再谈 child」：
+    //   原来先 child.kill() + child.wait()，而 wait() 是**阻塞**的，
+    //   且发生在 taskkill 兜底之前。于是当 kill() 无效（正是本文件的
+    //   实测结论）时，主线程会无限期卡在这里 —— 而唯一有效的
+    //   taskkill 因为写在其后，永远得不到执行机会。
+    //   后果：应用整体假死，用户连「退出」都做不到。
+    //
+    //   故改为：先在后台线程做「确认存活 → taskkill」，
+    //   主线程只做非阻塞的 child.kill() 且**不 wait()**
+    //   （进程即将退出，wait 的语义由后台线程的存活轮询覆盖）。
+    let pid = app
         .try_state::<EngineState>()
-        .and_then(|s| *s.pid.lock())
+        .and_then(|s| *s.pid.lock());
+
+    // 取 child 也要小心：此处不能跨 .await（没有 await，但要避免守卫过长存活）
+    if let Some(mut child) = app
+        .try_state::<EngineState>()
+        .and_then(|s| s.child.lock().take())
     {
-        if let Some(mut child) = app
-            .try_state::<EngineState>()
-            .and_then(|s| s.child.lock().take())
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        let _ = child.kill();
+        // ★ 不调 child.wait()：它会阻塞调用线程（UI 线程），
+        //   而本文件多处注释已确认 kill() 对该引擎无效 → 必然空等。
+    }
+
+    if let Some(p) = pid {
         std::thread::spawn(move || {
             for _ in 0..10 {
-                if !process_alive(pid) {
+                if !process_alive(p) {
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
-            kill_cmd("/T", "/F", pid);
+            // 唯一有效的手段：杀进程树
+            kill_cmd("/T", "/F", p);
         });
     }
     app.exit(0);
@@ -468,7 +503,29 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
     }
 }
 
+/// 停止引擎（自行获取 lifecycle 锁）。
 async fn stop_engine(app: &tauri::AppHandle) {
+    // 与 ensure_engine_running 互斥：否则「停止」与「拉起」交错，
+    // 会出现 stop 刚杀掉进程、ensure 又拉起一个，或反之 ——
+    // 两种顺序下 state.pid 都可能指向已死进程。
+    //
+    // ★ 必须先把 State 绑定到具名变量：app.state::<T>() 返回的是
+    //   临时值，守卫借用它，语句结束即析构 → 编译期 E0716。
+    let state = app.state::<EngineState>();
+    let _guard = state.lifecycle.lock().await;
+    stop_engine_locked(app).await
+}
+
+/// 停止引擎（调用方必须已持有 lifecycle 锁）。
+///
+/// ★ 拆成两个函数是因为锁不可重入：
+///   restart_engine 需要「先停后起」的原子性，若它先调 stop_engine
+///   （拿锁→放锁）再调 ensure_engine_running（再拿锁），两者之间
+///   存在一个窗口：健康监控可能抢进来把引擎拉起，
+///   于是 restart 变成「停→被别人拉起→再停→再拉起」，
+///   pid 归属在窗口期里可能错乱。
+///   故 restart 走 restart_engine_locked，全程持锁。
+async fn stop_engine_locked(app: &tauri::AppHandle) {
     // 先取 pid 再取 child：kill 失败时仍能用 pid 兜底
     let pid = *app.state::<EngineState>().pid.lock();
 
@@ -548,91 +605,114 @@ fn process_alive(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
-/// 确保引擎运行（启动 + 渐进式健康等待）
+/// 确保引擎运行（必要时启动，并等待就绪）。
+///
+/// ★ 并发模型（关键，勿简化）：
+///   lifecycle 锁只保护「判断 + spawn」这一小段临界区，
+///   最长 60s 的就绪等待在**锁外**进行。
+///   否则 19 个命令各自先调 ensure，首页一次加载的三个并发请求
+///   会被完全串行化、引擎故障时各等 60s —— 那是更严重的队头阻塞。
+///
+///   不重复 spawn 靠两件事协作：
+///     · 锁保证同一时刻只有一个执行者能走到 spawn
+///     · starting 标志让后来的执行者知道「已有人在拉」，转为等待
 async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
-    // ★ 用户主动停止过 → 不再自动拉起。
-    //   否则任何一次 API 调用都会把引擎复活，用户点的「停止」等于没点，
-    //   托盘刚转灰又立刻回绿，「防护已停」只存在了几百毫秒。
-    if app
-        .try_state::<EngineState>()
-        .map(|s| s.user_stopped.load(std::sync::atomic::Ordering::SeqCst))
-        .unwrap_or(false)
-    {
-        return Err("本地代理已被手动停止，请先在设置中重新启动".to_string());
-    }
-
-    // 已在运行且健康 → 直接返回
-    // ★ 关键：parking_lot 守卫非 Send，必须在 await 前显式释放
+    // 第一段：持锁做「快速路径 + 决定是否 spawn」
     {
         let state = app.state::<EngineState>();
+        let _guard = state.lifecycle.lock().await;
+
+        // ★ 用户主动停止过 → 不再自动拉起（见 ensure_engine_running_locked）
+        if state
+            .user_stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("本地代理已被手动停止，请先在设置中重新启动".to_string());
+        }
+
+        // 已在运行且健康 → 直接返回
+        // parking_lot 守卫非 Send，必须在 await 前显式释放
         let running = state.status.lock().running;
         if running && check_engine_health().await {
             return Ok(());
         }
-    }
 
-    // 未运行但外部引擎已就绪（用户手动 python -m ...）
-    if check_engine_health().await {
-        let state = app.state::<EngineState>();
-        let mut st = state.status.lock();
-        st.running = true;
-        st.healthy = true;
-        st.started_at = Some(unix_now());
-        st.startup_error = None;
-        return Ok(());
-    }
-
-    // 启动新进程
-    if let Err(e) = start_engine_process(app) {
-        let state = app.state::<EngineState>();
-        state.status.lock().startup_error = Some(format!("引擎启动失败: {e}"));
-        return Err(format!("引擎启动失败: {e}"));
-    }
-    {
-        let state = app.state::<EngineState>();
-        let mut st = state.status.lock();
-        st.running = true;
-        st.started_at = Some(unix_now());
-        st.startup_error = None;
-    }
-
-    // 渐进式健康检查
-    let start = Instant::now();
-
-    for _ in 0..ENGINE_PHASE1_STEPS {
-        if start.elapsed() > ENGINE_WAIT_TOTAL {
-            break;
-        }
+        // 端口上的引擎已就绪（外部引擎，或我们拉起但 status 滞后）
         if check_engine_health().await {
-            let state = app.state::<EngineState>();
             let mut st = state.status.lock();
+            st.running = true;
             st.healthy = true;
-            st.last_check = Some(unix_now());
+            if st.started_at.is_none() {
+                st.started_at = Some(unix_now());
+            }
+            st.startup_error = None;
             return Ok(());
         }
-        tokio::time::sleep(ENGINE_PHASE1_INTERVAL).await;
+
+        // 已经有人在拉起 → 不重复 spawn，交给下面的等待段
+        if state.starting.load(std::sync::atomic::Ordering::SeqCst) {
+            // 释放锁后进入等待段
+        } else {
+            // 启动新进程（持锁，保证只有一个 spawn）
+            if let Err(e) = start_engine_process(app) {
+                let st = &mut *state.status.lock();
+                st.startup_error = Some(format!("引擎启动失败: {e}"));
+                return Err(format!("引擎启动失败: {e}"));
+            }
+            {
+                let mut st = state.status.lock();
+                st.running = true;
+                st.started_at = Some(unix_now());
+                st.startup_error = None;
+            }
+            state.starting.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
-    for _ in 0..ENGINE_PHASE2_STEPS {
-        if start.elapsed() > ENGINE_WAIT_TOTAL {
-            break;
-        }
-        if check_engine_health().await {
-            let state = app.state::<EngineState>();
-            let mut st = state.status.lock();
-            st.healthy = true;
-            st.last_check = Some(unix_now());
-            return Ok(());
-        }
-        tokio::time::sleep(ENGINE_PHASE2_INTERVAL).await;
-    }
+    // 第二段：锁外等待就绪（最长 60s），不阻塞其他请求的快速路径
+    let ok = wait_engine_ready().await;
 
-    let msg = "引擎在 60 秒内未就绪".to_string();
+    // 无论成败都要清标志，否则引擎之后彻底失去自动拉起能力
     let state = app.state::<EngineState>();
-    let mut st = state.status.lock();
-    st.healthy = false;
-    st.startup_error = Some(msg.clone());
-    Err(msg)
+    state.starting.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    if ok {
+        let mut st = state.status.lock();
+        st.healthy = true;
+        st.last_check = Some(unix_now());
+        Ok(())
+    } else {
+        let msg = "引擎在 60 秒内未就绪".to_string();
+        state.status.lock().healthy = false;
+        state.status.lock().startup_error = Some(msg.clone());
+        Err(msg)
+    }
+}
+
+/// 渐进式等待引擎就绪（调用方不得持有 lifecycle 锁）。
+///
+/// 为什么要两段式等待：Nuitka onefile 首次启动需自解压，实测 10~50s。
+/// 单段 500ms×20 覆盖快速场景，长等待留给自解压。
+///
+/// 不需要 AppHandle：就绪与否只取决于健康探测，不涉及任何状态读写
+/// （状态由调用方在等待结束后统一更新）。
+async fn wait_engine_ready() -> bool {
+    let start = Instant::now();
+    for (steps, interval) in [
+        (ENGINE_PHASE1_STEPS, ENGINE_PHASE1_INTERVAL),
+        (ENGINE_PHASE2_STEPS, ENGINE_PHASE2_INTERVAL),
+    ] {
+        for _ in 0..steps {
+            if start.elapsed() > ENGINE_WAIT_TOTAL {
+                return false;
+            }
+            if check_engine_health().await {
+                return true;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+    false
 }
 
 /// 后台健康监控循环
@@ -715,19 +795,58 @@ fn spawn_health_monitor(app: tauri::AppHandle) {
                     st.running = false;
                     st.healthy = false;
                     st.startup_error =
-                        Some("引擎连续多次无响应，已停止自动重启".to_string());
+                        Some("引擎连续多次无响应".to_string());
                 }
                 if let Some(ctrl) = app.try_state::<TrayController>() {
                     ctrl.force_paused(&app);
                 }
                 let _ = app.emit("engine-unavailable", "引擎无响应");
-                break;
+
+                // ★★ 这里原来 break，直接终止整个健康监控循环。
+                //   三个问题叠加，构成「静默失效」：
+                //     ① spawn_health_monitor 只在 setup 里启动一次，
+                //        break 之后**再无任何自动恢复**
+                //     ② 只清了 status，pid 残留 → ensure 的 pid 归属
+                //        判断会误以为「自己拉起的引擎还活着」
+                //     ③ 残留进程可能仍占用 18765，挡住后续任何重启
+                //   对安全产品而言，看门狗自己躺下 = 防护静默消失。
+                //
+                //   改为：彻底清理（杀进程 + 清 pid）+ 退避后继续监控。
+                //   引擎出故障时最需要的就是有人一直盯着。
+                {
+                    let state2 = app.state::<EngineState>();
+                    let _guard = state2.lifecycle.lock().await;
+                    stop_engine_locked(&app).await;
+                }
+                // 退避 60s 再试，避免疯狂重启刷屏；不 break，监控继续。
+                fail_streak = 0;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
             }
 
             // 尝试重启
+            // ★ 必须整段持锁：原来这里是 stop_engine（自己拿锁再放）
+            //   然后裸调 start_engine_process（不持锁），
+            //   两步之间存在窗口 —— 并发的 ensure 会看到引擎已停而
+            //   自己也去拉起，于是和这里的 spawn 撞车抢端口。
+            //   这正是「两个引擎 + Errno 10048 + pid 指向死进程」
+            //   那条链路的起点。
             let app2 = app.clone();
-            stop_engine(&app2).await;
-            let _ = start_engine_process(&app2);
+            {
+                let state2 = app2.state::<EngineState>();
+                let _guard = state2.lifecycle.lock().await;
+                stop_engine_locked(&app2).await;
+                state2
+                    .user_stopped
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                if let Err(e) = start_engine_process(&app2) {
+                    eprintln!("[XuanDun Personal] 引擎自动重启失败: {e}");
+                    if let Some(ctrl) = app2.try_state::<TrayController>() {
+                        ctrl.force_paused(&app2);
+                    }
+                    continue;
+                }
+            }
             tokio::time::sleep(Duration::from_secs(3)).await;
             if check_engine_health().await {
                 fail_streak = 0;
@@ -835,12 +954,58 @@ async fn get_engine_status(app: tauri::AppHandle) -> Result<EngineStatus, String
 
 #[tauri::command]
 async fn restart_engine(app: tauri::AppHandle) -> Result<(), String> {
-    stop_engine(&app).await;
-    // 清除「用户主动停止」意图，让 ensure_engine_running 真正拉起
-    if let Some(state) = app.try_state::<EngineState>() {
-        state.user_stopped.store(false, std::sync::atomic::Ordering::SeqCst);
+    // ★ 全程持锁，让「停 + 起」成为一次原子操作。
+    //   若分两次加锁（stop 一次、ensure 一次），中间会有窗口让
+    //   健康监控抢先把引擎拉起，导致 pid 归属错乱。
+    // ★ State 必须绑定具名变量：app.state::<T>() 是临时值，
+    //   守卫借用它，语句结束即析构（E0716）。
+    let state = app.state::<EngineState>();
+    let _guard = state.lifecycle.lock().await;
+
+    stop_engine_locked(&app).await;
+    // 清除「用户主动停止」意图，让 ensure 真正拉起
+    state
+        .user_stopped
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // ★ 本函数已持有 lifecycle 锁，不能再调 ensure_engine_running
+    //   （它自己会加锁 → 立即自死锁）。
+    //   故这里内联「拉起 + 锁外等待」这段逻辑。
+    if let Err(e) = start_engine_process(&app) {
+        let err = format!("引擎启动失败: {e}");
+        state.status.lock().startup_error = Some(err.clone());
+        return Err(err);
     }
-    ensure_engine_running(&app).await
+    {
+        let mut st = state.status.lock();
+        st.running = true;
+        st.started_at = Some(unix_now());
+        st.startup_error = None;
+    }
+    state.starting.store(true, std::sync::atomic::Ordering::SeqCst);
+    // 放锁后再等就绪：等待期间不应阻塞其他请求的快速路径
+    drop(_guard);
+
+    let ok = wait_engine_ready().await;
+
+    let state = app.state::<EngineState>();
+    state.starting.store(false, std::sync::atomic::Ordering::SeqCst);
+    if ok {
+        let mut st = state.status.lock();
+        st.healthy = true;
+        st.last_check = Some(unix_now());
+        Ok(())
+    } else {
+        // ★ 必须把错误原样抛给前端，不能静默返回成功。
+        //   吞掉它 = 用户点了「重启引擎」看到「已重启」，
+        //   而实际跑着的还是重启前那个进程。
+        //   对安全产品而言，谎报操作成功比操作失败危险得多。
+        let msg = "引擎重启后未能在 60 秒内就绪".to_string();
+        let mut st = state.status.lock();
+        st.healthy = false;
+        st.startup_error = Some(msg.clone());
+        Err(msg)
+    }
 }
 
 #[tauri::command]
@@ -1155,8 +1320,42 @@ fn sanitize_local_path(path: &str) -> String {
 // 应用入口
 // ══════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════
+// CDP 调试端口门禁（安全加固）
+// ══════════════════════════════════════════════════════════════
+//
+// 为什么要加这个：CDP 测试需要直连 WebView2 才能做真实交互验证，
+// 但开放该端口等于让**任意本地进程**通过 http://127.0.0.1:9224/json
+// 枚举页面并注入 JS —— 对一个安全产品而言这是严重风险：
+// 本地恶意程序可以篡改界面显示的检测结果，让用户以为"防护中"。
+//
+// 因此采用与个人版防护理念一致的策略：
+//   · debug 构建自动开启（开发期便利）
+//   · release 构建默认关闭，需显式设置环境变量才开启
+//   · 开启时写日志留痕，不静默
+//
+// 环境变量：XUANDUN_ENABLE_CDP_DEBUG=1
+fn enable_cdp_debug_port() -> bool {
+    let enable = cfg!(debug_assertions)
+        || std::env::var("XUANDUN_ENABLE_CDP_DEBUG").is_ok();
+    if enable {
+        // ★ --remote-allow-origins=* 不可省略：
+        //   WebView2 仅设 --remote-debugging-port 会导致 Playwright/Node/Python
+        //   客户端全部被拒（403），且报错信息不会提示缺这个参数。
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--remote-debugging-port=9224 --remote-allow-origins=*",
+        );
+        eprintln!("[WARN] CDP 调试端口已开启: 9224（debug 构建或设置了 XUANDUN_ENABLE_CDP_DEBUG）");
+        eprintln!("[WARN] 任意本地进程可通过 CDP 注入 JS 篡改界面显示，仅限调试环境使用");
+    }
+    enable
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    enable_cdp_debug_port();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1165,6 +1364,8 @@ pub fn run() {
             child: parking_lot::Mutex::new(None),
             pid: parking_lot::Mutex::new(None),
             user_stopped: std::sync::atomic::AtomicBool::new(false),
+            lifecycle: tokio::sync::Mutex::new(()),
+            starting: std::sync::atomic::AtomicBool::new(false),
         })
         .manage(TrayController::default())
         .invoke_handler(tauri::generate_handler![

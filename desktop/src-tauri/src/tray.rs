@@ -234,7 +234,18 @@ impl TrayController {
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(PULSE_HOLD_MS)).await;
-            let ctrl = handle.state::<TrayController>();
+            // ★ 必须用 try_state，不能用 state()。
+            //   这个回落任务持有 AppHandle 克隆，可能在应用退出过程中
+            //   才醒来（此时 state 已被 drop）。state() 在这种情况下 panic，
+            //   而 release profile 配了 panic = "abort"
+            //   （见 Cargo.toml）—— panic 会直接终止进程、
+            //   **跳过 Drop for EngineState**，
+            //   于是监听 18765 的引擎变成孤儿进程，
+            //   下次启动报 [Errno 10048] 且无处可查。
+            //   托盘回落不值得拿「引擎占死端口」去换。
+            let Some(ctrl) = handle.try_state::<TrayController>() else {
+                return;
+            };
             // 期间又发生了新的脉冲 → 交给新的回落任务，旧的直接退出
             if ctrl.pulse_gen.load(Ordering::SeqCst) == gen {
                 ctrl.pulsing.store(false, Ordering::SeqCst);
