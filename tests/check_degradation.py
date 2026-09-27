@@ -134,6 +134,49 @@ def main() -> int:
     else:
         print("[PASS] 自研检测层正常（undeclared_tool，不依赖企业版护栏）")
 
+    # ⑥ 激活校验能力必须可见
+    #
+    # ★ 为什么要单独查：激活码校验依赖「公钥 + pyjwt」。
+    #   两者任一缺失，用户看到的都是「激活码无效」，
+    #   而真因是「验签组件没打进去」—— 反复换码永远激活不了，
+    #   且客服从错误文案里看不出真因。
+    #
+    #   这里断言的是「状态可被查询」，而不是「公钥必须存在」：
+    #   开发环境下没有公钥是合法的（此时应如实报告不可用）。
+    from daoti_xuandun_personal import license as _lic
+
+    pub = _lic.load_public_key()
+    try:
+        import jwt as _jwt  # noqa: F401
+        has_jwt = True
+    except ImportError:
+        has_jwt = False
+
+    if not has_jwt:
+        print("[FAIL] pyjwt 未安装 —— 激活码验签无法执行")
+        print("       用户会看到「激活码无效」，而真因是组件缺失")
+        problems.append("pyjwt 缺失，激活码验签不可用")
+    elif not pub:
+        # 缺公钥是合法的开发态，但必须可见
+        print("[WARN] 未配置激活码公钥 —— 激活功能当前不可用")
+        print("       （开发态可接受；发布前必须注入公钥）")
+    else:
+        print("[PASS] 激活校验组件就绪（公钥已加载 + pyjwt 可用）")
+
+    # ⑦ 「验不了」绝不能被当成「验过了」
+    #
+    # 这是整个激活系统最危险的失效方向：公钥缺失时若返回 ok=true，
+    # 全部防护白嫖且无任何报错。所以必须有一致性断言。
+    r = _lic.verify("XDACT-dummy.payload.sig", "x")
+    if r.ok:
+        print("[FAIL] 无效激活码竟然通过了验签")
+        problems.append("激活码验签形同虚设")
+    elif r.reason == "verifier_unavailable" and pub:
+        print("[FAIL] 公钥已加载却报验签组件不可用")
+        problems.append("验签组件状态报告矛盾")
+    else:
+        print(f"[PASS] 无效激活码被正确拒绝（reason={r.reason}）")
+
     print()
     print("=" * 66)
     if problems:

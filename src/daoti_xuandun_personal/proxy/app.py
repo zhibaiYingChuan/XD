@@ -855,6 +855,56 @@ def create_app() -> FastAPI:
         _storage.clear_reputations()
         return {"ok": True, "cleared": count}
 
+    @app.post("/api/license/verify")
+    async def license_verify(payload: Dict[str, Any] = Body(...)):
+        """激活码验签。
+
+        ★ 验签放在引擎侧而非 Rust 侧的理由见 license.py 顶部注释：
+          引擎是 Nuitka 编译产物，反编译者拿不到明文 Python 源码；
+          而改 Rust 侧的校验点只需改几行 Rust。
+
+        ★ 只回传结论，不回传签名细节 —— 错误文案刻意含糊，
+          减少反编译者从文案推断校验点的可能。
+
+        ★ verifier_available=False（引擎缺公钥 / 缺 jwt 依赖）时
+          必然 ok=False：「验不了」绝不能被当成「验过了」。
+        """
+        from .. import license as lic
+
+        code = str(payload.get("code") or "")
+        raw_mc = str(payload.get("machine_code") or "")
+        now = payload.get("now")
+
+        result = lic.verify(code, lic.machine_code_hash(raw_mc), now=now)
+
+        # 校验通过才推进时钟水位 —— 失败的尝试不该影响基线，
+        # 否则用户输错一次码后修正系统时间反而会被判定回拨。
+        if result.ok:
+            lic.write_last_seen(lic.now_unix())
+
+        return result.to_dict()
+
+    @app.get("/api/license/status")
+    async def license_status():
+        """激活相关的能力自检（供诊断页展示降级状态）。"""
+        from .. import license as lic
+
+        pub = lic.load_public_key()
+        try:
+            import jwt  # noqa: F401
+            has_jwt = True
+        except ImportError:
+            has_jwt = False
+
+        return {
+            # 有公钥才能验签。缺公钥 = 所有激活码都会被判无效，
+            # 这必须对外可见，否则用户只会看到「激活码无效」而找不到真因。
+            "verifier_available": bool(pub) and has_jwt,
+            "has_public_key": bool(pub),
+            "has_jwt": has_jwt,
+            "last_seen": lic.read_last_seen(),
+        }
+
     @app.get("/api/diagnostics")
     async def diagnostics():
         """诊断信息（分享诊断报告用，全部脱敏）。"""

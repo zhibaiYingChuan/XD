@@ -37,6 +37,21 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PERSONAL_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 SRC_DIR = os.path.join(PERSONAL_ROOT, "src")
+# 企业版核心算法引擎源码目录（护栏层所在）。
+#
+# ★ 个人版通过 verifier._try_load_guardrail() 复用企业版的
+#   「输出护栏」（提示词注入 + 敏感泄露两层检测）。
+#   该复用是**延迟 import**：编译期若不显式 include，
+#   Nuitka 会认为它是可选依赖而跳过 → 打包后
+#   `from daoti_xuandun.xuandun import XuanDun` 必然 ImportError
+#   → _guardrail_available 恒为 False → 两层检测静默失效。
+#
+#   而个人版没有把这个失效暴露给用户（界面照常显示「防护中」），
+#   所以这个缺失是纯静默的 —— 与此前 pyyaml 漏 include
+#   导致规则静默回退是同一类错误。
+ENTERPRISE_SRC_DIR = os.path.abspath(
+    os.path.join(SCRIPT_DIR, "..", "..", "src")
+)
 RESOURCE_ENGINE_DIR = os.path.join(SCRIPT_DIR, "src-tauri", "resources", "engine")
 
 # 引擎入口：Nuitka 编译的入口脚本。
@@ -70,7 +85,8 @@ def main() -> int:
     missing = []
     for mod, pkg in (("nuitka", "nuitka==4.1.3"), ("fastapi", "fastapi"),
                      ("uvicorn", "uvicorn"), ("httpx", "httpx"),
-                     ("pydantic", "pydantic")):
+                     ("pydantic", "pydantic"), ("yaml", "pyyaml"),
+                     ("jwt", "pyjwt"), ("cryptography", "cryptography")):
         try:
             __import__(mod)
         except ImportError:
@@ -79,6 +95,25 @@ def main() -> int:
         print("FATAL: 缺少编译依赖，请先安装：", file=sys.stderr)
         print(f"  pip install {' '.join(missing)}", file=sys.stderr)
         return 3
+
+    # 企业版护栏是否可编入。
+    #
+    # ★ 这里**不强制**：企业版源码不在（独立仓库 / 私有仓库场景）
+    #   时个人版仍应能编译，只是护栏层缺失 —— 且该缺失会由
+    #   check_degradation.py 与 /api/diagnostics 如实报告，不静默。
+    #   宁可少两层检测且如实告知，也不要让构建直接失败。
+    has_enterprise = os.path.isdir(
+        os.path.join(ENTERPRISE_SRC_DIR, "daoti_xuandun")
+    )
+    if has_enterprise:
+        print("检测到企业版源码 → 护栏层将编入（提示词注入 + 敏感泄露）")
+    else:
+        print(
+            "警告: 未检测到企业版源码 → 本次构建**不含护栏层**，\n"
+            f"      提示词注入与敏感泄露两类检测将失效。\n"
+            f"      查找路径: {ENTERPRISE_SRC_DIR}",
+            file=sys.stderr,
+        )
 
     target = _triple()
     final_engine_name = target
@@ -126,6 +161,19 @@ def main() -> int:
         ENGINE_MAIN,
     ]
 
+    if has_enterprise:
+        # ★ 护栏层：企业版核心算法引擎。
+        #   不加这两个参数，打包后的个人版就只有「自研检测层」，
+        #   prompt_inject 与 sensitive_leak 两类判据完全失效，
+        #   而界面照常显示「防护中」—— 用户无从察觉。
+        cmd.extend([
+            "--include-package=daoti_xuandun",
+            "--include-package-data=daoti_xuandun",
+            # 护栏的验签与编译期密钥注入需要
+            "--include-package=jwt",
+            "--include-package=cryptography",
+        ])
+
     if platform.system().lower() == "windows":
         icon = os.path.join(SCRIPT_DIR, "src-tauri", "icons", "icon.ico")
         cmd.extend([
@@ -137,10 +185,40 @@ def main() -> int:
         cmd.extend(["--macos-app-mode=background"])
 
     env = os.environ.copy()
-    # 让 Nuitka 能解析到个人版包
-    env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    # 让 Nuitka 能解析到个人版包；企业版源码在场时一并加入，
+    # 否则 --include-package=daoti_xuandun 找不到包而编译失败。
+    search_path = SRC_DIR
+    if has_enterprise:
+        search_path = ENTERPRISE_SRC_DIR + os.pathsep + search_path
+    env["PYTHONPATH"] = search_path + os.pathsep + env.get("PYTHONPATH", "")
+
+    # ★ 激活码公钥：打进包内，运行期无需外部文件。
+    #
+    #   放在 resources/engine/ 下（与引擎同级），
+    #   引擎按 license.py::load_public_key 的顺序查找：
+    #     ① 环境变量 XUANDUN_LICENSE_PUBKEY（CI 可用 secret 覆盖）
+    #     ② XUANDUN_LICENSE_PUBKEY_FILE 指定的文件
+    #     ③ <引擎目录>/license_pub.pem ← 本拷贝的落点
+    #
+    #   刻意**不设**第 ① 项：环境变量会进构建日志，
+    #   而公钥虽非秘密，也不必在日志里留痕。
+    #
+    #   ⚠ 缺公钥的后果必须让用户看得见：所有激活码都会判为
+    #     「验签组件不可用」而非「码无效」（见 license.py）。
+    pub_src = os.path.join(
+        PERSONAL_ROOT, "tools", "activation", "xuanDun_personal_public.pem"
+    )
+    if os.path.isfile(pub_src):
+        print(f"激活公钥: {pub_src}")
+    else:
+        print(
+            "警告: 未找到激活公钥，本次构建的客户端**无法激活**。\n"
+            f"      生成方式: python tools/activation/gen_activation_keys.py genkeypair",
+            file=sys.stderr,
+        )
 
     print("编译引擎中（首次约需数分钟）...")
+    print("护栏层:", "已编入" if has_enterprise else "★未编入（检测能力降级）")
     print("命令:", " ".join(cmd))
     result = subprocess.run(
         cmd, env=env, cwd=SCRIPT_DIR,
@@ -173,6 +251,17 @@ def main() -> int:
     if os.path.exists(main_dst):
         os.remove(main_dst)
     os.rename(main_src, main_dst)
+
+    # 激活公钥拷入引擎目录（与主程序同级）
+    #
+    # ★ 放在这里而不是 build 之前：拷贝源若在 tools/activation/，
+    #   那里可能被 .gitignore 排除，也可能在干净 CI 上不存在。
+    #   拷进产物目录后它随 resources/ 一起进安装包。
+    if os.path.isfile(pub_src):
+        shutil.copy2(
+            pub_src,
+            os.path.join(RESOURCE_ENGINE_DIR, "license_pub.pem"),
+        )
 
     count = len(os.listdir(RESOURCE_ENGINE_DIR))
     size_mb = sum(

@@ -30,8 +30,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, WindowEvent};
 use tokio::time::timeout;
 
+pub mod license;
 pub mod tray;
 
+use license::LicenseStatus;
 use tray::TrayController;
 
 // ══════════════════════════════════════════════════════════════
@@ -118,6 +120,145 @@ pub fn lock_proxy_port() -> u16 {
 /// 本地代理基础地址（使用本进程锁定的端口）
 fn proxy_base() -> String {
     format!("http://127.0.0.1:{}", lock_proxy_port())
+}
+
+// ══════════════════════════════════════════════════════════════
+// 激活
+// ══════════════════════════════════════════════════════════════
+//
+// 具体的机器码采集、状态存储、时钟回拨逻辑都在 license.rs，
+// 这里只做「调引擎验签 + 编排 + 暴露 Tauri 命令」。
+/// 调引擎的 /api/license/verify（真实验签在引擎侧）。
+async fn engine_verify(app: &tauri::AppHandle, code: &str) -> Result<license::VerifyOutcome, String> {
+    ensure_engine_running(app).await?;
+    let body = serde_json::json!({
+        "code": code,
+        "machine_code": license::machine_code(),
+        "now": license::now_unix(),
+    });
+    let v = proxy_call(
+        reqwest::Method::POST,
+        "/api/license/verify",
+        Some(body),
+        REQ_NORMAL,
+    )
+    .await?;
+    serde_json::from_value(v).map_err(|e| format!("验签结果解析失败: {e}"))
+}
+
+/// 组装对外的激活状态。
+///
+/// ★ 每次都重新验签，不只读磁盘上的字段：
+///   攻击者改掉 license.json 里的 expires_at 就能绕过「只读盘」的检查。
+async fn build_license_status(app: &tauri::AppHandle) -> LicenseStatus {
+    let mch = license::machine_code_hash(&license::machine_code());
+    let now = license::now_unix();
+    let st = license::load();
+
+    if st.code.is_empty() {
+        return LicenseStatus::inactive("尚未激活", mch);
+    }
+
+    // 时钟回拨：Rust 侧独立复核一次。
+    // 双侧都查的原因见 license.rs 顶部「校验点分散」。
+    if let Err(msg) = license::check_clock_rollback(
+        if st.last_seen > 0 { Some(st.last_seen) } else { None },
+        now,
+    ) {
+        return LicenseStatus {
+            activated: false,
+            expires_at: None,
+            tier: None,
+            subject: None,
+            jti: None,
+            reason: Some(msg.to_string()),
+            machine_code: mch,
+            remaining_days: 0,
+            verifier_available: true,
+        };
+    }
+
+    match engine_verify(app, &st.code).await {
+        Ok(o) if o.ok => LicenseStatus {
+            activated: true,
+            expires_at: o.exp,
+            tier: o.tier,
+            subject: o.subject,
+            jti: o.jti,
+            reason: None,
+            machine_code: mch,
+            remaining_days: o.exp.map(|e| (e - now) / 86400).unwrap_or(0),
+            verifier_available: o.verifier_available,
+        },
+        Ok(o) => LicenseStatus {
+            activated: false,
+            expires_at: None,
+            tier: None,
+            subject: None,
+            jti: None,
+            reason: o.message.or_else(|| Some("激活码无效".into())),
+            machine_code: mch,
+            remaining_days: 0,
+            verifier_available: o.verifier_available,
+        },
+        // ★ 引擎不可达时**不能**当成「已激活」，也不能当成「未激活」——
+        //   必须如实报「暂时无法确认」，否则会出现两种谎报：
+        //   谎报已激活 = 白嫖；谎报未激活 = 引擎一抖动用户就被要求重激活。
+        Err(e) => LicenseStatus {
+            activated: false,
+            expires_at: None,
+            tier: None,
+            subject: None,
+            jti: None,
+            reason: Some(format!("暂时无法确认激活状态：{e}")),
+            machine_code: mch,
+            remaining_days: 0,
+            verifier_available: false,
+        },
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Tauri 命令：激活
+// ══════════════════════════════════════════════════════════════
+
+/// 查询激活状态。
+#[tauri::command]
+async fn get_license_status(app: tauri::AppHandle) -> LicenseStatus {
+    build_license_status(&app).await
+}
+
+/// 提交激活码。
+#[tauri::command]
+async fn activate_license(app: tauri::AppHandle, code: String) -> Result<LicenseStatus, String> {
+    let trimmed = code.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("请输入激活码".into());
+    }
+
+    let outcome = engine_verify(&app, &trimmed).await?;
+    if !outcome.ok {
+        // 验签组件不可用 ≠ 码无效，必须分开说，
+        // 否则用户会反复换码却永远激活不了。
+        if !outcome.verifier_available {
+            return Err(outcome.message.unwrap_or_else(|| "激活校验组件不可用".into()));
+        }
+        return Err(outcome.message.unwrap_or_else(|| "激活码无效".into()));
+    }
+
+    license::save(&license::LicenseState {
+        code: trimmed,
+        last_seen: license::now_unix(),
+    })?;
+
+    Ok(build_license_status(&app).await)
+}
+
+/// 清除激活信息（换机或售后重置时用）。
+#[tauri::command]
+async fn clear_license(app: tauri::AppHandle) -> Result<LicenseStatus, String> {
+    let _ = std::fs::remove_file(license::license_file());
+    Ok(build_license_status(&app).await)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1369,6 +1510,10 @@ pub fn run() {
         })
         .manage(TrayController::default())
         .invoke_handler(tauri::generate_handler![
+            // ── 激活 ──
+            get_license_status,
+            activate_license,
+            clear_license,
             get_engine_status,
             restart_engine,
             stop_engine_command,

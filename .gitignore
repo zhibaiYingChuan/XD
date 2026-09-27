@@ -87,6 +87,18 @@ data/
 Thumbs.db
 desktop-list.txt
 
+# ── 激活码签发工具的密钥材料（★ 最高优先级）──────────────
+# 私钥一旦入库 = 任何人都能签发激活码 = 授权体系瞬间失效。
+# 且 Git 历史无法真正清除（即使后续删除，commit 里仍在）。
+tools/activation/*.pem
+tools/activation/*_private*.pem
+tools/activation/*_public*.pem
+# 签发日志含明文激活码 + 机器码，属用户隐私
+tools/activation/ACTIVATION_LOG.json
+tools/activation/LICENSE_LOG.json
+# 公钥若选择入库（供构建期读取），用下面这行显式放行：
+# !tools/activation/xuanDun_personal_public.pem
+
 # ── 测试临时产物 ──────────────────────────────────────────
 tests/__pycache__/
 *.tmp
