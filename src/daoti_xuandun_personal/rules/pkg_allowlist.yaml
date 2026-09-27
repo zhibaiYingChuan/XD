@@ -1,0 +1,151 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# Copyright (c) 2026 独立研究者，知白
+#
+# 常用包名基准表（用于 typosquat 相似度判据）
+# ══════════════════════════════════════════════════════════════
+# 为什么需要这张表：
+#   中转站把 `pip install requests` 改成 `pip install reqeusts`，
+#   整条指令不含任何危险词，正则/关键词表全部失效。
+#   但 typosquat 有强结构特征 —— 它是**真实包名的微小变体**：
+#     reqeusts  vs requests  → 字符易位（transposition）
+#     requsts  vs requests  → 字符丢失（deletion）
+#     reqeusts1 vs requests  → 追加字符（insertion）
+#   判据因此可以是「这个包名与某个常用包名只差一个编辑操作」——
+#   纯结构计算，不需要模型评判，也不循环论证。
+#
+# 为什么要外置：
+#   这张表会随生态演进而增删。写死在代码里每次都要重新打包。
+#
+# 覆盖策略：
+#   只收**生态主流包**（下载量top级别）。表外的包名走
+#   「编辑距离过近但不在表内」的旁路判据（见 _near_miss 说明），
+#   因此本表不必完整 —— 它的作用是提供比对基准，而非白名单。
+
+version: 2
+updated: "2026-09-27"
+
+# ── Python 常用包 ─────────────────────────────────────────
+python:
+  # 网络与 HTTP
+  - requests
+  - httpx
+  - aiohttp
+  - urllib3
+  - flask
+  - fastapi
+  - uvicorn
+  - django
+  - websockets
+  # 数据处理
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - sklearn
+  - scikit-learn
+  - torch
+  - tensorflow
+  - transformers
+  - opencv-python
+  - pillow
+  # 工具
+  - click
+  - typer
+  - rich
+  - tqdm
+  - pytest
+  - setuptools
+  - wheel
+  - pip
+  - poetry
+  - black
+  - flake8
+  - mypy
+  - isort
+  # 安全
+  - cryptography
+  - pycryptodome
+  - certifi
+  - oauthlib
+  - requests-oauthlib
+  # 数据库
+  - sqlalchemy
+  - psycopg2
+  - pymysql
+  - redis
+  - pymongo
+  - clickhouse-driver
+  # 文档
+  - python-dateutil
+  - pytz
+  - jinja2
+  - markdown
+  - pyyaml
+  - toml
+  - openpyxl
+  - xlrd
+  # 其他高频
+  - psutil
+  - watchdog
+  - schedule
+  - loguru
+  - python-dotenv
+  - virtualenv
+  - packaging
+  - typing-extensions
+
+# ── Node.js 常用包 ────────────────────────────────────────
+node:
+  - express
+  - react
+  - react-dom
+  - vue
+  - angular
+  - next
+  - nuxt
+  - svelte
+  - webpack
+  - vite
+  - rollup
+  - esbuild
+  - babel
+  - typescript
+  - lodash
+  - axios
+  - moment
+  - dayjs
+  - date-fns
+  - uuid
+  - chalk
+  - commander
+  - yargs
+  - dotenv
+  - cors
+  - helmet
+  - jsonwebtoken
+  - bcrypt
+  - mongoose
+  - sequelize
+  - prisma
+  - socket.io
+  - ws
+  - redis
+  - ioredis
+  - jest
+  - vitest
+  - cypress
+  - playwright
+  - puppeteer
+  - eslint
+  - prettier
+  - rimraf
+  - cross-env
+  - concurrently
+  - nodemon
+  - pm2
+  - electron
+  - cheerio
+  - puppeteer-core
+  - node-fetch
+  - undici

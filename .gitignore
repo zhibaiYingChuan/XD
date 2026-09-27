@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# 个人版仓库忽略规则
+#
+# 原则：**只提交源码与可复现的构建配置**，
+# 一切构建产物、依赖、缓存、本地数据都不入库。
+#
+# 背景：仓库根目录曾包含 node_modules(107MB) + Nuitka 引擎产物(156MB)
+# + Tauri resources，总计 423MB。这些全部可由构建命令重新生成，
+# 入库只会让 clone 变得不可接受，且掩盖真实的源码变更。
+
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# ── Node / 前端 ───────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+*.tsbuildinfo
+
+# Tauri 前端构建产物（src/ 是源码，dist/ 是产物）
+desktop/dist/
+desktop/.vite/
+
+# ── Rust / Tauri ──────────────────────────────────────────
+# target/ 是编译缓存，可完全重建
+desktop/src-tauri/target/
+# gen/schemas 是 tauri 自动生成的 ACL schema（tauri dev/build 时再生）
+desktop/src-tauri/gen/schemas/
+
+# ★ Nuitka 引擎编译产物（156MB）
+#   由 `python build_engine.py` 生成，打包时才需要，源码库不应包含。
+#   注意：personal/desktop/src-tauri/resources/engine/ 里还有一份
+#   是给 CI/build 占位用的，体积同样巨大，一并排除。
+desktop/src-tauri/resources/
+desktop/engine_main.dist/
+desktop/engine_main.build/
+desktop/engine_main.onefile-build/
+*.build/
+
+# ── 安装包 ────────────────────────────────────────────────
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.blockmap
+
+# ── 本地数据与凭证 ────────────────────────────────────────
+# ★ 关键：中转站 API Key 绝不能入库
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+*.log
+
+# 环境变量文件
+.env
+.env.*
+!.env.example
+
+# ── IDE / 编辑器 ─────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop-list.txt
+
+# ── 测试临时产物 ──────────────────────────────────────────
+tests/__pycache__/
+*.tmp
+_probe*.py
+_tmp*.py

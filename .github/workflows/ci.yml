@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# 个人版 CI — 防护能力门禁
+#
+# 这个 workflow 的性质与其他项目不同：它不只验证「代码能跑」，
+# 而是验证**防护能力没有退化、且没有引入误报**。
+#
+# 失败模式是「静默退化」—— 代码不报错、测试不红，
+# 只有防护能力悄悄消失。这类问题不会被任何常规检查发现：
+#   · 修误报时把攻击判据一起放松了（实测发生过：红队 15/15 → 13/15）
+#   · 依赖调整导致护栏加载失败，被 except 吞掉，防护能力静默减半
+#   · 规则文件没随包分发，回退到内置最小集，用户毫无感知
+#
+# 四道门禁（缺一不可）：
+#   1. test_redteam_attack   攻击必须被拦（防能力退化）
+#   2. test_false_positive   正常内容必须放行（防误报）
+#   3. test_mutation_guard   测试本身是否可靠（防假通过）
+#   4. check_degradation     降级必须是可见的（防静默失效）
+
+name: CI Validation
+
+on:
+  push:
+    branches: [main, 'dev/**', 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 并发控制：同一分支只运行最新一次
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ============ 门禁 1-4：无企业版护栏时的完整能力 ============
+  defense:
+    name: Defense Gate (no guardrail)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install personal edition
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install pytest
+          pip install -e .
+
+      # 门禁 4：护栏缺失时代理仍可运行，且降级状态对外可见。
+      #   README 承诺「未安装企业版 SDK 时个人版仍可运行」——
+      #   这条承诺被破坏时不会报错，只会「少了两层检测而用户不知道」。
+      - name: Verify graceful degradation
+        run: |
+          pip uninstall -y daoti-xuandun || true
+          python tests/check_degradation.py
+
+      - name: Run defense test suite
+        run: python -m pytest tests -v --no-header -p no:cacheprovider
+        timeout-minutes: 15
+
+      # 把中文结论打到 CI 日志，便于人工快速核对
+      - name: Print reports
+        run: |
+          echo "────────── 红队攻击报告 ──────────"
+          python tests/redteam_relay_attack.py || true
+          echo ""
+          echo "────────── 误报回归报告 ──────────"
+          python tests/test_false_positive.py || true
+          echo ""
+          echo "────────── 能力实测报告 ──────────"
+          python tests/probe_capability.py || true
+
+  # ============ 门禁 1-4：含企业版护栏时的完整能力 ============
+  # 只测一种环境，另一种的退化不会被发现。
+  # 护栏存在时 prompt_inject 与 sensitive_leak 两层检测才生效。
+  defense-with-guardrail:
+    name: Defense Gate (with guardrail)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ★ engine extra 依赖 PyPI 上的 daoti-xuandun，该包目前未发布。
+      #   因此这个 job 在 upstream 发布前会安装失败 —— 这是预期行为，
+      #   提醒我们「护栏依赖尚未满足独立可安装」这一事实。
+      #   一旦企业版引擎发布到 PyPI，本 job 即自动生效，无需改动。
+      - name: Install personal edition with engine extra
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install pytest numpy
+          pip install -e ".[engine]"
+
+      - name: Verify guardrail loaded
+        run: python tests/check_degradation.py --with-guardrail
+
+      - name: Run defense test suite
+        run: python -m pytest tests -v --no-header -p no:cacheprovider
+        timeout-minutes: 15

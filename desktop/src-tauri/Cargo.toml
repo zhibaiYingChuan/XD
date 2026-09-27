@@ -1,0 +1,43 @@
+[package]
+name = "xuandun-personal"
+version = "0.1.0-alpha"
+description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据安全"
+authors = ["Daoti Team"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "xuandun_personal_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon 是 Tauri 2 的可选 feature，承载系统托盘能力。
+# 不开这个 feature 则 TrayIconBuilder / TrayIconEvent 类型不存在。
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread"] }
+parking_lot = "0.12"
+thiserror = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+
+[features]
+# 默认启用（生产构建）
+default = ["custom-protocol"]
+# 开发模式下禁用自定义协议（走 vite dev server）
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# Copyright (c) 2026 独立研究者，知白
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daoti-xuandun-personal"
+version = "0.1.0a0"
+description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据与执行安全"
+readme = "README.md"
+requires-python = ">=3.11"
+# ★ 保留自定义许可证标识：道体研究许可证 v1.0 不是 OSI 认可的 SPDX ID，
+#   写成 license = { file = ... } 会丢失标识（源文件头部均声明
+#   SPDX-License-Identifier: DaoTi-Research-1.0），且 PyPI 分类器不接受
+#   非 SPDX 的自定义 license text。两者并存，以 text 为准。
+license = { text = "DaoTi-Research-1.0" }
+authors = [{ name = "独立研究者，知白" }]
+keywords = [
+    "llm-security", "prompt-injection", "ai-gateway", "proxy",
+    "supply-chain", "typosquat", "mcp-security", "firewall",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Internet :: Proxy Servers",
+]
+
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx[http2]>=0.27",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# 个人版复用企业版核心检测引擎
+engine = ["daoti-xuandun>=1.3.5"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+    "black>=23.0",
+    "isort>=5.12",
+]
+
+[project.scripts]
+xuandun-personal = "daoti_xuandun_personal.proxy.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# ★ rules/*.yaml 必须随包分发：检测规则已外置，缺了会回退到
+#   内置最小集（拦截能力大幅下降）。schema.sql 同理。
+daoti_xuandun_personal = ["storage/*.sql", "rules/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "tests"]
+
+[tool.mypy]
+ignore_missing_imports = true
+python_version = "3.11"
