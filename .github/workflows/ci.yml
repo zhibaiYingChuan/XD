@@ -52,13 +52,18 @@ jobs:
           pip install pytest
           pip install -e .
 
-      # 门禁 4：护栏缺失时代理仍可运行，且降级状态对外可见。
-      #   README 承诺「未安装企业版 SDK 时个人版仍可运行」——
-      #   这条承诺被破坏时不会报错，只会「少了两层检测而用户不知道」。
-      - name: Verify graceful degradation
-        run: |
-          pip uninstall -y daoti-xuandun || true
-          python tests/check_degradation.py
+      # 门禁 4：护栏必须真的可用，且能力状态与对外报告一致。
+      #
+      # ★ 这里不再 `pip uninstall daoti-xuandun`。
+      #   护栏已从「依赖企业版 SDK」改为**仓库内置子集**
+      #   （src/daoti_xuandun/，见 GUARDRAIL.md），
+      #   卸载企业版包不再是构造降级环境的手段。
+      #
+      #   反过来，护栏不可用现在必须**判为失败**：
+      #   少了提示词注入与敏感泄露两层检测，
+      #   而用户界面照常显示「防护中」—— 静默的能力下降。
+      - name: Verify guardrail and capability reporting
+        run: python tests/check_degradation.py
 
       - name: Run defense test suite
         run: python -m pytest tests -v --no-header -p no:cacheprovider

@@ -40,11 +40,20 @@ dependencies = [
     "httpx[http2]>=0.27",
     "pydantic>=2.5",
     "pyyaml>=6.0",
+    # 激活码验签（RS256 + JWT）。
+    #   ★ 缺这两个会导致所有激活码被判为「验签组件不可用」，
+    #     而用户看到的往往是「激活码无效」—— 真因被掩盖。
+    "pyjwt>=2.8",
+    "cryptography>=41.0",
+    # 护栏的向量运算（_check_output 的原型距离计算）
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
-# 个人版复用企业版核心检测引擎
-engine = ["daoti-xuandun>=1.3.5"]
+# ★ 不再有 engine extra：护栏已作为子集内置在 src/daoti_xuandun/，
+#   不依赖企业版 SDK。原先的 engine = ["daoti-xuandun>=1.3.5"]
+#   引用的是一个未发布到 PyPI 的包，装不上。
+#   个人版现在可以独立 pip 安装并获得完整防护能力。
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

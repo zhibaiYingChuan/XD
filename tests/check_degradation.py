@@ -58,21 +58,41 @@ def main() -> int:
     problems = []
 
     # ① 护栏状态必须符合当前模式
-    if expect_guardrail:
-        if not stats["guardrail_available"]:
-            print(f"[FAIL] 已装企业版 SDK 但护栏不可用：{stats}")
-            problems.append("护栏未加载（--with-guardrail 模式）")
-        elif stats["degraded"]:
-            print(f"[FAIL] 护栏可用却处于降级状态：{stats}")
-            problems.append("degraded 标志与实际状态矛盾")
+    #
+    # ★ 语义已变更（2026-09）：护栏从「依赖企业版 SDK」改为
+    #   **仓库内置子集**（src/daoti_xuandun/，见 GUARDRAIL.md）。
+    #   所以「护栏缺失」不再是 CI 的预期环境 ——
+    #   恰恰相反，护栏不可用现在是一个**真实缺陷**，
+    #   因为它意味着少两层检测而用户界面照常显示「防护中」。
+    #
+    #   两种模式下都要求护栏可用：
+    #     · --with-guardrail：显式验证
+    #     · 默认模式：也必须可用（内置了就不该再靠外部 SDK）
+    if not stats["guardrail_available"]:
+        if expect_guardrail:
+            print(f"[FAIL] 护栏不可用（--with-guardrail 模式）：{stats}")
+            problems.append("护栏未加载")
         else:
-            print("[PASS] 护栏已加载且未降级")
-    elif stats["guardrail_available"]:
-        print("[FAIL] 护栏可用 —— 本自检需在未安装企业版 SDK 的环境下运行")
-        print("       CI 中应先 pip uninstall -y daoti-xuandun")
-        problems.append("护栏未处于缺失状态，自检前提不成立")
+            print("[FAIL] 护栏不可用 —— 内置护栏子集未能加载")
+            print("       提示词注入 + 敏感泄露两类检测已失效，")
+            print("       而界面会照常显示「防护中」，用户无从察觉")
+            print("       排查：python -m pytest tests/test_guardrail_parity.py -v")
+            problems.append("内置护栏未加载（检测能力静默下降）")
+    elif stats["degraded"]:
+        print(f"[FAIL] 护栏可用却处于降级状态：{stats}")
+        problems.append("degraded 标志与实际状态矛盾")
     else:
-        print("[PASS] 护栏缺失（符合预期环境）")
+        src = sys.modules.get("daoti_xuandun")
+        origin = getattr(src, "__file__", "?")
+        in_repo = str(Path(origin).resolve()).startswith(
+            str((Path(__file__).resolve().parent.parent / "src").resolve())
+        )
+        print(f"[PASS] 护栏已加载且未降级（来源：{'仓库内置' if in_repo else origin}）")
+        if not in_repo:
+            # 本机装了企业版 SDK 时，加载的可能不是仓库内置那份 ——
+            # 那种情况下 CI 的「通过」验的不是要发布的那份代码。
+            print("[WARN] 护栏来自仓库外部，可能是本机安装的企业版 SDK")
+            print("       而非仓库内置子集 —— 测试通过但验的不是要发布的代码")
 
     # ② 降级必须对外可见，不能静默
     expected_missing = (
