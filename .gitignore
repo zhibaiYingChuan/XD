@@ -112,3 +112,6 @@ tests/__pycache__/
 *.tmp
 _probe*.py
 _tmp*.py
+
+# 构建期生成的护栏密钥（每次构建都不同，入库等于公开）
+build_secrets.json
