@@ -103,7 +103,8 @@ personal/
 │           ├── db.py             # SQLite 本地存储（含 schema 迁移）
 │           └── schema.sql        # 表结构
 ├── tools/activation/
-│   ├── gen_activation_keys.py    # ★ 签发工具（genkeypair/issue/verify/hash/rebind/revoke/revoked）
+│   ├── gen_activation_keys.py    # ★ 签发工具（genkeypair/issue/verify/hash/rebind/revoke/revoked/audit）
+│   ├── webui.py                  # ★ 签发 WebUI（本机工具，持有私钥，仅绑 127.0.0.1）
 │   └── xuanDun_personal_public.pem  # ★ 公钥入库（私钥绝不入库）
 ├── desktop/                      # Tauri 桌面端（个人版，5 页面 + 激活页）
 │   ├── src/
@@ -255,6 +256,22 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 - **带时钟回拨检测** —— 只查 `exp` 的话，把系统时间调回过去即可无限续期
 
 **签发流程（签发方）**
+
+日常操作用网页界面，命令行作为脚本/批量场景的备选：
+
+```bash
+cd personal
+python tools/activation/webui.py          # 浏览器打开 http://127.0.0.1:8760
+```
+
+界面含六个页签：签发 / 换机换绑 / 吊销 / 传播审计 / 签发记录 / 验码。
+
+> ★ **这个页面持有私钥，因此刻意不做登录鉴权** —— 它假设你只在自己电脑上跑。
+> 启动参数写死只能绑 `127.0.0.1`，传 `--host 0.0.0.0` 会被直接拒绝启动：
+> 那等于让局域网里任何人都能给自己签发永久激活码。
+> 需要远程签发请走 SSH 隧道，不要把它暴露到公网。
+
+命令行等价操作：
 
 ```bash
 cd personal
