@@ -226,95 +226,40 @@ jobs:
         # 公钥缺失就是发布阻断，不是可选项。
         run: python build_engine.py
 
-      - name: Assert public key landed in bundle
-        working-directory: desktop
-        # ★ 这条断言是本 workflow 存在的核心理由。
-        #   build_engine.py 会拷公钥，但「脚本说拷了」不等于「真的拷了」。
-        #   断言产物目录里确实有它，才算闭环。
-        #
-        # ★★ 用 Python 判断，不用 shell。
-        #   两版都踩过坑：
-        #     · test -f 相对路径 → Windows runner 上正斜杠路径失败
-        #     · FOUND=$(find ...) → set -u 下 find 无匹配即 unbound variable
-        #       （回归：2026-09-28 三平台同时挂在这一行，
-        #        报错是 "FOUND: unbound variable"，而产物其实在）
-        #   shell 判据在三平台上的差异比它解决的问题还多。
-        #   Python 的 Path 语义跨平台一致，且能顺手把目录内容打进日志。
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import sys
-
-          roots = [Path("src-tauri/resources/engine"), Path("engine_main.dist")]
-          hits = [p for r in roots if r.is_dir()
-                  for p in r.rglob("license_pub.pem")]
-          if not hits:
-              print("::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活")
-              for r in roots:
-                  print(f"  {r} 存在={r.is_dir()}")
-                  if r.is_dir():
-                      for p in sorted(r.iterdir())[:20]:
-                          print(f"    {p.name}")
-              sys.exit(1)
-          print(f"PASS：公钥已落入引擎产物（{hits[0]}）")
-          PY
-
-      # ★★★ 产物级护栏断言（本 workflow 最关键的一步）
+      # ★★★ 产物级断言：本 workflow 存在的核心理由
       #
-      #   前面所有检查都是「源码/配置对不对」，这一条是
-      #   「**编译出来的二进制里到底还有没有防护能力**」。
+      #   前面所有检查都是「源码/配置对不对」，这两条是
+      #   「**编译出来的二进制里到底还剩不剩交付能力**」。
       #
-      #   护栏的 import 是延迟 import，Nuitka 静态分析看不到它；
+      #   公钥：build_engine.py 会拷公钥，但「脚本说拷了」不等于
+      #   「真的拷了」。缺公钥的包能启动、能自检通过，唯独每个用户
+      #   都激活不了 —— 发布后才发现等于白发一个版本。
+      #
+      #   护栏：import 是延迟 import，Nuitka 静态分析看不到它；
       #   而判定护栏在不在场的路径曾指向仓库外的企业版目录 ——
       #   本地恰好有那个目录所以一直带着，干净 clone（= runner）
       #   上却静默跳过，产出没有提示词注入与敏感泄露检测的包，
       #   界面还照常显示「防护中」。用户以为自己受保护。
       #
-      #   ★ 判据：在二进制里搜护栏的判据标识。
-      #     不能找 .py 文件 —— Nuitka standalone 把模块编译进二进制，
-      #     dist/daoti_xuandun/ 下只剩 data 文件，源码根本不出现。
+      #   ★ 判据与实现都在 desktop/verify_guardrail_bundle.py，不内联在 YAML。
+      #     内联脚本藏在 YAML 缩进与 heredoc 里，本机无从验证 ——
+      #     2026-09-28 连续三轮栽在内联 Python 上（f-string 嵌套引号、
+      #     set -u 下 unbound variable、Windows 相对路径），每一轮都要
+      #     等十分钟的 CI 才暴露。独立文件可以本地跑通再推。
+      #
+      #   ★ 公钥判据：产物目录里确实有 license_pub.pem。
+      #   ★ 护栏判据：在二进制里搜判据标识（system_prompt_inject /
+      #     sensitive_leak）。不能找 .py 文件 —— Nuitka standalone 把
+      #     模块编译进二进制，dist/ 下只剩 data 文件，源码根本不出现；
       #     也不能只看目录存在 —— 空壳目录同样满足，而它毫无防护能力。
-      #     判据标识（如 system_prompt_inject / sensitive_leak）
-      #     只由护栏代码产生，护栏缺失时必然搜不到。
+      #     判据标识只由护栏代码产生，护栏缺失时必然搜不到。
+      - name: Assert public key landed in bundle
+        working-directory: desktop
+        run: python verify_guardrail_bundle.py --pubkey-only
+
       - name: Assert guardrail is present in compiled engine
         working-directory: desktop
-        # ★★ 同样用 Python，不用 shell。
-        #   `MISSING="$MISSING $sig"` 在 set -u 下首次赋值前引用未定义变量
-        #   会直接报错退出 —— 与 FOUND 同一个坑，不重复踩。
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import sys
-
-          roots = [Path("src-tauri/resources/engine"), Path("engine_main.dist")]
-          bins = [p for r in roots if r.is_dir()
-                  for p in r.iterdir()
-                  if p.is_file() and p.suffix in (".exe", ".bin")]
-          if not bins:
-              print("::error::在引擎产物目录里找不到可执行文件")
-              for r in roots:
-                  print(f"  {r} 存在={r.is_dir()}")
-                  if r.is_dir():
-                      for p in sorted(r.iterdir())[:20]:
-                          print(f"    {p.name} ({'dir' if p.is_dir() else p.stat().st_size}B})")
-              sys.exit(1)
-
-          # ★ 这些标识只由护栏代码产生，个人版自研层不包含它们。
-          #   缺了就证明护栏没编进来 —— 产物能启动、能自检通过，
-          #   但提示词注入与敏感泄露两类检测完全失效，
-          #   而界面照常显示「防护中」。用户以为自己受保护。
-          sigs = [b"system_prompt_inject", b"sensitive_leak"]
-          for b in bins:
-              data = b.read_bytes()
-              missing = [s.decode() for s in sigs if s not in data]
-              print(f"检查产物: {b}  ({len(data) / 1024 / 1024:.1f} MB)")
-              if missing:
-                  print(f"::error::{b.name} 里缺少护栏判据标识：{' '.join(missing)}")
-                  print("::error::护栏未编入这个包。发布一个没有防护能力的防火墙，")
-                  print("::error::比构建失败坏得多 —— 前者让用户产生错误的安全感。")
-                  sys.exit(1)
-              print(f"PASS：{b.name} 内含护栏判据，防护能力在位")
-          PY
+        run: python verify_guardrail_bundle.py
 
       - name: Install frontend dependencies
         working-directory: desktop
