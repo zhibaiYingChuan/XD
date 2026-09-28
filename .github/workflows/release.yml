@@ -11,8 +11,11 @@
 # 唯独每一个用户都激活不了 —— 发布后才发现等于白发一个版本。
 # 那正是「静默降级」最典型的形态，所以这里必须在构建期拦死。
 #
-# 另一处不同：企业版打三平台，个人版目前只出 Windows 安装包。
-# 护栏层已入库，不依赖企业版仓库，clone 后即可完整构建。
+# 另一处不同：企业版打三平台时用矩阵，这里也是矩阵，
+# 但有个容易踩的坑 —— **Nuitka 不能交叉编译**。
+# 它调用的是本机 C 编译器，所以三个平台必须各自在对应 runner 上
+# 编译引擎，而不是编一份再分发。
+# 护栏层已入库，不依赖外部仓库，clone 后即可完整构建。
 
 name: Release
 
@@ -91,14 +94,27 @@ jobs:
         timeout-minutes: 20
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.name }})
     needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
+            name: Windows x64
             target: x86_64-pc-windows-msvc
+            bundle: nsis
+            bundle_glob: '*.exe'
+          - os: macos-14
+            name: macOS arm64
+            target: aarch64-apple-darwin
+            bundle: dmg
+            bundle_glob: '*.dmg'
+          - os: ubuntu-22.04
+            name: Linux x64
+            target: x86_64-unknown-linux-gnu
+            bundle: appimage
+            bundle_glob: '*.AppImage'
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -117,9 +133,26 @@ jobs:
         with:
           node-version: '20'
 
+      # ★ 各平台用该平台的 Rust 工具链。macOS runner 是 arm64，
+      #   显式指定 aarch64-apple-darwin 而不用默认工具链，
+      #   否则会按 x86_64 交叉编译，产物在 M 系列机器上跑不起来。
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
         with:
           toolchain: stable
+          targets: ${{ matrix.target }}
+
+      # Linux 打包 AppImage 需要这些系统库。
+      # 缺 libwebkit2gtk 会报 "Required library 'webkit2gtk-4.1' not found"。
+      - name: Install Linux bundling dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            fuse3
 
       - name: Install Python dependencies
         run: |
@@ -129,6 +162,8 @@ jobs:
           pip install "nuitka==4.1.3"
           pip install -e .
 
+      # ★ Nuitka 必须在目标平台本机跑 —— 它调用的是本机 C 编译器，
+      #   不能交叉编译。所以这里是三个 runner 各自编译，不是编译三份。
       - name: Build Nuitka engine
         working-directory: desktop
         # 缺公钥时该脚本 return 4 —— 这里不做绕过。
@@ -152,13 +187,17 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop
-        run: npm run tauri build
+        # ★ 必须显式指定 --bundles，且传的是**格式名**（nsis/dmg/appimage）
+        #   而不是通配符 —— 命令行不接受 glob。
+        #   各平台只能构建自己支持的格式，传 all 会让 macOS runner
+        #   尝试产出 .exe 而失败。
+        run: npm run tauri build -- --bundles ${{ matrix.bundle }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: xuandun-personal-${{ matrix.target }}
-          path: desktop/src-tauri/target/release/bundle/**/*.exe
+          path: desktop/src-tauri/target/release/bundle/**/${{ matrix.bundle_glob }}
           # 空产物必须报错：上传 0 个文件却显示成功，
           # 会让后续 release 创建一个没有任何安装包的版本。
           if-no-files-found: error
@@ -186,9 +225,17 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          find . -type f -name "*.exe" -exec sha256sum {} \; \
+          # ★ 三种格式都要算。只认 *.exe 的话，macOS/Linux 用户
+          #   拿不到任何校验值 —— 而校验值恰恰是他们最需要的
+          #   （从第三方下载时无法确认文件未被篡改）。
+          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" \) \
+            -exec sha256sum {} \; \
             | sed 's|  \./[^ ]*/|  |' > checksums-sha256.txt
           cat checksums-sha256.txt
+          # 一个都没算出来就是失败：静默产出空校验文件比报错更糟，
+          # 用户会以为「没校验值也能装」。
+          test -s checksums-sha256.txt \
+            || { echo "::error::未找到任何安装包，校验文件为空"; exit 1; }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -196,4 +243,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/**/*.exe
+            artifacts/**/*.dmg
+            artifacts/**/*.AppImage
             artifacts/**/checksums-sha256.txt

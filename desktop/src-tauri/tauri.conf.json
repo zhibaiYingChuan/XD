@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "dmg", "appimage"],
     "resources": [
       "resources/engine"
     ],
@@ -46,6 +46,9 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   },
   "plugins": {
