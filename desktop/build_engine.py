@@ -359,6 +359,52 @@ def main() -> int:
 
     print("已生成构建期密钥（反编译加固）：build_secrets.json")
 
+    # ══════════════════════════════════════════════════════════
+    # Linux AppImage：把 numpy.libs 里的 .so 平铺到引擎目录根部
+    # ══════════════════════════════════════════════════════════
+    #
+    # ★★ 这不是洁癖，是 AppImage 打包的硬阻断。
+    #
+    #   护栏 9 个模块都 import numpy，Nuitka 因此把 numpy 打进产物。
+    #   numpy 自带的 OpenBLAS 文件名是
+    #   libscipy_openblas64_-<hash>.so —— 名字里的 scipy 是 OpenBLAS 的
+    #   历史命名（当年由 SciPy 项目维护），**本项目并未安装 scipy**。
+    #
+    #   AppImage 走 linuxdeploy，它按 AppImage 格式的定义必须把应用
+    #   依赖的每个 ELF 库都打进包内。扫到 numpy 的 .so 引用
+    #   libscipy_openblas64_-<hash>.so 时，它在 numpy.libs/ 子目录里
+    #   找不到这个名字（该工具对子目录里的依赖有已知解析缺陷，
+    #   社区 2019 年就记录过同类问题），于是报
+    #     ERROR: Could not find dependency: libscipy_openblas64_*.so
+    #   并终止整个打包。
+    #
+    #   做法：在**保持文件名不变**的前提下，把这些 .so 也复制一份到
+    #   引擎目录根部。linuxdeploy 搜索时能在根目录命中，依赖解析通过；
+    #   numpy 运行时靠 $ORIGIN/rpath 仍能用 numpy.libs 里那份，
+    #   两份内容相同，互不影响。代价是产物多几 MB。
+    #
+    #   ⚠ 只在 Linux 上做。Windows/macOS 不扫 ELF 依赖，
+    #     平铺纯属浪费体积。
+    #
+    #   ⚠ 同时注意：这个故障的报错文案与 linuxdeploy 其它故障
+    #     （FUSE 挂载失败、strip 失败）**完全一样**，都是
+    #     "failed to run linuxdeploy" 这句话。2026-09-28 因此白跑了一轮
+    #     17 分钟的 CI。排查务必看最后几行的真实错误。
+    if platform.system().lower() == "linux":
+        _libs_dir = os.path.join(RESOURCE_ENGINE_DIR, "numpy.libs")
+        if os.path.isdir(_libs_dir):
+            _n = 0
+            for _f in os.listdir(_libs_dir):
+                if not _f.endswith(".so"):
+                    continue
+                _src = os.path.join(_libs_dir, _f)
+                _dst = os.path.join(RESOURCE_ENGINE_DIR, _f)
+                if not os.path.isfile(_dst):
+                    shutil.copy2(_src, _dst)
+                    _n += 1
+            if _n:
+                print(f"AppImage 兼容：已平铺 {_n} 个 numpy .so 到引擎目录根部")
+
     count = len(os.listdir(RESOURCE_ENGINE_DIR))
     size_mb = sum(
         os.path.getsize(os.path.join(RESOURCE_ENGINE_DIR, f))

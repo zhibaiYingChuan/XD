@@ -101,29 +101,73 @@ jobs:
           echo "PASS：公钥已入库且格式正确"
 
   build:
-    name: Build (${{ matrix.name }})
+    name: Build (${{ matrix.art }})
     needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
+          # ★ 每项都带一个紧凑 id（如 win-x64），专供 artifact 命名。
+          #   不能用 matrix.name —— 里面有空格（"Windows x64"），
+          #   也不能用 matrix.target —— Linux 的 deb 与 AppImage
+          #   两个 job 的 target 完全相同，artifact 名字会撞，
+          #   upload-artifact 直接失败。
           - os: windows-latest
             name: Windows x64
+            art: win-x64
             target: x86_64-pc-windows-msvc
             bundle: nsis
             bundle_glob: '*.exe'
           - os: macos-14
             name: macOS arm64
+            art: mac-arm64
             target: aarch64-apple-darwin
             bundle: dmg
             bundle_glob: '*.dmg'
           - os: ubuntu-22.04
             name: Linux x64
+            art: linux-deb
+            target: x86_64-unknown-linux-gnu
+            bundle: deb
+            bundle_glob: '*.deb'
+
+          # ★ AppImage 单开一个 job，与 deb 分离。
+          #
+          #   AppImage 走 linuxdeploy，而 linuxdeploy 必须把应用依赖的
+          #   每一个 ELF 库都打进包里（这是 AppImage 格式的定义）。
+          #   护栏 9 个模块都 import numpy，numpy 自带的 OpenBLAS 叫
+          #   libscipy_openblas64_-<hash>.so（scipy 只是 OpenBLAS 的历史
+          #   命名，项目并未安装 scipy），它位于 numpy.libs/ 子目录。
+          #   linuxdeploy 解析子目录里的相对路径依赖时有已知缺陷，
+          #   会报 `Could not find dependency: libscipy_openblas64_*.so`
+          #   并终止整个打包。
+          #
+          #   deb 打包不调 linuxdeploy、不扫 ELF 依赖，因此 Linux 用户
+          #   先有可安装的 deb；AppImage 是覆盖面更广但脆弱的补充，
+          #   它失败不该让整个发布失败 —— 否则 Ubuntu 用户已经能装上的
+          #   东西，反而被一个用不上的 AppImage 卡住。
+          #
+          #   continue-on-error: true —— 允许这个 job 失败，
+          #   Release 步骤仍会拿到 deb 与另两个平台的产物。
+          - os: ubuntu-22.04
+            name: Linux AppImage
+            art: linux-appimage
             target: x86_64-unknown-linux-gnu
             bundle: appimage
             bundle_glob: '*.AppImage'
+            allow_failure: true
 
     runs-on: ${{ matrix.os }}
+
+    # ★ 只对 AppImage 那个矩阵项放行失败。
+    #   continue-on-error 是 job 级属性，不能写在 matrix include 里
+    #   （那样只是多出一个没人读的普通字段，不产生任何效果）——
+    #   所以条件写成「非 Linux AppImage 时恒为 false」。
+    #
+    #   这样设计的理由：AppImage 的失败源于 linuxdeploy 扫 ELF 依赖
+    #   时的缺陷，与本项目的代码正确性无关。让它失败等于让
+    #   「Ubuntu 用户能装上的 deb」也发不出去。
+    continue-on-error: ${{ matrix.allow_failure || false }}
 
     # ★★ 整个 job 强制 UTF-8。
     #   windows-latest 的控制台编码是 GBK（cp936），
@@ -267,45 +311,42 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop
-        # ★ 必须显式指定 --bundles，且传的是**格式名**（nsis/dmg/appimage）
+        # ★ 必须显式指定 --bundles，且传的是**格式名**（nsis/dmg/deb/appimage）
         #   而不是通配符 —— 命令行不接受 glob。
         #   各平台只能构建自己支持的格式，传 all 会让 macOS runner
         #   尝试产出 .exe 而失败。
         #
-        # ★ APPIMAGE_EXTRACT_AND_RUN 对 Linux 是**必须**的：
-        #   Tauri 的 AppImage 打包依赖 linuxdeploy，而 linuxdeploy
-        #   本身是个 AppImage —— 它必须用 FUSE 把自身挂载出来才能跑。
-        #   GitHub 的 ubuntu runner 在容器里，/dev/fuse 不可用，
-        #   于是 linuxdeploy 挂载失败，报出来的是
-        #   「failed to run linuxdeploy」—— 一个看不出真实原因的错误。
-        #   这个变量让它解包到临时目录再执行，绕开 FUSE。
+        # ★ 这里不再设 APPIMAGE_EXTRACT_AND_RUN / NO_STRIP。
+        #   2026-09-28 曾先后加上这两个变量，各花一轮 17 分钟的 CI，
+        #   两次都与真实故障无关：
+        #     · APPIMAGE_EXTRACT_AND_RUN —— Tauri 自己就设了这个环境变量
+        #       并传了 --appimage-extract-and-run（见 tauri-bundler 的
+        #       appimage/linuxdeploy.rs），我们设的是重复的。
+        #     · NO_STRIP —— 试的是「strip 失败」这个假设，未被证实。
+        #   真实原因是 linuxdeploy 扫 ELF 依赖时找不到 numpy 的
+        #   libscipy_openblas64_*.so，由 build_engine.py 平铺 .so 解决。
         #
-        # ★★ NO_STRIP=1 解决的是**另一个**独立的 linuxdeploy 失败点：
-        #   linuxdeploy 打包时会对可执行文件跑 strip，而新版
-        #   glibc/binutils 上这一步会失败。Tauri 同样只报
-        #   「failed to run linuxdeploy」，与 FUSE 那个症状一模一样，
-        #   但成因不同 —— 只加 APPIMAGE_EXTRACT_AND_RUN 不够
-        #   （2026-09-28 实测：变量已生效，Linux 仍挂在这里）。
-        #   上游通行的解法就是 NO_STRIP：产物大一点，不影响运行。
-        #   它只对 AppImage 打包有意义，其他格式不受影响。
-        #
-        # ★★ 加 --verbose 不是为了看编译进度，是为了**让失败可诊断**。
-        #   「failed to run linuxdeploy」这一句不含任何原因 ——
-        #   FUSE 挂载失败、strip 失败、插件下载失败，报出来长得一模一样。
-        #   2026-09-28 就是因为没有它，只能靠猜，猜错就再等十分钟。
-        #   一次构建 17 分钟，看不见原因等于盲飞。
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: '1'
-          NO_STRIP: '1'
+        # ★ --verbose 保留：它让 linuxdeploy 的真实报错出现在日志里。
+        #   没有它，Tauri 只给一句 "failed to run linuxdeploy"，
+        #   FUSE / strip / 依赖缺失三种故障长得一模一样。
+        #   一次构建 17 分钟，看不见原因等于盲飞 —— 这正是本次
+        #   连续两轮误判的直接原因。
         run: npm run tauri build -- --verbose --bundles ${{ matrix.bundle }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: xuandun-personal-${{ matrix.target }}
+          # ★ 用 matrix.art 而不是 matrix.target 命名。
+          #   Linux 的 deb 与 AppImage 是两个 job 但 target 相同
+          #   （都是 x86_64-unknown-linux-gnu），artifact 名字冲突时
+          #   upload-artifact 会直接失败 —— 而且报错与真实原因
+          #   毫无关联，不容易联想到是命名撞了。
+          name: xuandun-personal-${{ matrix.art }}
           path: desktop/src-tauri/target/release/bundle/**/${{ matrix.bundle_glob }}
-          # 空产物必须报错：上传 0 个文件却显示成功，
-          # 会让后续 release 创建一个没有任何安装包的版本。
+          # ★ 只有「打包成功」才算成功。AppImage 那个 job 允许失败
+          #   （continue-on-error），但如果它侥幸没产出文件而我们又
+          #   静默放过，Release 就会少一个包而没人知道。
+          #   它失败时 job 标红、这里也标红，两处一致才看得清。
           if-no-files-found: error
 
   release:
@@ -331,10 +372,12 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          # ★ 三种格式都要算。只认 *.exe 的话，macOS/Linux 用户
+          # ★ 四种格式都要算。只认 *.exe 的话，macOS/Linux 用户
           #   拿不到任何校验值 —— 而校验值恰恰是他们最需要的
           #   （从第三方下载时无法确认文件未被篡改）。
-          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" \) \
+          #   *.deb 同样必须算：它是 Linux 的**主力**安装格式。
+          find . -type f \( -name "*.exe" -o -name "*.dmg" \
+                         -o -name "*.AppImage" -o -name "*.deb" \) \
             -exec sha256sum {} \; \
             | sed 's|  \./[^ ]*/|  |' > checksums-sha256.txt
           cat checksums-sha256.txt
@@ -351,4 +394,5 @@ jobs:
             artifacts/**/*.exe
             artifacts/**/*.dmg
             artifacts/**/*.AppImage
+            artifacts/**/*.deb
             artifacts/**/checksums-sha256.txt
