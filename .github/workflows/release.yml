@@ -54,7 +54,21 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
+          pip install pytest
           pip install -e .
+
+      # ★★ 护栏必须在构建期就在位。
+      #   护栏的 import 是延迟 import，Nuitka 静态分析看不到；
+      #   而判定护栏在不在场的路径曾指向仓库外的企业版目录 ——
+      #   本地恰好有那个目录所以一直带着，干净 clone（= 本 runner）
+      #   上却静默跳过，产出没有提示词注入与敏感泄露检测的包，
+      #   界面还照常显示「防护中」。
+      #   这道门禁就是为拦住它存在的，必须在 CI 里跑。
+      - name: Assert guardrail is bundled
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_guardrail_in_build.py -q --no-header -p no:cacheprovider
+          echo "PASS：护栏层已确认编入产物"
 
       # ★ 私钥绝不能出现在仓库里。
       #   一旦入库，任何人都能签发激活码，授权体系瞬间失效，
@@ -85,12 +99,6 @@ jobs:
           grep -q "BEGIN PUBLIC KEY" "$PUB" \
             || { echo "::error::公钥内容不是有效 PEM"; exit 1; }
           echo "PASS：公钥已入库且格式正确"
-
-      # ★ 防护能力测试（tests/）已移出公开仓库，不在 CI 内运行。
-      #   判据与攻击样本是核心资产，不能公开。
-      #   代价是「构建成功」不再等于「防护能力没退化」——
-      #   这道门禁改在私有仓库或本地跑。
-      #   保留原有的引擎产物断言作为最低限度的兜底。
 
   build:
     name: Build (${{ matrix.name }})
