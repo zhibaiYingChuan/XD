@@ -362,7 +362,173 @@ def rebind(args) -> int:
     print("★ 下一步：让用户把新码重新粘贴进客户端。若旧码可能外泄，")
     print("  单独作废旧码（只杀 gen < 新代次，新码不受影响）：")
     print(f"  python gen_activation_keys.py revoke {claims.get('jti')} --before-gen {new_gen}")
+
+    # ★ 换绑必须记日志 —— 它是「码在传播」的唯一直接信号。
+    #   不记的话，下面的 audit 子命令看不见任何换绑痕迹，
+    #   而换绑次数正是判断「一张码被几个人用」的核心依据。
+    _append_log(
+        Path(args.log) if getattr(args, "log", "") else DEFAULT_LOG,
+        {
+            "jti": claims.get("jti"),
+            "gen": new_gen,
+            "name": claims.get("sub"),
+            "tier": claims.get("tier"),
+            "mch": new_mch,
+            "mch_raw": new_mch_raw,
+            "event": "rebind",
+            "from_mch": old_mch,
+            "from_gen": int(claims.get("gen", 0) or 0),
+            "created_at": datetime.fromtimestamp(
+                int(new_claims["iat"]), tz=timezone.utc
+            ).isoformat(),
+            "expires_at": datetime.fromtimestamp(
+                claims["exp"], tz=timezone.utc
+            ).isoformat(),
+            "code": new_code,
+        },
+    )
     return 0
+
+
+def audit(args) -> int:
+    """签发日志异常检测 —— 「码是否在被传播」的唯一可见手段。
+
+    ★★ 为什么这是整个体系里最有用的一环
+    ────────────────────────────────────────────────────────────
+    客户端校验防不住破解（校验发生在用户机器上，用户拥有那台机器）。
+    所以真正的防线不在客户端，而在这里 —— **签发方掌握全部真相**：
+
+        一张码被换绑到第 3 台机器 = 极可能已被传播
+        同一个码短时间多次换绑     = 有人在批量薅
+        已吊销的码之后又出现换绑   = 有人拿废码试
+
+    这三类信号客户端一个都给不出，只有签发日志能看见。
+
+    ★ 判据用「阈值」而不是「有一处异常就报」：
+      正常用户一年可能换一次机（换硬盘、系统重装）。
+      阈值定太低会把正常用户报成异常，报了也没人看 ——
+      **一个永远在报警的告警等于没有告警**。
+    """
+    path = Path(args.log) if args.log else DEFAULT_LOG
+    if not path.exists():
+        print(f"（尚无签发日志：{path}）")
+        print("  签发第一张码后即可用本命令审计传播情况。")
+        return 0
+
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"✗ 签发日志不可读（{e}）: {path}", file=sys.stderr)
+        print("  日志损坏会让传播检测失效 —— 别当成「没有异常」。", file=sys.stderr)
+        return 1
+
+    if not isinstance(records, list):
+        print(f"✗ 签发日志格式异常（不是列表）: {path}", file=sys.stderr)
+        return 1
+
+    # 按 jti 聚合：换绑次数、涉及机器数、是否已被吊销
+    by_jti: Dict[str, Dict[str, Any]] = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        jti = str(rec.get("jti", "")).strip()
+        if not jti:
+            continue
+        info = by_jti.setdefault(
+            jti,
+            {
+                "name": rec.get("name", "?"),
+                "issued": 0,
+                "rebinds": 0,
+                "machines": set(),
+                "first": rec.get("created_at", ""),
+                "last": rec.get("created_at", ""),
+                "events": [],
+            },
+        )
+        event = rec.get("event", "issue")
+        if event == "rebind":
+            info["rebinds"] += 1
+        else:
+            info["issued"] += 1
+        mch = str(rec.get("mch", "")).strip()
+        if mch:
+            info["machines"].add(mch)
+        ts = str(rec.get("created_at", ""))
+        if ts:
+            if not info["first"] or ts < info["first"]:
+                info["first"] = ts
+            if ts > info["last"]:
+                info["last"] = ts
+        info["events"].append((ts, event, mch))
+
+    try:
+        from daoti_xuandun_personal import license as lic
+
+        revoked = lic.load_revoked() or set()
+    except Exception:
+        revoked = set()
+
+    total_codes = len(by_jti)
+    total_rebinds = sum(v["rebinds"] for v in by_jti.values())
+
+    print("=" * 68)
+    print("  签发日志审计 —— 传播情况")
+    print("=" * 68)
+    print(f"  日志: {path}")
+    print(f"  激活码: {total_codes} 张    换绑: {total_rebinds} 次")
+    print()
+
+    alerts = []
+    for jti, info in by_jti.items():
+        reasons = []
+        if len(info["machines"]) > args.max_machines:
+            reasons.append(
+                f"绑定了 {len(info['machines'])} 台机器"
+                f"（阈值 {args.max_machines}）—— 极可能已传播"
+            )
+        if info["rebinds"] > args.max_rebinds:
+            reasons.append(
+                f"换绑 {info['rebinds']} 次（阈值 {args.max_rebinds}）"
+                f"—— 疑似批量使用"
+            )
+        is_revoked = any(
+            e == jti or e.startswith(f"{jti}#") for e in revoked
+        )
+        if is_revoked and any(e == "rebind" for _, e, _ in info["events"]):
+            # 吊销在客户端名单里，签发方这边只记换绑 → 无法直接比时间。
+            # 这里提示人工核对，而不是下断言。
+            reasons.append("该码已被吊销，但日志里仍有换绑记录 —— 请人工核对时序")
+
+        if reasons:
+            alerts.append((jti, info, reasons))
+
+    if not alerts:
+        print("  ✓ 未发现异常传播迹象")
+        print()
+        print("  阈值：单码最多 %d 台机器 / %d 次换绑"
+              % (args.max_machines, args.max_rebinds))
+        print("  （正常用户一年可能换一次机，阈值定太低会把正常用户报成异常）")
+    else:
+        print(f"  ⚠ 发现 {len(alerts)} 张码有异常：")
+        print()
+        for jti, info, reasons in alerts:
+            print(f"  jti {jti}  ({info['name']})")
+            for r in reasons:
+                print(f"      · {r}")
+            print(f"      时间跨度: {info['first'][:19]} → {info['last'][:19]}")
+            print(f"      机器数 {len(info['machines'])}，换绑 {info['rebinds']} 次")
+            print()
+        print("  处理建议：")
+        print("    1) 先核对是否正常换机（用户是否真的报过换机）")
+        print("    2) 确认传播后按 jti 吊销：")
+        print(f"       python gen_activation_keys.py revoke {alerts[0][0]}")
+        print("    3) 同一 jti 已换到多台机器时，可用 --before-gen 只作废早期代次，")
+        print("       保留最新一台（避免把唯一有效的码一起吊销掉）")
+
+    print("=" * 68)
+    # 有异常时返回非 0，便于挂到定时任务里
+    return 1 if alerts else 0
 
 
 def revoke(args) -> int:
@@ -512,6 +678,8 @@ def main() -> int:
     rb.add_argument("--pub", required=True, help="RSA 公钥 PEM（用于校验原码）")
     rb.add_argument("--request", required=True,
                     help="客户端给出的换绑请求串（XDRB.…）")
+    rb.add_argument("--log", default="",
+                    help="签发日志路径（换绑必须留痕，否则 audit 看不见传播）")
 
     rv = sub.add_parser("revoke", help="吊销一个已签发的激活码")
     rv.add_argument("jti", help="激活码的 jti（在签发日志/用户报障信息里）")
@@ -521,6 +689,13 @@ def main() -> int:
                     help="同步名单到分发目录（需自行配置目标）")
 
     ls = sub.add_parser("revoked", help="列出已吊销的 jti")
+
+    ad = sub.add_parser("audit", help="审计签发日志，检测激活码传播迹象")
+    ad.add_argument("--log", default="", help="签发日志路径（默认 ACTIVATION_LOG.json）")
+    ad.add_argument("--max-machines", type=int, default=2,
+                    help="单张码允许绑定的机器数上限（超过即视为可能传播）")
+    ad.add_argument("--max-rebinds", type=int, default=2,
+                    help="单张码允许的换绑次数上限（超过即视为批量使用）")
 
     args = ap.parse_args()
     if args.cmd == "genkeypair":
@@ -538,6 +713,8 @@ def main() -> int:
         return revoke(args)
     if args.cmd == "revoked":
         return list_revoked(args)
+    if args.cmd == "audit":
+        return audit(args)
     return 1
 
 

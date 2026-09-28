@@ -128,6 +128,7 @@ fn proxy_base() -> String {
 //
 // 具体的机器码采集、状态存储、时钟回拨逻辑都在 license.rs，
 // 这里只做「调引擎验签 + 编排 + 暴露 Tauri 命令」。
+
 /// 调引擎的 /api/license/verify（真实验签在引擎侧）。
 async fn engine_verify(app: &tauri::AppHandle, code: &str) -> Result<license::VerifyOutcome, String> {
     ensure_engine_running(app).await?;
@@ -159,8 +160,13 @@ async fn build_license_status(app: &tauri::AppHandle) -> LicenseStatus {
         return LicenseStatus::inactive("尚未激活", mch);
     }
 
-    // 时钟回拨：Rust 侧独立复核一次。
-    // 双侧都查的原因见 license.rs 顶部「校验点分散」。
+    // 时钟回拨检测。
+    //
+    // ★ 这里查它**不是为了「双侧校验」**——AI 流量不经过 Rust，
+    //   这段代码只影响 UI 显示的状态，不是流量路径上的关卡。
+    //   真正在流量路径上做判定的是引擎的 _protection_enabled()。
+    //   这里查的实质价值是：用户看到的状态与引擎一致，
+    //   不会出现「界面说已激活、引擎却在只读」这种自相矛盾。
     if let Err(msg) = license::check_clock_rollback(
         if st.last_seen > 0 { Some(st.last_seen) } else { None },
         now,
