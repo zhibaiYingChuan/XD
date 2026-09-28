@@ -26,6 +26,9 @@ standalone 是一堆 dll + 主 exe，无自解压，干净得多。
     cd personal/desktop
     pip install "nuitka==4.1.3" fastapi uvicorn httpx pydantic
     python build_engine.py
+
+    # 本地开发调试、暂不激活时，显式跳过公钥检查：
+    python build_engine.py --allow-missing-pubkey
 """
 
 import os
@@ -77,6 +80,11 @@ def _triple() -> str:
 
 
 def main() -> int:
+    # ★ 显式开关，不做「有则拷、无则静默跳过」。
+    #   缺公钥的包能启动、能自检通过，唯独所有用户都激活不了 ——
+    #   那是发布后才发现的灾难，必须在构建期就拦下。
+    _allow_missing_pubkey = "--allow-missing-pubkey" in sys.argv
+
     if not os.path.isdir(SRC_DIR):
         print(f"FATAL: 未找到个人版源码目录: {SRC_DIR}", file=sys.stderr)
         return 2
@@ -257,11 +265,28 @@ def main() -> int:
     # ★ 放在这里而不是 build 之前：拷贝源若在 tools/activation/，
     #   那里可能被 .gitignore 排除，也可能在干净 CI 上不存在。
     #   拷进产物目录后它随 resources/ 一起进安装包。
+    #
+    # ★★ 缺公钥必须让构建**失败**，不能只警告。
+    #   缺公钥的包能正常启动、能显示界面、能跑通所有自检 ——
+    #   唯独每一个用户都激活不了。发布后才发现，等于白发一个版本。
+    #   这正是「静默降级」最典型的形态：构建成功，产品完全不可用。
     if os.path.isfile(pub_src):
         shutil.copy2(
             pub_src,
             os.path.join(RESOURCE_ENGINE_DIR, "license_pub.pem"),
         )
+    else:
+        print()
+        print("[FATAL] 找不到激活码公钥，构建中止。", file=sys.stderr)
+        print(f"  期望路径: {pub_src}", file=sys.stderr)
+        print("  生成方法: python tools/activation/gen_activation_keys.py genkeypair",
+              file=sys.stderr)
+        print("  没有公钥的包可以启动、可以自检通过，但**所有用户都激活不了**。",
+              file=sys.stderr)
+        print("  如仅做本地开发调试，可显式跳过：", file=sys.stderr)
+        print("    python build_engine.py --allow-missing-pubkey", file=sys.stderr)
+        if not _allow_missing_pubkey:
+            return 4
 
     count = len(os.listdir(RESOURCE_ENGINE_DIR))
     size_mb = sum(
