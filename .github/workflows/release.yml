@@ -161,8 +161,17 @@ jobs:
 
       # Linux 打包 AppImage 需要这些系统库。
       # 缺 libwebkit2gtk 会报 "Required library 'webkit2gtk-4.1' not found"。
+      #
+      # ★ APPIMAGE_EXTRACT_AND_RUN=1 是**必须**的，不是优化：
+      #   AppImage 运行时必须用 FUSE 把自身挂载出来才能执行，
+      #   而 GitHub 的 ubuntu runner 跑在容器里，/dev/fuse 不可用
+      #   （典型报错 "failed to run linuxdeploy" —— linuxdeploy 本身
+      #   是个 AppImage，它挂载不上去就直接死给你看）。
+      #   这个变量让它改成「解包到临时目录再运行」，绕开 FUSE。
       - name: Install Linux bundling dependencies
         if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -222,11 +231,23 @@ jobs:
         # ★ 这条断言是本 workflow 存在的核心理由。
         #   build_engine.py 会拷公钥，但「脚本说拷了」不等于「真的拷了」。
         #   断言产物目录里确实有它，才算闭环。
+        #
+        # ★★ 用 find 定位而非相对路径 test -f：
+        #   相对路径 src-tauri/resources/engine/... 在 Windows runner 上
+        #   经 bash 处理会失败（正斜杠 + 盘符），而 Linux/macOS 正常 ——
+        #   典型的「只在一个平台炸」的坑。
+        #   find 走的是同一套 glob 语义，三平台一致。
         run: |
           set -euo pipefail
-          test -f src-tauri/resources/engine/license_pub.pem \
-            || { echo "::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活"; exit 1; }
-          echo "PASS：公钥已落入引擎产物"
+          FOUND=$(find . -name "license_pub.pem" -path "*resources/engine*" | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活"
+            echo "::error::当前目录内容："
+            ls -la
+            find . -maxdepth 3 -type d -name "engine" 2>/dev/null || true
+            exit 1
+          fi
+          echo "PASS：公钥已落入引擎产物（$FOUND）"
 
       # ★★★ 产物级护栏断言（本 workflow 最关键的一步）
       #
@@ -249,10 +270,28 @@ jobs:
         working-directory: desktop
         run: |
           set -euo pipefail
-          DIST="engine_main.dist"
-          BIN=$(find "$DIST" -maxdepth 1 -type f \( -name "*.exe" -o -name "*.bin" \) | head -1)
+          # ★ 直接扫 resources/engine —— 那是 build_engine.py 拷入的最终产物目录，
+          #   也是 Tauri 打进安装包的东西。
+          #   不用 engine_main.dist：Nuitka 的 --remove-output 会不会保留它
+          #   取决于版本，断言一个可能被清掉的目录等于断言一个不存在的东西。
+          #   find 而非相对路径 test：Windows runner 上正斜杠路径会失败。
+          BIN=""
+          for d in src-tauri/resources/engine engine_main.dist; do
+            if [ -d "$d" ]; then
+              CAND=$(find "$d" -maxdepth 1 -type f \( -name "*.exe" -o -name "*.bin" \) | head -1)
+              if [ -n "$CAND" ]; then
+                BIN="$CAND"
+                break
+              fi
+            fi
+          done
           if [ -z "$BIN" ]; then
-            echo "::error::在 $DIST 里找不到引擎可执行文件"
+            echo "::error::在引擎产物目录里找不到可执行文件"
+            echo "::error::目录内容："
+            ls -la src-tauri/resources/engine 2>/dev/null || \
+              echo "  src-tauri/resources/engine 不存在"
+            ls -la engine_main.dist 2>/dev/null || \
+              echo "  engine_main.dist 不存在"
             exit 1
           fi
           echo "检查产物: $BIN"
@@ -285,6 +324,16 @@ jobs:
         #   而不是通配符 —— 命令行不接受 glob。
         #   各平台只能构建自己支持的格式，传 all 会让 macOS runner
         #   尝试产出 .exe 而失败。
+        #
+        # ★ APPIMAGE_EXTRACT_AND_RUN 对 Linux 是**必须**的：
+        #   Tauri 的 AppImage 打包依赖 linuxdeploy，而 linuxdeploy
+        #   本身是个 AppImage —— 它必须用 FUSE 把自身挂载出来才能跑。
+        #   GitHub 的 ubuntu runner 在容器里，/dev/fuse 不可用，
+        #   于是 linuxdeploy 挂载失败，报出来的是
+        #   「failed to run linuxdeploy」—— 一个看不出真实原因的错误。
+        #   这个变量让它解包到临时目录再执行，绕开 FUSE。
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
         run: npm run tauri build -- --bundles ${{ matrix.bundle }}
 
       - name: Upload artifacts
