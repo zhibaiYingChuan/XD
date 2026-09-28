@@ -126,7 +126,18 @@ tests/
 
 # CI 门禁细节：四道防护门禁的存在与判据、发布流水线的公钥断言。
 # 公开这些等于告诉破解者「我们重点防什么、怎么防的」。
-.github/
+#
+# ★ 例外：release.yml 必须入库。
+#   GitHub 只从 .github/workflows/ 读流水线，没有它就没有线上构建 ——
+#   「线上编译」这件事本身依赖这个文件。
+#   它只做构建与公钥断言（检查私钥有没有漏进仓库），
+#   不含任何检测判据或攻击样本。
+#   ci.yml 则相反：它跑 tests/（已移出），且四道门禁的名称与判据
+#   本身就是情报，不能公开。
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/release.yml
 
 # 内部开发文档（不对外发布）
 docs/
