@@ -37,6 +37,25 @@ import shutil
 import subprocess
 import sys
 
+# ★★ Windows 终端默认 GBK 编码，遇到「→」「★」这类字符会抛
+#   UnicodeEncodeError 直接把构建打断。GitHub 的 windows-latest
+#   runner 就是 GBK，本脚本里的中文提示 + 符号会稳定触发。
+#
+#   必须在任何输出**之前**设好，且要重配 stdout/stderr ——
+#   光设环境变量对已初始化的 TextIOWrapper 无效。
+#
+#   记忆库同类教训：「Windows GBK 终端打印 ✓✗ 会 UnicodeEncodeError，
+#   验证需 PYTHONIOENCODING=utf-8」（企业版 CSCD 踩过）。
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for _s in ("stdout", "stderr"):
+        _stream = getattr(sys, _s, None)
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PERSONAL_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 SRC_DIR = os.path.join(PERSONAL_ROOT, "src")
