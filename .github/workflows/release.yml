@@ -232,22 +232,32 @@ jobs:
         #   build_engine.py 会拷公钥，但「脚本说拷了」不等于「真的拷了」。
         #   断言产物目录里确实有它，才算闭环。
         #
-        # ★★ 用 find 定位而非相对路径 test -f：
-        #   相对路径 src-tauri/resources/engine/... 在 Windows runner 上
-        #   经 bash 处理会失败（正斜杠 + 盘符），而 Linux/macOS 正常 ——
-        #   典型的「只在一个平台炸」的坑。
-        #   find 走的是同一套 glob 语义，三平台一致。
+        # ★★ 用 Python 判断，不用 shell。
+        #   两版都踩过坑：
+        #     · test -f 相对路径 → Windows runner 上正斜杠路径失败
+        #     · FOUND=$(find ...) → set -u 下 find 无匹配即 unbound variable
+        #       （回归：2026-09-28 三平台同时挂在这一行，
+        #        报错是 "FOUND: unbound variable"，而产物其实在）
+        #   shell 判据在三平台上的差异比它解决的问题还多。
+        #   Python 的 Path 语义跨平台一致，且能顺手把目录内容打进日志。
         run: |
-          set -euo pipefail
-          FOUND=$(find . -name "license_pub.pem" -path "*resources/engine*" | head -1)
-          if [ -z "$FOUND" ]; then
-            echo "::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活"
-            echo "::error::当前目录内容："
-            ls -la
-            find . -maxdepth 3 -type d -name "engine" 2>/dev/null || true
-            exit 1
-          fi
-          echo "PASS：公钥已落入引擎产物（$FOUND）"
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+
+          roots = [Path("src-tauri/resources/engine"), Path("engine_main.dist")]
+          hits = [p for r in roots if r.is_dir()
+                  for p in r.rglob("license_pub.pem")]
+          if not hits:
+              print("::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活")
+              for r in roots:
+                  print(f"  {r} 存在={r.is_dir()}")
+                  if r.is_dir():
+                      for p in sorted(r.iterdir())[:20]:
+                          print(f"    {p.name}")
+              sys.exit(1)
+          print(f"PASS：公钥已落入引擎产物（{hits[0]}）")
+          PY
 
       # ★★★ 产物级护栏断言（本 workflow 最关键的一步）
       #
@@ -268,51 +278,43 @@ jobs:
       #     只由护栏代码产生，护栏缺失时必然搜不到。
       - name: Assert guardrail is present in compiled engine
         working-directory: desktop
+        # ★★ 同样用 Python，不用 shell。
+        #   `MISSING="$MISSING $sig"` 在 set -u 下首次赋值前引用未定义变量
+        #   会直接报错退出 —— 与 FOUND 同一个坑，不重复踩。
         run: |
-          set -euo pipefail
-          # ★ 直接扫 resources/engine —— 那是 build_engine.py 拷入的最终产物目录，
-          #   也是 Tauri 打进安装包的东西。
-          #   不用 engine_main.dist：Nuitka 的 --remove-output 会不会保留它
-          #   取决于版本，断言一个可能被清掉的目录等于断言一个不存在的东西。
-          #   find 而非相对路径 test：Windows runner 上正斜杠路径会失败。
-          BIN=""
-          for d in src-tauri/resources/engine engine_main.dist; do
-            if [ -d "$d" ]; then
-              CAND=$(find "$d" -maxdepth 1 -type f \( -name "*.exe" -o -name "*.bin" \) | head -1)
-              if [ -n "$CAND" ]; then
-                BIN="$CAND"
-                break
-              fi
-            fi
-          done
-          if [ -z "$BIN" ]; then
-            echo "::error::在引擎产物目录里找不到可执行文件"
-            echo "::error::目录内容："
-            ls -la src-tauri/resources/engine 2>/dev/null || \
-              echo "  src-tauri/resources/engine 不存在"
-            ls -la engine_main.dist 2>/dev/null || \
-              echo "  engine_main.dist 不存在"
-            exit 1
-          fi
-          echo "检查产物: $BIN"
+          python - <<'PY'
+          from pathlib import Path
+          import sys
 
-          # ★ 这些标识只由护栏代码产生。
-          #   个人版自研层不包含它们 —— 缺了就证明护栏没编进来。
-          MISSING=""
-          for sig in system_prompt_inject sensitive_leak; do
-            if ! grep -qa -- "$sig" "$BIN"; then
-              MISSING="$MISSING $sig"
-            fi
-          done
-          if [ -n "$MISSING" ]; then
-            echo "::error::二进制里缺少护栏判据标识：$MISSING"
-            echo "::error::护栏（提示词注入 + 敏感泄露）未编入这个包。"
-            echo "::error::它能启动、能自检通过，但这两类检测完全失效，"
-            echo "::error::而界面照常显示「防护中」。用户以为自己受保护。"
-            echo "::error::发布一个没有防护能力的防火墙，比构建失败坏得多。"
-            exit 1
-          fi
-          echo "PASS：护栏判据已确认存在于二进制中（防护能力在位）"
+          roots = [Path("src-tauri/resources/engine"), Path("engine_main.dist")]
+          bins = [p for r in roots if r.is_dir()
+                  for p in r.iterdir()
+                  if p.is_file() and p.suffix in (".exe", ".bin")]
+          if not bins:
+              print("::error::在引擎产物目录里找不到可执行文件")
+              for r in roots:
+                  print(f"  {r} 存在={r.is_dir()}")
+                  if r.is_dir():
+                      for p in sorted(r.iterdir())[:20]:
+                          print(f"    {p.name} ({'dir' if p.is_dir() else p.stat().st_size}B})")
+              sys.exit(1)
+
+          # ★ 这些标识只由护栏代码产生，个人版自研层不包含它们。
+          #   缺了就证明护栏没编进来 —— 产物能启动、能自检通过，
+          #   但提示词注入与敏感泄露两类检测完全失效，
+          #   而界面照常显示「防护中」。用户以为自己受保护。
+          sigs = [b"system_prompt_inject", b"sensitive_leak"]
+          for b in bins:
+              data = b.read_bytes()
+              missing = [s.decode() for s in sigs if s not in data]
+              print(f"检查产物: {b}  ({len(data) / 1024 / 1024:.1f} MB)")
+              if missing:
+                  print(f"::error::{b.name} 里缺少护栏判据标识：{' '.join(missing)}")
+                  print("::error::护栏未编入这个包。发布一个没有防护能力的防火墙，")
+                  print("::error::比构建失败坏得多 —— 前者让用户产生错误的安全感。")
+                  sys.exit(1)
+              print(f"PASS：{b.name} 内含护栏判据，防护能力在位")
+          PY
 
       - name: Install frontend dependencies
         working-directory: desktop
