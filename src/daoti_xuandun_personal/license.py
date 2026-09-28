@@ -280,7 +280,8 @@ def load_public_key() -> Optional[str]:
     2. ``XUANDUN_LICENSE_PUBKEY_FILE`` 指向的文件
     3. **引擎可执行文件同级**的 ``license_pub.pem``
        —— 这是发布形态下的实际落点（由 build_engine.py 拷入）
-    4. 用户配置目录下的 ``license_pub.pem``
+    4. 仓库内 ``tools/activation/``（开发态，见下方说明）
+    5. 用户配置目录下的 ``license_pub.pem``
 
     ★ 绝不设默认值。企业版 ``config.py`` 里有
       ``shell_key = b"daoti_xuandun_16"`` 这类硬编码 fallback，
@@ -292,10 +293,24 @@ def load_public_key() -> Optional[str]:
     if pem and "BEGIN PUBLIC KEY" in pem:
         return pem
 
-    candidates = []
+    # ★ 显式指定的路径**先单独判定**，不与兜底候选混在一起。
+    #   混了的话，路径配错时会悄悄用兜底里的另一把公钥验签 ——
+    #   表现为「所有码都无效」，而配置里那个路径看起来一切正常，
+    #   极难定位。「显式配置」与「兜底发现」是两种语义，不能混。
     env_path = os.getenv("XUANDUN_LICENSE_PUBKEY_FILE", "").strip()
     if env_path:
-        candidates.append(env_path)
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "BEGIN PUBLIC KEY" in content:
+                return content
+        except OSError as e:
+            raise FileNotFoundError(
+                f"XUANDUN_LICENSE_PUBKEY_FILE 指向的公钥不可用: {env_path}（{e}）"
+            ) from e
+        raise ValueError(f"公钥文件内容不是有效的 PEM: {env_path}")
+
+    candidates = []
 
     # ③ 引擎可执行文件同级 —— 发布形态下的主路径
     try:
@@ -308,6 +323,21 @@ def load_public_key() -> Optional[str]:
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         candidates.append(os.path.join(here, "license_pub.pem"))
+
+        # ④ 开发态：从 src/daoti_xuandun_personal/ 上溯**两层**到仓库根，
+        #    再进 tools/activation/。
+        #    （一层是 src/，两层是仓库根 —— 写错层数会静默找不到，
+        #      而「找不到」的表现是「激活码无效」，极难定位。）
+        #    ★ 开发模式下桌面端是用 `python -m daoti_xuandun_personal.proxy.app`
+        #      启动引擎的（见 lib.rs 的 need_module 分支），
+        #      没有任何地方会把公钥拷到 site-packages 或引擎同级 ——
+        #      缺了这一条，开发态下所有激活码都判为「验签组件不可用」，
+        #      而用户只会看到「激活码无效」，真因被完全掩盖。
+        repo_root = os.path.dirname(os.path.dirname(here))
+        candidates.append(
+            os.path.join(repo_root, "tools", "activation",
+                         "xuanDun_personal_public.pem")
+        )
     except Exception:
         pass
 
@@ -328,6 +358,11 @@ def load_public_key() -> Optional[str]:
                 return content
         except OSError:
             continue
+
+    # 兜底候选全部落空 = 组件确实不可用。
+    # ★ 返回 None 而不抛错：这是「没装公钥」的正常状态
+    #   （开发态、CI），调用方据此报 verifier_unavailable。
+    #   与上面「显式配错」区分开 —— 那个是配置错误，必须抛。
     return None
 
 
@@ -416,7 +451,19 @@ def verify(
             False, "malformed", "激活码格式不正确，请检查是否复制完整"
         )
 
-    pub = load_public_key()
+    # ★ load_public_key 在「显式配置的路径不存在」时会抛异常
+    #   （那是配置错误，不该被静默兜底掩盖）。
+    #   但异常绝不能穿透到调用方 —— verify 的契约是「永远返回结论」，
+    #   否则 Rust 侧会拿到 Err 而当成引擎故障，界面显示不出真因。
+    try:
+        pub = load_public_key()
+    except Exception as e:
+        return VerifyResult(
+            False,
+            "verifier_unavailable",
+            f"激活校验组件不可用（{e}），请联系售后",
+            verifier_available=False,
+        )
     if not pub:
         return VerifyResult(
             False,

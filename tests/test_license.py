@@ -378,11 +378,57 @@ def test_missing_public_key_is_not_treated_as_valid(keypair, monkeypatch, tmp_pa
     assert r.reason == "verifier_unavailable"
 
 
-def test_status_endpoint_reports_degradation(monkeypatch, tmp_path):
-    """能力自检要能看出「公钥缺失」，供诊断页展示。"""
-    monkeypatch.setenv("XUANDUN_LICENSE_PUBKEY_FILE", str(tmp_path / "nope.pem"))
+def test_explicit_pubkey_path_missing_raises(monkeypatch, tmp_path):
+    """★ 显式配置的公钥路径读不到时必须**抛错**，不得静默回退。
+
+    静默回退的后果：运维把路径配错 → 系统悄悄用另一把公钥验签
+    → 表现为「所有码都无效」，而配置里那个路径看起来一切正常。
+    「显式配置」与「兜底发现」是两种语义，混在一起就丢了真因。
+    """
+    monkeypatch.setenv("XUANDUN_LICENSE_PUBKEY_FILE", str(tmp_path / "typo.pem"))
     monkeypatch.delenv("XUANDUN_LICENSE_PUBKEY", raising=False)
-    assert lic.load_public_key() is None
+
+    with pytest.raises(FileNotFoundError) as ei:
+        lic.load_public_key()
+    assert "typo.pem" in str(ei.value), "报错必须指出是哪个路径找不到"
+
+
+def test_explicit_pubkey_path_missing_still_fails_closed(monkeypatch, tmp_path):
+    """★ 但 verify() 必须顶住该异常并如实报「不可用」。
+
+    verify 的契约是「永远返回结论」。若异常穿透到 Rust 侧，
+    会被当成引擎故障，界面显示不出真因。
+    """
+    monkeypatch.setenv("XUANDUN_LICENSE_PUBKEY_FILE", str(tmp_path / "typo.pem"))
+    monkeypatch.delenv("XUANDUN_LICENSE_PUBKEY", raising=False)
+
+    r = lic.verify("XDACT-a.b.c", "x")
+    assert not r.ok
+    assert r.reason == "verifier_unavailable"
+    assert r.verifier_available is False
+    assert "typo.pem" in (r.message or ""), (
+        f"错误信息应指出真因（哪个路径找不到），实际: {r.message!r}"
+    )
+
+
+def test_repo_public_key_is_discoverable(monkeypatch):
+    """★ 开发态必须能找到仓库内的公钥。
+
+    开发模式下桌面端用 `python -m daoti_xuandun_personal.proxy.app`
+    启动引擎，没有任何地方会把公钥拷到引擎同级或 site-packages。
+    缺了这条兜底路径，开发态下所有激活码都判为「验签组件不可用」，
+    而用户看到的往往是「激活码无效」—— 真因被完全掩盖，
+    且 check_degradation 只会给一个 WARN，不阻断任何东西。
+    """
+    monkeypatch.delenv("XUANDUN_LICENSE_PUBKEY", raising=False)
+    monkeypatch.delenv("XUANDUN_LICENSE_PUBKEY_FILE", raising=False)
+
+    pub = lic.load_public_key()
+    assert pub, (
+        "开发态找不到仓库内的公钥 —— 所有激活码会判为验签组件不可用。"
+        f"确认 {(_ROOT / 'tools' / 'activation' / 'xuanDun_personal_public.pem')} 已入库"
+    )
+    assert "BEGIN PUBLIC KEY" in pub
 
 
 # ══════════════════════════════════════════════════════════════

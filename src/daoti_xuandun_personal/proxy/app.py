@@ -249,7 +249,16 @@ def create_app() -> FastAPI:
                 logger.info("进入只读模式：%s（%s）", r.reason, r.message or "")
             return r.ok
         except Exception as e:  # 任何异常都不得让防护静默消失
-            logger.warning("激活状态读取失败（%s），按已授权处理", e)
+            # ★ 这里返回 True（不降级）是刻意的：
+            #   验签组件故障时降级 = 用我方故障惩罚已付费用户。
+            #   但配置错误（如公钥路径写错）也落进这个分支，
+            #   所以日志要说清是哪一种 —— 否则「所有码都无效」
+            #   这个现象会一直查不到根因。
+            logger.warning(
+                "激活状态读取失败（%s: %s），按已授权处理。"
+                "若公钥路径配置有误请检查 XUANDUN_LICENSE_PUBKEY_FILE",
+                type(e).__name__, e,
+            )
             return True
 
     def _load_saved_code() -> str:
@@ -1030,7 +1039,16 @@ def create_app() -> FastAPI:
         """激活相关的能力自检（供诊断页展示降级状态）。"""
         from .. import license as lic
 
-        pub = lic.load_public_key()
+        # ★ load_public_key 在「显式配置的路径不存在」时会抛异常。
+        #   自检端点必须顶住它并把真因报出来 ——
+        #   这个端点存在的意义就是「让降级可见」，
+        #   它自己却因配置错误而 500 就本末倒置了。
+        pub_error = ""
+        try:
+            pub = lic.load_public_key()
+        except Exception as e:
+            pub = None
+            pub_error = str(e)
         try:
             import jwt  # noqa: F401
             has_jwt = True
@@ -1042,6 +1060,7 @@ def create_app() -> FastAPI:
             # 这必须对外可见，否则用户只会看到「激活码无效」而找不到真因。
             "verifier_available": bool(pub) and has_jwt,
             "has_public_key": bool(pub),
+            "public_key_error": pub_error,
             "has_jwt": has_jwt,
             "last_seen": lic.read_last_seen(),
         }
