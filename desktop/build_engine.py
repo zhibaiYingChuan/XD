@@ -363,24 +363,31 @@ def main() -> int:
     # Linux AppImage：把 numpy.libs 里的 .so 平铺到引擎目录根部
     # ══════════════════════════════════════════════════════════
     #
-    # ★ 2026-09-28 实测结论：**这一步不足以让 AppImage 通过**，
-    #   但仍保留，因为它能消掉一部分 linuxdeploy 找不到库的情况，
-    #   且成本极低。
+    # ★ 2026-09-29 结论：**这一步不足以让 AppImage 通过**，且它
+    #   对 AppImage 其实**不起作用** —— 保留它只是因为无法确定
+    #   运行时是否依赖这个根目录副本（Nuitka 若未给 numpy/_core/*.so
+    #   打上指向根目录的 rpath，它就是运行时的唯一来源）。
+    #   **在没有证据前不动它**：删错了会直接弄坏 Linux 上的 numpy。
     #
-    #   实测失败点（v0.1.0-alpha10，Linux AppImage job）：
-    #     ERROR: Could not find dependency: libscipy_openblas64_-32a4b2a6.so
-    #   日志显示「引用方」就是 libscipy_openblas64_-32a4b2a6.so 本身 ——
-    #   numpy 的 manylinux wheel 里 OpenBLAS 会链接同名的另一个变体，
-    #   而那个变体不在产物里。linuxdeploy 逐个解析 ELF 的 DT_NEEDED，
-    #   找不到就终止，**平铺与否都一样**。
+    #   ★ 曾被记成「引用方就是 libscipy_openblas64_*.so 本身，
+    #     属 linuxdeploy 对 numpy 的固有缺陷，产物结构绕不过去」
+    #     —— 这是**误判**。2026-09-29 读 v0.1.0-alpha11 的
+    #     --verbose 日志，最后两行是：
+    #       Deploying dependencies for ELF file .../engine/numpy/_core/_multiarray_umath.so
+    #       ERROR: Could not find dependency: libscipy_openblas64_-32a4b2a6.so
+    #     即**引用方是 numpy/_core/_multiarray_umath.so**，不是它自己。
     #
-    #   ⇒ 这是 linuxdeploy 对 numpy manylinux 包的固有缺陷，
-    #     不是产物结构能绕过的。真正的解法是让它别去扫 numpy：
-    #     需改 Tauri 打包流程或改用静态链接的 numpy，超出本项目范围。
+    #   真实机制：linuxdeploy 解析 DT_NEEDED 时只在两类位置找
+    #     ① 引用方自己所在的目录 ② 系统库路径（ldconfig 列表）。
+    #   ①能在同一份日志里验证：引擎根部的 libscipy_openblas64_*.so
+    #   需要 libgfortran-*.so.5.0.0，linuxdeploy 就在同一目录找到了。
+    #   平铺把 OpenBLAS 放到了**引擎根部**，而引用方在 numpy/_core/
+    #   —— 目录不同，①覆盖不到 ⇒ 平铺对 AppImage 无效果。
     #
-    #   ★ 因此 Linux 的**主力交付格式是 deb**（不调 linuxdeploy、
-    #     不扫 ELF 依赖）；AppImage 在 workflow 里是
-    #     continue-on-error 的可选产物，失败不影响发布。
+    #   ⇒ 真正的解法在 CI 侧：release.yml 的
+    #     "Register numpy OpenBLAS for linuxdeploy" 步骤把该库注册进
+    #     系统库路径，走②让 linuxdeploy 正常解析。
+    #     （Linux 主力的 deb 格式本来就不调 linuxdeploy、不扫依赖。）
     #
     #   护栏 9 个模块都 import numpy 是这件事的源头
     #   （Nuitka 因此把 numpy 打进产物）。而 numpy 自带的 OpenBLAS
