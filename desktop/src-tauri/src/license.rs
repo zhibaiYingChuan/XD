@@ -198,6 +198,14 @@ pub fn save(st: &LicenseState) -> Result<(), String> {
 
 /// 引擎验签返回的结果。
 #[derive(Debug, Clone, Deserialize)]
+// ★★ 必须加 rename_all = "camelCase"。
+//   引擎（Python 侧 license.py::VerifyResult::to_dict）返回的键是
+//   驼峰：verifierAvailable / machineCode…，而 Rust 字段是蛇形。
+//   缺了这个标注，serde 会因「缺字段 verifier_available」而整体失败 ——
+//   用户看到的是「验签结果解析失败: missing field」，
+//   而真实原因（键名大小写不匹配）在界面上完全看不出来，
+//   且无论激活码对不对都会失败。2026-09-28 线上就是这样。
+#[serde(rename_all = "camelCase")]
 pub struct VerifyOutcome {
     pub ok: bool,
     /// 失败原因码：malformed / bad_signature / expired /

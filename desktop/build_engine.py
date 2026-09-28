@@ -363,33 +363,34 @@ def main() -> int:
     # Linux AppImage：把 numpy.libs 里的 .so 平铺到引擎目录根部
     # ══════════════════════════════════════════════════════════
     #
-    # ★★ 这不是洁癖，是 AppImage 打包的硬阻断。
+    # ★ 2026-09-28 实测结论：**这一步不足以让 AppImage 通过**，
+    #   但仍保留，因为它能消掉一部分 linuxdeploy 找不到库的情况，
+    #   且成本极低。
     #
-    #   护栏 9 个模块都 import numpy，Nuitka 因此把 numpy 打进产物。
-    #   numpy 自带的 OpenBLAS 文件名是
-    #   libscipy_openblas64_-<hash>.so —— 名字里的 scipy 是 OpenBLAS 的
-    #   历史命名（当年由 SciPy 项目维护），**本项目并未安装 scipy**。
+    #   实测失败点（v0.1.0-alpha10，Linux AppImage job）：
+    #     ERROR: Could not find dependency: libscipy_openblas64_-32a4b2a6.so
+    #   日志显示「引用方」就是 libscipy_openblas64_-32a4b2a6.so 本身 ——
+    #   numpy 的 manylinux wheel 里 OpenBLAS 会链接同名的另一个变体，
+    #   而那个变体不在产物里。linuxdeploy 逐个解析 ELF 的 DT_NEEDED，
+    #   找不到就终止，**平铺与否都一样**。
     #
-    #   AppImage 走 linuxdeploy，它按 AppImage 格式的定义必须把应用
-    #   依赖的每个 ELF 库都打进包内。扫到 numpy 的 .so 引用
-    #   libscipy_openblas64_-<hash>.so 时，它在 numpy.libs/ 子目录里
-    #   找不到这个名字（该工具对子目录里的依赖有已知解析缺陷，
-    #   社区 2019 年就记录过同类问题），于是报
-    #     ERROR: Could not find dependency: libscipy_openblas64_*.so
-    #   并终止整个打包。
+    #   ⇒ 这是 linuxdeploy 对 numpy manylinux 包的固有缺陷，
+    #     不是产物结构能绕过的。真正的解法是让它别去扫 numpy：
+    #     需改 Tauri 打包流程或改用静态链接的 numpy，超出本项目范围。
     #
-    #   做法：在**保持文件名不变**的前提下，把这些 .so 也复制一份到
-    #   引擎目录根部。linuxdeploy 搜索时能在根目录命中，依赖解析通过；
-    #   numpy 运行时靠 $ORIGIN/rpath 仍能用 numpy.libs 里那份，
-    #   两份内容相同，互不影响。代价是产物多几 MB。
+    #   ★ 因此 Linux 的**主力交付格式是 deb**（不调 linuxdeploy、
+    #     不扫 ELF 依赖）；AppImage 在 workflow 里是
+    #     continue-on-error 的可选产物，失败不影响发布。
     #
-    #   ⚠ 只在 Linux 上做。Windows/macOS 不扫 ELF 依赖，
-    #     平铺纯属浪费体积。
+    #   护栏 9 个模块都 import numpy 是这件事的源头
+    #   （Nuitka 因此把 numpy 打进产物）。而 numpy 自带的 OpenBLAS
+    #   文件名是 libscipy_openblas64_-<hash>.so —— 名字里的 scipy
+    #   是 OpenBLAS 的历史命名（当年由 SciPy 项目维护），
+    #   **本项目并未安装 scipy**。
     #
-    #   ⚠ 同时注意：这个故障的报错文案与 linuxdeploy 其它故障
-    #     （FUSE 挂载失败、strip 失败）**完全一样**，都是
-    #     "failed to run linuxdeploy" 这句话。2026-09-28 因此白跑了一轮
-    #     17 分钟的 CI。排查务必看最后几行的真实错误。
+    #   ⚠ 排查提醒：linuxdeploy 的三类失败（FUSE 挂载、strip、
+    #     依赖缺失）报出来**全都是**同一句
+    #     "failed to run linuxdeploy"，只能靠 --verbose 看最后几行。
     if platform.system().lower() == "linux":
         _libs_dir = os.path.join(RESOURCE_ENGINE_DIR, "numpy.libs")
         if os.path.isdir(_libs_dir):
@@ -404,6 +405,8 @@ def main() -> int:
                     _n += 1
             if _n:
                 print(f"AppImage 兼容：已平铺 {_n} 个 numpy .so 到引擎目录根部")
+                print("  注意：这不足以让 AppImage 通过（见上方说明），"
+                      "Linux 主力交付格式是 deb。")
 
     count = len(os.listdir(RESOURCE_ENGINE_DIR))
     size_mb = sum(
