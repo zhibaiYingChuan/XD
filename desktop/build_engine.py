@@ -40,21 +40,22 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PERSONAL_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 SRC_DIR = os.path.join(PERSONAL_ROOT, "src")
-# 企业版核心算法引擎源码目录（护栏层所在）。
+# 护栏层（输出护栏 + 敏感泄露）源码目录。
 #
-# ★ 个人版通过 verifier._try_load_guardrail() 复用企业版的
-#   「输出护栏」（提示词注入 + 敏感泄露两层检测）。
-#   该复用是**延迟 import**：编译期若不显式 include，
+# ★★ 这里指向**本仓库内**的 src/，不是仓库外的企业版路径。
+#
+#   护栏已入库（src/daoti_xuandun/），它是个人版防护能力的组成部分，
+#   不是可选依赖。此前这里指向 ../../src（仓库外的企业版），
+#   导致干净 clone 上判定为「护栏不在场」→ 编译时跳过 --include-package
+#   → 产物缺提示词注入与敏感泄露两层检测，而界面照常显示「防护中」。
+#   本地因为恰好有 ../src 而碰巧带上，线上却是残废的 ——
+#   典型的「本地能跑、线上失效」静默降级。
+#
+#   护栏的 import 是**延迟 import**：编译期若不显式 include，
 #   Nuitka 会认为它是可选依赖而跳过 → 打包后
 #   `from daoti_xuandun.xuandun import XuanDun` 必然 ImportError
-#   → _guardrail_available 恒为 False → 两层检测静默失效。
-#
-#   而个人版没有把这个失效暴露给用户（界面照常显示「防护中」），
-#   所以这个缺失是纯静默的 —— 与此前 pyyaml 漏 include
-#   导致规则静默回退是同一类错误。
-ENTERPRISE_SRC_DIR = os.path.abspath(
-    os.path.join(SCRIPT_DIR, "..", "..", "src")
-)
+#   → _guardrail_available 恒为 False。
+GUARDRAIL_SRC_DIR = SRC_DIR
 RESOURCE_ENGINE_DIR = os.path.join(SCRIPT_DIR, "src-tauri", "resources", "engine")
 
 # 引擎入口：Nuitka 编译的入口脚本。
@@ -104,24 +105,32 @@ def main() -> int:
         print(f"  pip install {' '.join(missing)}", file=sys.stderr)
         return 3
 
-    # 企业版护栏是否可编入。
+    # 护栏层是否可编入。
     #
-    # ★ 这里**不强制**：企业版源码不在（独立仓库 / 私有仓库场景）
-    #   时个人版仍应能编译，只是护栏层缺失 —— 且该缺失会由
-    #   check_degradation.py 与 /api/diagnostics 如实报告，不静默。
-    #   宁可少两层检测且如实告知，也不要让构建直接失败。
-    has_enterprise = os.path.isdir(
-        os.path.join(ENTERPRISE_SRC_DIR, "daoti_xuandun")
-    )
-    if has_enterprise:
-        print("检测到企业版源码 → 护栏层将编入（提示词注入 + 敏感泄露）")
+    # ★★ 缺失必须让构建**失败**，不能只警告。
+    #
+    #   护栏已在仓库内（src/daoti_xuandun/），它是个人版防护能力的
+    #   组成部分，不是可选依赖。缺了它，产物照样能启动、能显示界面、
+    #   能跑通所有自检 —— 唯独提示词注入与敏感泄露两类检测静默失效，
+    #   而用户界面照常显示「防护中」。
+    #
+    #   发布一个没有防护能力的防火墙，比构建失败坏得多：
+    #   前者让用户以为自己在受保护。
+    #
+    #   此处曾按「仓库外企业版路径」判定，本地恰好有那个目录所以
+    #   一直带上了，干净 clone 上却静默跳过 —— 已修正为包内路径。
+    guardrail_dir = os.path.join(GUARDRAIL_SRC_DIR, "daoti_xuandun")
+    has_guardrail = os.path.isdir(guardrail_dir)
+    if has_guardrail:
+        print("护栏层已就位 → 将编入（提示词注入 + 敏感泄露）")
     else:
-        print(
-            "警告: 未检测到企业版源码 → 本次构建**不含护栏层**，\n"
-            f"      提示词注入与敏感泄露两类检测将失效。\n"
-            f"      查找路径: {ENTERPRISE_SRC_DIR}",
-            file=sys.stderr,
-        )
+        print(file=sys.stderr)
+        print("[FATAL] 找不到护栏层源码，构建中止。", file=sys.stderr)
+        print(f"  期望路径: {guardrail_dir}", file=sys.stderr)
+        print("  没有护栏层的包能启动、能自检通过，但**提示词注入与", file=sys.stderr)
+        print("  敏感泄露两类检测完全失效**，而界面照常显示「防护中」。", file=sys.stderr)
+        print("  这不是可降级的依赖 —— 缺了它就不该称为防火墙。", file=sys.stderr)
+        return 6
 
     target = _triple()
     final_engine_name = target
@@ -169,11 +178,7 @@ def main() -> int:
         ENGINE_MAIN,
     ]
 
-    if has_enterprise:
-        # ★ 护栏层：企业版核心算法引擎。
-        #   不加这两个参数，打包后的个人版就只有「自研检测层」，
-        #   prompt_inject 与 sensitive_leak 两类判据完全失效，
-        #   而界面照常显示「防护中」—— 用户无从察觉。
+    if has_guardrail:
         cmd.extend([
             "--include-package=daoti_xuandun",
             "--include-package-data=daoti_xuandun",
@@ -193,11 +198,9 @@ def main() -> int:
         cmd.extend(["--macos-app-mode=background"])
 
     env = os.environ.copy()
-    # 让 Nuitka 能解析到个人版包；企业版源码在场时一并加入，
-    # 否则 --include-package=daoti_xuandun 找不到包而编译失败。
+    # 让 Nuitka 能解析到包内模块。护栏（daoti_xuandun）与个人版
+    # 都在 SRC_DIR 下，同一个路径即可。
     search_path = SRC_DIR
-    if has_enterprise:
-        search_path = ENTERPRISE_SRC_DIR + os.pathsep + search_path
     env["PYTHONPATH"] = search_path + os.pathsep + env.get("PYTHONPATH", "")
 
     # ★ 激活码公钥：打进包内，运行期无需外部文件。
@@ -229,7 +232,7 @@ def main() -> int:
         )
 
     print("编译引擎中（首次约需数分钟）...")
-    print("护栏层:", "已编入" if has_enterprise else "★未编入（检测能力降级）")
+    print("护栏层:", "已编入" if has_guardrail else "★未编入（检测能力降级）")
     print("命令:", " ".join(cmd))
     result = subprocess.run(
         cmd, env=env, cwd=SCRIPT_DIR,
