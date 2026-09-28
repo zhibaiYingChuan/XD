@@ -213,8 +213,11 @@ def main() -> int:
     #
     #   ⚠ 缺公钥的后果必须让用户看得见：所有激活码都会判为
     #     「验签组件不可用」而非「码无效」（见 license.py）。
+    # ★ 公钥随包分发（放在包内而非 tools/ 下）：
+    #   tools/ 是签发方内部工具，不进公开仓库 —— 而公钥是客户端
+    #   验签必需的公开材料，必须留在会分发的代码里。
     pub_src = os.path.join(
-        PERSONAL_ROOT, "tools", "activation", "xuanDun_personal_public.pem"
+        PERSONAL_ROOT, "src", "daoti_xuandun_personal", "license_pub.pem"
     )
     if os.path.isfile(pub_src):
         print(f"激活公钥: {pub_src}")

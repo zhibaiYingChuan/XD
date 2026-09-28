@@ -280,14 +280,14 @@ def load_public_key() -> Optional[str]:
     2. ``XUANDUN_LICENSE_PUBKEY_FILE`` 指向的文件
     3. **引擎可执行文件同级**的 ``license_pub.pem``
        —— 这是发布形态下的实际落点（由 build_engine.py 拷入）
-    4. 仓库内 ``tools/activation/``（开发态，见下方说明）
+    4. **包内** ``license_pub.pem``（随源码分发，公开材料）
     5. 用户配置目录下的 ``license_pub.pem``
 
     ★ 绝不设默认值。企业版 ``config.py`` 里有
-      ``shell_key = b"daoti_xuandun_16"`` 这类硬编码 fallback，
-      那是另一套密钥体系；激活码公钥一旦有 fallback，
-      就等于「无公钥也能验签」，授权体系直接失效。
-      找不到就返回 None，由调用方如实报告「验签组件不可用」。
+      硬编码 fallback 密钥，那是另一套密钥体系；
+      激活码公钥一旦有 fallback，就等于「无公钥也能验签」，
+      授权体系直接失效。找不到就返回 None，由调用方如实报告
+      「验签组件不可用」。
     """
     pem = os.getenv("XUANDUN_LICENSE_PUBKEY", "").strip()
     if pem and "BEGIN PUBLIC KEY" in pem:
@@ -323,21 +323,6 @@ def load_public_key() -> Optional[str]:
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         candidates.append(os.path.join(here, "license_pub.pem"))
-
-        # ④ 开发态：从 src/daoti_xuandun_personal/ 上溯**两层**到仓库根，
-        #    再进 tools/activation/。
-        #    （一层是 src/，两层是仓库根 —— 写错层数会静默找不到，
-        #      而「找不到」的表现是「激活码无效」，极难定位。）
-        #    ★ 开发模式下桌面端是用 `python -m daoti_xuandun_personal.proxy.app`
-        #      启动引擎的（见 lib.rs 的 need_module 分支），
-        #      没有任何地方会把公钥拷到 site-packages 或引擎同级 ——
-        #      缺了这一条，开发态下所有激活码都判为「验签组件不可用」，
-        #      而用户只会看到「激活码无效」，真因被完全掩盖。
-        repo_root = os.path.dirname(os.path.dirname(here))
-        candidates.append(
-            os.path.join(repo_root, "tools", "activation",
-                         "xuanDun_personal_public.pem")
-        )
     except Exception:
         pass
 
