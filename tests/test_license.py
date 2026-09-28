@@ -791,3 +791,141 @@ def test_gitignore_does_not_re_enable_private_key():
         and "private" in ln.lower()
     ]
     assert not offenders, f".gitignore 显式放行了含 private 的路径: {offenders}"
+
+
+# ══════════════════════════════════════════════════════════════
+# 只读模式（引擎端到端）
+# ══════════════════════════════════════════════════════════════
+#
+# ★ 为什么要起真实引擎而不是只测 license.verify：
+#   只读模式是 app.py 里的编排逻辑（读文件 → 验签 → 决定降级），
+#   而它的失效表现是「界面照常显示防护中、KPI 照常统计，
+#   实际请求全部直通」—— 对用户的谎报。
+#   纯函数测试覆盖不到 /api/state 是否真的带出 read_only 字段，
+#   而那正是前端据以显示提示的唯一依据。
+
+
+@pytest.fixture
+def live_engine(tmp_path, monkeypatch):
+    """在临时目录里起一个真实引擎实例（uvicorn + 独立端口）。"""
+    import socket
+    import threading
+    import time as _time
+
+    import uvicorn
+
+    from daoti_xuandun_personal.proxy.app import create_app
+
+    # 端口用系统分配，避免与本机正在跑的引擎（18765）冲突
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    app = create_app()
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    )
+    th = threading.Thread(target=server.run, daemon=True)
+    th.start()
+
+    import urllib.request
+
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(80):
+        _time.sleep(0.25)
+        try:
+            urllib.request.urlopen(f"{base}/health", timeout=2).read()
+            break
+        except Exception:
+            continue
+    else:
+        server.should_exit = True
+        pytest.skip("引擎未能在本机端口启动")
+
+    yield base
+    server.should_exit = True
+    _time.sleep(0.5)
+
+
+def _get_json(base: str, path: str) -> dict:
+    import urllib.request
+
+    return json.loads(urllib.request.urlopen(f"{base}{path}", timeout=8).read())
+
+
+def test_state_reports_read_only_when_unactivated(live_engine, monkeypatch, tmp_path):
+    """★ 未激活时 /api/state 必须带出 read_only=True。
+
+    没有这个字段，前端就没有任何依据显示「只读模式」，
+    用户会看到绿色的状态点和照常增长的 KPI，
+    而实际每一个请求都在直通 —— 对用户的谎报。
+    """
+    # 前置：确认隔离目录下确实没有 license.json
+    # ★ 路径函数在 app.py 里（不在 license.py）—— 它读的是引擎侧落盘位置。
+    from daoti_xuandun_personal.proxy import app as _app
+
+    lic_file = Path(_app._license_file_path())
+    assert not lic_file.exists(), (
+        f"前置失败：隔离目录下不该有 license.json，实际存在 {lic_file}"
+    )
+
+    st = _get_json(live_engine, "/api/state")
+    assert st.get("read_only") is True, (
+        f"未激活时 read_only 应为 True，实际 {st.get('read_only')!r}；"
+        "缺这个字段前端不会显示只读提示"
+    )
+
+
+def test_state_not_read_only_with_valid_code(live_engine, keypair, monkeypatch, tmp_path):
+    """★ 持有合法码时 read_only 必须是 False（不得误降级）。"""
+    priv, pub = keypair
+    monkeypatch.setenv("XUANDUN_LICENSE_PUBKEY_FILE", str(pub))
+    monkeypatch.delenv("XUANDUN_LICENSE_PUBKEY", raising=False)
+
+    import json as _json
+    import os as _os
+
+    code = _issue(priv, "MACHINE-OK", gen=0)
+    path = _os.path.join(
+        _os.getenv("LOCALAPPDATA"), "com.daoti.xuandun-personal", "license.json"
+    )
+    _os.makedirs(_os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump({"code": code, "lastSeen": int(time.time())}, f)
+
+    # 授权判定有 5s TTL 缓存，且键含 license.json 的 mtime ——
+    # 刚写完文件 mtime 必变，缓存必然失效重算，这里只需等它生效
+    import time as _time
+
+    deadline = _time.time() + 12
+    last = None
+    while _time.time() < deadline:
+        last = _get_json(live_engine, "/api/state").get("read_only")
+        if last is False:
+            break
+        _time.sleep(0.5)
+
+    assert last is False, (
+        f"合法激活码下 read_only 应为 False，实际 {last!r} —— "
+        "这会把已付费用户误降级成只读"
+    )
+
+
+def test_license_status_exposes_public_key_error(live_engine, monkeypatch, tmp_path):
+    """★ 公钥路径配错时，/api/license/status 必须报出真因。
+
+    自检端点存在的意义就是「让降级可见」，
+    它自己却因配置错误而崩掉或沉默就本末倒置了。
+    """
+    import os as _os
+
+    monkeypatch.setenv(
+        "XUANDUN_LICENSE_PUBKEY_FILE", str(tmp_path / "definitely-missing.pem")
+    )
+    st = _get_json(live_engine, "/api/license/status")
+    assert st.get("has_public_key") is False
+    assert st.get("verifier_available") is False
+    assert "definitely-missing.pem" in (st.get("public_key_error") or ""), (
+        f"应指出是哪个路径找不到，实际 {st.get('public_key_error')!r}"
+    )
