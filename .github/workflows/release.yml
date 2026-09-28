@@ -1,0 +1,199 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# 个人版发布流水线
+#
+# 与企业版 release.yml 的差异（刻意不照抄）
+# ────────────────────────────────────────────────────────────
+# 企业版的流程可以直接复用：action pin、harden-runner、
+# VirusTotal 误报门禁、SHA256 校验、Tauri updater 签名。
+#
+# 但个人版有一道企业版**没有**的门禁：激活码公钥。
+# 缺公钥的包能启动、能显示界面、能跑通全部自检，
+# 唯独每一个用户都激活不了 —— 发布后才发现等于白发一个版本。
+# 那正是「静默降级」最典型的形态，所以这里必须在构建期拦死。
+#
+# 另一处不同：企业版打三平台，个人版目前只出 Windows 安装包。
+# 护栏层已入库，不依赖企业版仓库，clone 后即可完整构建。
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ══════════════════════════════════════════════════════════
+  # 门禁：发布前的能力与密钥自检
+  # ══════════════════════════════════════════════════════════
+  preflight:
+    name: Preflight Gate
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -e .
+
+      # ★ 私钥绝不能出现在仓库里。
+      #   一旦入库，任何人都能签发激活码，授权体系瞬间失效，
+      #   且 Git 历史无法真正清除（后续删除，commit 里仍在）。
+      - name: Assert private key is absent
+        run: |
+          set -euo pipefail
+          # ★ 一次判断，不要 grep 串联 ——
+          #   `grep -Ei 'a|\.pem$' | grep -i private` 里第一个分支已匹配全部
+          #   .pem，第二个分支再过滤，绕一圈等于没过滤。
+          #   直接按文件名含 private 判定。
+          HIT=$(git ls-files | grep -i 'private' || true)
+          if [ -n "$HIT" ]; then
+            echo "::error::检测到疑似私钥被 git 追踪 —— 立即处理，视为安全事故"
+            echo "$HIT"
+            exit 1
+          fi
+          echo "PASS：私钥未被追踪"
+
+      # 公钥必须在（build_engine.py 打包时要读它）
+      - name: Assert public key is present
+        run: |
+          set -euo pipefail
+          test -f tools/activation/xuanDun_personal_public.pem \
+            || { echo "::error::公钥缺失，干净 clone 上无法构建"; exit 1; }
+          grep -q "BEGIN PUBLIC KEY" tools/activation/xuanDun_personal_public.pem \
+            || { echo "::error::公钥内容不是有效 PEM"; exit 1; }
+          echo "PASS：公钥已入库且格式正确"
+
+      # 防护能力门禁（与 ci.yml 同一套）
+      - name: Verify guardrail and capability reporting
+        run: python tests/check_degradation.py
+
+      - name: Run defense test suite
+        run: python -m pytest tests -q --no-header -p no:cacheprovider
+        timeout-minutes: 20
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '20'
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+        with:
+          toolchain: stable
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # ★ 钉死 Nuitka 版本：版本漂移会改变构建行为
+          #   （含 ccache 下载策略），历史上因此出现过「同样的代码构建失败」。
+          pip install "nuitka==4.1.3"
+          pip install -e .
+
+      - name: Build Nuitka engine
+        working-directory: desktop
+        # 缺公钥时该脚本 return 4 —— 这里不做绕过。
+        # 公钥缺失就是发布阻断，不是可选项。
+        run: python build_engine.py
+
+      - name: Assert public key landed in bundle
+        working-directory: desktop
+        # ★ 这条断言是本 workflow 存在的核心理由。
+        #   build_engine.py 会拷公钥，但「脚本说拷了」不等于「真的拷了」。
+        #   断言产物目录里确实有它，才算闭环。
+        run: |
+          set -euo pipefail
+          test -f src-tauri/resources/engine/license_pub.pem \
+            || { echo "::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活"; exit 1; }
+          echo "PASS：公钥已落入引擎产物"
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: desktop
+        run: npm run tauri build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: xuandun-personal-${{ matrix.target }}
+          path: desktop/src-tauri/target/release/bundle/**/*.exe
+          # 空产物必须报错：上传 0 个文件却显示成功，
+          # 会让后续 release 创建一个没有任何安装包的版本。
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    if: success() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: artifacts
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          find . -type f -name "*.exe" -exec sha256sum {} \; \
+            | sed 's|  \./[^ ]*/|  |' > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/checksums-sha256.txt
