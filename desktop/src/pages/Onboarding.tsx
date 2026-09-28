@@ -5,7 +5,7 @@
 
    步骤 1：欢迎（说明玄盾做什么）
    步骤 2：激活（拿机器码 → 填激活码）
-   步骤 3：配置 AI 工具（选择工具 + 填写中转站）
+   步骤 3：配置 AI 工具（填写中转站信息）
    步骤 4：完成
 
    ★ 激活放在配置之前：用户第一时间就需要机器码去申请激活码，
@@ -15,7 +15,6 @@
 import { useEffect, useState } from 'react';
 import {
   Shield,
-  ShieldCheck,
   CheckCircle2,
   ArrowRight,
   ArrowLeft,
@@ -29,23 +28,13 @@ import type { PersonalConfig, LicenseStatus } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard } from '../lib/tauriShim';
 
-type ToolChoice = 'cursor' | 'claude' | 'other';
-
-const TOOL_INFO: Record<ToolChoice, { name: string; where: string }> = {
-  cursor: { name: 'Cursor', where: '设置 → Models → API Base URL' },
-  claude: { name: 'Claude Desktop', where: '配置文件中的 baseURL 字段' },
-  other: { name: '其他工具', where: '工具的 API 设置页面' },
-};
-
 export default function Onboarding({ onFinish }: { onFinish: () => void }) {
   const toast = useToast();
   // 0 欢迎 / 1 激活 / 2 配置 / 3 完成
   const [step, setStep] = useState(0);
-  const [tool, setTool] = useState<ToolChoice>('cursor');
   const [relayName, setRelayName] = useState('我的中转站');
   const [relayUrl, setRelayUrl] = useState('');
   const [relayKey, setRelayKey] = useState('');
-  const [model, setModel] = useState('');
   const [saving, setSaving] = useState(false);
 
   // ── 激活 ──
@@ -58,7 +47,9 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
   // ★ 不强制激活：允许「先看看」，但会一直提醒。
   //   强制拦住不让进，等于在用户还没了解产品时就要掏钱，
   //   那是把试用变成了付费墙。
-  const canNext = step !== 2 || (relayUrl.trim() && relayKey.trim() && model.trim());
+  //   中转站地址与 Key 是必填 —— 没有它们，玄盾无从转发，
+  //   也就监控不了任何东西。
+  const canNext = step !== 2 || (relayUrl.trim() && relayKey.trim());
 
   // ★ P1-10：向导在 Layout 之外，需自行同步实际运行端口，
   //   否则步骤 4 会显示一个还没生效的地址。
@@ -137,7 +128,6 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
           name: relayName.trim() || '我的中转站',
           base_url: relayUrl.trim(),
           api_key: relayKey.trim(),
-          model: model.trim(),
           enabled: true,
         },
         guard: {
@@ -344,33 +334,6 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
               然后把 AI 工具的 API 地址改为玄盾的本地地址。
             </div>
 
-            {/* 工具选择 */}
-            <div className="field-label">你正在使用哪个工具？</div>
-            <div className="tool-cards">
-              {(Object.keys(TOOL_INFO) as ToolChoice[]).map((k) => (
-                <div
-                  key={k}
-                  className={`tool-card ${tool === k ? 'active' : ''}`}
-                  onClick={() => setTool(k)}
-                >
-                  <div className="tool-card-icon">
-                    {k === 'cursor' ? (
-                      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                        <path d="M4 4l16 8-16 8 3-8-3-8z" />
-                      </svg>
-                    ) : k === 'claude' ? (
-                      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                        <path d="M12 3l9 5v8l-9 5-9-5V8l9-5z" />
-                      </svg>
-                    ) : (
-                      <ShieldCheck size={26} strokeWidth={1.5} />
-                    )}
-                  </div>
-                  <div className="tool-card-name">{TOOL_INFO[k].name}</div>
-                </div>
-              ))}
-            </div>
-
             {/* 中转站信息 */}
             <div className="field">
               <label className="field-label" htmlFor="ob-name">
@@ -415,19 +378,6 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
               </div>
             </div>
 
-            <div className="field">
-              <label className="field-label" htmlFor="ob-model">
-                模型名称
-              </label>
-              <input
-                id="ob-model"
-                className="input mono"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="例如：gpt-4o"
-              />
-            </div>
-
             <div className="wizard-actions">
               <button className="btn secondary" onClick={() => setStep(1)}>
                 <ArrowLeft size={15} strokeWidth={1.5} />
@@ -460,7 +410,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                   http://127.0.0.1:{currentProxyPort()}/v1
                 </div>
                 <div className="field-hint">
-                  在 {TOOL_INFO[tool].name} 的「{TOOL_INFO[tool].where}」中填入上面的地址，
+                  在你使用的 AI 工具的「API 地址 / Base URL」设置项中填入上面的地址，
                   并把 API Key 也改成你的中转站 Key。
                 </div>
               </div>

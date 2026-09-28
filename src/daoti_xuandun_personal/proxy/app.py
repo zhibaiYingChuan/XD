@@ -425,9 +425,9 @@ def create_app() -> FastAPI:
             _restorer.register(restore_session, redaction_records)
 
         # ══════ 请求基线（★ v0.1.0）══════
-        # 必须在转发前捕获，且必须在 _forward_to_relay 覆盖 model 之前 ——
-        # 否则基线里的 model 会被我们自己改写的值污染，
-        # 「模型降级」判据就永远发现不了真正的降级。
+        # 必须在转发前捕获。请求体是原样透传的（玄盾不改写 model），
+        # 因此基线里的 model 就是用户真正请求的模型，
+        # 「模型降级」判据才可能发现中转站的偷换行为。
         request_baseline = build_baseline(body)
         if _storage is not None:
             try:
@@ -464,18 +464,20 @@ def create_app() -> FastAPI:
         )
 
     async def _forward_to_relay(body: Dict[str, Any], stream: bool):
-        """转发请求到中转站。"""
+        """转发请求到中转站（请求体原样透传，不改写 model）。
+
+        ★ 玄盾监控的是 API，不是某个模型 —— 请求里的 model 属于用户
+          与中转站之间的约定，玄盾无权也无必要改写它。曾有一版用配置里的
+          「默认模型」覆盖请求 model，后果是：用户明明发的是 A 模型，
+          中转站收到的是 B；而请求基线里记的也是被改写的 B，
+          于是「模型降级」判据（中转站偷偷换模型）永远发现不了真降级。
+        """
         if _http_client is None or _config is None:
             raise httpx.ConnectError("代理未初始化")
 
-        # 覆盖模型名
-        payload = dict(body)
-        if _config.relay.model:
-            payload["model"] = _config.relay.model
-
         return await _http_client.post(
             f"{_config.relay.normalized_base}/chat/completions",
-            json=payload,
+            json=body,
             headers={
                 "Authorization": f"Bearer {_config.relay.api_key}",
                 "Content-Type": "application/json",

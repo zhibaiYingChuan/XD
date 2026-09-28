@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,14 +31,37 @@ _CONFIG_DIR = (
 CONFIG_FILE = _CONFIG_DIR / "config.json"
 
 
+def _known_fields(cls: type, raw: Any) -> Dict[str, Any]:
+    """按 dataclass 声明过滤字段，丢弃配置里的未知键。
+
+    ★ 为什么不直接 `cls(**raw)`：dataclass 对未知关键字抛 TypeError，
+      而 load() 把 TypeError 一律当作「配置损坏」整体降级为默认值 ——
+      用户的中转站地址、API Key、安全级别、端口会被**全部静默丢弃**。
+
+      典型场景：某版本删掉了某个字段（如 relay.model），
+      用户 config.json 里仍留着旧键，升级后所有设置瞬间归零，
+      且只留一行 warning。一个过期的键不该有这种杀伤力。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    known = {f.name for f in fields(cls)}
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        logger.info("%s 忽略未知配置项: %s", cls.__name__, ", ".join(unknown))
+    return {k: v for k, v in raw.items() if k in known}
+
+
 @dataclass
 class RelayConfig:
-    """中转站配置（个人版核心配置）。"""
+    """中转站配置（个人版核心配置）。
+
+    ★ 这里**不**包含 model 字段：玄盾监控的是 API，不是某个模型。
+      请求里的 model 原样透传给中转站，玄盾不改写它。
+    """
 
     name: str = "默认中转站"           # 显示名
     base_url: str = ""                 # 如 https://api.example.com
     api_key: str = ""                  # 中转站 API Key
-    model: str = ""                    # 默认模型
     enabled: bool = True
 
     def validate(self) -> List[str]:
@@ -50,8 +73,6 @@ class RelayConfig:
             errors.append("中转站地址必须以 http:// 或 https:// 开头")
         if not self.api_key:
             errors.append("中转站 API Key 不能为空")
-        if not self.model:
-            errors.append("模型名称不能为空")
         return errors
 
     @property
@@ -167,9 +188,9 @@ class PersonalConfig:
 
         try:
             return PersonalConfig(
-                relay=RelayConfig(**raw.get("relay", {})),
-                guard=GuardConfig(**raw.get("guard", {})),
-                server=ServerConfig(**raw.get("server", {})),
+                relay=RelayConfig(**_known_fields(RelayConfig, raw.get("relay", {}))),
+                guard=GuardConfig(**_known_fields(GuardConfig, raw.get("guard", {}))),
+                server=ServerConfig(**_known_fields(ServerConfig, raw.get("server", {}))),
             )
         except TypeError as e:
             logger.warning("配置字段不匹配（%s），使用默认配置", e)
@@ -202,8 +223,6 @@ class PersonalConfig:
             self.relay.base_url = v
         if v := os.getenv("XUANDUN_PERSONAL_RELAY_KEY"):
             self.relay.api_key = v
-        if v := os.getenv("XUANDUN_PERSONAL_MODEL"):
-            self.relay.model = v
         if v := os.getenv("XUANDUN_PERSONAL_PORT"):
             try:
                 self.server.port = int(v)

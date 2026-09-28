@@ -6,7 +6,7 @@
    四大区块：
      A. 防护开关（3 个）
      B. 安全级别（宽松 / 均衡 / 严格）
-     C. 代理配置（中转站地址 + API Key + 模型 + 复制地址）
+     C. 代理配置（中转站地址 + API Key + 复制地址）
      D. 敏感信息脱敏（勾选哪些类型需要拦截）
 */
 
@@ -492,20 +492,6 @@ export default function Settings() {
               ? `当前：${config.relay.api_key}（留空则不修改）`
               : '尚未配置'}
           </div>
-        </div>
-
-        <div className="field">
-          <label className="field-label" htmlFor="relay-model">
-            模型名称
-          </label>
-          <input
-            id="relay-model"
-            className="input mono"
-            placeholder="例如：gpt-4o"
-            value={config.relay.model}
-            disabled={saving}
-            onChange={(e) => setConfig({ ...config, relay: { ...config.relay, model: e.target.value } })}
-          />
         </div>
 
         {/* Phase 7：中转站风险提示（预检命中时才出现） */}

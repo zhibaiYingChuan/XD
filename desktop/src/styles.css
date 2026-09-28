@@ -1397,48 +1397,6 @@ textarea {
   margin-top: 26px;
 }
 
-.tool-cards {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-bottom: 22px;
-}
-
-.tool-card {
-  padding: 18px 12px;
-  background: var(--xd-bg);
-  border: 1px solid var(--xd-border);
-  border-radius: var(--xd-radius-sm);
-  text-align: center;
-  cursor: pointer;
-  transition: all var(--xd-transition);
-}
-
-.tool-card:hover {
-  border-color: var(--xd-border-light);
-}
-
-.tool-card.active {
-  border-color: var(--xd-primary);
-  background: var(--xd-primary-dim);
-}
-
-.tool-card-icon {
-  margin-bottom: 8px;
-  color: var(--xd-text-dim);
-  display: flex;
-  justify-content: center;
-}
-
-.tool-card.active .tool-card-icon {
-  color: var(--xd-primary);
-}
-
-.tool-card-name {
-  font-size: var(--xd-fs-body);
-  font-weight: 500;
-}
-
 /* ══════════════════════════════════════════════════════════════
    错误边界
    ══════════════════════════════════════════════════════════════ */
