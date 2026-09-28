@@ -382,6 +382,16 @@ jobs:
         #   故这里把该矩阵项的失败**显式降级为 warning**：
         #   信息仍留在日志与注解里，但不再把整轮结果染红。
         #   非 AppImage 的矩阵项照旧 exit 1，失败仍会阻断发布。
+        # ★ 必须显式声明 shell: bash —— 本段是 bash 语法（if/then/fi、[ "$X" = ... ]）。
+        #   不声明时 GitHub 按 runner 的**默认 shell** 执行：macOS/Linux 是 bash，
+        #   但 **Windows 是 pwsh**，而 pwsh 解析不了 bash 的 if 语句 ——
+        #   v0.1.0-alpha12 的 Build (win-x64) 就是这么挂的：
+        #     ParserError: ...ps1:2
+        #     Missing '(' after 'if' in if statement.
+        #   ★ 危险点：Linux/macOS 三个 job 全绿、只有 Windows 红，
+        #     很容易被误读成「Windows 平台性问题」而往错的方向查。
+        #     真实原因是 shell 选错了，与平台、代码都无关。
+        shell: bash
         run: |
           if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }}; then
             exit 0
