@@ -36,6 +36,19 @@ sys.path.insert(0, str(_SRC))
 GUARD_PKG = _SRC / "daoti_xuandun"
 
 
+def _git_tracked_files():
+    """git 追踪的文件列表；不在仓库内时返回 None。"""
+    import subprocess
+
+    r = subprocess.run(
+        ["git", "-c", "core.hooksPath=NUL", "ls-files"],
+        cwd=_ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    if r.returncode != 0:
+        return None
+    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+
+
 # ══════════════════════════════════════════════════════════════
 # 护栏必须来自本仓库
 # ══════════════════════════════════════════════════════════════
@@ -175,37 +188,72 @@ def test_degradation_is_reported():
 
 
 def test_no_hardcoded_fallback_keys():
-    """★ config.py 里的明文 fallback 密钥是反编译后的第一手材料。
+    """★ 护栏层的明文 fallback 密钥是反编译后的第一手材料。
 
-    企业版原版有：
+    源码里仍保留：
         self.shell_key    = b"daoti_xuandun_16"
         self.mapping_key  = b"ancient_map_16b!"
 
-    个人版打包时若不设 XUANDUN_REQUIRE_SECURE_KEY=1，
-    这两个公开密钥会被打进二进制，任何人反编译即可拿到。
+    现状：**构建期注入随机密钥**（build_engine.py 生成
+    build_secrets.json，运行时由 app.py::_inject_build_secrets 读入），
+    所以发布包实际使用的不是这两个固定值。
 
-    当前策略：**哨兵提醒**而非直接失败 ——
-    因为改密钥推导属反编译加固那一轮的工作，
-    在此直接 raise 会让护栏完全无法加载（比现状更糟）。
-    真正修复见 build_engine.py 注入编译期密钥。
+    但源码里的 fallback 仍在，且**一旦 build_secrets.json 缺失就会回退**
+    —— 那是「以为加固了其实没加固」的最坏情况。
+    所以本用例断言两件事：
+      1. 构建期注入链路存在（build_engine 会生成、app.py 会读）
+      2. build_secrets.json 不在版本控制里（入库 = 公开）
     """
+    import warnings
+
+    # ① 注入链路必须存在
+    # ★ 路径层级（实测确认，写错只会「文件不存在」）：
+    #   GUARD_PKG        = <repo>/src/daoti_xuandun        （护栏）
+    #   .parent          = <repo>/src
+    #   .parent.parent   = <repo>
+    #   app.py 实际在 <repo>/src/daoti_xuandun_personal/proxy/app.py
+    #   build_engine.py 在 <repo>/desktop/build_engine.py
+    app_py = (
+        GUARD_PKG.parent / "daoti_xuandun_personal" / "proxy" / "app.py"
+    ).read_text(encoding="utf-8")
+    build_py = (GUARD_PKG.parent.parent / "desktop" / "build_engine.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "build_secrets.json" in build_py, (
+        "build_engine.py 不再生成构建期密钥 —— "
+        "发布包会回退到源码里的明文 fallback，反编译加固形同虚设"
+    )
+    assert "token_urlsafe" in build_py, (
+        "构建期密钥必须是随机生成的；写死等于换个地方硬编码"
+    )
+    assert "_inject_build_secrets" in app_py and "build_secrets.json" in app_py, (
+        "引擎不再读取构建期密钥 —— 注入链路断了一半，"
+        "生成的文件不会被使用"
+    )
+
+    # ② 构建期密钥不得入库
+    tracked = _git_tracked_files()
+    if tracked is not None:
+        offenders = [f for f in tracked if f.endswith("build_secrets.json")]
+        assert not offenders, (
+            f"构建期密钥被 git 追踪了（每次都不同，入库即公开）: {offenders}"
+        )
+
+    # ③ 源码里的固定 fallback 仍然存在 —— 如实记录，不假装已清除
     cfg_text = (GUARD_PKG / "config.py").read_text(encoding="utf-8")
     hardcoded = []
     for marker in ("daoti_xuandun_16", "ancient_map_16b!"):
-        # 允许出现在注释/文档里（说明来历），不允许出现在赋值语句里
         for line in cfg_text.splitlines():
             if marker in line and "self." in line and "=" in line \
                     and not line.strip().startswith("#"):
                 hardcoded.append(line.strip())
 
     if hardcoded:
-        import warnings
-
         warnings.warn(
-            "检测到明文 fallback 密钥（反编译可直接获得）：\n  "
-            + "\n  ".join(hardcoded)
-            + "\n→ 属反编译加固范畴，需在打包时注入编译期密钥并设置 "
-              "XUANDUN_REQUIRE_SECURE_KEY=1",
+            "源码中仍保留明文 fallback 密钥（发布包已由构建期密钥覆盖，"
+            "但 build_secrets.json 缺失时会回退到它们）：\n  "
+            + "\n  ".join(hardcoded),
             UserWarning,
             stacklevel=1,
         )

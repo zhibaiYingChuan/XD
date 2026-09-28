@@ -288,6 +288,52 @@ def main() -> int:
         if not _allow_missing_pubkey:
             return 4
 
+    # ══════════════════════════════════════════════════════════
+    # 反编译加固：生成构建期密钥
+    # ══════════════════════════════════════════════════════════
+    #
+    #   护栏层原本带两个明文 fallback 密钥：
+    #     shell_key  = b"daoti_xuandun_16"
+    #     mapping_key = b"ancient_map_16b!"
+    #   反编译者一眼就能拿到，动态壳与符号映射的初始化种子失去意义。
+    #
+    #   这里每次构建生成**随机**密钥写入引擎目录，运行时由
+    #   proxy/app.py::_inject_build_secrets 读入。
+    #   效果：源码与二进制里都没有固定密钥，且每个版本不同。
+    #
+    #   ★ 诚实说明：这**不是**绝对防线。密钥仍随包分发，
+    #     有能力逆向的人仍可读出后重打包。它抬高的是门槛，
+    #     真正的防线在「校验点分散」——改一处校验不生效。
+    #     不要把它当成「密钥已保密」。
+    import json as _json
+    import secrets as _secrets
+
+    _build_secrets = {
+        # 32 字节随机，与原 fallback 长度相当（AEAD 类用途需 ≥16 字节）
+        "shell_key": _secrets.token_urlsafe(32),
+        "mapping_key": _secrets.token_urlsafe(32),
+    }
+    _secrets_path = os.path.join(RESOURCE_ENGINE_DIR, "build_secrets.json")
+    with open(_secrets_path, "w", encoding="utf-8") as _f:
+        _json.dump(_build_secrets, _f, ensure_ascii=False, indent=2)
+
+    # 构建产物不得入库（其中的密钥每次都不同，入库等于公开）
+    _gitignore = os.path.join(PERSONAL_ROOT, ".gitignore")
+    try:
+        with open(_gitignore, "r", encoding="utf-8") as _f:
+            _gi = _f.read()
+        if "build_secrets.json" not in _gi:
+            with open(_gitignore, "a", encoding="utf-8") as _f:
+                _f.write(
+                    "\n# 构建期生成的护栏密钥（每次构建都不同，入库等于公开）\n"
+                    "build_secrets.json\n"
+                )
+            print("已更新 .gitignore：忽略 build_secrets.json")
+    except OSError:
+        pass
+
+    print("已生成构建期密钥（反编译加固）：build_secrets.json")
+
     count = len(os.listdir(RESOURCE_ENGINE_DIR))
     size_mb = sum(
         os.path.getsize(os.path.join(RESOURCE_ENGINE_DIR, f))

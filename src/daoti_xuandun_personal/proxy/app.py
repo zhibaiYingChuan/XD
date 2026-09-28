@@ -83,6 +83,67 @@ def _license_file_path() -> str:
     )
 
 
+# 构建期生成的密钥文件名（由 build_engine.py 写入引擎目录）
+_BUILD_SECRETS_FILE = "build_secrets.json"
+
+
+def _inject_build_secrets(config) -> bool:
+    """把构建期生成的密钥注入护栏配置。
+
+    反编译加固
+    ────────────────────────────────────────────────────────────
+    护栏层原本带两个明文 fallback 密钥
+    （``shell_key = b"daoti_xuandun_16"`` / ``mapping_key = b"ancient_map_16b!"``），
+    反编译者一眼就能拿到，动态壳与符号映射的初始化种子就此失去意义。
+
+    正确做法是**构建期生成随机密钥**，随包分发，运行时读入：
+      · 源码与二进制里都不再有固定密钥
+      · 每个版本的密钥不同，跨版本复用无效
+      · 仍不抗「读出二进制里的密钥再重打包」——
+        那是抬高门槛而非绝对防线，靠的是校验点分散
+
+    ★ 文件缺失时**不静默**：那是开发态源码运行的正常情况。
+      但若有人以为「构建过了」而实际没生成，
+      护栏会带着固定 fallback 密钥运行 —— 那是假装的加固。
+      所以这里返回 False，由调用方决定是否要求它存在。
+    """
+    import json as _json
+    import os as _os
+    import sys as _sys
+
+    exe_dir = _os.path.dirname(_os.path.abspath(_sys.executable))
+    path = _os.path.join(exe_dir, _BUILD_SECRETS_FILE)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except OSError:
+        return False
+    except ValueError:
+        logger.warning("构建密钥文件不是合法 JSON，已忽略：%s", path)
+        return False
+
+    if not isinstance(data, dict):
+        logger.warning("构建密钥文件格式异常（不是对象），已忽略：%s", path)
+        return False
+
+    applied = False
+    shell = data.get("shell_key")
+    mapping = data.get("mapping_key")
+    if isinstance(shell, str) and shell:
+        config.shell_key = shell.encode("utf-8")
+        applied = True
+    if isinstance(mapping, str) and mapping:
+        config.mapping_key = mapping.encode("utf-8")
+        applied = True
+
+    if applied:
+        logger.info("已加载构建期密钥（来源：%s）", _BUILD_SECRETS_FILE)
+    else:
+        logger.warning("构建密钥文件存在但内容为空，护栏将回退到默认密钥")
+    return applied
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """应用生命周期。"""
@@ -1561,6 +1622,7 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
 
     config = PersonalConfig.load()
     config.apply_env_overrides()
+    _inject_build_secrets(config)
 
     parser = argparse.ArgumentParser(
         prog="daoti_xuandun_personal.proxy.app",
