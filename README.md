@@ -25,19 +25,21 @@
 **玄盾是防火墙，不是安全助手。**
 
 防火墙不询问用户「要不要拦」，它直接拦。用户不需要知道它在工作，
-只在危险被挡下的那一刻收到信号。四层结构：
+只在危险被挡下的那一刻收到信号。层次结构：
 
 | 层 | 职责 | 打断用户？ |
 |---|------|-----------|
 | ① 响应侧自动拦截 | 检测到高危内容直接阻断，AI 工具收到错误响应 | 否 |
 | ② 请求侧自动脱敏 | 静默替换敏感信息为占位符，返回时本地恢复 | 否 |
-| ③ 托盘图标变色 | 状态可见的唯一实时通道 | 否 |
-| ④ 日志事后查阅 | 用户想了解细节时主动打开 | 否 |
+| ③ 托盘图标变色 | **实时**状态可见的唯一通道 | 否 |
+| ④ 激活状态提示 | 未激活时状态栏显示「只读模式」，不谎报正在防护 | 否 |
+| ⑤ 日志事后查阅 | 用户想了解细节时主动打开 | 否 |
 
 **为什么托盘是唯一的实时通道**：用户对中转站返回了什么完全无感 ——
 他看到的只是 AI 工具展示的结果。若中转站偷偷插入恶意 tool call、
 篡改系统提示词，用户毫无察觉。而玄盾无法控制第三方 AI 工具的 UI，
-托盘图标是代理形态下唯一可行的感知通道。
+托盘图标是代理形态下唯一可行的**实时**感知通道
+（激活状态、日志属于用户主动查看的**非实时**通道，不在此列）。
 
 **托盘必须常驻**：关闭窗口只是隐藏到托盘，代理继续运行。
 若允许关窗口带走进程，用户会在无感知的情况下失去防护 ——
@@ -71,44 +73,65 @@
 personal/
 ├── README.md                    # 本文件
 ├── pyproject.toml               # 独立包配置（包名 daoti-xuandun-personal）
+├── GUARDRAIL.md                 # 护栏子集的裁剪依据与同步机制
 ├── src/
+│   ├── daoti_xuandun/           # ★ 护栏层（从企业版裁剪的 615 KB 子集）
+│   │   ├── _check_output.py     #   输出护栏判据
+│   │   ├── sensitive_leak.py    #   敏感信息泄露
+│   │   ├── _check_prompt_leak.py#   提示词泄露
+│   │   ├── tool_detector.py     #   工具调用检测
+│   │   └── ...                  #   共 16 个文件，详见 GUARDRAIL.md
 │   └── daoti_xuandun_personal/
-│       ├── __init__.py           # 包入口 + __version__ = "0.1.0-alpha"
+│       ├── __init__.py           # 包入口 + __version__
 │       ├── config.py             # 个人版配置（中转站/脱敏策略/安全级别/服务端口）
+│       ├── license.py            # 激活码验签（RS256）、吊销名单、换绑请求
 │       ├── types.py              # 数据契约（脱敏记录/验证结果/日志条目/信誉）
 │       ├── proxy/
 │       │   ├── __init__.py
 │       │   ├── app.py            # FastAPI 本地代理入口（端口 18765）
-│       │   │                      #   —— 转发/流式/统计/日志/配置全部端点都在此文件
+│       │   │                      #   —— 转发/流式/统计/日志/配置/激活端点都在此文件
+│       │   ├── baseline.py       # 请求基线结构差分（响应侧检测的对照物）
 │       │   ├── sanitizer.py      # 第一层：请求侧敏感信息脱敏
 │       │   ├── verifier.py       # 第二层：响应侧完整性验证
 │       │   └── restorer.py       # 第三层：脱敏内容恢复
 │       ├── reputation/
 │       │   ├── __init__.py
 │       │   └── tracker.py        # 中转站信誉评估引擎
+│       ├── rules/                # ★ 检测规则外置（54 条 YAML）
 │       └── storage/
 │           ├── __init__.py
 │           ├── db.py             # SQLite 本地存储（含 schema 迁移）
-│           └── schema.sql        # 表结构（6 张表）
-├── desktop/                      # Tauri 桌面端（个人版，5 页面）
+│           └── schema.sql        # 表结构
+├── tools/activation/
+│   ├── gen_activation_keys.py    # ★ 签发工具（genkeypair/issue/verify/hash/rebind/revoke/revoked）
+│   └── xuanDun_personal_public.pem  # ★ 公钥入库（私钥绝不入库）
+├── desktop/                      # Tauri 桌面端（个人版，5 页面 + 激活页）
 │   ├── src/
 │   │   ├── pages/
 │   │   │   ├── Dashboard.tsx     # 首页（3 秒知道"现在安全吗"）
 │   │   │   ├── Logs.tsx         # 日志（搜索/筛选/详情抽屉/标记安全/导出）
 │   │   │   ├── Settings.tsx     # 设置（防护开关/级别/中转站/脱敏类别）
-│   │   │   ├── Onboarding.tsx   # 首次启动向导
+│   │   │   ├── Activate.tsx     # 激活（机器码展示/复制、激活码输入、换机申请）
+│   │   │   ├── Onboarding.tsx   # 首次启动向导（4 步，含激活步骤）
 │   │   │   └── Help.tsx         # 帮助与常见问题
 │   │   ├── components/           # Layout / Toast / ErrorBoundary
-│   │   ├── lib/tauriShim.ts       # Tauri ↔ 浏览器双模垫片 + 文件下载
+│   │   ├── lib/tauriShim.ts      # Tauri ↔ 浏览器双模垫片 + 文件下载
 │   │   ├── services/api.ts       # 统一 API 客户端（Tauri IPC 优先，HTTP 回退）
 │   │   ├── App.tsx / main.tsx / styles.css
 │   │   └── vite.config.ts / tsconfig.json / package.json / index.html
-│   └── src-tauri/                # Rust 后端（IPC 封装 + 引擎进程生命周期）
-│       ├── src/lib.rs
-│       └── tauri.conf.json
+│   ├── src-tauri/                # Rust 后端（IPC 封装 + 引擎进程生命周期 + 机器码采集）
+│   │   ├── src/lib.rs
+│   │   ├── src/license.rs        # 机器码采集（sysinfo）、状态存储、时钟回拨检测
+│   │   ├── src/tray.rs
+│   │   └── tauri.conf.json
+│   └── build_engine.py           # 引擎编译（Nuitka standalone）
 └── tests/
-    ├── test_pipeline.py          # 45 项三层管道 + 信誉引擎验证
-    └── test_app_api.py           # HTTP 端点契约测试（pytest）
+    ├── test_license.py           # 激活码验签/吊销/换绑/密钥不入库（39 项）
+    ├── test_pipeline.py          # 三层管道 + 信誉引擎
+    ├── test_guardrail_parity.py  # 护栏与自研层的等价性
+    ├── test_mutation_guard.py    # 测试自身的可靠性（防假通过）
+    ├── check_degradation.py      # 降级可见性自检
+    └── cdp_desktop_regression.py # 桌面端端到端回归（真实 WebView2）
 ```
 
 ---
@@ -201,7 +224,58 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 | 已知恶意指纹 | 内置信誉库 | 匹配已知的恶意中转站域名（含高风险 TLD 降分） |
 | 用户社区反馈 | 云端同步 | **不做** —— 与「不依赖云端」的核心承诺冲突 |
 
-### 5.4 系统托盘（唯一实时感知通道）
+### 5.4 激活码（一码一机）
+
+个人版需激活码才能使用防护能力。
+
+**授权模型**
+
+| 项 | 设计 |
+|---|------|
+| 签名算法 | **RS256 非对称** —— 私钥只在签发方，从未进入任何客户端产物 |
+| 激活码格式 | `XDACT-<base64url(JWT)>` |
+| 绑定粒度 | **一码一机**：payload 里的 `mch` 是本机机器码的哈希 |
+| 离线验签 | 客户端只内嵌公钥，验签不需要联网 |
+| 换机 | 客户端生成 `XDRB.…` 请求串，签发方验签后只改机器码重签 |
+| 吊销 | 本地名单按 `jti`（+ 代次）索引，退款/泄露可作废 |
+
+> **为什么必须是非对称签名**：若改用 HS256（对称），公钥即签名密钥 ——
+> 签发能力会随反编译一起暴露，整个授权体系瞬间失效。
+> 这是不可逆的架构级选择。
+
+**未激活时的行为：只读模式**
+
+未激活或已过期时，引擎进入**只读模式** —— 界面、日志、设置全部可用，
+但**不执行脱敏与拦截**，请求直接透传。状态栏会显式提示「只读模式」。
+
+为什么这样设计：
+
+- **只读而不是锁死** —— 已付费用户若只是码过期或换了机器，锁死会导致彻底无法使用
+- **验签组件故障时不降级** —— 组件不可用 ≠ 用户没付过钱，用我方故障惩罚已付费用户是最糟的失效
+- **带时钟回拨检测** —— 只查 `exp` 的话，把系统时间调回过去即可无限续期
+
+**签发流程（签发方）**
+
+```bash
+cd personal
+# ① 首次生成密钥对（私钥绝不入库）
+python tools/activation/gen_activation_keys.py genkeypair
+
+# ② 用户在「激活」页复制机器码后，在此签发
+python tools/activation/gen_activation_keys.py issue \
+    --key tools/activation/xuanDun_personal_private.pem \
+    --name "用户姓名" --mch <机器码> --days 365
+
+# ③ 用户换机后：粘贴客户端给出的 XDRB 请求串
+python tools/activation/gen_activation_keys.py rebind \
+    --key <私钥> --pub <公钥> --request "XDRB.…"
+
+# ④ 作废（退款/泄露）
+python tools/activation/gen_activation_keys.py revoke <jti>
+python tools/activation/gen_activation_keys.py revoke <jti> --before-gen 1  # 只作废旧代次
+```
+
+### 5.5 系统托盘（唯一实时感知通道）
 
 | 能力 | 行为 |
 |------|------|
@@ -280,6 +354,7 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 | 情况 | 原因 |
 |------|------|
 | ⚠️ **用户没改 AI 工具配置** | 玄盾**完全不生效**。它不是全局代理，必须在 AI 工具里把地址改成 `127.0.0.1:18765`。这是最大的落地门槛 |
+| ⚠️ **未激活 / 激活码已过期** | 进入**只读模式**：界面与日志照常可用，但**不执行脱敏与拦截**，请求直接透传。状态栏会显示「未激活，当前为只读模式」 |
 | ⚠️ **中转站本来就在看你的数据** | 你的提示词与对话在**发送前**就完整交给了它。玄盾只在传输途中动手脚，人家已经看过了。**这是架构问题，不是实现问题** |
 | ⚠️ **HTTPS 内容** | 玄盾是明文 HTTP 代理，走 HTTPS 通道时它是透明的 |
 | **上游攻击** | DNS 劫持、证书伪造、中转站服务器被入侵、模型被投毒 —— 都在视野之外 |
@@ -299,31 +374,36 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 ```
 个人版（personal/）
     │
-    ├─ 复用 ──────────────► src/daoti_xuandun/_check_output.py（输出护栏）
-    │                       src/daoti_xuandun/sensitive_leak.py（敏感检测）
-    │                       src/daoti_xuandun/_check_prompt_leak.py（提示词泄露）
-    │                       src/daoti_xuandun/tool_detector.py（工具调用检测）
-    │                       src/daoti_xuandun/xuandun.py（引擎主类）
-    │                       src/daoti_xuandun/config.py（配置）
-    │                       src/daoti_xuandun/types.py（数据契约）
+    ├─ ★ 已内置（裁剪子集）──► src/daoti_xuandun/  共 16 个文件 / 615 KB
+    │                          _check_output.py / sensitive_leak.py
+    │                          _check_prompt_leak.py / tool_detector.py
+    │                          xuandun.py / config.py / types.py / preprocessors.py
+    │                          ancient_mapper.py / luoshu_mapper.py / reject_gate.py
+    │                          secure_strings.py / dynamic_shell.py / timing_checker.py
+    │                          _check_external.py
     │
-    ├─ 待评估 ────────────► src/daoti_xuandun/luoshu_mapper.py（洛书映射器）
-    │                       ⚠️ 尚未接入。需先评估其在单机场景的运行成本：
+    │   ★ 为什么是「裁剪入库」而不是「pip 依赖企业版 SDK」：
+    │     原方案下护栏在生产包中 100% 缺失 —— 企业版包未发布到 PyPI，
+    │     干净 clone 上装不上，而护栏不可用被 except 吞掉，
+    │     提示词注入与敏感泄露两类检测静默失效，用户毫无感知。
+    │     详见 GUARDRAIL.md。
+    │
+    ├─ 未接入 ──────────────► luoshu_mapper（已内置但未在检测链路中启用）
+    │                          ⚠️ 需先评估其在单机场景的运行成本：
     │                          洛书映射器在企业版是性能敏感路径（向量编码 + 映射），
     │                          个人版对延迟更敏感，且误报率上升会直接摧毁产品信任。
-    │                          建议 0.1.0 稳定后单独立项。
     │
-    ├─ 参考实现 ──────────► src/daoti_xuandun/gateway/proxy.py（SSE 流式透传）
-    │
-    └─ 全新实现 ──────────► sanitizer.py / verifier.py / restorer.py
-                            reputation/tracker.py（信誉评估）
-                            storage/db.py（个人版专属 SQLite）
-                            proxy/app.py（个人版专属代理入口）
-                            src-tauri/src/tray.rs（系统托盘）
+    └─ 全新实现 ────────────► sanitizer.py / verifier.py / restorer.py
+                              baseline.py（请求基线差分）
+                              reputation/tracker.py（信誉评估）
+                              storage/db.py（个人版专属 SQLite）
+                              proxy/app.py（个人版专属代理入口）
+                              license.py（激活码验签）
+                              src-tauri/src/license.rs（机器码采集）
+                              src-tauri/src/tray.rs（系统托盘）
 ```
 
-**复用方式**：`personal/` 通过 `pip install -e ../` 安装企业版 SDK，然后 `import daoti_xuandun` 复用核心引擎。
-护栏为**可选依赖**：未安装企业版 SDK 时个人版仍可运行（仅少了护栏层检测）。
+**护栏现在是仓库内置子集，不依赖任何外部包。** `pip install -e .` 即可获得完整防护能力。
 
 ---
 
@@ -339,23 +419,37 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 | Phase 6 | 系统托盘（常驻 + 变色 + 菜单） | ✅ 完成 |
 | Phase 7 | 信誉详情展开 + 新中转站风险提示 | ✅ 完成 |
 | Phase 8 | 打包 + 安装测试 | ✅ 完成 |
+| Phase 9 | 护栏层入库（不再依赖企业版 SDK） | ✅ 完成 |
+| Phase 10 | 激活码体系（一码一机 / 吊销 / 换机）+ 激活界面 | ✅ 完成 |
+| Phase 11 | 未激活只读模式 | ✅ 完成 |
+| 待办 | 反编译加固（消除 config.py 的明文 fallback 密钥） | ⬜ **未完成** |
+| 待办 | 个人版 release workflow | ⬜ **未完成** |
 | 未来 | 洛书映射器接入（需先技术调研） | ⬜ 待评估 |
 | 未来 | 模式 B：CA 证书 TLS 代理 | ⬜ 待评估 |
+
+> ⚠️ **反编译加固尚未完成**：`src/daoti_xuandun/config.py` 里仍有
+> `shell_key = b"daoti_xuandun_16"` / `mapping_key = b"ancient_map_16b!"`
+> 这类明文 fallback 密钥，反编译可直接获得。
+> 计划在打包时注入编译期密钥并设置 `XUANDUN_REQUIRE_SECURE_KEY=1`。
+> `tests/test_guardrail_parity.py::test_no_hardcoded_fallback_keys` 是哨兵，
+> 当前会发出警告。**这是已知的未完成项，不应被当成已完成。**
 
 ---
 
 ## 十、快速开始（开发中）
 
 ```bash
-# 1. 安装依赖（含企业版核心引擎）
+# 1. 安装依赖（护栏已内置，无需企业版 SDK）
 cd personal
-pip install -e ".."
-pip install -e ".[personal]"
+pip install -e ".[dev]"
 
-# 2. 启动本地代理
+# 2. 生成激活码密钥对（首次；公钥入库，私钥绝不入库）
+python tools/activation/gen_activation_keys.py genkeypair
+
+# 3. 启动本地代理
 python -m daoti_xuandun_personal.proxy.app --port 18765
 
-# 3. 桌面端开发
+# 4. 桌面端开发
 cd personal/desktop
 npm install
 npm run tauri dev
@@ -365,14 +459,15 @@ npm run tauri dev
 
 ```bash
 cd personal
-python tests/test_pipeline.py          # 三层管道 + 信誉引擎（45 项）
-python -m pytest tests -q              # HTTP 端点契约
+python -m pytest tests -q              # 全量（115 项）
+python tests/check_degradation.py      # 降级可见性自检
+python tests/probe_capability.py       # 防护能力实测（三层管道 + 攻击样本）
 
 cd desktop
 npx tsc --noEmit                       # 前端类型检查
 npm run build                          # 前端构建
 cd src-tauri && cargo check             # Rust 编译检查
-cargo test --lib                        # 托盘图标四态像素校验（4 项）
+cargo test --lib                        # 机器码哈希 / 时钟回拨（8 项）
 ```
 
 **Phase 7 专项验收**（需先启动引擎并指定端口 18799）：
