@@ -56,6 +56,32 @@ _reputation: Optional[ReputationTracker] = None
 _http_client: Optional[httpx.AsyncClient] = None
 _paused_until: float = 0.0     # 暂停截止时间戳
 
+# 授权结论的短 TTL 缓存：(许可证文件 mtime, 判定时刻, 是否启用防护)。
+# 存在理由见 _protection_enabled 的 docstring —— 那里每个 AI 请求都会调用。
+#
+# ★ 缓存键里带 mtime 而不只是时间：Rust 侧 activate 成功后
+#   直接写 license.json，引擎收不到任何通知。若缓存只看时间，
+#   用户刚激活完仍会被降级最多 5 秒。mtime 一变即刻失效。
+_PROTECTION_TTL = 5.0
+_protection_cache: Dict[str, Any] = {}
+
+
+def _license_file_path() -> str:
+    """激活信息落盘路径。
+
+    ★ 必须与 Rust 侧 ``license.rs::license_file`` 完全一致。
+      两边读的不是同一个文件时，会出现「界面说已激活、
+      引擎说未激活」——用户激活成功了却仍在只读模式，
+      且两边都觉得自己是对的，极难排查。
+    """
+    import os as _os
+
+    return _os.path.join(
+        _os.getenv("LOCALAPPDATA") or _os.path.expanduser("~/.config"),
+        "com.daoti.xuandun-personal",
+        "license.json",
+    )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -164,6 +190,38 @@ def create_app() -> FastAPI:
     #   所以引擎侧只做它能正确做的判定：签名 / 有效期 / 吊销。
     #   机器码绑定由 Rust 在 activate 时强制校验（见 license.rs）。
     def _protection_enabled() -> bool:
+        """未激活 / 已过期时返回 False（进入只读模式）。
+
+        ★ 带短 TTL 缓存：这里在**每个 AI 请求**上都会调用，
+          而底层一次完整验签要读 2 次磁盘（公钥 / 时钟水位）
+          加 1 次 RSA 签名验证。高频对话下这是可观的开销。
+          授权结论在几秒内不会变，缓存 5 秒不影响正确性。
+
+        ★ 缓存还以 license.json 的 mtime 为键：Rust 侧 activate
+          成功后直接写文件，引擎收不到任何通知，纯时间缓存会让
+          用户刚激活完仍被降级。mtime 一变即刻重算。
+        """
+        stamp = _license_file_mtime()
+        cached = _protection_cache.get("value")
+        if (
+            cached is not None
+            and cached[0] == stamp
+            and time.time() - cached[1] < _PROTECTION_TTL
+        ):
+            return cached[2]
+        value = _compute_protection_enabled()
+        _protection_cache["value"] = (stamp, time.time(), value)
+        return value
+
+    def _license_file_mtime() -> float:
+        import os as _os
+
+        try:
+            return _os.path.getmtime(_license_file_path())
+        except OSError:
+            return -1.0
+
+    def _compute_protection_enabled() -> bool:
         """未激活 / 已过期时返回 False（进入只读模式）。"""
         try:
             from .. import license as lic
@@ -177,6 +235,7 @@ def create_app() -> FastAPI:
 
             code = _load_saved_code()
             if not code:
+                # 全新安装 / 还没填过码 —— 这才是「确实未激活」
                 return False
 
             # ★ mch 传空串：引擎无从复现 Rust 采集的机器码，
@@ -184,6 +243,10 @@ def create_app() -> FastAPI:
             #   verify() 对空 mch 的处理是「不比对机器码」——
             #   机器码绑定由 Rust 侧负责，这里不越权判定。
             r = lic.verify(code, "", machine_check=False)
+            if not r.ok:
+                # 「有码但验不过」与「没码」是两种不同情况，
+                # 日志必须能区分，否则用户报障时无法定位。
+                logger.info("进入只读模式：%s（%s）", r.reason, r.message or "")
             return r.ok
         except Exception as e:  # 任何异常都不得让防护静默消失
             logger.warning("激活状态读取失败（%s），按已授权处理", e)
@@ -195,17 +258,10 @@ def create_app() -> FastAPI:
         落盘位置与 Rust 侧 license.rs::license_file 一致，
         两边必须读同一个文件，否则会出现「界面说已激活、引擎说没激活」。
         """
-        import os as _os
+        import json as _json
 
-        path = _os.path.join(
-            _os.getenv("LOCALAPPDATA") or _os.path.expanduser("~/.config"),
-            "com.daoti.xuandun-personal",
-            "license.json",
-        )
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                import json as _json
-
+            with open(_license_file_path(), "r", encoding="utf-8") as f:
                 return str(_json.load(f).get("code", "") or "")
         except (OSError, ValueError):
             return ""

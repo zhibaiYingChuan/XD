@@ -569,6 +569,18 @@ def test_status_bar_honest(page, be: Backend):
         rec("T3 状态栏无自相矛盾", not wrong,
             f"状态栏全文={bar!r}，混入 {wrong}" if wrong else f"状态栏全文={bar!r}")
 
+    # ★ 只读模式必须显式说出来。
+    #   未激活时 state 仍可能是 learning/protecting、KPI 也照常统计，
+    #   但请求实际全部直通。界面若不提，用户会以为防护在正常工作。
+    read_only = bool(real.get("read_only"))
+    bar = status_text(page)
+    if read_only:
+        rec("T3 只读模式已如实告知", "只读" in bar,
+            f"后端 read_only=True 但状态栏未提示；状态栏全文={bar!r}")
+    else:
+        rec("T3 非只读模式不误报", "只读模式" not in bar,
+            f"后端 read_only=False 但状态栏显示了只读提示；状态栏全文={bar!r}")
+
 
 def test_unreachable_label(page, be: Backend):
     """T3b 引擎不可达时，状态栏必须说「未运行」而不是继续显示「防护中」。
