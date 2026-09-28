@@ -1066,6 +1066,29 @@ def create_app() -> FastAPI:
         _storage.clear_reputations()
         return {"ok": True, "cleared": count}
 
+    @app.get("/api/license/machine_code")
+    async def license_machine_code():
+        """本机机器码（供界面展示，用户拿它向官方申请激活码）。
+
+        ★ 为什么机器码由引擎采集、而不是 Rust 侧自行采集：
+          历史上两侧各写一份算法，结果线上出现「按界面上的机器码
+          申请的码，装上却提示与本机不匹配」—— 签发时与验证时
+          算出的值不同。现在采集的唯一实现在 license.py，
+          签发工具与验签引擎 import 的是同一个函数。
+
+        ★ 回传 hash 而非原文：界面只需要一个稳定标识用于
+          申请与核对，不必展示硬件序列号本身。
+        """
+        from .. import license as lic
+
+        raw = lic.machine_code()
+        return {
+            "machineCode": lic.machine_code_hash(raw),
+            # 采集不到稳定硬件 ID 时为 true，界面据此提示用户
+            # 「这台机器的机器码可能不稳定，换机时需重新申请」。
+            "degraded": raw.startswith("hw-unavailable:"),
+        }
+
     @app.post("/api/license/verify")
     async def license_verify(payload: Dict[str, Any] = Body(...)):
         """激活码验签。
@@ -1073,6 +1096,11 @@ def create_app() -> FastAPI:
         ★ 验签放在引擎侧而非 Rust 侧的理由见 license.py 顶部注释：
           引擎是 Nuitka 编译产物，反编译者拿不到明文 Python 源码；
           而改 Rust 侧的校验点只需改几行 Rust。
+
+        ★ 机器码**一律由本引擎采集**，忽略调用方传入的值。
+          曾经的契约是「Rust 采集 → 传给引擎比对」，但那份采集
+          实现本身不稳定（取磁盘卷标），且与签发工具的算法会漂移。
+          采信调用方传的值等于把激活的正确性外包给一个不可靠来源。
 
         ★ 只回传结论，不回传签名细节 —— 错误文案刻意含糊，
           减少反编译者从文案推断校验点的可能。
@@ -1083,10 +1111,13 @@ def create_app() -> FastAPI:
         from .. import license as lic
 
         code = str(payload.get("code") or "")
-        raw_mc = str(payload.get("machine_code") or "")
         now = payload.get("now")
 
-        result = lic.verify(code, lic.machine_code_hash(raw_mc), now=now)
+        result = lic.verify(
+            code,
+            lic.machine_code_hash(lic.machine_code()),
+            now=now,
+        )
 
         # 校验通过才推进时钟水位 —— 失败的尝试不该影响基线，
         # 否则用户输错一次码后修正系统时间反而会被判定回拨。
@@ -1137,11 +1168,15 @@ def create_app() -> FastAPI:
 
         刻意不加密：内容是「一张已签名的码 + 一个机器码哈希」，
         不含隐私；加密反而需要客户端持有解密密钥，那才是泄露点。
+
+        ★ 机器码由本引擎采集，不采信调用方传入的值 ——
+          与 verify 同理，采信外部传入的机器码等于把激活的
+          正确性外包给一个不可靠来源。
         """
         from .. import license as lic
 
         code = str(payload.get("code") or "")
-        mc = str(payload.get("machine_code") or "")
+        mc = lic.machine_code()
         if not code.strip():
             raise HTTPException(status_code=400, detail="缺少原激活码")
         return {

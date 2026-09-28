@@ -153,7 +153,14 @@ class PersonalConfig:
             return PersonalConfig()
 
         try:
-            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            # ★★ 必须用 utf-8-sig 而不是 utf-8。
+            #   Windows 记事本、PowerShell 的 Out-File、某些同步工具
+            #   写出的文本文件会带 UTF-8 BOM。utf-8 会把它当成
+            #   JSON 的第一个字符而抛「Unexpected UTF-8 BOM」——
+            #   用户的全部设置（中转站地址、安全级别、API Key）
+            #   随之被丢弃，且只留一行 warning，多数人不会注意到。
+            #   utf-8-sig 对有无 BOM 都正确，是这里唯一该用的编码。
+            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("配置文件读取失败（%s），使用默认配置", e)
             return PersonalConfig()

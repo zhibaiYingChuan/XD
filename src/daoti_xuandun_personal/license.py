@@ -70,6 +70,177 @@ def machine_code_hash(machine_code: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
 
 
+# ══════════════════════════════════════════════════════════════
+# 机器码采集（本模块是**唯一实现**）
+# ══════════════════════════════════════════════════════════════
+#
+# ★★★ 为什么必须收在这里，而不是各侧各写一份
+#
+#   历史上机器码有三处实现：Rust 的 license.rs、签发工具自己复制的
+#   machine_code_hash、以及本模块的哈希函数。三份各自演化，
+#   结果是 2026-09-28 线上版用户「码明明是按 UI 上的机器码签的，
+#   却提示与本机不匹配」——签发时与验证时算出的值不同。
+#
+#   更糟的是旧实现**本身就不稳定**（已被移除，见下）：
+#   它取「第一块非移动磁盘的卷标 + 容量」。卷标会变（改名、
+#   重装、换盘符），枚举顺序也不保证，插拔移动硬盘就能改变
+#   「第一块」是谁。同一台机器在不同时刻可以算出不同机器码。
+#
+# ★ 采集方式：调用系统自带的 WMI/CIM 查询，零新增依赖
+#   · Windows: PowerShell 的 Get-CimInstance（不依赖已弃用的 wmic）
+#   · macOS:   ioreg -rd1 -c IOPlatformExpertDevice
+#   · 其余平台：降级到「无稳定硬件 ID」，见下方 fallback。
+#
+#   刻意不引入 `windows` crate 拿序列号：本机网络被策略阻断
+#   （证书吊销检查失败，CRYPT_E_NO_REVOCATION_CHECK），拉不到新依赖，
+#   而「本机跑不通的代码」比「多一个依赖」危险得多。
+
+_WMI_QUERY = (
+    "Get-CimInstance Win32_DiskDrive | "
+    "Where-Object { $_.InterfaceType -ne 'USB' -and $_.SerialNumber } | "
+    "ForEach-Object { $_.SerialNumber }; "
+    "Get-CimInstance Win32_BaseBoard | "
+    "ForEach-Object { $_.SerialNumber }; "
+    "Get-CimInstance Win32_Processor | "
+    "ForEach-Object { $_.ProcessorId }"
+)
+
+# WMI 里这些是「占位序列号」，厂商没填。混进机器码会让
+# 一批同型号机器算出同一个值，一码一机直接失效。
+#
+# ★ 存的是**去掉所有空白后**的大写形式，与 _is_real_serial
+#   的比较口径一致 —— 否则 "Default string" 与
+#   "DefaultString" 会是两个条目，其中一个漏网。
+_PLACEHOLDER_KEYS = {
+    "".join(s.upper().split())
+    for s in (
+        "",
+        "TOBEFILLEDBYOEMS",
+        "TOBEFILLEDBYMANUFACTURER",
+        "TOBEFILLEDBYSYSTEM",
+        "DEFAULT STRING",
+        "DEFAULTSTRING",
+        "NONE",
+        "UNKNOWN",
+        "NULL",
+        "NOTAPPLICABLE",
+        "NOT APPLICABLE",
+        "NOTAVAILABLE",
+        "NOTSPECIFIED",
+        "SYSTEMSERIALNUMBER",
+        "SYSTEM SERIAL NUMBER",
+        "BASEBOARD SERIAL NUMBER",
+        "CHASSIS SERIAL NUMBER",
+    )
+}
+
+
+def _is_real_serial(value: str) -> bool:
+    """判断一个序列号是否值得采信。"""
+    v = (value or "").strip()
+    # ★ 比较前先去掉所有空白：WMI 会返回 "Default string"、
+    #   "Not Specified"、"baseboard serial number" 这类变体，
+    #   按原样比对会漏掉一半，占位值就会混进机器码。
+    key = "".join(v.upper().split())
+    if key in _PLACEHOLDER_KEYS:
+        return False
+    # 纯数字且全同（如 0000000000）同样是占位
+    return not (v.isdigit() and len(set(v)) == 1)
+
+
+def _run_windows_serials() -> list:
+    """Windows：走 PowerShell 取磁盘/主板/CPU 序列号。"""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive",
+                "-Command", _WMI_QUERY,
+            ],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    text = (out.stdout or b"").decode("utf-8", errors="replace")
+    serials = []
+    for ln in text.splitlines():
+        # ★ 逐段清洗：WMI 的磁盘序列号常带尾随空格与点号
+        #   （如 "TA2032704020153     _00000001."）。这些噪声在不同
+        #   WMI 版本上不一致，留着会让机器码随系统更新而变 ——
+        #   那正是要消灭的那类不稳定性。
+        v = ln.strip().rstrip(".").strip()
+        if _is_real_serial(v):
+            serials.append(v)
+    return serials
+
+
+def _run_macos_serials() -> list:
+    """macOS：IOPlatformUUID 是 Apple 定义的唯一硬件标识。"""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    text = (out.stdout or b"").decode("utf-8", errors="replace")
+    found = []
+    for line in text.splitlines():
+        if '"IOPlatformUUID"' in line and "=" in line:
+            val = line.split("=", 1)[1].strip().strip('"')
+            if _is_real_serial(val):
+                found.append(val)
+    return found
+
+
+def machine_code() -> str:
+    """采集本机机器码（原始串，不哈希）。
+
+    ★ 这是**唯一**实现。签发工具、引擎验签都从这里取，
+      Rust 侧不再自行采集（它拿不到稳定的等价手段，
+      而两侧各自实现必然漂移 —— 那正是 2026-09-28 线上激活
+      失败的根因）。
+
+    ★ 强度说明（如实告知，不夸大）：
+      Windows 取磁盘+主板+CPU 序列号，macOS 取 IOPlatformUUID，
+      都是厂商烧录的硬件 ID，同一台机器重启、插拔硬盘、
+      改盘符、改卷标都不会变。
+      仍挡不住的是「伪造」—— 有能力改客户端二进制的人可以
+      写死任意机器码。客户端校验本质上是可绕过的，
+      真正的价值在于「私钥不出签发方」与「换绑留痕」。
+
+    ⚠ 采集失败时返回带 ``hw-unavailable:`` 前缀的降级串。
+      绝不返回空串 —— 空串会让所有用户算出同一个哈希，
+      等于取消一码一机。用前缀标记是为了让签发方一眼看出
+      这台机器拿不到稳定 ID，从而在签发前就与用户沟通。
+    """
+    import platform as _platform
+    import sys as _sys
+
+    system = _platform.system()
+    if system == "Windows":
+        serials = _run_windows_serials()
+    elif system == "Darwin":
+        serials = _run_macos_serials()
+    else:
+        serials = []
+
+    if not serials:
+        return "hw-unavailable:" + (system or _sys.platform or "unknown")
+
+    # 排序去重：同一台机器多次采集必须得到完全相同的串，
+    # 否则 WMI 返回顺序一变哈希就变了 —— 正是旧实现的翻车方式。
+    uniq = sorted(set(serials))
+    return "|".join(uniq)
+
+
 def now_unix() -> int:
     return int(time.time())
 
@@ -413,11 +584,11 @@ def verify(
         now: 当前 Unix 秒。显式传入便于测试确定性。
         machine_check: 是否比对机器码。
 
-    ★ ``machine_check=False`` 只给**引擎侧**用。
-      机器码由 Rust 用 sysinfo 采集，引擎是独立进程拿不到那个值；
-      若它自己用别的方式重算，两侧算法必然漂移，结果是所有用户的
-      码都验不过。引擎因此只校验签名/有效期/吊销，
-      机器码绑定由 Rust 在激活入口强制执行（两处都过才算激活）。
+    ★ ``machine_check=False`` 只给**测试**用 —— 用来构造
+      「不校验机器码」的调用场景以覆盖其它分支。
+      生产路径一律传 True：机器码由本模块采集，
+      调用方无从也不该插手（那正是 2026-09-28 线上激活失败的成因
+      —— Rust 侧自采的机器码既不稳定，又与签发方算法漂移）。
 
     ★ ``verifier_available=False`` 的每一条路径都必须让 ``ok=False``。
       「验不了」绝不能被当成「验过了」—— 那是授权系统最危险的失效方向。

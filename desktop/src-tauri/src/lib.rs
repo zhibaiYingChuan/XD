@@ -130,11 +130,15 @@ fn proxy_base() -> String {
 // 这里只做「调引擎验签 + 编排 + 暴露 Tauri 命令」。
 
 /// 调引擎的 /api/license/verify（真实验签在引擎侧）。
+///
+/// ★ 不再传 machine_code —— 引擎自己采集。
+///   旧契约是「Rust 采集 → 传给引擎」，那份采集既不稳定
+///   （取磁盘卷标，插拔硬盘就变）又与签发工具算法漂移，
+///   线上表现为「按界面机器码申请的码激活失败」。
 async fn engine_verify(app: &tauri::AppHandle, code: &str) -> Result<license::VerifyOutcome, String> {
     ensure_engine_running(app).await?;
     let body = serde_json::json!({
         "code": code,
-        "machine_code": license::machine_code(),
         "now": license::now_unix(),
     });
     let v = proxy_call(
@@ -147,12 +151,36 @@ async fn engine_verify(app: &tauri::AppHandle, code: &str) -> Result<license::Ve
     serde_json::from_value(v).map_err(|e| format!("验签结果解析失败: {e}"))
 }
 
+/// 向引擎索取本机机器码（哈希形式）。
+///
+/// ★ 引擎不可达时返回空串。此时界面显示「暂时无法确认激活状态」，
+///   而不是给一个错误的机器码 —— 后者会让用户拿它去申请，
+///   结果必然不匹配，而报错还会指向完全错误的方向。
+pub async fn machine_code_via_engine() -> String {
+    let v = match proxy_call(
+        reqwest::Method::GET,
+        "/api/license/machine_code",
+        None,
+        REQ_NORMAL,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    v.get("machineCode")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// 组装对外的激活状态。
 ///
 /// ★ 每次都重新验签，不只读磁盘上的字段：
 ///   攻击者改掉 license.json 里的 expires_at 就能绕过「只读盘」的检查。
 async fn build_license_status(app: &tauri::AppHandle) -> LicenseStatus {
-    let mch = license::machine_code_hash(&license::machine_code());
+    // ★ machine_code() 返回的已经是哈希，不要再哈希一次。
+    let mch = license::machine_code().await;
     let now = license::now_unix();
     let st = license::load();
 
@@ -292,7 +320,6 @@ async fn build_rebind_request(app: tauri::AppHandle, code: String) -> Result<Reb
     }
     let body = serde_json::json!({
         "code": trimmed,
-        "machine_code": license::machine_code(),
     });
     let v = proxy_call(
         reqwest::Method::POST,

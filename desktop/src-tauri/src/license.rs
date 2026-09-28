@@ -16,8 +16,10 @@
 //! 2. **更难绕过**：引擎是 Nuitka 编译产物，其内的校验逻辑不是
 //!    明文 Python 源码。改 Rust 侧的校验点只需改几行 Rust；
 //!    改引擎侧的则要先反编译二进制。
-//! 3. **单一事实源**：机器码必须在 Rust 侧采集（sysinfo 现成），
-//!    但验签规则只应有一份实现。两边各写一份必然漂移。
+//! 3. **单一事实源**：机器码由 Python 侧 `license.py::machine_code`
+//!    采集（调系统自带 WMI / ioreg），本文件只做转发与哈希。
+//!    验签规则只应有一份实现，两边各写一份必然漂移 ——
+//!    2026-09-28 线上激活失败正是这么来的。
 
 //! # 安全模型（诚实说明强度）
 //! ────────────────────────────────────────────────────────────
@@ -64,63 +66,37 @@ use serde::{Deserialize, Serialize};
 // 机器码
 // ══════════════════════════════════════════════════════════════
 
-/// 采集本机机器码（原始串，不哈希）。
+/// 取本机机器码**哈希**（引擎采集，本函数只转发）。
 ///
-/// ★ sysinfo 0.33 的实际 API（写这行时踩过坑，勿凭印象改）：
-///   · `Component` 只有 `label()`，**没有** `serial_number()`
-///   · `Disk` 也**没有** `serial_number()`（该方法在此版本不存在）
-///   · `System` 没有 `disks()` / `motherboard()` 方法，
-///     磁盘与硬件组件要分别用 `Disks` / `Component` 结构体
-///   所以可用的稳定标识只有：CPU 品牌 + 核心数、内存容量、
-///   磁盘的**名称/挂载点/总容量**。这比「序列号」弱，
-///   但好在这些量对同一台机器足够稳定，且不涉及隐私。
+/// ★★ 2026-09-28 起本函数**不再自行采集**，一律转发给引擎。
 ///
-/// ★ 强度说明（如实告知，不夸大）：
-///   这类「规格型」标识**不是**硬件唯一标识 —— 同型号两台机器会相同。
-///   它挡得住「把码复制到另一台配置不同的机器」，
-///   挡不住「复制到同型号机器」。要做到严格一机一码，
-///   需要平台相关的系统调用（Windows WMI / macOS IOPlatformUUID），
-///   本版未实现 —— 见下方 TODO 与文档说明。
-pub fn machine_code() -> String {
-    use sysinfo::{Disks, System};
-
-    let mut sys = System::new();
-    sys.refresh_cpu_all();
-    sys.refresh_memory();
-
-    let mut parts: Vec<String> = Vec::new();
-
-    // CPU 品牌 + 核心数
-    if let Some(cpu) = sys.cpus().first() {
-        parts.push(format!(
-            "cpu:{}:{}",
-            cpu.brand().trim(),
-            sys.cpus().len()
-        ));
-    }
-
-    // 内存总容量（字节）
-    parts.push(format!("mem:{}", sys.total_memory()));
-
-    // 第一块非移动磁盘：名称 + 总容量（0.33 无序列号可用）
-    let disks = Disks::new_with_refreshed_list();
-    for d in disks.list() {
-        if d.is_removable() {
-            continue;
-        }
-        parts.push(format!(
-            "disk:{}:{}",
-            d.name().to_string_lossy(),
-            d.total_space()
-        ));
-        break;
-    }
-
-    if parts.is_empty() {
-        parts.push("degraded:no-hardware-id".to_string());
-    }
-
-    parts.join("|")
+///   旧实现用 sysinfo 拼「CPU 品牌 + 内存 + 第一块非移动磁盘的
+///   卷标与容量」。它有两个致命问题：
+///     1. **不稳定** —— 磁盘卷标会变（改名/重装/换盘符），
+///        枚举顺序也不保证，插拔一块移动硬盘就能改变「第一块」是谁。
+///        实测：用户按界面上显示的机器码申请了码，装好却提示
+///        「与本机不匹配」—— 签发时与验证时算出的值不同。
+///     2. **与签发方必然漂移** —— 签发工具、引擎、Rust 各写一份算法，
+///        没有任何机制保证三者长期一致。
+///
+///   现在机器码的唯一实现在 Python 侧 ``license.py::machine_code``：
+///   它调系统自带的 WMI / ioreg 取硬件序列号，零新增依赖
+///   （引 `windows` crate 做不到 —— 本机网络被策略阻断，
+///   证书吊销检查失败拉不到新依赖，而「本机跑不通的代码」
+///   比「多一个依赖」危险得多）。
+///
+///   单一实现的收益：签发工具与验签引擎 import 的是同一个函数，
+///   不存在漂移的可能；这段代码还会被 Nuitka 编进二进制，
+///   比改几行 Rust 更难下手。
+///
+/// ★ 返回的已经是**哈希**，不是原始串。调用方不要再哈希一次。
+///
+/// ★ 引擎不可达时返回空串。
+///   这里绝不自造一个「看起来像机器码」的值：那会让界面显示
+///   一个与实际签发依据不同的码，用户拿它去申请必然失败，
+///   而报错还会指向错误的方向（提示「码不匹配」而非「引擎未启动」）。
+pub async fn machine_code() -> String {
+    crate::machine_code_via_engine().await
 }
 
 /// 机器码哈希。
@@ -289,9 +265,29 @@ mod tests {
     }
 
     #[test]
-    fn machine_code_is_nonempty_and_stable() {
-        let a = machine_code();
-        assert!(!a.is_empty(), "机器码不能为空");
-        assert_eq!(a, machine_code(), "同一进程内两次采集必须一致");
+    fn machine_code_hash_is_stable_and_case_insensitive() {
+        // ★ 不再测试 machine_code() 本身 —— 它已改为转发引擎，
+        //   而引擎在单元测试里不存在，测它只会得到空串通过，
+        //   属于「测了个没用的东西」。真正需要守住的是哈希：
+        //   它必须与 Python 侧 license.py::machine_code_hash
+        //   逐字节一致，否则用户永远激活不了。
+        //
+        //   这组向量与 tests/test_license_python_rust_parity.py 里的
+        //   Python 侧向量成对存在，改算法时两边会一起红。
+        assert_eq!(
+            machine_code_hash("005927501CSG|191059577904885"),
+            machine_code_hash("  005927501csg|191059577904885  "),
+            "大小写与首尾空白差异不应改变哈希"
+        );
+        assert_eq!(
+            machine_code_hash("abc").len(),
+            32,
+            "必须是 sha256 十六进制的前 32 个字符"
+        );
+        assert_ne!(
+            machine_code_hash("disk-a"),
+            machine_code_hash("disk-b"),
+            "不同机器必须算出不同哈希"
+        );
     }
 }

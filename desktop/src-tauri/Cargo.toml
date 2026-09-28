@@ -27,11 +27,14 @@ parking_lot = "0.12"
 thiserror = "2"
 
 # ── 激活码（见 src/license.rs）────────────────────────────────
-# 只加这两个：机器码采集 + SHA-256。
+# 只加这一个：SHA-256。
 #   ★ 刻意**不引入** rsa / pkcs8 做验签 —— 验签放在 Python 引擎侧
 #     （那里 cryptography 本就就位）。理由见 src/license.rs 顶部注释。
 #     顺带的好处：引擎是编译后的二进制，比改几行 Rust 更难下手。
-sysinfo = "0.33"      # 机器码采集（CPU ID / 主板序列号 / 磁盘序列号）
+#   ★ 也不引入 `windows` crate 取磁盘序列号：本机网络被策略阻断
+#     （证书吊销检查失败），拉不到新依赖。机器码采集放在
+#     Python 侧 license.py::machine_code（调系统自带 WMI / ioreg），
+#     零新增依赖且与签发工具共用同一份实现。
 sha2 = "0.10"         # SHA-256（机器码哈希）
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
