@@ -188,6 +188,53 @@ jobs:
             || { echo "::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活"; exit 1; }
           echo "PASS：公钥已落入引擎产物"
 
+      # ★★★ 产物级护栏断言（本 workflow 最关键的一步）
+      #
+      #   前面所有检查都是「源码/配置对不对」，这一条是
+      #   「**编译出来的二进制里到底还有没有防护能力**」。
+      #
+      #   护栏的 import 是延迟 import，Nuitka 静态分析看不到它；
+      #   而判定护栏在不在场的路径曾指向仓库外的企业版目录 ——
+      #   本地恰好有那个目录所以一直带着，干净 clone（= runner）
+      #   上却静默跳过，产出没有提示词注入与敏感泄露检测的包，
+      #   界面还照常显示「防护中」。用户以为自己受保护。
+      #
+      #   ★ 判据：在二进制里搜护栏的判据标识。
+      #     不能找 .py 文件 —— Nuitka standalone 把模块编译进二进制，
+      #     dist/daoti_xuandun/ 下只剩 data 文件，源码根本不出现。
+      #     也不能只看目录存在 —— 空壳目录同样满足，而它毫无防护能力。
+      #     判据标识（如 system_prompt_inject / sensitive_leak）
+      #     只由护栏代码产生，护栏缺失时必然搜不到。
+      - name: Assert guardrail is present in compiled engine
+        working-directory: desktop
+        run: |
+          set -euo pipefail
+          DIST="engine_main.dist"
+          BIN=$(find "$DIST" -maxdepth 1 -type f \( -name "*.exe" -o -name "*.bin" \) | head -1)
+          if [ -z "$BIN" ]; then
+            echo "::error::在 $DIST 里找不到引擎可执行文件"
+            exit 1
+          fi
+          echo "检查产物: $BIN"
+
+          # ★ 这些标识只由护栏代码产生。
+          #   个人版自研层不包含它们 —— 缺了就证明护栏没编进来。
+          MISSING=""
+          for sig in system_prompt_inject sensitive_leak; do
+            if ! grep -qa -- "$sig" "$BIN"; then
+              MISSING="$MISSING $sig"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::二进制里缺少护栏判据标识：$MISSING"
+            echo "::error::护栏（提示词注入 + 敏感泄露）未编入这个包。"
+            echo "::error::它能启动、能自检通过，但这两类检测完全失效，"
+            echo "::error::而界面照常显示「防护中」。用户以为自己受保护。"
+            echo "::error::发布一个没有防护能力的防火墙，比构建失败坏得多。"
+            exit 1
+          fi
+          echo "PASS：护栏判据已确认存在于二进制中（防护能力在位）"
+
       - name: Install frontend dependencies
         working-directory: desktop
         run: npm ci

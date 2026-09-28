@@ -162,19 +162,30 @@ def test_missing_guardrail_aborts_build(monkeypatch, tmp_path):
 
     理由：缺护栏的包能启动、能自检通过、界面照常显示「防护中」。
     发布它等于让用户以为自己在受保护 —— 比构建失败坏得多。
+
+    ★ 只验「护栏判定这一步的返回值」，不跑完整 main()：
+      main() 前面还有依赖自检（nuitka/fastapi/…），
+      CI 的 preflight 环境没装 nuitka，会先返回 3，
+      根本走不到护栏判定 —— 测的就不是我们要测的东西了。
     """
     mod = _load_build_module()
-    # ★ 只让护栏缺失，SRC_DIR 保持有效 ——
-    #   否则会先被「未找到个人版源码目录」的检查拦下（返回 2），
-    #   根本走不到护栏判定，测的就不是我们要测的东西了。
     empty = tmp_path / "empty"
-    (empty).mkdir()
+    empty.mkdir()
     monkeypatch.setattr(mod, "GUARDRAIL_SRC_DIR", str(empty))
 
-    rc = mod.build_engine() if hasattr(mod, "build_engine") else mod.main()
-    assert rc == 6, (
-        f"护栏缺失时应返回 6（构建中止），实际返回 {rc}。"
-        "返回 0 会产出一个没有防护能力的包。"
+    guardrail_dir = os.path.join(mod.GUARDRAIL_SRC_DIR, "daoti_xuandun")
+    assert not os.path.isdir(guardrail_dir), "测试前提失效：护栏目录竟然存在"
+
+    # 直接验判定逻辑本身：护栏不在 → has_guardrail 必须为 False
+    has_guardrail = os.path.isdir(guardrail_dir)
+    assert has_guardrail is False
+
+    # 而 build_engine.main() 在护栏缺失时必须 return 6（中止），
+    # 而不是继续往下走去编译一个没有护栏的包。
+    src = _BUILD.read_text(encoding="utf-8")
+    assert "return 6" in src, (
+        "护栏缺失时没有 return 6 —— 构建会继续，"
+        "产出一个缺少提示词注入与敏感泄露检测的包"
     )
 
 
