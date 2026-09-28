@@ -688,3 +688,60 @@ def test_empty_mch_with_machine_check_on_is_not_mismatch(keypair, monkeypatch):
     code = _issue(priv, "M", gen=0)
     r = lic.verify(code, "")
     assert r.ok, f"空 mch 不该判成不匹配: {r.reason} {r.message}"
+
+
+# ══════════════════════════════════════════════════════════════
+# 密钥材料不得入库
+# ══════════════════════════════════════════════════════════════
+
+
+def _git_tracked() -> set:
+    import subprocess
+
+    r = subprocess.run(
+        ["git", "-c", "core.hooksPath=NUL", "ls-files"],
+        cwd=_ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    if r.returncode != 0:
+        pytest.skip("不在 git 仓库内")
+    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+
+
+def test_private_key_never_tracked():
+    """★ 私钥入库 = 任何人都能签发激活码 = 授权体系瞬间失效。
+
+    且 Git 历史无法真正清除：即使后续删除，commit 里仍在。
+    这条断言一旦红了，视为安全事故而非普通测试失败。
+    """
+    tracked = _git_tracked()
+    bad = [p for p in tracked if "private" in p.lower() and p.endswith(".pem")]
+    assert not bad, f"★ 私钥被 git 追踪了，必须立即处理: {bad}"
+
+
+def test_public_key_is_tracked():
+    """公钥**必须**入库 —— build_engine.py 打包时要读它。
+
+    公钥不是秘密（它本就明文嵌在客户端里）。若它被忽略，
+    干净 clone 上构建会因缺公钥而失败，CI 产不出安装包。
+    """
+    tracked = _git_tracked()
+    assert "tools/activation/xuanDun_personal_public.pem" in tracked, (
+        "公钥未入库 —— 干净 clone 上 build_engine.py 会 return 4，"
+        "CI 无法产出安装包"
+    )
+
+
+def test_gitignore_does_not_re_enable_private_key():
+    """★ .gitignore 里不能出现把私钥放行的规则。
+
+    典型的致命失误：为了让 CI 过而放宽忽略规则时，
+    把 `tools/activation/*.pem` 注释掉，顺带放出了私钥。
+    这里直接扫文本，不给「以后再改」留空间。
+    """
+    gi = (_ROOT / ".gitignore").read_text(encoding="utf-8")
+    offenders = [
+        ln.strip() for ln in gi.splitlines()
+        if ln.strip().startswith("!")
+        and "private" in ln.lower()
+    ]
+    assert not offenders, f".gitignore 显式放行了含 private 的路径: {offenders}"

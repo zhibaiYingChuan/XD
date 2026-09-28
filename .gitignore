@@ -90,14 +90,22 @@ desktop-list.txt
 # ── 激活码签发工具的密钥材料（★ 最高优先级）──────────────
 # 私钥一旦入库 = 任何人都能签发激活码 = 授权体系瞬间失效。
 # 且 Git 历史无法真正清除（即使后续删除，commit 里仍在）。
-tools/activation/*.pem
 tools/activation/*_private*.pem
-tools/activation/*_public*.pem
 # 签发日志含明文激活码 + 机器码，属用户隐私
 tools/activation/ACTIVATION_LOG.json
 tools/activation/LICENSE_LOG.json
-# 公钥若选择入库（供构建期读取），用下面这行显式放行：
-# !tools/activation/xuanDun_personal_public.pem
+
+# ★ 公钥**必须入库**（放行）。
+#   公钥不是秘密 —— 它本来就明文嵌在客户端里，任何反编译者都能拿到。
+#   私钥安全性完全不依赖它是否公开。
+#
+#   而 build_engine.py 在打包时要从 tools/activation/ 读它拷进
+#   resources/engine/。若公钥不入库，干净 clone 上构建会直接失败
+#   （build_engine.py 缺公钥即 return 4），CI 无法产出安装包。
+#   —— 这正是「为了让 CI 过而放宽私钥」时最危险的模仿操作：
+#      两种密钥挨在一起写规则，人一放松就会把私钥一起放出去。
+#   这里显式只放行公钥，私钥那两行不动。
+!tools/activation/xuanDun_personal_public.pem
 
 # ── 测试临时产物 ──────────────────────────────────────────
 tests/__pycache__/
