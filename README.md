@@ -422,17 +422,19 @@ python tools/activation/gen_activation_keys.py revoke <jti> --before-gen 1  # �
 | Phase 9 | 护栏层入库（不再依赖企业版 SDK） | ✅ 完成 |
 | Phase 10 | 激活码体系（一码一机 / 吊销 / 换机）+ 激活界面 | ✅ 完成 |
 | Phase 11 | 未激活只读模式 | ✅ 完成 |
-| 待办 | 反编译加固（消除 config.py 的明文 fallback 密钥） | ⬜ **未完成** |
-| 待办 | 个人版 release workflow | ⬜ **未完成** |
+| Phase 12 | 发布流水线（含公钥门禁） | ✅ 完成 |
+| Phase 13 | 反编译加固（护栏构建期密钥注入） | ✅ 完成 |
 | 未来 | 洛书映射器接入（需先技术调研） | ⬜ 待评估 |
 | 未来 | 模式 B：CA 证书 TLS 代理 | ⬜ 待评估 |
 
-> ⚠️ **反编译加固尚未完成**：`src/daoti_xuandun/config.py` 里仍有
-> `shell_key = b"daoti_xuandun_16"` / `mapping_key = b"ancient_map_16b!"`
-> 这类明文 fallback 密钥，反编译可直接获得。
-> 计划在打包时注入编译期密钥并设置 `XUANDUN_REQUIRE_SECURE_KEY=1`。
-> `tests/test_guardrail_parity.py::test_no_hardcoded_fallback_keys` 是哨兵，
-> 当前会发出警告。**这是已知的未完成项，不应被当成已完成。**
+> **反编译加固的诚实边界**：护栏的 `shell_key` / `mapping_key` 改为构建期
+> 随机生成（`build_secrets.json`），源码与二进制里不再有固定密钥，
+> 且每个版本不同。**但这不是绝对防线** —— 密钥仍随包分发，
+> 有能力逆向的人仍可读出后重打包。它抬高的是门槛，
+> 真正的防线在「校验点分散」：改一处校验不生效。
+>
+> 激活码体系同理：RS256 私钥从不出现在任何客户端产物里，
+> 这一点才是真正不可逆的（见 5.4）。
 
 ---
 
