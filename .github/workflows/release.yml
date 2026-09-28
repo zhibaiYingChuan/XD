@@ -279,9 +279,25 @@ jobs:
         #   于是 linuxdeploy 挂载失败，报出来的是
         #   「failed to run linuxdeploy」—— 一个看不出真实原因的错误。
         #   这个变量让它解包到临时目录再执行，绕开 FUSE。
+        #
+        # ★★ NO_STRIP=1 解决的是**另一个**独立的 linuxdeploy 失败点：
+        #   linuxdeploy 打包时会对可执行文件跑 strip，而新版
+        #   glibc/binutils 上这一步会失败。Tauri 同样只报
+        #   「failed to run linuxdeploy」，与 FUSE 那个症状一模一样，
+        #   但成因不同 —— 只加 APPIMAGE_EXTRACT_AND_RUN 不够
+        #   （2026-09-28 实测：变量已生效，Linux 仍挂在这里）。
+        #   上游通行的解法就是 NO_STRIP：产物大一点，不影响运行。
+        #   它只对 AppImage 打包有意义，其他格式不受影响。
+        #
+        # ★★ 加 --verbose 不是为了看编译进度，是为了**让失败可诊断**。
+        #   「failed to run linuxdeploy」这一句不含任何原因 ——
+        #   FUSE 挂载失败、strip 失败、插件下载失败，报出来长得一模一样。
+        #   2026-09-28 就是因为没有它，只能靠猜，猜错就再等十分钟。
+        #   一次构建 17 分钟，看不见原因等于盲飞。
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
-        run: npm run tauri build -- --bundles ${{ matrix.bundle }}
+          NO_STRIP: '1'
+        run: npm run tauri build -- --verbose --bundles ${{ matrix.bundle }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
