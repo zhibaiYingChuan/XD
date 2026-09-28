@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -42,8 +43,15 @@ CHECKS = [
                "这是整个发布链路里唯一不可逆的底线。",
         "severity": "critical",
         "patterns": [
-            rb"BEGIN (?:RSA )?PRIVATE KEY",
-            rb"BEGIN ENCRYPTED PRIVATE KEY",
+            # ★ 必须匹配**完整 PEM 块**，不能只搜头部字符串。
+            #   只搜 "BEGIN PRIVATE KEY" 会稳定误报，因为二进制里必然含有：
+            #     · cryptography 库的 PEM 头部解析正则
+            #     · PyJWT 内置的官方测试样例私钥（AKIAIOSFODNN7EXAMPLE）
+            #     · 护栏库的中文文档字符串（列举 PEM 头部做示例）
+            #   那三处都不是我们的密钥。误报的审计等于没有审计。
+            rb"-----BEGIN (?:RSA |ENCRYPTED )?PRIVATE KEY-----[ \t]*\r?\n"
+            rb"(?:[A-Za-z0-9+/]{60,}[ \t]*\r?\n){4,}"
+            rb"-----END (?:RSA |ENCRYPTED )?PRIVATE KEY-----",
         ],
     },
     {
@@ -58,12 +66,14 @@ CHECKS = [
     },
     {
         "name": "构建期密钥",
-        "why": "build_secrets.json 的内容若以明文落在二进制里，"
-               "等同于没做构建期注入。",
+        "why": "build_secrets.json 的**真实密钥值**若以明文落在二进制里，"
+               "等同于没做构建期注入。注意不能搜 'build_secrets' 这个词 ——"
+               "函数名 _inject_build_secrets 与文件名常量必然命中，那是误报。",
         "severity": "high",
-        "patterns": [
-            rb"build_secrets",
-        ],
+        # ★ 不放静态 pattern：搜 "build_secrets" 只会命中函数名与文件名常量，
+        #   那不是密钥。真实值由 audit() 读 build_secrets.json 后动态比对。
+        "patterns": [],
+        "from_secrets_file": "build_secrets.json",
     },
     {
         "name": "内部路径",
@@ -139,6 +149,15 @@ def audit(binary: Path) -> int:
     print()
 
     findings = []
+    secrets_path = binary.parent / "build_secrets.json"
+    secret_values: list[str] = []
+    if secrets_path.is_file():
+        try:
+            raw = json.loads(secrets_path.read_text(encoding="utf-8"))
+            secret_values = [str(v) for v in raw.values() if v]
+        except (OSError, ValueError) as e:
+            print(f"  [警告] 读取 {secrets_path.name} 失败：{e}\n")
+
     for chk in CHECKS:
         hits = {}
         for pat in chk["patterns"]:
@@ -146,6 +165,12 @@ def audit(binary: Path) -> int:
             if n:
                 key = pat.decode("ascii", "replace")
                 hits[key] = n
+        # ★ 动态比对：真实密钥值是否被编进了二进制
+        #   只对「构建期密钥」这一项做，避免同一个值在每一项里重复报警
+        if chk.get("from_secrets_file"):
+            for val in secret_values:
+                if val.encode("ascii", "ignore") in data:
+                    hits[f"实际密钥值 {val[:6]}…"] = 1
         findings.append((chk, hits))
 
     findings.sort(key=lambda x: (SEV_ORDER[x[0]["severity"]], sum(x[1].values())))
