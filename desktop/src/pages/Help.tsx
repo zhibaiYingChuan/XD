@@ -1,7 +1,17 @@
-﻿/* SPDX-License-Identifier: DaoTi-Research-1.0
+/* SPDX-License-Identifier: DaoTi-Research-1.0
    Copyright (c) 2026 独立研究者，知白
 
-   帮助页 — 消费级 FAQ + 配置教程。
+   帮助页 — 消费级 FAQ + 上手步骤。
+
+   ★ 关于「AI 工具」这一段的写法（2026-09-29 改）：
+     原先按 Cursor / Cherry Studio / 自建脚本逐个列教程，
+     但那些具体菜单路径从未被验证过 —— 写没核实过的步骤，
+     等于让用户照着可能失效的操作去折腾。
+     现在的写法只讲两件事：
+       ① 在玄盾设置页填平台给的中转站地址与 Key；
+       ② 在 AI 工具里填玄盾给的本地地址。
+     不点名具体工具、不描述各家菜单在哪 ——
+     用户用的是哪个工具、界面长什么样，只有他自己知道。
 */
 
 import { useState } from 'react';
@@ -32,7 +42,7 @@ const FAQ = [
   },
   {
     q: '为什么需要修改 API 地址？',
-    a: `因为玄盾要"站在中间"检查数据，就像安检机需要你把行李放上传送带。\n\n你需要把 AI 工具的 API 地址从 https://api.xxx.com 改成 ${P}，这样流量就会先经过玄盾再发往中转站。\n\n只有支持自定义 API 地址的工具才能这样配置（Cursor、Cherry Studio、VS Code 插件、自建脚本等都支持）。`,
+    a: `因为玄盾要"站在中间"检查数据，就像安检机需要你把行李放上传送带。\n\n你需要把 AI 工具的 API 地址从 https://api.xxx.com 改成 ${P}，这样流量就会先经过玄盾再发往中转站。\n\n前提是这个工具支持自定义 API 地址 —— 玄盾是本地代理，不是全局代理，它只处理「被指向它」的流量。`,
   },
   {
     q: '支持 HTTPS 吗？',
@@ -67,31 +77,30 @@ const FAQ = [
 const TOOL_GUIDES = [
   {
     icon: Monitor,
-    name: 'Cursor',
+    name: '第一步 · 在玄盾里填中转站',
     steps: [
-      '打开 Cursor → 设置（Settings）',
-      '搜索 "Override OpenAI Base URL"',
-      `填入 ${P}`,
-      '把 OpenAI API Key 改成你的中转站 Key',
+      '打开玄盾「设置」页',
+      '「中转站」区域填入平台给你的 API 地址与 API Key',
+      '保存。首页「当前中转站」显示出域名即成功',
     ],
   },
   {
     icon: FileText,
-    name: 'Cherry Studio / Chatbox 等第三方客户端',
+    name: '第二步 · 在 AI 工具里填玄盾给的地址',
     steps: [
-      '打开设置 → 模型服务 / OpenAI 配置',
-      `API 地址填 ${P}`,
-      'API Key 填你的中转站 Key',
-      '模型名按中转站支持的填，玄盾原样转发、不改写',
+      '玄盾会给你一个本地地址，形如 http://127.0.0.1:18765/v1',
+      '在 AI 工具的 API 地址一栏填这个本地地址，API Key 仍填中转站那把',
+      '之后所有请求都先经过玄盾再转发给中转站',
     ],
   },
   {
     icon: SettingsIcon,
-    name: '自建脚本 / 任意程序',
+    name: '如果连不上，按这个顺序排查',
     steps: [
-      `把代码中的 base_url 改为 ${P}`,
-      'api_key 仍用你的中转站 Key',
-      `如果用 OpenAI SDK：client = OpenAI(base_url="${P}", api_key=...)`,
+      '首页「当前中转站」是否显示了域名 —— 没显示说明玄盾侧还没配上',
+      'AI 工具里填的是玄盾的本地地址，而不是中转站的地址（两者不能混）',
+      'Key 是否与玄盾设置页里填的是同一把',
+      '以上都正常仍无记录 → 你的工具可能不支持自定义 API 地址',
     ],
   },
 ];
@@ -108,7 +117,7 @@ export default function Help() {
     <div style={{ maxWidth: 780 }}>
       <div className="page-header">
         <h1 className="page-title">帮助</h1>
-        <p className="page-subtitle">常见问题与配置教程</p>
+        <p className="page-subtitle">常见问题与上手步骤</p>
       </div>
 
       {/* 核心概念 */}
@@ -149,23 +158,19 @@ export default function Help() {
 
       {/* 配置教程 */}
       <div className="card">
-        <div className="card-title">配置你的 AI 工具</div>
+        <div className="card-title">让玄盾生效（两步，缺一不可）</div>
 
-        {/* ★ 第 0 步必须先讲：很多用户照着下面的教程改完地址，
-             却发现玄盾首页写着「尚未配置中转站」——
-             因为中转站地址和 Key 是在玄盾自己的「设置」页里填的，
-             不填就没有「中转站」可谈。这不是玄盾坏了，是第 0 步没做。 */}
+        {/* ★ 两步都在「设置」类页面里完成，但分属两个软件：
+             ① 玄盾里填中转站 —— 平台给你的 API 地址与 Key 填在这里；
+             ② AI 工具里填玄盾的本地地址 —— 之后流量才先经过玄盾。
+             少任何一步，防护都不生效，而界面看不出异常。 */}
         <div className="field-hint mb-16" style={{ marginTop: 0 }}>
-          <b>第 0 步（先做这个）：</b>打开玄盾「设置」页 →
-          「中转站」区域填入<b>你自己中转站的 API 地址和 Key</b> → 保存。
-          首页「当前中转站」显示出来才算配好。
-        </div>
-
-        <div className="field-hint mb-16">
-          第 1 步：把 AI 工具的 API 地址统一改成{' '}
-          <code className="mono" style={{ color: 'var(--xd-safe)' }}>
-            http://127.0.0.1:{currentProxyPort()}/v1
-          </code>
+          <b>第 2 步要填的地址长这样：</b>
+          <div className="mt-8">
+            <code className="mono" style={{ color: 'var(--xd-safe)' }}>
+              http://127.0.0.1:{currentProxyPort()}/v1
+            </code>
+          </div>
         </div>
 
         {TOOL_GUIDES.map((g) => {
