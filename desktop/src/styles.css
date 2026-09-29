@@ -1219,6 +1219,13 @@ textarea {
   color: #FCD34D;
   border: 1px solid rgba(245, 166, 35, 0.3);
 }
+/* 成功态：用于「测试连接」通过等实测结论。
+   danger / suspect / info 都不能表达「已验证可用」。 */
+.alert.safe {
+  background: var(--xd-safe-dim);
+  color: var(--xd-safe);
+  border: 1px solid rgba(0, 212, 170, 0.3);
+}
 .alert.info {
   background: var(--xd-primary-dim);
   color: #93C5FD;
@@ -1274,6 +1281,12 @@ textarea {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* 行内旋转图标（按钮里的加载态）。.spinner 是固定尺寸的方块替代品，
+   塞进按钮会撑坏布局，所以单独给一个只带旋转动画的类。 */
+.spin-icon {
+  animation: spin 0.7s linear infinite;
 }
 
 /* ══════════════════════════════════════════════════════════════

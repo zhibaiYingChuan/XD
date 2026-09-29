@@ -123,7 +123,7 @@ tools/
 # 这等于告诉攻击者判据边界在哪、哪里容易误报。
 # 检测类产品的判据是核心资产，不是测试代码。
 #
-# ★ 例外：以下四个测试必须入库，它们防的都是「静默失效」。
+# ★ 例外：以下五个测试必须入库，它们防的都是「静默失效」。
 #   ① test_guardrail_in_build.py
 #      防「产物没有护栏却被当成防火墙发布」——
 #      判据里没有任何攻击样本，只有路径与构建参数。
@@ -134,8 +134,12 @@ tools/
 #      只有读 PE 头的 Subsystem 字段才能确认。
 #   ④ test_engine_response_contract.py
 #      防「引擎返回驼峰键、Rust 按蛇形解析，激活一律失败」。
-#   四者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
-#   2026-09-28 这四类问题里有三类是线上反馈才发现的。
+#   ⑤ test_relay_config.py
+#      防「中转站地址被拼错一层（/v1beta/v1、/chat/completions/v1）」——
+#      现象是 404，用户会去查中转站、查 Key、查网络，
+#      唯独不会想到地址被拼坏了。判据只有地址字符串，不含任何检测逻辑。
+#   五者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
+#   2026-09-28 这几类问题里有三类是线上反馈才发现的。
 #
 #   用 /* 逐条排除而非 !tests/xxx 反向放行：
 #   gitignore 不支持「目录被排除后再放行子项」，
@@ -145,8 +149,12 @@ tests/*
 !tests/test_machine_code.py
 !tests/test_desktop_gui_subsystem.py
 !tests/test_engine_response_contract.py
+!tests/test_relay_config.py
+!tests/cdp_desktop_regression.py
+!tests/cdp_popup_probe.py
+!tests/mutation_check.py
 
-# CI 门禁细节：四道防护门禁的存在与判据、发布流水线的公钥断言。
+# ── CI 门禁细节：防护门禁的存在与判据、发布流水线的公钥断言。
 # 公开这些等于告诉破解者「我们重点防什么、怎么防的」。
 #
 # ★ 例外：release.yml 必须入库。

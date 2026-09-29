@@ -32,7 +32,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..config import PersonalConfig
+from ..config import PersonalConfig, RelayConfig, is_masked_key
 from ..reputation.tracker import ReputationTracker
 from ..storage.db import PersonalStorage
 from ..types import Action, LogEntry, LogType, RedactionRecord, SecurityLevel
@@ -990,6 +990,168 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="base_url 不能为空")
         return _reputation.inspect_url(base_url)
 
+    @app.post("/api/relay/test")
+    async def test_relay(payload: Dict[str, Any] = Body(...)):
+        """真实发一次请求，把「地址不对 / Key 不对 / 站点不可达」分开。
+
+        ★ 为什么必须有这个端点，而不是只靠地址规范化：
+          中转站后台把「接入地址」与「完整端点」并排展示，用户按配置 API
+          的直觉复制的是完整端点。normalized_base 已在字符串层面兜住这类
+          输入，但字符串兜不住没有版本段的自定义路径（如
+          ``https://x.com/openai`` 会被补成 ``/openai/v1``）——
+          这一层只能靠真探测。
+
+          更关键的是：地址填错的现象是 404，用户会去查中转站、查 Key、
+          查网络，唯独不会想到是地址被拼坏了一层。把真实探测结果摆出来，
+          是这个信息差唯一的解法。
+
+        ★ 探针是 POST /chat/completions + 一个不存在的模型名。
+          两个选择都有实测依据（见下方注释）：/models 不校验鉴权，
+          真模型会撞上套餐权益 —— 两者都会把「配置正确」误报成别的结论。
+          假模型既不需要知道用户用哪个模型（配置里已没有模型字段），
+          又把鉴权与套餐权益干净地分开。
+        """
+        if _config is None:
+            raise HTTPException(status_code=503, detail="配置未就绪")
+
+        base_url = str(payload.get("base_url") or "").strip() or _config.relay.base_url
+        if not base_url:
+            raise HTTPException(status_code=400, detail="请先填写中转站地址")
+
+        # ★ 空 Key 一律回退到已保存的那个：界面上显示的是掩码，
+        #   用户不重填时前端传来的就是空串，语义是「沿用原来的」。
+        api_key = str(payload.get("api_key") or "").strip() or _config.relay.api_key
+        if not api_key:
+            raise HTTPException(status_code=400, detail="请先填写中转站 API Key")
+
+        base = RelayConfig(base_url=base_url).normalized_base
+        headers = {"Authorization": f"Bearer {api_key}"}
+        # ★ 用专用超时而不是共用的 _http_client：共用客户端的 read 超时是
+        #   request_timeout_s（本机为 300s）。测试按钮要让用户等 300 秒
+        #   才知道地址是死的，那不是诊断，是惩罚。
+        probe_timeout = httpx.Timeout(connect=6.0, read=12.0, write=12.0, pool=6.0)
+
+        def _snippet(text: Any, limit: int = 300) -> str:
+            return " ".join(str(text or "").split())[:limit]
+
+        started = time.monotonic()
+
+        def _result(
+            ok: bool,
+            kind: str,
+            message: str,
+            *,
+            status: Optional[int] = None,
+            model_count: Optional[int] = None,
+            raw: Any = "",
+        ) -> Dict[str, Any]:
+            return {
+                "ok": ok,
+                "kind": kind,
+                "address": base,
+                "request_url": f"{base}/chat/completions",
+                "status": status,
+                "model_count": model_count,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "message": message,
+                "raw": _snippet(raw),
+            }
+
+        async def _probe(method: str, url: str, body: Optional[Dict[str, Any]] = None):
+            async with httpx.AsyncClient(
+                timeout=probe_timeout, follow_redirects=False
+            ) as client:
+                return await client.request(method, url, json=body, headers=headers)
+
+        def _count_models(resp: httpx.Response) -> Optional[int]:
+            try:
+                data = resp.json()
+            except Exception:  # noqa: BLE001 —— 上游返回非 JSON 属正常情况
+                return None
+            items = data.get("data") if isinstance(data, dict) else data
+            return len(items) if isinstance(items, list) else None
+
+        # ── 探针：POST /chat/completions，刻意用一个不存在的模型名 ──
+        #
+        # ★ 为什么必须打对话接口，而不是 GET /models：
+        #   实测（2026-09-29，api.commandcode.ai）该站的 /models
+        #   **不校验鉴权** —— 错 Key 返回 200，连 Key 都不带也返回 200。
+        #   拿它当探针，会把「Key 填错了」报成「连接正常」——
+        #   比不测更糟：用户会以为自己配对了，然后每次对话都 401。
+        #   校验 Authorization 的是对话接口。
+        #
+        # ★ 为什么用一个不存在的模型名，而不是真模型：
+        #   实测真模型 + 好 Key 会返回 403 MODEL_NOT_IN_PLAN ——
+        #   那是套餐权益问题，与「配置对不对」毫无关系，
+        #   拿它做判据会让配置完全正确的用户看到「失败」。
+        #   假模型把这两件事隔离开了：
+        #     好 Key → 400（模型不支持）→ 地址与 Key 都通
+        #     坏 Key → 401（鉴权失败）
+        try:
+            resp = await _probe(
+                "POST",
+                f"{base}/chat/completions",
+                {
+                    "model": "__xuandun_probe__",
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                },
+            )
+        except httpx.TimeoutException:
+            return _result(
+                False, "timeout", "连接超时：这个地址没有响应。确认域名能打开、没有被网络拦截"
+            )
+        except httpx.HTTPError as e:
+            return _result(False, "unreachable", f"连不上这个地址：{_snippet(e)}")
+
+        status = resp.status_code
+
+        if status in (401, 403):
+            return _result(
+                False,
+                "auth",
+                "地址是通的，但这个 API Key 没通过校验。请核对 Key 是否复制完整、是否已失效",
+                status=status,
+                raw=resp.text,
+            )
+
+        if status in (404, 405):
+            # 两种可能：地址错了一层，或这个站对不存在的模型回 404。
+            # 用 /models 判一次 —— 它能证明「这个接入地址下确实有个 API」。
+            # ★ 注意它证明的只是地址，不是鉴权（见上面的实测）。
+            try:
+                listing = await _probe("GET", f"{base}/models")
+            except httpx.HTTPError:
+                listing = None
+            if listing is not None and 200 <= listing.status_code < 300:
+                return _result(
+                    False,
+                    "http",
+                    f"地址可以访问（模型列表正常），但对话接口返回 {status} —— "
+                    f"这个中转站可能不支持标准的 /chat/completions 路径，请对照其文档确认",
+                    status=status,
+                    model_count=_count_models(listing),
+                    raw=resp.text,
+                )
+            return _result(
+                False,
+                "address",
+                f"地址可能不对：玄盾请求的 {base}/chat/completions 返回 {status}。"
+                f"请对照中转站后台的「接入地址」核对",
+                status=status,
+                raw=resp.text,
+            )
+
+        # 其余状态码（200 / 400 / 422 …）都说明路由命中且鉴权已通过 ——
+        # 上游对那个假模型怎么说并不重要，重要的是它**应答了**。
+        return _result(
+            True,
+            "ok",
+            "连接正常：地址与 API Key 都可用",
+            status=status,
+            raw=resp.text,
+        )
+
     @app.get("/api/config")
     async def get_config():
         """读取配置（API Key 掩码）。"""
@@ -1009,6 +1171,29 @@ def create_app() -> FastAPI:
                     # 空字符串表示"保持原密钥不变"
                     if k == "api_key" and v == "":
                         continue
+                    # ★ 掩码值绝不能落成真实 Key（判据在 config.is_masked_key）。
+                    #   读取配置返回的是掩码（xxxx****yyyy），前端原样回传时
+                    #   若被写回磁盘，真实 Key 就被掩码串替换了 —— 之后所有
+                    #   请求 401，而配置页看起来一切正常，用户只会以为
+                    #   中转站封了他。这是**静默**的：没有报错、没有日志。
+                    #
+                    # ★ 必须报错而不是 warning 后 continue：
+                    #   真实 Key 里含 **** 的情况确实存在（部分中转站会这样签发），
+                    #   静默丢弃的后果是「提示保存成功、实际没生效」——
+                    #   而用户下一次请求就 401，且无从关联到这次保存。
+                    #   那正是本条守卫要消灭的失效模式，不能自己再犯一次。
+                    if k == "api_key" and is_masked_key(v):
+                        logger.warning(
+                            "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
+                        )
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "这个 API Key 看起来是脱敏后的串（含 ****），"
+                                "已拒绝保存。若这是新填的 Key，请确认复制完整；"
+                                "若不修改 Key，请把该输入框清空后再保存。"
+                            ),
+                        )
                     setattr(_config.relay, k, v)
         if "guard" in payload:
             for k, v in payload["guard"].items():

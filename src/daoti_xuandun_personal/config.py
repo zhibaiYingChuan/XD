@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,44 @@ from .types import SecurityLevel
 logger = logging.getLogger("xuandun-personal.config")
 
 DEFAULT_PORT = 18765
+
+# 地址末段是否已是「版本段」：/v1、/v1beta、/api/v4 …
+#
+# ★ 判据不能用 `endswith("/v1")`：那只认字面量 /v1，
+#   而 /v1beta、/api/v4 会被再拼一层 /v1，请求直接 404。
+_VERSION_SEG = re.compile(r"/v\d+[a-z]*$")
+
+# 用户可能连端点一起粘进来的尾巴。
+#
+# ★ 这不是「用户填错了」，而是产品必须接住的一种输入：
+#   中转站后台把「接入地址」与「完整端点」并排展示，用户按
+#   配置 API 的直觉复制的是完整端点。实测（2026-09-29）本机
+#   配置填的就是 https://api.commandcode.ai/provider/v1/chat/completions。
+#   Anthropic 形态（/messages）也一并收下。
+_ENDPOINT_TAIL = re.compile(
+    r"/(?:chat/completions|completions|messages|responses|embeddings|models)$"
+)
+
+# 掩码串的标记（mask_key() 的产物里必然含它）。
+_MASK_MARK = "****"
+
+
+def is_masked_key(value: Any) -> bool:
+    """该值是否是掩码串，而不是真实的 API Key。
+
+    ★ 这是一条**不可省略**的边界校验：
+      服务端读取配置时返回的是掩码（``mask_key()`` 的产物），
+      前端若原样回传，掩码就会被当成新 Key 写进 config.json ——
+      之后所有请求都 401，而配置页上完全看不出异常，
+      用户只会以为中转站封了他。失效是静默的，所以判据必须独立存在、
+      可被单独测试，而不是埋在某个视图函数里。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    # mask_key() 有两种产物：长 Key 的 ``xxxx****yyyy``、短 Key 的 ``***``
+    return _MASK_MARK in text or set(text) <= {"*"}
+
 
 # 配置文件路径
 _CONFIG_DIR = (
@@ -77,9 +116,30 @@ class RelayConfig:
 
     @property
     def normalized_base(self) -> str:
-        """规范化地址（去掉尾部斜杠 + 补 /v1）。"""
-        base = self.base_url.rstrip("/")
-        if not base.endswith("/v1"):
+        """规范化地址：去空白 → 去查询串 → 剥端点 → 补 /v1。
+
+        ★ 设计前提：**用户不该需要知道地址该填到哪一段**。
+          中转站给什么形式就粘什么 —— 带 /v1、不带 /v1、
+          连完整端点一起、带查询串、Anthropic 形态，
+          都要能直接用。要求用户先理解 base_url 与 endpoint 的区别，
+          等于把配置门槛推给了最不懂的人。
+
+        ★ 实测（2026-09-29）本机配置填的是
+          ``https://api.commandcode.ai/provider/v1/chat/completions``。
+          旧判据 ``endswith("/v1")`` 不成立 → 拼成
+          ``.../chat/completions/v1/chat/completions``，该地址实测返回
+          404「is not a registered route」；本属性拼出的
+          ``.../provider/v1/chat/completions`` 实测路由命中
+          （返回的是模型不支持，属另一层问题）。
+        """
+        base = (self.base_url or "").strip()
+        # 从文档复制时常带查询串/锚点，留着会污染请求路径
+        for sep in ("?", "#"):
+            base = base.split(sep, 1)[0]
+        base = base.rstrip("/")
+        # 剥掉误粘的端点尾巴（在补 /v1 之前做，才能得到干净的接入地址）
+        base = _ENDPOINT_TAIL.sub("", base).rstrip("/")
+        if not _VERSION_SEG.search(base):
             base = f"{base}/v1"
         return base
 

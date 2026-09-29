@@ -158,6 +158,24 @@ def _run_windows_serials() -> list:
     """Windows：走 PowerShell 取磁盘/主板/CPU 序列号。"""
     import subprocess
 
+    # ★★★ CREATE_NO_WINDOW 是必须的，漏了会在屏幕上弹窗
+    #
+    #   引擎（本模块的宿主）由桌面端以 CREATE_NO_WINDOW 启动，也就是
+    #   它**自己不带控制台**。Windows 的规则是：无控制台的进程再拉起
+    #   powershell.exe 这类控制台程序时，系统会为子进程**新建一个可见的
+    #   控制台窗口**并显示出来。
+    #
+    #   实测症状：用户每切一次页面、每点一次激活，屏幕上就闪一个
+    #   PowerShell 窗口 —— 因为界面切页会重新请求激活状态，
+    #   而每次组装状态都要采集一次机器码。
+    #
+    #   0x08000000 让子进程不分配控制台，窗口根本不会出现。
+    #
+    # ★ 用 getattr 取而不是直接写 subprocess.CREATE_NO_WINDOW：
+    #   CPython 只在 `if _mswindows:` 分支里定义该常量，
+    #   直接写会让本模块在 macOS/Linux 上 AttributeError（导入即崩）。
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
     try:
         out = subprocess.run(
             [
@@ -167,6 +185,7 @@ def _run_windows_serials() -> list:
             capture_output=True,
             timeout=15,
             check=False,
+            creationflags=no_window,
         )
     except (OSError, subprocess.SubprocessError):
         return []

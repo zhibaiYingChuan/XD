@@ -78,6 +78,8 @@ export default function Activate() {
   const [copied, setCopied] = useState(false);
   // 换机面板：collapsed=收起 / open=展开
   const [rebindOpen, setRebindOpen] = useState(false);
+  // 换机区自带的原激活码输入（已激活态下上方主输入框不存在）
+  const [rebindCode, setRebindCode] = useState('');
   const [rebindText, setRebindText] = useState('');
 
   const refresh = useCallback(async () => {
@@ -119,9 +121,13 @@ export default function Activate() {
   };
 
   const handleGenerateRebind = async () => {
-    const trimmed = code.trim();
+    // ★ 用换机区自己的输入框，不读上方主输入框。
+    //   已激活态下那个框不存在（未激活分支才画），
+    //   沿用它会让「已激活 → 换机」这条路根本走不通 ——
+    //   而那正是唯一真正需要换机的场景。
+    const trimmed = (rebindCode || code).trim();
     if (!trimmed) {
-      toast.error('请先在上方填写原激活码');
+      toast.error('请先填写原激活码');
       return;
     }
     setBusy(true);
@@ -184,6 +190,87 @@ export default function Activate() {
 
   const s = status;
 
+  // ── 换机区（已激活 / 未激活 两种状态共用）──
+  //
+  // ★ 抽成变量而非组件，是因为它要用到本组件的
+  //   rebindOpen / rebindCode / rebindText / busy 等一批状态，
+  //   拆成子组件反而要把它们全变成 props —— 更长，且更容易漏。
+  //
+  // ★ 自带原激活码输入框，不复用上方那个：
+  //   已激活态下上方输入框不渲染，复用它等于这条路走不通。
+  const rebindSection = (
+    <div className="field">
+      {rebindOpen ? (
+        <>
+          <div className="field-label">换机申请</div>
+          <Notice kind="info">
+            填入<strong>原激活码</strong>后生成，把整段发给玄盾官方。
+            官方会发回一张绑定本机的新码。
+          </Notice>
+          <input
+            id="act-rebind-code"
+            className="mono mt-8"
+            value={rebindCode}
+            onChange={(e) => setRebindCode(e.target.value)}
+            placeholder="XDACT-..."
+          />
+          <div className="code-box mt-8">{rebindText || '（尚未生成）'}</div>
+          <div className="btn-row mt-8">
+            <button
+              className="btn secondary"
+              onClick={() => void handleGenerateRebind()}
+              // ★ 两个输入框都算数：未激活态下用户通常直接在
+              //   上方主输入框填原激活码（那里文案写着「粘贴玄盾官方发给你的
+              //   激活码」），此时 rebindCode 是空的。
+              //   只看 rebindCode 会让按钮恒为禁用 —— 而按钮变灰
+              //   没有任何解释，用户只会以为功能坏了。
+              disabled={busy || !(rebindCode.trim() || code.trim())}
+            >
+              {rebindText ? '重新生成' : '生成换机申请'}
+            </button>
+            {rebindText && (
+              <button
+                className="btn secondary"
+                onClick={async () => {
+                  const ok = await copyToClipboard(rebindText);
+                  if (ok) {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                    toast.success('换机申请已复制');
+                  } else {
+                    toast.error('复制失败，请手动选中复制');
+                  }
+                }}
+              >
+                {copied ? (
+                  <Check size={14} strokeWidth={1.5} />
+                ) : (
+                  <Copy size={14} strokeWidth={1.5} />
+                )}
+                {copied ? '已复制' : '复制'}
+              </button>
+            )}
+            <button className="btn ghost" onClick={() => setRebindOpen(false)}>
+              取消
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="field-hint">
+            换了电脑或硬盘？原激活码在新机上用不了，需要换绑。
+          </div>
+          <div className="btn-row mt-8">
+            <button className="btn secondary" onClick={() => setRebindOpen(true)}>
+              <Laptop size={14} strokeWidth={1.5} />
+              换机
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div style={{ maxWidth: 640 }}>
       <h1 className="page-title">激活</h1>
@@ -208,6 +295,16 @@ export default function Activate() {
           <Row label="激活码 ID">
             <span className="mono faint">{s.jti || '—'}</span>
           </Row>
+          {/* 机器码在已激活态同样要能看到。
+              ★ 此前它只画在「未激活」分支里，于是已激活用户
+                报障时给不出这串串 —— 而签发方核对一台机器
+                靠的就是它，双方都没有就只剩「重装试试」这种钝办法。
+                顺带也满足测试对「机器码始终可见」的要求。 */}
+          <Row label="本机机器码">
+            {/* 用 code-box 而非普通文本：这串要能被选中复制，
+                报障时用户得把它原样发给签发方。 */}
+            <div className="code-box">{s.machineCode || '—'}</div>
+          </Row>
           {s.remainingDays <= 7 && (
             <Notice kind={s.remainingDays <= 0 ? 'error' : 'warn'}>
               {s.remainingDays <= 0
@@ -216,6 +313,15 @@ export default function Activate() {
               {' '}到期后防护会停止，记得提前续期。
             </Notice>
           )}
+
+          {/* ② 换机入口：已激活态下同样必须存在。
+              ★ 此前它只画在「未激活」分支里，于是已激活用户
+                换电脑时界面上根本没有出路 —— 而一码一机的设计下
+                原码在新机上必然验不过。用户只能去找客服，
+                连「这是预期行为、该走什么流程」都无从得知。
+                典型场景正是：在**旧机器**上（已激活、想迁走）
+                才想起来要办换机。 */}
+          {rebindSection}
         </div>
       ) : (
         /* ── 未激活 ── */
@@ -270,62 +376,7 @@ export default function Activate() {
           </div>
 
           {/* ② 换机：原码在新机上必然验不过，需要一条专门的出路 */}
-          <div className="field">
-            {rebindOpen ? (
-              <>
-                <div className="field-label">换机申请</div>
-                <Notice kind="info">
-                  在上方填入<strong>原激活码</strong>后生成，把整段发给玄盾官方。
-                  官方会发回一张绑定本机的新码，粘贴到上面即可激活。
-                </Notice>
-                <div className="code-box mt-8">{rebindText || '（尚未生成）'}</div>
-                <div className="btn-row mt-8">
-                  <button
-                    className="btn secondary"
-                    onClick={() => void handleGenerateRebind()}
-                    disabled={busy}
-                  >
-                    {rebindText ? '重新生成' : '生成换机申请'}
-                  </button>
-                  {rebindText && (
-                    <button
-                      className="btn secondary"
-                      onClick={async () => {
-                        const ok = await copyToClipboard(rebindText);
-                        if (ok) {
-                          setCopied(true);
-                          setTimeout(() => setCopied(false), 2000);
-                          toast.success('换机申请已复制');
-                        } else {
-                          toast.error('复制失败，请手动选中复制');
-                        }
-                      }}
-                    >
-                      {copied ? (
-                        <Check size={14} strokeWidth={1.5} />
-                      ) : (
-                        <Copy size={14} strokeWidth={1.5} />
-                      )}
-                      {copied ? '已复制' : '复制'}
-                    </button>
-                  )}
-                  <button className="btn ghost" onClick={() => setRebindOpen(false)}>
-                    取消
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="field-hint">换了电脑或硬盘？原激活码在新机上用不了。</div>
-                <div className="btn-row mt-8">
-                  <button className="btn secondary" onClick={() => setRebindOpen(true)}>
-                    <Laptop size={14} strokeWidth={1.5} />
-                    生成换机申请
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+          {rebindSection}
         </div>
       )}
 

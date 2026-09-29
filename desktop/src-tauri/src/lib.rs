@@ -46,6 +46,11 @@ const DEFAULT_PROXY_PORT: u16 = 18765;
 /// HTTP 请求超时（前端侧）
 const REQ_FAST: Duration = Duration::from_secs(5);
 const REQ_NORMAL: Duration = Duration::from_secs(15);
+/// ★ 真实网络探测专用：引擎侧单次探针最长 connect 6s + read 12s，
+///   且 /models 不成时会再打一次业务端点，最坏情况约 36s。
+///   给它留足余量，否则会出现「引擎还在探测、桌面端已判超时」，
+///   用户看到的是超时错误而不是探测结论。
+const REQ_PROBE: Duration = Duration::from_secs(45);
 
 /// 引擎启动等待上限
 const ENGINE_WAIT_TOTAL: Duration = Duration::from_secs(60);
@@ -1418,6 +1423,28 @@ async fn precheck_relay(
     .await
 }
 
+/// 中转站真实连通性测试。
+///
+/// ★ 与 precheck_relay 的分工：
+///   precheck 查的是「这家站口碑如何」（静态信誉，不发请求）；
+///   test 做的是「这个地址和 Key 现在能不能用」（真实探测）。
+///   两者解决的是完全不同的问题，用户的困惑通常属于后者。
+#[tauri::command]
+async fn test_relay(
+    app: tauri::AppHandle,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    let body = payload.map(|p| p.0).unwrap_or_else(|| serde_json::json!({}));
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        "/api/relay/test",
+        Some(body),
+        REQ_PROBE,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn clear_reputation(
     app: tauri::AppHandle,
@@ -1599,6 +1626,7 @@ pub fn run() {
             clear_logs,
             get_relays,
             precheck_relay,
+            test_relay,
             clear_reputation,
             get_config,
             get_active_port,

@@ -110,6 +110,48 @@ class TestMachineCodeDegradation:
             assert lic._is_real_serial(good), f"真实序列号被误剔除：{good!r}"
 
 
+class TestCollectionDoesNotPopupWindows:
+    def test_windows_collection_hides_console_window(self, monkeypatch) -> None:
+        """采集机器码时必须以 CREATE_NO_WINDOW 拉起 PowerShell。
+
+        ★ 为什么这条要单独断言：
+          引擎由桌面端以 CREATE_NO_WINDOW 启动，**自身没有控制台**。
+          Windows 下无控制台的进程再拉起 powershell.exe，
+          系统会给子进程新建一个**可见的控制台窗口** ——
+          表现为用户每切一次页面、每点一次激活，屏幕上就闪一个
+          PowerShell 窗口。
+
+        ★ 这是「功能全绿但体验极差」的典型：采集结果完全正确，
+          所有功能测试都通过，只有用户会看到窗口在弹。
+        """
+        import subprocess
+
+        captured: dict = {}
+
+        class _Out:
+            stdout = b""
+            stderr = b""
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured.update(kwargs)
+            return _Out()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        lic._run_windows_serials()
+
+        flags = captured.get("creationflags", 0)
+        if sys.platform == "win32":
+            assert flags == 0x0800_0000, (
+                "采集机器码时未设 CREATE_NO_WINDOW —— "
+                "引擎自身无控制台，拉起 powershell 会弹出可见窗口"
+            )
+        else:
+            # ★ 非 Windows 上该常量不存在，必须传 0：
+            #   POSIX 的 Popen 收到非零 creationflags 会直接抛 ValueError。
+            assert flags == 0
+
+
 class TestMachineCodeHash:
     def test_hash_is_32_hex_chars(self) -> None:
         h = lic.machine_code_hash(lic.machine_code())

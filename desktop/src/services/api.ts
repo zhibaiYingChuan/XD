@@ -134,6 +134,29 @@ export interface RelayPrecheck {
   is_precheck: boolean;
 }
 
+/**
+ * 中转站真实连通性测试结果。
+ *
+ * ★ 与 RelayPrecheck 的区别：precheck 是**不发请求**的静态信誉判断，
+ *   这是**真发了一次请求**的实测结果。用户「配好了但用不了」时，
+ *   需要的正是后者 —— 它能把地址错、Key 错、站点不可达三者分开。
+ */
+export interface RelayTestResult {
+  ok: boolean;
+  /** ok / auth / address / unreachable / timeout / http */
+  kind: 'ok' | 'auth' | 'address' | 'unreachable' | 'timeout' | 'http';
+  /** 玄盾规范化之后实际使用的接入地址 —— 用户要核对的就是它 */
+  address: string;
+  /** 玄盾真正会打到的完整路径 */
+  request_url: string;
+  status: number | null;
+  model_count: number | null;
+  elapsed_ms: number;
+  message: string;
+  /** 上游响应片段（截断），便于用户与官方排查 */
+  raw: string;
+}
+
 export interface RelaysResponse {
   relays: RelayReputation[];
   summary: {
@@ -254,9 +277,12 @@ export function currentProxyPort(): number {
 
 // 注意：显式标注为 Record 而非 as const 字面量类型，
 // 否则 TS 会把 FAST 收窄成字面量 5000，导致默认值参数类型不兼容。
-const TIMEOUT: Record<'FAST' | 'NORMAL', number> = {
+const TIMEOUT: Record<'FAST' | 'NORMAL' | 'PROBE', number> = {
   FAST: 5_000,      // 状态查询、配置读写
   NORMAL: 15_000,   // 列表查询、模式切换
+  // ★ 真实网络探测：引擎侧最坏情况（/models 失败后再打业务端点）约 36s。
+  //   必须比引擎侧宽，否则是前端先超时、用户拿到超时错误而非探测结论。
+  PROBE: 50_000,
 };
 
 class ApiTimeoutError extends Error {
@@ -447,6 +473,22 @@ export const api = {
    */
   precheckRelay: (baseUrl: string) =>
     call<RelayPrecheck>('precheck_relay', 'POST', '/api/relay/precheck', { base_url: baseUrl }),
+
+  /**
+   * 真实连通性测试（发一次真请求，实测地址与 Key 能不能用）。
+   *
+   * ★ apiKey 只在用户重新输入过时才传；空串的语义是「沿用已保存的」。
+   *   界面上回显的是掩码，把掩码回传会让引擎拿着 ``xxxx****yyyy``
+   *   去请求，测出来必然是「Key 被拒绝」。
+   */
+  testRelay: (baseUrl: string, apiKey?: string) =>
+    call<RelayTestResult>(
+      'test_relay',
+      'POST',
+      '/api/relay/test',
+      { base_url: baseUrl, api_key: apiKey ?? '' },
+      TIMEOUT.PROBE,
+    ),
   clearReputation: () =>
     call<{ ok: boolean; cleared: number }>('clear_reputation', 'POST', '/api/reputation/clear'),
 

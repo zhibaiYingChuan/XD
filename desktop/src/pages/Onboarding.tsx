@@ -359,6 +359,9 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                 onChange={(e) => setRelayUrl(e.target.value)}
                 placeholder="https://api.example.com"
               />
+              <div className="field-hint">
+                粘贴中转站给你的地址即可（带不带 /v1 都行），玄盾会自动识别
+              </div>
             </div>
 
             <div className="field">

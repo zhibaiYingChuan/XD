@@ -20,6 +20,8 @@ import {
   Plus,
   X,
   RotateCcw,
+  PlugZap,
+  Loader2,
 } from 'lucide-react';
 import {
   api,
@@ -29,6 +31,7 @@ import {
   type PersonalConfig,
   type SecurityLevel,
   type RelayPrecheck,
+  type RelayTestResult,
 } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard, openExternal } from '../lib/tauriShim';
@@ -87,6 +90,18 @@ export default function Settings() {
   const [portError, setPortError] = useState<string | null>(null);
   // ★ Phase 7：预检风险提示。非 null 时接管保存按钮，必须显式选择才能继续。
   const [relayRisk, setRelayRisk] = useState<RelayPrecheck | null>(null);
+  // ★ API Key 草稿：服务端返回的是掩码，绝不能让它进入可提交的状态。
+  //   旧实现把掩码留在 config.relay.api_key 里，用户点一次「保存中转站配置」
+  //   就会把 ``xxxx****yyyy`` 写回磁盘，真实 Key 被替换 —— 之后所有请求
+  //   401，而配置页看不出任何异常，用户只会以为中转站封了他。
+  const [keyDraft, setKeyDraft] = useState('');
+  // ★ 真实连通性测试结果（发过真请求，非静态信誉判断）
+  const [relayTest, setRelayTest] = useState<RelayTestResult | null>(null);
+  const [testing, setTesting] = useState(false);
+  // ★ 「测试连接」请求序号。见 handleTestRelay 处的说明：
+  //   探针最长 45s，在飞请求的结论必须能被后续操作作废，
+  //   否则会把基于旧地址的结论呈现给用户。
+  const testSeqRef = useRef(0);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -212,6 +227,18 @@ export default function Settings() {
 
   // ── C. 中转站配置 ──
   /**
+   * 组装要提交的中转站配置。
+   *
+   * ★ api_key 一律取 keyDraft，绝不取 config.relay.api_key ——
+   *   后者装的是服务端返回的掩码，提交它等于用 ``xxxx****yyyy``
+   *   覆盖真实 Key。空串的语义是「保持原 Key 不变」（后端既有约定）。
+   */
+  const relayPayload = () => {
+    if (!config) return null;
+    return { ...config.relay, api_key: keyDraft };
+  };
+
+  /**
    * 保存中转站配置后就地做一次风险预检（Phase 7）。
    *
    * ★ 为什么必须在这里提示，而不是等首页：
@@ -241,9 +268,16 @@ export default function Settings() {
       }
     }
 
-    const ok = await save({ relay: config.relay }, '中转站配置已保存并立即生效');
+    const payload = relayPayload();
+    if (!payload) return;
+    // 保存会作废在飞的测试：配置一旦落盘，
+    // 先前那份「基于旧配置」的结论就不再对应用户看到的东西了。
+    testSeqRef.current += 1;
+    setRelayTest(null);
+    const ok = await save({ relay: payload }, '中转站配置已保存并立即生效');
     if (ok) {
-      // 保存成功后 api_key 会被掩码，需重新拉取真实值
+      // 保存成功后 api_key 会被掩码，需重新拉取
+      setKeyDraft('');
       await load();
     }
   };
@@ -256,12 +290,64 @@ export default function Settings() {
    */
   const forceSaveRelay = async () => {
     if (!config) return;
+    const payload = relayPayload();
+    if (!payload) return;
+    testSeqRef.current += 1;
+    setRelayTest(null);
     const ok = await save(
-      { relay: config.relay },
+      { relay: payload },
       '中转站配置已保存并立即生效 — 请留意其数据留存行为',
     );
     setRelayRisk(null);
-    if (ok) await load();
+    if (ok) {
+      setKeyDraft('');
+      await load();
+    }
+  };
+
+  /**
+   * 真实连通性测试。
+   *
+   * ★ 为什么不能只靠「保存」来发现地址错：
+   *   地址填错的症状是 404，而玄盾对上游错误是原样透传的 ——
+   *   用户只会在真正发对话时看到一个 404，然后去怀疑中转站、
+   *   怀疑 Key、怀疑网络。这里把「玄盾实际请求的地址」摆出来，
+   *   让用户在配置这一步就能核对。
+   */
+  const handleTestRelay = async () => {
+    if (!config) return;
+    const baseUrl = config.relay.base_url.trim();
+    if (!baseUrl) {
+      toast.error('请先填写中转站地址');
+      return;
+    }
+    // ★ 请求序号：探针最长可达 45s，期间用户可以改地址、改 Key。
+    //   靠「onChange 里清空 relayTest」防陈旧是**不够**的 ——
+    //   那是把「输入变了」与「结论作废」绑在一起，
+    //   但在飞的请求返回时照样会 setRelayTest，把基于旧地址的结论重新画出来。
+    //
+    //   典型故障：测试 a.com（需 30s）→ 用户改成 b.com → 面板消失 →
+    //   20s 后旧请求返回 → 面板显示「a.com 连接正常」。
+    //   用户据此认为 b.com 可用，而 b.com 从未被探测过。
+    const seq = ++testSeqRef.current;
+    setTesting(true);
+    setRelayTest(null);
+    try {
+      // 传 keyDraft 而非 config 里的掩码：用户没重填时是空串，
+      // 引擎会回退到已保存的真实 Key。
+      const r = await api.testRelay(baseUrl, keyDraft);
+      // 序号不匹配说明用户已经改过输入或又点了一次：丢弃这次结论。
+      if (!mountedRef.current || seq !== testSeqRef.current) return;
+      setRelayTest(r);
+      if (r.ok) toast.success(r.message);
+      else toast.error(r.message);
+    } catch (e) {
+      if (mountedRef.current && seq === testSeqRef.current) {
+        toast.error(`测试失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+    } finally {
+      if (mountedRef.current && seq === testSeqRef.current) setTesting(false);
+    }
   };
 
   const handleCopyUrl = async () => {
@@ -468,10 +554,20 @@ export default function Settings() {
             className="input mono"
             placeholder="https://api.example.com"
             value={config.relay.base_url}
-            disabled={saving}
-            onChange={(e) => setConfig({ ...config, relay: { ...config.relay, base_url: e.target.value } })}
+            disabled={saving || testing}
+            onChange={(e) => {
+              setConfig({ ...config, relay: { ...config.relay, base_url: e.target.value } });
+              // 地址一改，上一次的测试结论就作废了。
+              // ★ 同时递增序号作废**在飞**的请求：只清面板不够，
+              //   旧请求返回时会把基于旧地址的结论重新画出来。
+              testSeqRef.current += 1;
+              setRelayTest(null);
+            }}
           />
-          <div className="field-hint">玄盾会自动补全 /v1 后缀</div>
+          <div className="field-hint">
+            粘贴中转站给你的地址即可 —— 带不带 /v1、是否连完整端点一起复制都行，
+            玄盾会自动识别
+          </div>
         </div>
 
         <div className="field">
@@ -482,16 +578,75 @@ export default function Settings() {
             id="relay-key"
             className="input mono"
             type="password"
-            placeholder={config.relay.api_key || '留空表示不修改'}
-            value={config.relay.api_key === config.relay.api_key ? '' : config.relay.api_key}
-            disabled={saving}
-            onChange={(e) => setConfig({ ...config, relay: { ...config.relay, api_key: e.target.value } })}
+            placeholder={
+              config.relay.api_key ? '留空则保持当前 Key 不变' : '粘贴中转站给你的 API Key'
+            }
+            value={keyDraft}
+            disabled={saving || testing}
+            onChange={(e) => {
+              setKeyDraft(e.target.value);
+              testSeqRef.current += 1;
+              setRelayTest(null);
+            }}
           />
           <div className="field-hint">
             {config.relay.api_key
-              ? `当前：${config.relay.api_key}（留空则不修改）`
+              ? `当前：${config.relay.api_key}（留空则保持不变）`
               : '尚未配置'}
           </div>
+        </div>
+
+        {/* ★ 真实连通性测试。
+            地址填错的症状是 404，用户在真正发对话之前无从发现自己
+            填的是完整端点、少了一层或路径不对。这里把「玄盾实际会请求的
+            地址」摆出来，让配置这一步就能核对，而不是等用不了再猜。 */}
+        <div className="field">
+          <div className="btn-row" style={{ marginTop: 0, alignItems: 'center' }}>
+            <button className="btn secondary" onClick={handleTestRelay} disabled={saving || testing}>
+              {testing ? (
+                <Loader2 size={14} strokeWidth={1.5} className="spin-icon" />
+              ) : (
+                <PlugZap size={14} strokeWidth={1.5} />
+              )}
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+            <span className="faint" style={{ fontSize: 12 }}>
+              会发出一真实请求，确认地址与 Key 是否可用
+            </span>
+          </div>
+
+          {relayTest && (
+            <div
+              className={`alert ${
+                relayTest.ok ? 'safe' : relayTest.kind === 'auth' ? 'suspect' : 'danger'
+              }`}
+              style={{ marginTop: 12, marginBottom: 0 }}
+            >
+              {relayTest.ok ? (
+                <Check size={17} strokeWidth={1.5} className="alert-icon" />
+              ) : relayTest.kind === 'auth' ? (
+                <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+              ) : (
+                <ShieldX size={17} strokeWidth={1.5} className="alert-icon" />
+              )}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <b>{relayTest.message}</b>
+                <div className="mt-8 faint" style={{ fontSize: 12 }}>
+                  玄盾请求的地址：<span className="mono">{relayTest.request_url}</span>
+                  {relayTest.status !== null && `　状态码 ${relayTest.status}`}
+                  {`　耗时 ${relayTest.elapsed_ms} ms`}
+                </div>
+                {!relayTest.ok && relayTest.raw && (
+                  <div
+                    className="mt-8 faint mono"
+                    style={{ fontSize: 12, wordBreak: 'break-all' }}
+                  >
+                    {relayTest.raw}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Phase 7：中转站风险提示（预检命中时才出现） */}
