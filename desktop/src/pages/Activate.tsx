@@ -27,6 +27,11 @@ import { copyToClipboard, isTauri } from '../lib/tauriShim';
 
 type LoadState = 'loading' | 'ready' | 'unavailable';
 
+/** 官方联系方式 —— 用户申请激活码的唯一入口。
+ *  ★ 集中成常量而不是散落成字符串字面量：换邮箱时改一处即可，
+ *    且 grep 这个地址能确认它到底露在哪些界面上。 */
+const OFFICIAL_EMAIL = 'spring60@foxmail.com';
+
 /** 剩余天数的紧迫度（用于配色，越少越提醒） */
 function urgencyClass(days: number): string {
   if (days <= 7) return 'danger';
@@ -204,8 +209,9 @@ export default function Activate() {
         <>
           <div className="field-label">换机申请</div>
           <Notice kind="info">
-            填入<strong>原激活码</strong>后生成，把整段发给玄盾官方。
-            官方会发回一张绑定本机的新码。
+            填入<strong>原激活码</strong>后生成，把整段发给玄盾官方（
+            <a href={`mailto:${OFFICIAL_EMAIL}`}>{OFFICIAL_EMAIL}</a>
+            ）。官方会发回一张绑定本机的新码。
           </Notice>
           <input
             id="act-rebind-code"
@@ -314,6 +320,14 @@ export default function Activate() {
             </Notice>
           )}
 
+          {/* 已激活用户同样需要知道找谁：续期、换机、报障都走同一个邮箱。
+              ★ 不写在这里的话，他们只会在过期那天才发现无处可去。 */}
+          <div className="field-hint">
+            续期 / 换机 / 报障，都发邮件给官方（
+            <a href={`mailto:${OFFICIAL_EMAIL}`}>{OFFICIAL_EMAIL}</a>
+            ）。
+          </div>
+
           {/* ② 换机入口：已激活态下同样必须存在。
               ★ 此前它只画在「未激活」分支里，于是已激活用户
                 换电脑时界面上根本没有出路 —— 而一码一机的设计下
@@ -337,7 +351,19 @@ export default function Activate() {
           <div className="field">
             <label className="field-label">本机机器码</label>
             <div className="code-box">{s.machineCode}</div>
-            <div className="field-hint">申请激活码时，把这串机器码发给玄盾官方即可。</div>
+            {/* ★ 官方邮箱必须直接写出来，不能只说「发给玄盾官方」。
+                用户看不到「玄盾官方」是谁，也找不到客服入口，
+                到这一步就卡死了 —— 而卡住的状态在激活页里
+                没有任何提示，看起来像是玄盾没提供这个服务。
+                留一个 mailto: 让用户一步就能发起邮件，
+                免去「抄下来再自己去开邮件客户端」的摩擦。 */}
+            <div className="field-hint">
+              申请激活码：把这串机器码发邮件给官方{' '}
+              <a href={`mailto:${OFFICIAL_EMAIL}?subject=${encodeURIComponent('玄盾激活码申请')}&body=${encodeURIComponent(`请为我签发激活码：\n\n本机机器码：${s.machineCode}\n\n`)}`}>
+                {OFFICIAL_EMAIL}
+              </a>
+              ，玄盾会回邮件发激活码给你。
+            </div>
             <div className="btn-row mt-8">
               <button className="btn secondary" onClick={() => void copyMch()}>
                 <Copy size={14} strokeWidth={1.5} />

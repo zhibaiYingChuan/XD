@@ -394,20 +394,29 @@ def on_wizard(page):
     return page.locator(".wizard-shell").count() > 0
 
 
-def wait_for_wizard(page, timeout=15000):
-    """等欢迎向导出现。返回 (是否出现, 说明)。
+def wait_for_shell(page, timeout=15000):
+    """等界面挂起来（主界面或向导）。返回 (是否就绪, 说明)。
 
-    ★ 判据是「wizard-shell 出现且主界面 nav 不在」：
-      两者互斥才是真的进了向导。只查 wizard-shell 会在
-      React 还没跑完 checkFirstRun（此时显示 loading）时误判为通过。
+    ★ 原判据是「wizard-shell 出现且主界面 nav 不在」，
+      但「nav==0」不等于「还在向导里」—— 它同时也是
+      **主界面正在挂载**的中间态。实测：CDP 连上后 4.3s 时
+      nav 还是 0，6.5s 才挂上，这 2.2s 空窗既不是向导也不是主界面。
+      原判据在这个空窗里等满 15s，然后报
+      「可能是首启动判定逻辑失效」—— 而产品完全正常，
+      这句话会把排查方向直接带偏（真去查 checkFirstRun 是白费工夫）。
+
+    ★ 修法：主界面挂上就算就绪。调用方本来就只在 nav==0 时
+      调进来，所以返回 True 时必然仍在向导里；
+      两者都还没出现，才是界面真的没挂起来。
     """
     end = time.time() + timeout / 1000
     while time.time() < end:
-        if on_wizard(page) and page.locator("nav a").count() == 0:
+        if page.locator("nav a").count() > 0:
+            return True, "主界面已挂载（按设计跳过向导：中转站已配置）"
+        if on_wizard(page):
             return True, "向导可见（正常：未配置过中转站的新用户会看到它）"
         page.wait_for_timeout(300)
-    return False, ("未出现欢迎向导 —— 可能是首启动判定逻辑失效，"
-                   "或中转站已配置导致按设计跳过")
+    return False, "15s 内既没挂上主界面、也没出现向导：界面可能真的没挂起来"
 
 
 def complete_wizard(page):
@@ -1091,18 +1100,18 @@ def main():
             #   否则整套测试会因为「用户还没配置」而全灭 ——
             #   那是环境问题，不是产品缺陷，不该记在产品账上。
             if page.locator("nav a").count() == 0:
-                ok_shell, why = wait_for_wizard(page, timeout=15000)
-                if ok_shell:
-                    rec("T0 初始状态为欢迎向导", True, why)
-                    ok, why2 = complete_wizard(page)
-                    onboarded_by_test = onboarded_by_test or ok
-                    rec("T0 引导至主界面", ok, why2)
-                else:
-                    rec("T1 主界面挂载", False,
-                        f"既无主界面也无向导：{why}")
+                ok_shell, why = wait_for_shell(page, timeout=15000)
+                if not ok_shell:
+                    rec("T1 主界面挂载", False, f"界面未就绪：{why}")
                     print("\n[FATAL] 无法进入主界面，后续用例无法执行。")
                     page.wait_for_timeout(300)
                     return 2
+                # 到这里必然是「在向导里」—— wait_for_shell 只在
+                # nav 仍为 0 时才可能返回 False，那已被上一行拦掉。
+                rec("T0 首次运行显示欢迎向导", True, why)
+                ok, why2 = complete_wizard(page)
+                onboarded_by_test = onboarded_by_test or ok
+                rec("T0 引导至主界面", ok, why2)
 
             if page.locator("nav a").count() == 0:
                 rec("T1 主界面挂载", False, "走完向导后仍无 nav 元素")
@@ -1152,7 +1161,7 @@ def main():
                 page.evaluate(
                     "() => localStorage.removeItem('xuandun-personal-onboarded')")
                 page.reload(wait_until="domcontentloaded")
-                ok_shell, why = wait_for_wizard(page, timeout=15000)
+                ok_shell, why = wait_for_shell(page, timeout=15000)
 
                 # ★ 「中转站已配置 → 按设计跳过向导」是**正确行为**，
                 #   不是首启动判定失效。
@@ -1164,14 +1173,23 @@ def main():
                 #   判据：引擎内存里确实有真实中转站时，跳过向导是预期行为，
                 #   本用例改判 SKIP 并说明原因，不计入失败。
                 relay_now = ((be.config() or {}).get("relay") or {}).get("base_url") or ""
-                if not ok_shell and relay_now.strip():
+                # ★ 判据必须是「真的看到向导」，不能用 ok_shell ——
+                #   wait_for_shell 在主界面直接挂上时也返回 True，
+                #   拿它当「看到向导」会跑去点「开始」按钮，
+                #   而主界面上根本没有这个按钮 → 必假失败。
+                #   （实测踩过：判据借位，T0 从真缺陷变成假缺陷。）
+                saw_wizard = on_wizard(page)
+                if not saw_wizard and relay_now.strip():
                     rec("T0 首次运行显示欢迎向导", True,
                         f"按设计跳过（已配置中转站 {relay_now[:40]}…，"
                         f"向导进入条件「未配置过中转站」不成立）—— 非缺陷")
+                elif not saw_wizard:
+                    rec("T0 首次运行显示欢迎向导", False,
+                        f"未配置中转站却也没出现向导：{why}")
                 else:
-                    rec("T0 首次运行显示欢迎向导", ok_shell, why)
+                    rec("T0 首次运行显示欢迎向导", True, why)
 
-                if ok_shell:
+                if saw_wizard:
                     ok, why2 = complete_wizard(page)
                     onboarded_by_test = ok
                     rec("T0 向导可完整走通", ok, why2)
