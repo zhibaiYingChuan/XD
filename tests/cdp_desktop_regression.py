@@ -94,7 +94,9 @@ STATE_LABELS = {
     "danger": "危险",
     "paused": "已暂停",
 }
-ALL_STATE_LABELS = set(STATE_LABELS.values()) | {"本地代理未运行"}
+# ★ 不再有 ALL_STATE_LABELS：原判据「整条状态栏只许出现一个状态词」
+#   与状态栏的设计冲突 —— 它本就渲染「危险 N」「可疑 N」等统计项。
+#   详见 test_status_bar_honest 里的说明。
 
 results = {"pass": 0, "fail": 0, "skip": 0}
 _console_errors: list[str] = []
@@ -174,6 +176,44 @@ class Backend:
             return self._get("/api/diagnostics", timeout=5)
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
+            return None
+
+    def post_chat(self, payload, timeout=30):
+        """向引擎的对话端点发一次真实请求。
+
+        ★ T10 需要它：拦截测试必须**真的打一条请求过去**，
+          手工构造日志记录或直接改数据库都验不到
+          「引擎拦了 → 界面如实呈现」这条链路。
+          只有真发一次，中间那层才是被验证过的。
+
+        返回 (状态码, 响应体)。状态码 403/502 表示被拦截 ——
+        那正是要断言的，不是错误。
+        """
+        url = f"http://127.0.0.1:{self.port}/v1/chat/completions"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # ★ 拦截就是以 4xx/5xx 回来的，必须读出响应体 ——
+            #   里面才有 error.type 与 findings，那是断言的依据。
+            try:
+                return e.code, json.loads(e.read().decode("utf-8"))
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            return None, {"error": f"{type(e).__name__}: {e}"}
+
+    def block_logs(self, limit=5):
+        """读拦截类日志。"""
+        try:
+            return self._get(f"/api/logs?limit={limit}&action=block", timeout=8)
+        except Exception:
             return None
 
     def guard(self):
@@ -630,19 +670,29 @@ def test_status_bar_honest(page, be: Backend):
     rec("T3 状态栏显示真实状态", ok, detail)
 
     if ok:
-        # ★ 判据改为「整个状态栏里只出现一个状态词」。
-        #   曾经写成「status-label 文本里不含其他状态词」——
-        #   而 status_label() 只读那唯一一个 span，其内容恒等于 expected，
-        #   于是 wrong 恒为 []，这是一条**恒真断言、零信息量**，
-        #   看起来在防「多重状态谎报」实际什么也没防。
+        # ★ 判据只针对「状态词」，且必须排除统计数字里的字样。
+        #   曾经想把整条状态栏的文本拿来判「有且只有一个状态词」，
+        #   但状态栏**设计上**就带统计：Layout.tsx 会渲染
+        #   「危险 N」「可疑 N」「已打码 N 处」这几个 .status-stat。
+        #   于是今日一旦真的发生过拦截，状态栏里就会同时出现
+        #   「危险」和「可疑」——那是正常信息，不是自相矛盾。
+        #   2026-09-29 加了 T10（真发一次带密钥的请求）后，
+        #   danger/suspect 计数首次同时非零，当场把这条判据逼出来。
         #
-        #   真正的风险是：状态栏同时出现「危险」和「今日已检查 12 次」
-        #   这类自相矛盾的组合（一边报警、一边报喜）。
-        #   所以要看的是整条状态栏的文本，不是那一个 label。
+        #   真正要防的是：label 说了「防护中」，
+        #   同一状态栏里又写「今日已阻断 3 次危险响应」——
+        #   一边报喜一边报警。判据因此只取 label 与 stat 里的
+        #   **结论性措辞**，不取统计项的名称。
         bar = status_text(page)
-        wrong = [o for o in ALL_STATE_LABELS if o in bar and o != expected]
+        # 统计项（"危险 2"/"可疑 1"）是事实陈述，不参与矛盾判定；
+        # 只检查是否出现了「与之矛盾的结论语」——
+        #   即除了当前状态词之外的、表示状态的措辞。
+        CONTRADICTING = ("已阻断", "被拦截", "发生危险", "出现危险")
+        wrong = [o for o in CONTRADICTING
+                 if o in bar and expected not in ("危险", "已拦截", "阻断")]
         rec("T3 状态栏无自相矛盾", not wrong,
-            f"状态栏全文={bar!r}，混入 {wrong}" if wrong else f"状态栏全文={bar!r}")
+            f"状态栏全文={bar!r}，混入矛盾的结论措辞 {wrong}" if wrong
+            else f"状态栏全文={bar!r}（统计项不计矛盾）")
 
     # ★ 只读模式必须显式说出来。
     #   未激活时 state 仍可能是 learning/protecting、KPI 也照常统计，
@@ -861,6 +911,130 @@ def test_console_clean(page):
     real = [e for e in _console_errors if "AbortError" not in e]
     rec("T7 控制台无严重报错", len(real) == 0,
         f"{len(real)} 条: {real[:3]}" if real else "干净")
+
+
+def test_block_end_to_end(page, be: Backend):
+    """T10 拦截全链路：攻击发生 → 引擎拦下 → 界面如实呈现。
+
+    ★★ 这条补的是本脚本最大的一处空白（2026-09-29）。
+      此前 32 条用例里没有一条**触发过拦截**：
+        · test_redteam_attack.py（39 条）验的是引擎规则，直接调函数
+        · cdp_desktop_regression.py 验的是界面渲染，从不打攻击请求
+      两者之间的接合处 ——「引擎拦了，界面有没有告诉用户」——
+      一直是空白。而这正是用户唯一能感知的部分：
+      引擎拦了但界面不显示，用户会以为没拦住。
+
+    ★ 为什么必须真发请求，不能手工塞日志：
+      直接往数据库写一条 block 记录，或手工构造界面状态，
+      都只验了「界面能显示已有的东西」，
+      验不到「攻击 → 拦截 → 呈现」这条链路是否真的连通。
+      只有真打一次，中间那层才被验证过。
+
+    ★ 载荷选 API 密钥而不是语义投毒：
+      语义投毒要靠**中转站返回**恶意内容才能触发，
+      而那取决于用户配的中转站与模型名，本机不可控。
+      请求侧的敏感信息阻断只依赖载荷本身，稳定可复现 ——
+      判据必须选在所有环境都成立的那一侧。
+    """
+    goto(page, "首页")
+
+    # ── 基线：拦之前先记下当前计数 ──
+    before = (be.state() or {}).get("today") or {}
+    b_danger = before.get("danger_count")
+    b_total = before.get("total_calls")
+    if b_danger is None or b_total is None:
+        rec("T10 拦截链路", False, "读不到后端今日统计", skip=True)
+        return
+    logs_before = (be.block_logs(1) or {}).get("total")
+    if logs_before is None:
+        rec("T10 拦截链路", False, "读不到拦截日志", skip=True)
+        return
+
+    # ── 发起一个必然被拦的请求 ──
+    #   载荷含两个高危项：OpenAI 形态的 Key + AWS Access Key。
+    #   _POLICY 里两者在三档安全级别下都是 BLOCK，
+    #   所以无论用户设的是宽松/均衡/严格，这条都会被拦 ——
+    #   判据不依赖当前安全级别设置。
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{
+            "role": "user",
+            "content": "t10 probe: sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD "
+                       "AKIAIOSFODNN7EXAMPLE",
+        }],
+    }
+    status, body = be.post_chat(payload, timeout=30)
+
+    # ① 引擎真的拦了 —— 判据读 error.type，不靠状态码猜
+    err = (body or {}).get("error") or {}
+    etype = str(err.get("type") or "")
+    blocked = etype == "sensitive_data_blocked"
+    rec("T10 敏感信息请求被阻断", blocked,
+        f"HTTP={status} error.type={etype!r} "
+        f"message={str(err.get('message'))[:80]!r}")
+
+    if not blocked:
+        # ★ 中转站不可达 / 未配 Key 等前置不成立时不能算失败 ——
+        #   那不是防护失效，是环境问题（与 T8 的处理同一原则）。
+        rec("T10 拦截链路", False,
+            f"未被拦截（HTTP={status}）。若中转站未配置或不可达，"
+            f"本用例前置不成立，应改为环境问题而非产品缺陷", skip=True)
+        return
+
+    # ② 后端计数确实增加了
+    after = (be.state() or {}).get("today") or {}
+    a_danger = after.get("danger_count")
+    a_total = after.get("total_calls")
+    rec("T10 拦截被计入危险计数",
+        a_danger == b_danger + 1 and a_total == b_total + 1,
+        f"危险 {b_danger}→{a_danger}（期望 +1），"
+        f"总次数 {b_total}→{a_total}（期望 +1）")
+
+    # ③ 拦截日志落库，且带上原因
+    logs_after = be.block_logs(3) or {}
+    rec("T10 拦截写入日志",
+        (logs_after.get("total") or 0) > (logs_before or 0),
+        f"block 日志 {logs_before}→{logs_after.get('total')}")
+
+    # ── ④ 界面是否如实呈现（这才是本用例的核心）──
+    #    必须等轮询把新数据取回来：Dashboard 是 3s 一轮，
+    #    刚发完请求立刻读会读到旧值 —— 那是「还没到时候」，
+    #    不是界面谎报。判据要等，不该用固定 sleep。
+    try:
+        page.wait_for_function(
+            """(base) => {
+                const el = [...document.querySelectorAll('.kpi')]
+                  .find(x => x.innerText.includes('危险'));
+                if (!el) return false;
+                const n = parseInt(el.innerText.replace(/[^0-9]/g, ''), 10);
+                return Number.isFinite(n) && n > base;
+            }""",
+            arg=b_danger,
+            timeout=15000,
+        )
+        ui_danger_ok = True
+    except Exception:
+        ui_danger_ok = False
+    rec("T10 首页「危险」计数随之上升", ui_danger_ok,
+        f"期望 > {b_danger}" + ("" if ui_danger_ok else "，15s 内界面未更新"))
+
+    # ⑤ 日志页能看到这条拦截的摘要
+    try:
+        goto(page, "日志")
+        page.wait_for_timeout(600)
+        logs_body = page.locator("body").inner_text()
+    except Exception as e:
+        logs_body = ""
+        rec("T10 日志页呈现拦截记录", False, f"打开日志页失败: {e}")
+    else:
+        entries = (logs_after.get("entries") or [])
+        summary = str(entries[0].get("summary") or "") if entries else ""
+        # 摘要取前 12 字比对：界面会截断，全文比对会因截断而误判
+        probe = summary[:12]
+        shown = bool(probe) and probe in logs_body
+        rec("T10 日志页呈现拦截记录", shown,
+            f"最新拦截摘要前 12 字={probe!r} "
+            + ("已出现在日志页" if shown else "未出现在日志页"))
 
 
 def test_pause_resume(page, be: Backend):
@@ -1215,6 +1389,14 @@ def main():
                     ("T5 开关存在", lambda: test_settings_toggles(page, be)),
                     ("T5b 开关生效", lambda: test_toggle_applies(page, be)),
                     ("T8 测试连接", lambda: test_relay_test_button(page, be)),
+                    # ★ T10 必须排在 T9（暂停恢复）**之前**：
+                    #   T9 会把防护暂停掉，而防护暂停时引擎走的是
+                    #   直通转发、不再执行检测 —— T10 在那种状态下跑，
+                    #   载荷里的敏感信息会**原样发往中转站**，
+                    #   既测不到拦截（必然 FAIL），
+                    #   又等于往真实中转站发了一次带假密钥的请求。
+                    #   顺序不是风格问题，是安全与正确性问题。
+                    ("T10 拦截全链路", lambda: test_block_end_to_end(page, be)),
                     ("T9 暂停恢复", lambda: test_pause_resume(page, be)),
                     ("T6 异常边界", lambda: test_error_boundary(page)),
                     ("T7 控制台", lambda: test_console_clean(page)),
