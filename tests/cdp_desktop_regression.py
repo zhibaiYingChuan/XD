@@ -162,6 +162,20 @@ class Backend:
         except Exception:
             return None
 
+    def diagnostics(self):
+        """读后端诊断信息（含 relay_configured / relay_domain）。
+
+        ★ 这是「首页有没有谎报中转站配置状态」的**唯一对照源**。
+          /api/config 也能推出，但它是用户填的原值、
+          域名要前端再解析一次 —— 而 /api/diagnostics 给的是
+          引擎自己算出的 relay_domain，与首页读的那份同源。
+        """
+        try:
+            return self._get("/api/diagnostics", timeout=5)
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            return None
+
     def guard(self):
         """从配置里取 guard 段（不依赖 to_safe_dict 的掩码细节）。"""
         c = self.config()
@@ -706,6 +720,62 @@ def test_dashboard_kpi(page, be: Backend):
         + ("" if ui_complete else " ← 界面 KPI 缺失（组件未渲染或选择器失效）"))
 
 
+def test_dashboard_relay_honest(page, be: Backend):
+    """T4b 首页「当前中转站」与后端配置状态一致 —— 不许谎报「尚未配置」。
+
+    ★ 这条是补 2026-09-29 的真实缺陷的：
+      明明已在设置页配好中转站，首页却显示「尚未配置中转站」。
+      根因是判据 `primaryRelay ?? relays[relays.length-1]` ——
+      /api/relays 只收录**产生过调用记录**的中转站，刚配置还没发过
+      对话时它是空数组，于是 primaryRelay 为 undefined，
+      界面落进「尚未配置」分支。
+
+    ★ 为什么 T4 抓不到：T4 只比 KPI 数字，
+      而「谎报未配置」与「KPI 是否一致」完全正交。
+      判据必须直接对着后端的 relay_configured。
+    """
+    goto(page, "首页")
+    diag = be.diagnostics() or {}
+    configured = bool(diag.get("relay_configured"))
+    domain = str(diag.get("relay_domain") or "")
+
+    # ★ 必须等 currentDomain 落地，不能固定 sleep。
+    #   getDiagnostics 是**独立于轮询**的一次性请求（Dashboard 的
+    #   useEffect 里只跑一次），它没回来时 currentDomain 仍是 ''，
+    #   界面会短暂显示「尚未配置中转站」——
+    #   此时断言就是「把还没到时候当成坏了」。
+    #   实测该请求偶尔要 1~2 秒，固定 600ms 不足以覆盖。
+    if configured:
+        try:
+            page.wait_for_function(
+                "() => !document.body.innerText.includes('尚未配置中转站')",
+                timeout=8000,
+            )
+        except Exception:
+            pass  # 超时后由下面的断言报出真实问题
+    page.wait_for_timeout(400)
+
+    body = page.locator("body").inner_text()
+    claims_unconfigured = "尚未配置中转站" in body
+
+    if configured:
+        # 配了就不许说没配
+        rec("T4b 首页不谎报「尚未配置中转站」", not claims_unconfigured,
+            f"后端 relay_configured=True（{domain}），"
+            + (f"但界面仍显示「尚未配置中转站」" if claims_unconfigured
+               else f"界面已正确显示当前中转站"))
+        # 且域名应该出现在首页上 —— 证明「收到了，正在用」
+        if domain:
+            shown = domain in body
+            rec("T4b 首页展示当前中转站域名", shown,
+                f"域名 {domain} " + ("已显示" if shown else "未出现在首页上"))
+    else:
+        # 没配就必须说没配，且要给出去处
+        has_link = page.locator("a:has-text('前往设置')").count() > 0
+        rec("T4b 未配置时提示去设置", claims_unconfigured and has_link,
+            f"声称未配置={claims_unconfigured} 有前往设置入口={has_link}")
+
+
 def test_settings_toggles(page, be: Backend):
     """T5 设置页存在防护开关。"""
     goto(page, "设置")
@@ -1106,12 +1176,20 @@ def main():
                     print("\n[FATAL] 无法进入主界面，后续用例无法执行。")
                     page.wait_for_timeout(300)
                     return 2
-                # 到这里必然是「在向导里」—— wait_for_shell 只在
-                # nav 仍为 0 时才可能返回 False，那已被上一行拦掉。
-                rec("T0 首次运行显示欢迎向导", True, why)
-                ok, why2 = complete_wizard(page)
-                onboarded_by_test = onboarded_by_test or ok
-                rec("T0 引导至主界面", ok, why2)
+                # ★ 必须用 on_wizard 复核，不能凭 wait_for_shell 的返回值。
+                #   wait_for_shell 在「主界面直接挂上」时也返回 True
+                #   （那是它修的那个 bug：把挂载中当成「什么都没出现」），
+                #   所以 True 只说明「界面就绪」，不说明「在向导里」。
+                #   早先这里直接走去导分支，而主界面上没有「开始」按钮
+                #   → 必假失败。判据借位是这脚本最反复的一类坑。
+                if on_wizard(page):
+                    rec("T0 首次运行显示欢迎向导", True, why)
+                    ok, why2 = complete_wizard(page)
+                    onboarded_by_test = onboarded_by_test or ok
+                    rec("T0 引导至主界面", ok, why2)
+                else:
+                    rec("T0 首次运行显示欢迎向导", True,
+                        f"{why}（按设计跳过：已配置过中转站的用户不再走向导）")
 
             if page.locator("nav a").count() == 0:
                 rec("T1 主界面挂载", False, "走完向导后仍无 nav 元素")
@@ -1125,6 +1203,7 @@ def main():
                     ("T3 状态诚实性", lambda: test_status_bar_honest(page, be)),
                     ("T3b 降级分支", lambda: test_unreachable_label(page, be)),
                     ("T4 KPI 一致性", lambda: test_dashboard_kpi(page, be)),
+                    ("T4b 中转站状态诚实性", lambda: test_dashboard_relay_honest(page, be)),
                 ):
                     try:
                         fn()

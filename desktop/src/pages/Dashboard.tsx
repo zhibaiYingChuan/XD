@@ -83,7 +83,6 @@ export default function Dashboard() {
   const [state, setState] = useState<StateResponse | null>(null);
   const [recent, setRecent] = useState<LogEntry[]>([]);
   const [relays, setRelays] = useState<RelayReputation[]>([]);
-  const [currentDomain, setCurrentDomain] = useState<string>('');
   // ★ Phase 7：信誉详情默认收起。首页要在 3 秒内回答「现在安全吗」，
   //   评分明细是用户主动追问时才需要的信息，常开会把首屏挤成表格。
   const [showRepDetail, setShowRepDetail] = useState(false);
@@ -95,15 +94,36 @@ export default function Dashboard() {
   // ★ P2-11 修复所需：当前配置的中转站域名。
   //   /api/relays 按信誉分升序返回（最差在前），直接取 [0]
   //   会把「信誉最差的中转站」当成「当前中转站」展示，语义完全相反。
+  //
+  // ★★ 必须区分「没配」与「还没查完」。
+  //   getDiagnostics 是一次性请求（不进轮询），它返回前 currentDomain
+  //   是空串。此前空串一律渲染成「尚未配置中转站」——
+  //   于是每次打开首页都有几秒显示「没配」，
+  //   而用户明明配好了。**加载中就说「没配」是谎报**，
+  //   它会让用户以为配置丢了，去反复重填甚至以为软件坏了。
+  //   null = 还在查；'' = 查过了，确实没配。
+  const [currentDomain, setCurrentDomain] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     api
       .getDiagnostics()
       .then((d) => {
-        if (!cancelled) setCurrentDomain(d.relay_domain ?? '');
+        // ★ 后端没给 relay_domain（字段缺失）不等于「没配」。
+        //   `?? ''` 会把「后端没说」悄悄变成「用户没配」——
+        //   这是最隐蔽的一种谎报：数据缺失被当成了否定结论。
+        if (!cancelled) {
+          const v = d?.relay_domain;
+          setCurrentDomain(typeof v === 'string' ? v : null);
+        }
       })
       .catch(() => {
-        /* 诊断信息仅用于定位当前中转站，失败则回退到最高分 */
+        // ★ 读取失败 ≠ 没配。
+        //   设成 '' 会让界面说「尚未配置中转站」——
+        //   而真实原因是查不到，用户去反复重填配置，
+        //   问题却在读取侧，越重填越没用。
+        //   保持 null（未知）→ 界面显示「正在读取」，
+        //   至少不说谎。
+        if (!cancelled) setCurrentDomain(null);
       });
     return () => {
       cancelled = true;
@@ -252,9 +272,25 @@ export default function Dashboard() {
   const today = state?.today;
   // ★ P2-11 修复：按域名匹配当前配置的中转站；匹配不到时退而取
   //   信誉最高者（relays 按分数升序 → 最后一个），而不是最差的那个。
+  //
+  // ★★ 但那个兜底**只在「确实没配」时才允许**。
+  //   currentDomain 非空却匹配不上，只有一个含义：配置了、还没发过
+  //   对话，信誉库里还没有它。此时回退去取 relays[last] 会把
+  //   **另一个中转站**当成「当前中转站」展示 —— 同样的谎报，
+  //   只是发生在多中转站场景下。宁可空着也不能指错对象。
+  //   currentDomain 为 null（还在查）同理：不知道是哪个，
+  //   更不能随便挑一个顶替。
+  const matchedRelay = currentDomain
+    ? relays.find((r) => r.domain === currentDomain)
+    : undefined;
   const primaryRelay =
-    (currentDomain ? relays.find((r) => r.domain === currentDomain) : undefined) ??
-    relays[relays.length - 1];
+    matchedRelay ?? (currentDomain === '' ? relays[relays.length - 1] : undefined);
+  // ★ 「配了但还没有调用记录」是独立于有无信誉记录的状态，
+  //   把它与「压根没配」分成两种文案 —— 后者会让已配置的用户
+  //   以为自己的配置丢了，进而重复配置或以为软件坏了。
+  //   null（还在查）不能当成「没配」：那是加载态，不是结论。
+  const relayConfigured = !!currentDomain;
+  const relayProbeDone = currentDomain !== null;
   // ★ P2-11 配套：首日 last_seen - first_seen 不足 1 天，
   //   原 `Math.max(1, ...)` 会向用户谎报「已使用 1 天」
   const usedDays = primaryRelay
@@ -505,14 +541,37 @@ export default function Dashboard() {
             <div className="empty-icon">
               <Info size={30} strokeWidth={1.5} />
             </div>
-            <div className="empty-text">
-              尚未配置中转站
-              <div className="mt-8">
-                <Link to="/settings" className="btn sm">
-                  前往设置
-                </Link>
+            {!relayProbeDone ? (
+              /* 还在查 —— 不给结论。
+                 早先这里直接落到「尚未配置中转站」，
+                 于是每次打开首页都有几秒在谎报用户没配。 */
+              <div className="empty-text faint">正在读取中转站配置…</div>
+            ) : relayConfigured ? (
+              /* ★ 已配置但信誉库里还没有它 —— 通常是刚填完还没发过对话。
+                 这里**必须**显示域名：用户刚在设置页填完地址回来，
+                 看到「尚未配置中转站」会以为保存失败了，去反复重填、
+                 甚至以为软件坏了。域名摆出来才能证明「收到了，正在用」。 */
+              <div className="empty-text">
+                <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--xd-text)' }}>
+                  {currentDomain}
+                </div>
+                <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>
+                  已配置 · 尚未产生调用记录
+                </div>
+                <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>
+                  用 AI 工具发起一次对话后，这里会显示它的信誉评分与调用统计。
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="empty-text">
+                尚未配置中转站
+                <div className="mt-8">
+                  <Link to="/settings" className="btn sm">
+                    前往设置
+                  </Link>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
