@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: DaoTi-Research-1.0
+# 个人版 CI — 公开版（脱敏）
+#
+# 为什么不直接放行原 ci.yml
+# ─────────────────────────────────────────────────────────────
+# 原配置逐条列出了防护门禁的名称、判据与失败模式，
+# 公开它等于告诉破解者「我们重点防什么、怎么防的」。
+# 那是 2026-09-28 把它移出仓库的原始理由，不该被绕开。
+#
+# 这一版保留的是**验证行为**，去掉的是**情报**：
+#   · 仍会在每次 push 上跑测试，红了会挡住后续提交
+#   · 但不出现任何门禁名称、判据、检查项的具体所指
+#   · 失败时只报「哪条测试挂了」，不解释它在防什么
+#
+# ★ 这样取舍的代价必须说清：
+#   公开 CI 能发现「测试挂了」，但**不能**替代本地那套
+#   更严格的门禁（后者仍在本地运行，不公开）。
+#   公开 CI 是第一道网，不是唯一一道。
+
+name: CI Validation
+
+on:
+  push:
+    branches: [main, 'dev/**', 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install pytest
+          pip install -e .
+
+      # ★ 门禁 1-4 仍在本地 CI（.github/workflows/ci.yml 完整版，未公开）运行。
+      #   这里只跑「不依赖未公开资源」的那部分，
+      #   避免公开仓库 clone 后因缺文件而恒红 ——
+      #   一个恒红的 CI 等于没有 CI：久而久之没人看它。
+      - name: Run test suite
+        run: python -m pytest tests -q --no-header -p no:cacheprovider
+        timeout-minutes: 15

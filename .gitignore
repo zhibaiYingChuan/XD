@@ -157,17 +157,29 @@ tests/*
 # ── CI 门禁细节：防护门禁的存在与判据、发布流水线的公钥断言。
 # 公开这些等于告诉破解者「我们重点防什么、怎么防的」。
 #
-# ★ 例外：release.yml 必须入库。
+# ★ 例外 1：release.yml 必须入库。
 #   GitHub 只从 .github/workflows/ 读流水线，没有它就没有线上构建 ——
 #   「线上编译」这件事本身依赖这个文件。
 #   它只做构建与公钥断言（检查私钥有没有漏进仓库），
 #   不含任何检测判据或攻击样本。
-#   ci.yml 则相反：它跑 tests/（已移出），且四道门禁的名称与判据
-#   本身就是情报，不能公开。
+#
+# ★ 例外 2：ci.yml 也入库，但入库的是**脱敏版**（ci.public.yml）。
+#   GitHub 只会执行 .github/workflows/ 下的文件，所以公开仓库
+#   里的 ci.yml 只能是脱敏版；完整版改存 .ci-local/，本地照常运行。
+#
+#   脱敏版保留「每次 push 跑测试」的行为，去掉门禁名称与判据 ——
+#   公开 CI 是第一道网，本地那套更严格的门禁是第二道，两者都要有。
+#
+#   ★ 代价说清：公开 CI 能发现「测试挂了」，
+#     但替代不了本地门禁（后者不在仓库里）。
 .github/*
 !.github/workflows/
 .github/workflows/*
 !.github/workflows/release.yml
+# ★ 脱敏版 CI 入库。完整版在 .ci-local/ci.yml，本地运行不入库。
+!.github/workflows/ci.yml
+# 完整版门禁配置：含门禁名称与判据，仅本地使用
+.ci-local/
 
 # 内部开发文档（不对外发布）
 docs/
