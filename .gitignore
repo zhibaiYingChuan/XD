@@ -138,7 +138,13 @@ tools/
 #      防「中转站地址被拼错一层（/v1beta/v1、/chat/completions/v1）」——
 #      现象是 404，用户会去查中转站、查 Key、查网络，
 #      唯独不会想到地址被拼坏了。判据只有地址字符串，不含任何检测逻辑。
-#   五者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
+#   ⑥ test_help_claims.py
+#      防「帮助页文案与源码漂移」——托盘声称有并不存在的黄色态、
+#      基线样本数夸大 10 倍、编造未实测的毫秒数、
+#      把「宽松档仍阻断 API 密钥」说成「只拦明确危险」。
+#      这些都不会让任何测试变红，却会让用户按错误预期行动
+#      （比如以为宽松模式下密钥会外发）。判据只比对文案与常量。
+#   六者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
 #   2026-09-28 这几类问题里有三类是线上反馈才发现的。
 #
 #   用 /* 逐条排除而非 !tests/xxx 反向放行：
@@ -150,6 +156,7 @@ tests/*
 !tests/test_desktop_gui_subsystem.py
 !tests/test_engine_response_contract.py
 !tests/test_relay_config.py
+!tests/test_help_claims.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py
