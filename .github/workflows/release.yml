@@ -309,46 +309,70 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      # ★★ Linux AppImage 专用：把 numpy 自带的 OpenBLAS 注册进系统库路径。
+      # ★★ Linux AppImage 专用：把 numpy 自带的科学计算库链注册进系统库路径。
       #
-      #   2026-09-29 从 --verbose 日志读出的**真实机制**（v0.1.0-alpha11）：
+      #   2026-09-29 从 v0.1.0-alpha16 的 --verbose 日志读出的**真实机制**：
+      #
       #     Deploying dependencies for ELF file .../engine/numpy/_core/_multiarray_umath.so
-      #     ERROR: Could not find dependency: libscipy_openblas64_-32a4b2a6.so
+      #     ERROR: Could not find dependency: libgfortran-040039e1-0352e75f.so.5.0.0
+      #     ERROR: Failed to deploy dependencies for existing files
       #
       #   linuxdeploy 逐个 ELF 解析 DT_NEEDED，只在两类位置找依赖：
       #     ① 引用方**自己所在的目录**
       #     ② 系统库路径（即 ldconfig 的搜索列表）
       #
-      #   ①在同一份日志里可以验证：引擎根部的 libscipy_openblas64_*.so
-      #   需要 libgfortran-*.so.5.0.0，linuxdeploy 就在**同一目录**里
-      #   把它找了出来（日志："Deploying shared library .../engine/
-      #   libgfortran-040039e1-0352e75f.so.5.0.0"）。
+      #   ★★ 关键：要注册的是**整条传递依赖链**，不止 OpenBLAS 一个。
       #
-      #   而本处的引用方在 engine/numpy/_core/，OpenBLAS 在 engine/ 根部
-      #   —— 目录不同，①覆盖不到；于是只能走②。
+      #     依赖关系（全部来自同一份日志，可逐条验证）：
+      #       numpy/_core/_multiarray_umath.so
+      #         └─ libscipy_openblas64_-32a4b2a6.so   （在 engine/ 根部）
+      #              └─ libgfortran-040039e1-*.so.5.0.0  ← 缺的就是它
+      #                   └─ libquadmath-96973f99-*.so.0.0.0
       #
-      #   ★ 此前（alpha10/alpha11 的注释里）把根因记成「引用方就是
-      #     libscipy_openblas64_*.so 本身、属 linuxdeploy 对 numpy 的
-      #     固有缺陷、产物结构绕不过去」—— 那是**误判**，已按日志更正。
+      #     之前的版本只注册了 OpenBLAS。日志显示它确实生效了
+      #     （ldconfig 匹配项数=1，linuxdeploy 也成功部署了它
+      #     和它的依赖 libgfortran），
+      #     但**下一层**的 libgfortran 引用方在 numpy/_core/，
+      #     自己在 engine/ 根部 —— ①那条路覆盖不到，
+      #     而它从未进过系统库索引，②也覆盖不到 → 整包失败。
+      #
+      #     所以这里把 libgfortran / libquadmath 一并注册，
+      #     覆盖到链条的每一环。
       #
       #   ★ 这不是「绕过依赖检查」：注册之后 linuxdeploy 依然按它自己的
-      #     规则解析并部署该库，产出的 AppImage 与 deb 运行时行为一致。
-      #   ★ 找不到该文件不失败：这一步只是尽力而为，产物能否打出由
+      #     规则解析并部署这些库，产出的 AppImage 与 deb 运行时行为一致。
+      #   ★ 单个库找不到不失败：整批尽力而为，产物能否打出由
       #     后面的打包结果决定（失败也已被降级为警告）。
-      - name: Register numpy OpenBLAS for linuxdeploy
+      - name: Register numpy native libs for linuxdeploy
         if: matrix.allow_failure
         shell: bash
         working-directory: desktop
         run: |
-          lib="$(find src-tauri/resources/engine -name 'libscipy_openblas64*.so*' -type f -print -quit)"
-          if [ -z "$lib" ]; then
-            echo "::warning::引擎产物里没有 libscipy_openblas64*.so，AppImage 大概率仍会因依赖缺失而打包失败（deb 不受影响）。"
-            exit 0
-          fi
-          echo "找到 OpenBLAS：$lib"
-          sudo cp -v "$lib" /usr/lib/x86_64-linux-gnu/
+          set -uo pipefail
+          # ★ 三类都要：OpenBLAS 本身 + 它的两个下游。
+          #   少注册任何一个，linuxdeploy 都会在下一层报
+          #   "Could not find dependency"，而那个报错出现在
+          #   几万行日志末尾，很容易被误读成别的原因。
+          missing=0
+          for pat in 'libscipy_openblas64*.so*' 'libgfortran*.so*' 'libquadmath*.so*'; do
+            lib="$(find src-tauri/resources/engine -name "$pat" -type f -print -quit)"
+            if [ -z "$lib" ]; then
+              echo "::warning::引擎产物里没有 $pat"
+              missing=$((missing + 1))
+              continue
+            fi
+            echo "注册：$(basename "$lib")"
+            sudo cp -v "$lib" /usr/lib/x86_64-linux-gnu/
+          done
           sudo ldconfig
-          echo "系统库索引中的匹配项数：$(ldconfig -p | grep -c scipy_openblas || true)"
+          echo "---- 注册后系统库索引核对 ----"
+          for pat in scipy_openblas gfortran quadmath; do
+            echo "  $pat → $(ldconfig -p | grep -c "$pat" || true) 项"
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::warning::有 $missing 类库未找到，AppImage 可能仍会因依赖缺失而失败（deb 不受影响）。"
+          fi
+          exit 0
 
       - name: Build Tauri app
         working-directory: desktop
