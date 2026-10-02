@@ -26,6 +26,7 @@ import {
   AlertTriangle,
   Info,
   ChevronDown,
+  RefreshCw,
 } from 'lucide-react';
 import {
   api,
@@ -88,6 +89,11 @@ export default function Dashboard() {
   const [showRepDetail, setShowRepDetail] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // ★ 手动刷新状态 + 上次成功刷新时刻。
+  //   轮询失败时 mountedRef 会置空，手动刷新必须能独立重试，
+  //   否则「连接断了 → 按钮也点不动 → 只能重启应用」。
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
   const failRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -142,6 +148,12 @@ export default function Dashboard() {
       setState(s);
       setLoadError(null);
       failRef.current = 0;
+      // ★ 记录刷新时刻。轮询与手动刷新都走这里，
+      //   所以它反映的是「界面上的数字有多新」——
+      //   这正是用户判断「数据对不对得上」需要的唯一时间锚点。
+      //   注意 formatTime 吃的是**秒**，Date.now() 是毫秒，
+      //   直接传会把时间显示成 5 万多年前的时刻。
+      setLastLoadedAt(Date.now() / 1000);
       if (logs) {
         // 首页只展示非"安全"事件：阻断 + 告警
         const all = await api
@@ -177,6 +189,21 @@ export default function Dashboard() {
       clearTimeout(timer);
     };
   }, [load, loadError]);
+
+  // ── 手动刷新 ──
+  // ★ 必须走独立的状态机，不复用 busy：
+  //   busy 是「暂停/恢复/分享诊断」的操作锁，
+  //   混用会让刷新按钮在别的操作进行中变灰，
+  //   用户点不动又不知道原因。
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      if (mountedRef.current) setRefreshing(false);
+    }
+  };
 
   // ── 操作：暂停防护（P1-6：5 / 30 / 永久 三档）──
   const handlePause = async (durationMin: number) => {
@@ -361,6 +388,40 @@ export default function Dashboard() {
       <div className="card hero">
         <div className={`hero-state ${s}`}>{STATE_LABELS[s]}</div>
         <div className="hero-message">{state?.message ?? '正在获取状态...'}</div>
+
+        {/* ★ 手动刷新 + 上次更新时间。
+            只有 3 秒轮询时，用户既不知道数字有多新，也无法在
+            数值可疑时立刻拉一次 —— 只能干等或重启应用。
+            「数据对不上」的第一嫌疑往往是时间差，
+            把刷新时刻摆出来，判断才有依据。 */}
+        <div
+          className="faint"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 10,
+            fontSize: 11,
+            marginBottom: 12,
+          }}
+        >
+          <span className="mono">
+            {lastLoadedAt ? `更新于 ${formatTime(lastLoadedAt)}` : '尚未更新'}
+          </span>
+          <button
+            className="btn ghost sm"
+            onClick={() => void handleRefresh()}
+            disabled={refreshing}
+            aria-label="刷新数据"
+          >
+            <RefreshCw
+              size={13}
+              strokeWidth={1.5}
+              className={refreshing ? 'spin-icon' : undefined}
+            />
+            {refreshing ? '刷新中' : '刷新'}
+          </button>
+        </div>
 
         {today && (
           <div className="kpi-row" style={{ maxWidth: 460, margin: '0 auto' }}>

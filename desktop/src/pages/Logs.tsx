@@ -226,7 +226,7 @@ function DetailDrawer({
               {findings.length > 0 && (
                 <div className="mt-24">
                   <div className="field-label">触发规则</div>
-                  {findings.map((f: { category?: string; detail?: string; severity?: string }, i: number) => (
+                  {findings.map((f: { category?: string; detail?: string; severity?: string; evidence?: string }, i: number) => (
                     <div key={i} className="detail-row" style={{ alignItems: 'flex-start' }}>
                       <span className="detail-key" style={{ paddingTop: 1 }}>
                         <span
@@ -249,7 +249,17 @@ function DetailDrawer({
                           {f.severity === 'high' ? '高危' : f.severity === 'medium' ? '中危' : '低危'}
                         </span>
                       </span>
-                      <span className="detail-val">{f.detail}</span>
+                      <span className="detail-val">
+                        <div>{f.detail}</div>
+                        {/* ★ 掩码后的命中片段。
+                            没有它，用户只能看到「检测到 JWT 令牌」这类结论，
+                            无法核对究竟拦了什么 —— 这正是「疑似误报」的根源。 */}
+                        {f.evidence && (
+                          <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
+                            片段：{f.evidence}
+                          </div>
+                        )}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -265,7 +275,9 @@ function DetailDrawer({
               {detail.redactions.length > 0 && (
                 <div className="mt-24">
                   <div className="field-label">
-                    脱敏记录（{detail.redactions.length} 处）
+                    {detail.entry.action === 'block'
+                      ? `拦截依据（${detail.redactions.length} 处）`
+                      : `脱敏记录（${detail.redactions.length} 处）`}
                   </div>
                   {detail.redactions.map((r) => (
                     <div key={r.id} className="detail-row">
@@ -286,6 +298,12 @@ function DetailDrawer({
                       </span>
                     </div>
                   ))}
+                  {detail.entry.action === 'block' && (
+                    <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
+                      片段为掩码后内容（保留首尾与长度），原文从未离开本机。
+                      若确认是误报，可点下方「标记为安全」。
+                    </div>
+                  )}
                 </div>
               )}
             </>

@@ -144,6 +144,14 @@ tools/
 #      把「宽松档仍阻断 API 密钥」说成「只拦明确危险」。
 #      这些都不会让任何测试变红，却会让用户按错误预期行动
 #      （比如以为宽松模式下密钥会外发）。判据只比对文案与常量。
+#   ⑦ test_block_evidence.py
+#      防「拦截了却拿不出依据」——阻断分支 return 得比通用落库路径早，
+#      redaction_records 恒为 0 行；detail_json 写成 dict 而前端只渲染数组。
+#      两者叠加的结果是：引擎拦得完全正确、/api/state 数字完全正确，
+#      而用户手上没有任何可核对的依据，于是 40 条真实拦截
+#      在界面上看起来就像 40 次误报。
+#      这类故障的特征是「后端有数据、前端不显示」，
+#      两边各自检查都会说自己对，只有跨层断言能拦住。
 #   六者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
 #   2026-09-28 这几类问题里有三类是线上反馈才发现的。
 #
@@ -157,6 +165,7 @@ tests/*
 !tests/test_engine_response_contract.py
 !tests/test_relay_config.py
 !tests/test_help_claims.py
+!tests/test_block_evidence.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py

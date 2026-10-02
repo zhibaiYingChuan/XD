@@ -170,6 +170,52 @@ BUILTIN_RULES: List[_Rule] = [
 
 
 # ══════════════════════════════════════════════════════════════
+# 阻断证据（可核对，但不可还原）
+# ══════════════════════════════════════════════════════════════
+
+
+def _mask_value(value: str, keep: int = 4) -> str:
+    """把敏感值压成「前 4 + 长度 + 尾 2」。
+
+    为什么不能只留首尾：单看 `sk-a…9f` 用户无法确认这是不是
+    自己那把 Key；而整段原文落库又等于把密钥抄进日志。
+    长度是关键信息 —— 一段七百多字符的激活码与一个几十字符的
+    JWT，靠长度就能一眼区分，误报判断不需要看到原文。
+    """
+    n = len(value)
+    if n <= keep * 2 + 3:
+        # 太短，保留头尾会几乎等于原文，直接只报长度
+        return f"⟪{n} 字符⟫"
+    return f"{value[:keep]}…{value[-2:]}⟪{n} 字符⟫"
+
+
+def _masked_evidence(
+    text: str, deduped: List[Tuple[int, int, str, str]]
+) -> List[RedactionRecord]:
+    """为阻断命中生成掩码证据记录。
+
+    ★ 与打码记录的区别：`original` 存的是**掩码后**的字符串，
+      不是原文。这是刻意的 —— 阻断路径的证据会经 detail_json
+      进 /api/logs、也会进 CSV 导出，存原文等于开一条泄露通道。
+      落库的 original 因此只能用于「核对」，不能用于「还原」。
+    """
+    records: List[RedactionRecord] = []
+    for idx, (start, end, category, rule_name) in enumerate(deduped, start=1):
+        records.append(
+            RedactionRecord(
+                index=idx,
+                category=category,
+                original=_mask_value(text[start:end]),
+                redacted=RedactionRecord.placeholder(idx),
+                start=start,
+                end=end,
+                action=Action.BLOCK.value,
+            )
+        )
+    return records
+
+
+# ══════════════════════════════════════════════════════════════
 # 脱敏器
 # ══════════════════════════════════════════════════════════════
 
@@ -329,6 +375,13 @@ class RequestSanitizer:
                 action=Action.BLOCK.value,
                 hit_categories=hit_categories,
                 blocked_reason=f"检测到不可外发的敏感信息：{'、'.join(labels)}",
+                # ★ 阻断也必须给出可核对的证据。
+                #   原实现 records 为空，落库后界面只剩一句结论，
+                #   用户无从判断真假 —— 40 条 JWT 拦截里绝大多数是
+                #   用户自己把激活码贴进对话，属实但「看起来像误报」。
+                #   这里对每个命中区间做掩码：保留类型、前后少量字符
+                #   与长度，中间一律替换。足以定位，又不泄露原文。
+                records=_masked_evidence(text, deduped),
             )
 
         # ③.5 过滤：策略为 PASS 的命中不脱敏（如宽松级的手机号/邮箱）

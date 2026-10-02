@@ -383,21 +383,46 @@ def create_app() -> FastAPI:
                     body, _sanitizer
                 )
             except _BlockRequest as blocked:
+                # ★ 阻断也必须留下可核对的依据。
+                #   原实现只写 hit_categories 就 return，
+                #   redaction_records 与 text_preview 全为空 ——
+                #   界面只能显示「检测到 JWT 令牌」，
+                #   用户既看不到命中位置，也看不到片段，
+                #   只能凭感觉猜是不是误报。
+                #   40 条 JWT 拦截里绝大多数其实是用户自己把
+                #   激活码贴进提问（激活码本身就是 RS256 JWT），
+                #   拦截属实，但不给依据就永远说不清。
                 entry = LogEntry(
                     log_type=LogType.REQUEST_SANITIZE.value,
                     relay_domain=upstream_domain,
                     action=Action.BLOCK.value,
                     severity="high",
                     model=model,
+                    finding_count=len(blocked.records),
                     summary=blocked.reason,
                     detail_json=json.dumps(
-                        {"hit_categories": blocked.categories},
+                        _block_evidence(
+                            blocked.categories, blocked.records, blocked.context
+                        ),
                         ensure_ascii=False,
+                    ),
+                    text_preview=_make_preview(
+                        _evidence_preview(blocked.records)
                     ),
                 )
                 log_id = _storage.insert_log(entry)
+                if blocked.records:
+                    _storage.insert_redactions(
+                        log_id, session_id, blocked.records
+                    )
                 # ★ P2-13：阻断路径也记 total_calls，否则首页
                 #   「今日已检查 N 次」失真、KPI 数字对不上
+                #
+                #   ★ 这里**不能**加 redactions=len(records)。
+                #     该计数在状态栏显示为「已打码 N 处」，
+                #     而阻断根本没有打码 —— 请求被拒绝发送，
+                #     没有任何内容离开本机。把它记进打码数，
+                #     状态栏就会对用户谎报「已替你遮住 N 处敏感信息」。
                 _storage.update_daily_stats(total_calls=1, danger=1)
                 logger.info(
                     "会话 %s 请求被阻断：%s", session_id, blocked.reason
@@ -1662,6 +1687,8 @@ def _sanitize_messages_inplace(
                         raise _BlockRequest(
                             r.blocked_reason or "敏感信息阻断",
                             r.hit_categories,
+                            r.records,
+                            context=_message_role_hint(m),
                         )
                     if r.records:
                         block["text"] = _shift_placeholders(
@@ -1679,7 +1706,10 @@ def _sanitize_messages_inplace(
         r = sanitizer.sanitize(content)
         if r.action == Action.BLOCK.value:
             raise _BlockRequest(
-                r.blocked_reason or "敏感信息阻断", r.hit_categories
+                r.blocked_reason or "敏感信息阻断",
+                r.hit_categories,
+                r.records,
+                context=_message_role_hint(m),
             )
         if not r.records:
             continue
@@ -1690,6 +1720,75 @@ def _sanitize_messages_inplace(
         offset_base += len(r.records)
 
     return all_records
+
+
+def _block_evidence(
+    categories: List[str], records: List[Any], context: str
+) -> List[Dict[str, Any]]:
+    """构造阻断依据（detail_json）。
+
+    ★ 结构刻意与响应侧 findings 对齐（category/severity/detail/evidence）：
+      日志详情页的「触发规则」区块直接按这个结构渲染，
+      两类事件用同一套展示逻辑，用户不必学两种格式。
+      若这里改成 dict，页面会解析不出数组、依据整段消失 ——
+      那正是本轮修的病，不能再犯一次。
+    """
+    from .sanitizer import CATEGORY_LABELS
+
+    labels = [CATEGORY_LABELS.get(c, c) for c in categories]
+    head = f"{'、'.join(labels)}（{context}）" if context else "、".join(labels)
+    out: List[Dict[str, Any]] = [
+        {
+            "category": "request_blocked",
+            "severity": "high",
+            "detail": f"命中不可外发内容：{head}",
+            "evidence": "",
+        }
+    ]
+    for r in records:
+        out.append(
+            {
+                "category": r.category,
+                "severity": "high",
+                "detail": (
+                    f"第 {r.index} 处 · {CATEGORY_LABELS.get(r.category, r.category)}"
+                    f" · 位于 {context or '请求内容'}"
+                    f" · 第 {r.start}-{r.end} 字符"
+                ),
+                # 掩码后的片段（不是原文）
+                "evidence": r.original,
+            }
+        )
+    return out
+
+
+def _evidence_preview(records: List[Any]) -> str:
+    """把掩码证据拼成一行可读预览，写入 text_preview。
+
+    ★ 阻断时没有任何原文可预览（内容根本没发出去），
+      预览位空着会让搜索和详情页都无从下手。
+      这里填的是**掩码后**的片段，人可读、不可还原。
+    """
+    if not records:
+        return ""
+    return " ｜ ".join(r.original for r in records)
+
+
+def _message_role_hint(msg: Dict[str, Any]) -> str:
+    """返回消息角色的中文说明，供阻断依据展示。
+
+    命中位置所在的角色决定了责任归属：
+    同一段密钥，出现在 system 提示词里和出现在用户提问里，
+    排查方向完全不同。不给角色，用户只能自己猜。
+    """
+    role = str(msg.get("role", "") or "")
+    return {
+        "system": "系统提示词",
+        "developer": "开发者提示词",
+        "user": "用户提问",
+        "assistant": "模型回复",
+        "tool": "工具返回",
+    }.get(role, role or "未知角色")
 
 
 def _shift_placeholders(text: str, records: List[Any], base: int) -> str:
@@ -1722,12 +1821,29 @@ def _renumber(records: List[Any], base: int) -> List[Any]:
 
 
 class _BlockRequest(Exception):
-    """请求侧命中阻断类敏感信息（内部信号，由调用方转 403）。"""
+    """请求侧命中阻断类敏感信息（内部信号，由调用方转 403）。
 
-    def __init__(self, reason: str, categories: Optional[List[str]] = None):
+    ★ 必须携带可核对的证据。
+      原实现只带 reason + categories，而阻断分支在写完日志后
+      立刻 return —— redaction_records 从未落库。
+      结果是：界面只有一句「检测到 JWT 令牌」，
+      既看不到命中位置，也看不到片段，用户无法判断是误报还是真命中。
+      records 是**已掩码**的证据（保留首尾与长度，去掉中段原文），
+      可安全落库、可展示、可导出。
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        categories: Optional[List[str]] = None,
+        records: Optional[List[Any]] = None,
+        context: str = "",
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.categories: List[str] = list(categories or [])
+        self.records: List[Any] = list(records or [])
+        self.context = context
 
 
 def _apply_sanitized(body: Dict[str, Any], sanitizer) -> None:

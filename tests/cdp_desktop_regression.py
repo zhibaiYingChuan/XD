@@ -55,6 +55,7 @@ CDP 端口安全性
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -213,6 +214,13 @@ class Backend:
         """读拦截类日志。"""
         try:
             return self._get(f"/api/logs?limit={limit}&action=block", timeout=8)
+        except Exception:
+            return None
+
+    def log_detail(self, log_id, timeout=8):
+        """读单条日志详情（含脱敏记录 / 拦截依据）。"""
+        try:
+            return self._get(f"/api/logs/{log_id}", timeout=timeout)
         except Exception:
             return None
 
@@ -1036,6 +1044,169 @@ def test_block_end_to_end(page, be: Backend):
             f"最新拦截摘要前 12 字={probe!r} "
             + ("已出现在日志页" if shown else "未出现在日志页"))
 
+    # ── ⑥ 拦截依据必须可核对（本轮新增）──
+    #
+    # ★ 这一段验的是「用户能不能自己判断是不是误报」。
+    #   2026-10-02 用户提出「是否存在误报」，追下去发现：
+    #   阻断路径压根不写 redaction_records，detail_json 还是个 dict，
+    #   前端只渲染数组 → 依据整段不显示。
+    #   后端 /api/state 的数字完全正确，引擎也真的拦了，
+    #   但用户手上**没有任何可核对的依据**，
+    #   于是 40 条真实拦截看起来就像 40 次误报。
+    #
+    #   判据分三层：接口有数据 → 落库有记录 → 界面看得到。
+    #   少任何一层都可能出现「后端有、前端无」的谎报。
+    entries = (logs_after.get("entries") or [])
+    if not entries:
+        rec("T10 拦截依据可核对", False, "拿不到刚写入的拦截日志", skip=True)
+        return
+
+    log_id = entries[0].get("id")
+    detail = be.log_detail(log_id) or {}
+    reds = detail.get("redactions") or []
+
+    rec("T10 拦截依据已落库",
+        len(reds) > 0,
+        f"日志 {log_id} 的脱敏记录 {len(reds)} 条"
+        + ("（阻断路径仍未落库）" if not reds else ""))
+
+    # 依据必须是掩码后的片段，绝不能是原文 ——
+    # 证据会经 /api/logs 与 CSV 导出外发，存原文等于自建泄露通道。
+    raw_leaked = False
+    for r in reds:
+        if "sk-abcdefghijklmnopqrstuvwxyz" in str(r.get("original") or ""):
+            raw_leaked = True
+            break
+    rec("T10 拦截依据已掩码", bool(reds) and not raw_leaked,
+        "依据里出现了密钥原文" if raw_leaked else "依据为掩码片段")
+
+    # detail_json 必须是数组：前端只渲染数组，写成 dict 会整段不显示。
+    try:
+        parsed = json.loads(str(entries[0].get("detail_json") or ""))
+        is_list = isinstance(parsed, list) and any(
+            isinstance(x, dict) and x.get("evidence") for x in parsed
+        )
+    except Exception:
+        parsed, is_list = None, False
+    rec("T10 拦截依据结构可被前端渲染", is_list,
+        f"detail_json 类型={type(parsed).__name__}"
+        + ("（dict 会被前端静默丢弃）" if isinstance(parsed, dict) else ""))
+
+    # 界面侧：打开该条详情抽屉，必须真的看到片段
+    try:
+        goto(page, "日志")
+        page.wait_for_timeout(600)
+        # 点开最新一条（日志页表格按时间倒序，tbody 第一行即刚才那条）
+        page.locator("tbody tr").first.click(timeout=6000)
+        page.wait_for_timeout(900)
+        drawer = page.locator(".drawer").first
+        drawer.wait_for(timeout=6000)
+        drawer_text = drawer.inner_text()
+        has_evidence = ("片段" in drawer_text) or ("依据" in drawer_text)
+        rec("T10 日志详情展示拦截依据", has_evidence,
+            "详情抽屉未出现「片段/依据」" if not has_evidence
+            else f"抽屉含依据（前 60 字）={drawer_text[:60]!r}")
+    except Exception as e:
+        rec("T10 日志详情展示拦截依据", False, f"打开详情抽屉失败: {e}")
+    finally:
+        # ★ 必须关掉抽屉。
+        #   .drawer-overlay 是全屏遮罩，不关掉的话它会拦下
+        #   后续所有导航点击 —— T11/T9 会以「点击超时」失败，
+        #   而真实原因是本用例留了个没关的弹窗。
+        #   那是测试自身的缺陷，却记在产品账上。
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+            if page.locator(".drawer-overlay").count() > 0:
+                page.locator(".drawer-overlay").first.click(
+                    position={"x": 5, "y": 5}, timeout=3000)
+                page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+
+def test_dashboard_refresh(page, be: Backend):
+    """T11 首页刷新按钮：存在、可点、点了真的会重新取数。
+
+    ★ 为什么要有这条
+      2026-10-02 用户反馈「页面数据对应不上，也没有刷新按钮」。
+      当时首页只有 3 秒轮询，没有任何手动刷新入口，
+      也没有「数据是什么时候的」这个信息 ——
+      数字看着不对时，用户既不能立刻拉一次，
+      也无从判断是数据错了还是还没刷新。
+      「数据对不上」的第一嫌疑往往就是时间差。
+
+    ★ 判据设计
+      不能只断言按钮存在 —— 存在但点了没反应同样满足「有刷新按钮」。
+      这里验的是**行为**：点下去之后「更新于」的时刻必须真的往前跳。
+    """
+    goto(page, "首页")
+    page.wait_for_timeout(500)
+
+    btn = page.locator("button[aria-label='刷新数据']")
+    if btn.count() == 0:
+        rec("T11 首页有刷新按钮", False, "未找到 aria-label='刷新数据' 的按钮")
+        return
+    rec("T11 首页有刷新按钮", True, "按钮存在")
+
+    # ★ 必须等首屏数据真的到齐，不能只 sleep 一下就读。
+    #   刚切到首页时 state 还是 null，界面显示「尚未更新」——
+    #   那是**诚实的加载态**，不是缺陷。
+    #   早先这里 500ms 后直接断言，读到的必然是加载态，
+    #   于是把「还没加载完」报成「产品没显示更新时间」。
+    pat = re.compile(r"更新于\s*(\d{2}):(\d{2}):(\d{2})")
+    try:
+        page.wait_for_function(
+            """() => /更新于\\s*\\d{2}:\\d{2}:\\d{2}/.test(document.body.innerText)""",
+            timeout=15000,
+        )
+        ok_time = True
+    except Exception:
+        ok_time = False
+    body = page.locator("body").inner_text()
+    rec("T11 首页显示数据更新时间", ok_time,
+        "已显示上次更新时间" if ok_time
+        else f"15s 内未出现「更新于 时:分:秒」，实际前 120 字={body[:120]!r}")
+    if not ok_time:
+        return
+
+    def stamp():
+        m = pat.search(page.locator("body").inner_text())
+        return m.group(0) if m else ""
+
+    before = stamp()
+    # ★ 必须真的点下去，并在点之前先确认轮询的秒级变化
+    #   不至于快到让「时间戳变了」无法归因于这次点击。
+    #   判据只看「点了之后变了」，不点就等轮询的话，
+    #   这条用例在 3 秒轮询下必然恒真 —— 那是一条假判据。
+    try:
+        btn.first.click(timeout=6000)
+    except Exception as e:
+        rec("T11 点刷新后时间戳更新", False, f"点击刷新按钮失败: {e}")
+        return
+
+    try:
+        page.wait_for_function(
+            """(b) => {
+                const m = document.body.innerText.match(
+                    /更新于\\s*(\\d{2}:\\d{2}:\\d{2})/);
+                return !!m && m[0] !== b;
+            }""",
+            arg=before,
+            timeout=12000,
+        )
+        ok = True
+    except Exception:
+        ok = False
+    rec("T11 点刷新后时间戳更新", ok,
+        f"点击前={before!r} 点击后={stamp()!r}"
+        + ("" if ok else "（12s 内未变化：按钮可能未绑定动作）"))
+
+    # 刷新不得把界面打成空态（有数据时点刷新，数据不该消失）
+    still_has_kpi = page.locator(".kpi").count() > 0
+    rec("T11 刷新后界面未清空", still_has_kpi,
+        "刷新后 KPI 消失" if not still_has_kpi else "数据仍在")
+
 
 def test_pause_resume(page, be: Backend):
     """T9 暂停/恢复全链路：界面 + 托盘 + 引擎三处一致。
@@ -1397,6 +1568,7 @@ def main():
                     #   又等于往真实中转站发了一次带假密钥的请求。
                     #   顺序不是风格问题，是安全与正确性问题。
                     ("T10 拦截全链路", lambda: test_block_end_to_end(page, be)),
+                    ("T11 首页刷新", lambda: test_dashboard_refresh(page, be)),
                     ("T9 暂停恢复", lambda: test_pause_resume(page, be)),
                     ("T6 异常边界", lambda: test_error_boundary(page)),
                     ("T7 控制台", lambda: test_console_clean(page)),
