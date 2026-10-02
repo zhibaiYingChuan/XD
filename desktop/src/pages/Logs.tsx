@@ -23,6 +23,7 @@ import {
   Check,
   Download,
   ShieldOff,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   api,
@@ -149,11 +150,26 @@ function DetailDrawer({
     setMarking(true);
     try {
       await api.markLogSafe(logId);
-      toast.success('已标记为误报，后续统计将不再计入风险');
+      toast.success('已标记为误报，今日「危险/可疑」计数已减去这一条');
       onMarkedSafe();
       onClose();
     } catch (e) {
       toast.error(`标记失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setMarking(false);
+    }
+  };
+
+  const handleUnmarkSafe = async () => {
+    if (marking) return;
+    setMarking(true);
+    try {
+      await api.unmarkLogSafe(logId);
+      toast.success('已撤销标记，计数已加回');
+      onMarkedSafe();
+      onClose();
+    } catch (e) {
+      toast.error(`撤销失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setMarking(false);
     }
@@ -219,7 +235,7 @@ function DetailDrawer({
               {detail.entry.marked_safe && (
                 <div className="alert safe mt-16" style={{ marginBottom: 0 }}>
                   <CheckCircle2 size={17} strokeWidth={1.5} className="alert-icon" />
-                  <div>你已将此条标记为<b>误报</b>，它不计入风险统计。</div>
+                  <div>你已将此条标记为<b>误报</b>，今日「危险/可疑」计数已减去这一条。</div>
                 </div>
               )}
 
@@ -319,14 +335,23 @@ function DetailDrawer({
             )}
             {copied ? '已复制' : '复制详情'}
           </button>
-          {!detail?.entry.marked_safe && (
+          {detail?.entry.marked_safe ? (
+            <button
+              className="btn secondary"
+              onClick={handleUnmarkSafe}
+              disabled={loading || marking}
+            >
+              <ShieldCheck size={15} strokeWidth={1.5} />
+              {marking ? '撤销中...' : '撤销标记'}
+            </button>
+          ) : (
             <button
               className="btn secondary"
               onClick={handleMarkSafe}
               disabled={loading || marking}
             >
               <ShieldOff size={15} strokeWidth={1.5} />
-              {marking ? '标记中...' : '标记为安全'}
+              {marking ? '标记中...' : '标记为误报'}
             </button>
           )}
           <button className="btn danger" onClick={handleDelete} disabled={loading}>

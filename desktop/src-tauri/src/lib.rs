@@ -1321,6 +1321,23 @@ async fn mark_log_safe(app: tauri::AppHandle, id: u64) -> Result<serde_json::Val
     .await
 }
 
+/// 撤销误报标记。
+///
+/// ★ 必须与 mark_log_safe 成对暴露：
+///   标记现在会真的改动当日统计（危险/可疑），
+///   只能标不能撤的话，一次手滑就永久改写了统计。
+#[tauri::command]
+async fn unmark_log_safe(app: tauri::AppHandle, id: u64) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        &format!("/api/logs/{id}/unmark-safe"),
+        Some(serde_json::json!({})),
+        REQ_NORMAL,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn export_logs(
     app: tauri::AppHandle,
@@ -1622,6 +1639,7 @@ pub fn run() {
             get_log_detail,
             delete_log,
             mark_log_safe,
+            unmark_log_safe,
             export_logs,
             clear_logs,
             get_relays,

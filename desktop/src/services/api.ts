@@ -450,6 +450,23 @@ export const api = {
       TIMEOUT.NORMAL,
       { id },
     ),
+  /**
+   * 撤销误报标记。
+   *
+   * ★ 与 markLogSafe 必须成对存在：
+   *   标记现在会真的改动当日统计（危险/可疑），
+   *   若只能标不能撤，一次手滑就永久改写了统计，
+   *   而界面上没有任何入口能改回来。
+   */
+  unmarkLogSafe: (id: number) =>
+    call<{ ok: boolean; log_id: number }>(
+      'unmark_log_safe',
+      'POST',
+      `/api/logs/${id}/unmark-safe`,
+      undefined,
+      TIMEOUT.NORMAL,
+      { id },
+    ),
   exportLogs: (format: 'csv' | 'json' = 'csv') =>
     call<{ ok: boolean; filename: string; content: string }>(
       'export_logs',

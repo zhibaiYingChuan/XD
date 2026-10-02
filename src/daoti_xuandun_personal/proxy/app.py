@@ -919,6 +919,24 @@ def create_app() -> FastAPI:
         logger.info("日志 %d 已标记为误报", log_id)
         return {"ok": True, "log_id": log_id, "marked_safe": True}
 
+    @app.post("/api/logs/{log_id}/unmark-safe")
+    async def unmark_log_safe(log_id: int):
+        """撤销误报标记，统计随之加回。
+
+        ★ 必须有这条对称路径。
+          标记现在会真的改动 daily_stats（这是本轮修的谎报），
+          若只能标不能撤，一次手滑就永久改写了用户的当日统计，
+          而界面上根本没有任何入口能改回来 ——
+          那就把「谎报」换成了「不可撤销的错误」。
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        if _storage.get_log(log_id) is None:
+            raise HTTPException(status_code=404, detail="日志不存在")
+        _storage.unmark_safe(log_id)
+        logger.info("日志 %d 已撤销误报标记", log_id)
+        return {"ok": True, "log_id": log_id, "marked_safe": False}
+
     @app.post("/api/logs/export")
     async def export_logs(payload: Dict[str, Any] = Body(default={})):
         """导出日志为 CSV / JSON（文档 4.1「导出」按钮）。"""

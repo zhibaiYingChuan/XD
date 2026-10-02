@@ -293,6 +293,301 @@ class TestFrontendMustShowEvidence:
         assert "handleRefresh" in tsx
 
 
+class TestMarkedFalsePositiveActuallyLowersTheCount:
+    """「标记为误报」必须真的把数字降下来。
+
+    ★ 本轮发现的第三个谎报
+      界面上点「标记为安全」会提示「后续统计将不再计入风险」，
+      而原实现只写 logs.marked_safe —— daily_stats 是累加缓存，
+      永远不会因标记而回退。
+      实测标记前后 {danger:1} 完全不变。
+
+      为什么这条比前两条更糟：前两条让用户「看不到依据」，
+      这条让用户「做了正确操作却看不到效果」。
+      用户会得出「玄盾在骗我」或「玄盾坏了」的结论 ——
+      对一个以防篡改为卖点的产品，这直接摧毁信任。
+    """
+
+    @staticmethod
+    def _fresh(action: str):
+        import tempfile
+        from pathlib import Path as _P
+
+        from daoti_xuandun_personal.storage.db import PersonalStorage
+        from daoti_xuandun_personal.types import LogEntry, LogType
+
+        st = PersonalStorage(_P(tempfile.mkdtemp()) / "t.db")
+        lid = st.insert_log(LogEntry(
+            log_type=LogType.RESPONSE_VERIFY.value,
+            relay_domain="d", action=action, severity="high",
+            model="m", summary="s", detail_json="[]",
+        ))
+        # 复现真实写入路径：先记一次统计，再标记
+        danger = 1 if action == "block" else 0
+        suspect = 1 if action == "alert" else 0
+        safe = 1 if action == "pass" else 0
+        st.update_daily_stats(
+            total_calls=1, danger=danger, suspect=suspect, safe=safe
+        )
+        return st, lid
+
+    def test_marking_a_block_lowers_danger(self):
+        st, lid = self._fresh("block")
+        try:
+            before = st.get_today_stats()
+            assert st.mark_safe(lid) is True
+            after = st.get_today_stats()
+            assert after["danger_count"] == before["danger_count"] - 1, (
+                "标记危险日志为误报后，危险计数没有下降"
+            )
+            assert after["total_calls"] == before["total_calls"] - 1
+        finally:
+            st.close()
+
+    def test_marking_an_alert_lowers_suspect(self):
+        st, lid = self._fresh("alert")
+        try:
+            before = st.get_today_stats()
+            st.mark_safe(lid)
+            after = st.get_today_stats()
+            assert after["suspect_count"] == before["suspect_count"] - 1, (
+                "标记可疑日志为误报后，可疑计数没有下降"
+            )
+        finally:
+            st.close()
+
+    def test_unmarking_restores_the_count(self):
+        """取消标记必须把数字加回去，否则就成了单向不可逆。"""
+        st, lid = self._fresh("block")
+        try:
+            base = st.get_today_stats()
+            st.mark_safe(lid)
+            marked = st.get_today_stats()
+            st.unmark_safe(lid)
+            back = st.get_today_stats()
+            assert back == base, f"取消标记后未恢复原值：{base} → {marked} → {back}"
+        finally:
+            st.close()
+
+    def test_marking_twice_does_not_double_subtract(self):
+        """★ 判据设计踩过的坑
+
+        最初这版用「1 条 block 日志，标记两次」来验幂等，
+        结果**恒绿** —— 因为另一道防线 MAX(0, ...) 把第二次扣减
+        吃掉了：1 → 0 → 0。两次都断言成 0，自然测不出差异。
+
+        ★★ 两道防线会互相遮掩对方的失效：
+          幂等保护没了，负数钳位还在；
+          负数钳位没了，单条场景也够不到负数。
+        所以这里必须造**两条** block 日志：
+        正确答案 2→1，重复扣减 2→1→0，两者才分得开。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from daoti_xuandun_personal.storage.db import PersonalStorage
+        from daoti_xuandun_personal.types import LogEntry, LogType
+
+        st = PersonalStorage(_P(tempfile.mkdtemp()) / "t.db")
+        try:
+            ids = [
+                st.insert_log(LogEntry(
+                    log_type=LogType.RESPONSE_VERIFY.value,
+                    relay_domain="d", action="block", severity="high",
+                    model="m", summary="s", detail_json="[]",
+                ))
+                for _ in range(2)
+            ]
+            st.update_daily_stats(total_calls=2, danger=2)
+
+            st.mark_safe(ids[0])
+            once = st.get_today_stats()
+            st.mark_safe(ids[0])          # 重复标记同一��
+            twice = st.get_today_stats()
+
+            assert once["danger_count"] == 1, (
+                f"标记一次应从 2 降到 1，实际 {once['danger_count']}"
+            )
+            assert twice == once, (
+                f"重复标记导致重复扣减：{once} → {twice}"
+                "（幂等保护失效，且被 MAX(0,...) 遮掩）"
+            )
+        finally:
+            st.close()
+
+    def test_counts_never_go_negative(self):
+        """任何路径都不许把计数压到负数。
+
+        ★ 判据必须能真正触发负数，否则这条断言是恒真的。
+          用「1 条日志、标记一次」造不出负数（1-1=0），
+          实测把 MAX(0,...) 去掉测试依然全绿。
+
+        ★ 负数在真实场景里并不罕见：
+          daily_stats 是缓存，与 logs 可能不同步 ——
+          用户清过统计、补标了一条旧日志、或跨天补记，
+          都会出现「有这条日志，但当日计数已被重置为 0」。
+          此时再减一次就是 -1，首页会显示「危险 -1」。
+          MAX(0, ...) 是唯一防线，必须有人守着。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from daoti_xuandun_personal.storage.db import PersonalStorage
+        from daoti_xuandun_personal.types import LogEntry, LogType
+
+        st = PersonalStorage(_P(tempfile.mkdtemp()) / "t.db")
+        try:
+            lid = st.insert_log(LogEntry(
+                log_type=LogType.RESPONSE_VERIFY.value,
+                relay_domain="d", action="block", severity="high",
+                model="m", summary="s", detail_json="[]",
+            ))
+            st.update_daily_stats(total_calls=1, danger=1)
+            # 制造不同步：统计被重置为 0，但那条日志还在
+            with st._conn:
+                st._conn.execute(
+                    "UPDATE daily_stats SET danger_count = 0,"
+                    " total_calls = 0"
+                )
+            assert st.get_today_stats()["danger_count"] == 0
+
+            st.mark_safe(lid)
+            s = st.get_today_stats()
+            assert s["danger_count"] == 0, (
+                f"统计被重置后再标记，危险计数变成了 {s['danger_count']}"
+                "（MAX(0,...) 钳位失效）"
+            )
+            for k, v in s.items():
+                assert v >= 0, f"{k} 变成了负数：{v}"
+        finally:
+            st.close()
+
+    def test_marking_pass_does_not_shrink_safe_count(self):
+        """★ 标记「安全」日志不得让安全数变小。
+
+        pass 本来就不算风险，标记它没有意义；
+        若连带回退 safe_count，首页「安全 N」会凭空变小 ——
+        那只是把一个谎报换成了另一个。
+        """
+        st, lid = self._fresh("pass")
+        try:
+            before = st.get_today_stats()
+            st.mark_safe(lid)
+            after = st.get_today_stats()
+            assert after["safe_count"] == before["safe_count"], (
+                "标记安全日志竟然让「安全」计数下降了"
+            )
+            assert after["total_calls"] == before["total_calls"], (
+                "标记安全日志竟然让总检查次数下降了"
+            )
+        finally:
+            st.close()
+
+    def test_marking_never_touches_redaction_count(self):
+        """★ 标记不得让「已打码 N 处」变成负数或错数。
+
+        阻断路径本来就不计入打码数（它没打码），
+        若标记时也去动 redaction_count，凭空减一次就成负数。
+        """
+        st, lid = self._fresh("block")
+        try:
+            before = st.get_today_stats()
+            st.mark_safe(lid)
+            after = st.get_today_stats()
+            assert after["redaction_count"] == before["redaction_count"], (
+                "标记误报改动了打码计数"
+            )
+            assert after["redaction_count"] >= 0
+        finally:
+            st.close()
+
+
+class TestUnmarkPathExists:
+    """★ 标记能改统计，就必须能撤销。
+
+    这是本轮修复引入的新风险：原先 mark_safe 只写一个标志位，
+    改错了顶多显示不对；现在它会真的改动 daily_stats ——
+    若没有对称的撤销路径，一次手滑就永久改写了用户的当日统计，
+    而界面上没有任何入口能改回来。
+    那等于把「谎报」换成了「不可撤销的错误」。
+    """
+
+    def test_backend_exposes_unmark_endpoint(self):
+        src = _read(APP_PY)
+        assert "/unmark-safe" in src, "后端没有撤销标记的接口"
+
+    def test_unmark_endpoint_calls_unmark_safe(self):
+        src = _read(APP_PY)
+        m = re.search(
+            r"unmark_log_safe.*?_storage\.unmark_safe\(log_id\)", src, re.S
+        )
+        assert m, "撤销接口没有调用 storage.unmark_safe"
+
+    def test_tauri_exposes_unmark_command(self):
+        rs = _read(ROOT / "desktop" / "src-tauri" / "src" / "lib.rs")
+        assert "unmark_log_safe" in rs, (
+            "Tauri 没有暴露 unmark_log_safe，前端调不到"
+        )
+
+    def test_frontend_calls_unmark(self):
+        tsx = TestFrontendMustShowEvidence._code_only(LOGS_TSX)
+        assert "unmarkLogSafe" in tsx, "界面没有调用撤销接口"
+        assert "撤销标记" in tsx, "界面上没有撤销按钮"
+
+    def test_unmark_restores_count_through_storage(self):
+        """端到端核对：标记 → 撤销，统计必须回到原值。"""
+        import tempfile
+        from pathlib import Path as _P
+
+        from daoti_xuandun_personal.storage.db import PersonalStorage
+        from daoti_xuandun_personal.types import LogEntry, LogType
+
+        st = PersonalStorage(_P(tempfile.mkdtemp()) / "t.db")
+        try:
+            lid = st.insert_log(LogEntry(
+                log_type=LogType.RESPONSE_VERIFY.value,
+                relay_domain="d", action="block", severity="high",
+                model="m", summary="s", detail_json="[]",
+            ))
+            st.update_daily_stats(total_calls=1, danger=1)
+            base = st.get_today_stats()
+
+            st.mark_safe(lid)
+            assert st.get_today_stats()["danger_count"] == base["danger_count"] - 1
+
+            st.unmark_safe(lid)
+            assert st.get_today_stats() == base, "撤销后未回到原值"
+        finally:
+            st.close()
+
+
+class TestFrontendMustNotOverpromise:
+    """前端文案不得承诺后端做不到的事。"""
+
+    def test_toast_matches_reality(self):
+        """★ 判据：文案不得再说「后续统计将不再计入风险」。
+
+        那句承诺指向的是「未来的记录」，
+        而真正需要说明的是「已经记进去的那一条被减掉了」。
+        两件事完全不同，说错会让用户去找不存在的行为。
+        """
+        tsx = TestFrontendMustShowEvidence._code_only(LOGS_TSX)
+        assert "后续统计将不再计入风险" not in tsx, (
+            "界面仍在承诺「后续统计不再计入」，与实际行为不符"
+        )
+        assert "已减去这一条" in tsx, "标记后的提示未说明当前计数已被修正"
+
+    def test_mark_button_label_is_unambiguous(self):
+        """按钮写「标记为安全」而提示写「标记为误报」，含义相反。
+
+        两个名字指同一件事，用户会怀疑是不是有两个功能。
+        统一成「标记为误报」——它准确描述了发生什么。
+        """
+        tsx = TestFrontendMustShowEvidence._code_only(LOGS_TSX)
+        assert "'标记为安全'" not in tsx, "按钮文案与提示文案互相矛盾"
+        assert "标记为误报" in tsx
+
+
 class TestEvidenceSurvivesStorage:
     """证据必须真的能落库并读回来（不只是内存里有）。"""
 

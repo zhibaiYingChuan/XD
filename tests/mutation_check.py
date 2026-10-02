@@ -156,6 +156,83 @@ MUTATIONS = [
         ],
         "test_refresh_timestamp_uses_seconds_not_milliseconds",
     ),
+    # ── 标记误报必须真的降数（2026-10-02）──
+    (
+        "标记误报不再回退 daily_stats",
+        "src/daoti_xuandun_personal/storage/db.py",
+        [
+            (
+                r"            self\._adjust_daily_stats_for_mark\(entry, delta=-1\)",
+                "            pass  # 变异：不再回退统计",
+            )
+        ],
+        "test_marking_a_block_lowers_danger",
+    ),
+    (
+        "标记误报连带回退「安全」计数",
+        "src/daoti_xuandun_personal/storage/db.py",
+        [
+            (
+                r'        if entry\.action == Action\.BLOCK\.value:\n'
+                r'            col = "danger_count"\n'
+                r"        elif entry\.action == Action\.ALERT\.value:\n"
+                r'            col = "suspect_count"\n'
+                r"        else:\n            return",
+                '        col = {"block": "danger_count", "alert": "suspect_count",'
+                '\n               "pass": "safe_count"}[entry.action]'
+                "  # 变异",
+            )
+        ],
+        "test_marking_pass_does_not_shrink_safe_count",
+    ),
+    (
+        "标记误报时重复扣减（去掉幂等保护）",
+        "src/daoti_xuandun_personal/storage/db.py",
+        [
+            (
+                r"        if entry\.marked_safe:\n"
+                r"            return True   # 已标记，不重复扣减",
+                "        # 变异：幂等保护被去掉",
+            )
+        ],
+        "test_marking_twice_does_not_double_subtract",
+    ),
+    (
+        "取消标记不再把数字加回",
+        "src/daoti_xuandun_personal/storage/db.py",
+        [
+            (
+                r"            self\._adjust_daily_stats_for_mark\(entry, delta=1\)",
+                "            pass  # 变异：不加回",
+            )
+        ],
+        "test_unmarking_restores_the_count",
+    ),
+    (
+        "计数不再防负数",
+        "src/daoti_xuandun_personal/storage/db.py",
+        [
+            (
+                r"SET \{col\} = MAX\(0, \{col\} \+ \?\),\n"
+                r"\s*total_calls = MAX\(0, total_calls \+ \?\)",
+                "SET {col} = {col} + ?,\n"
+                "                    total_calls = total_calls + ?",
+            )
+        ],
+        "test_counts_never_go_negative",
+    ),
+    (
+        "前端又承诺「后续统计不再计入」",
+        "desktop/src/pages/Logs.tsx",
+        [
+            (
+                r"toast\.success\('已标记为误报，今日「危险/可疑」计数已减去这一条'\);",
+                "toast.success('已标记为误报，后续统计将不再计入风险');"
+                "  // 变异",
+            )
+        ],
+        "test_toast_matches_reality",
+    ),
 ]
 
 
@@ -164,7 +241,7 @@ def run_tests(pattern: str) -> tuple[int, str]:
         [
             sys.executable, "-m", "pytest",
             "tests/test_relay_config.py", "tests/test_block_evidence.py",
-            "-q", "-k", pattern,
+            "-q", "-k", pattern, "--tb=line", "-rf",
         ],
         cwd=ROOT,
         capture_output=True,
@@ -172,7 +249,25 @@ def run_tests(pattern: str) -> tuple[int, str]:
         encoding="utf-8",
         errors="replace",
     )
-    return proc.returncode, (proc.stdout or "")[-4000:]
+    # ★★ 这里必须只保留 pytest 的**摘要行**，丢弃其余全部输出。
+    #
+    #   踩过的坑：判据要读 Logs.tsx / Dashboard.tsx 源码，
+    #   pytest 会把断言失败时的源码片段整段打进输出，
+    #   「FAILED ...::test_xxx」摘要行被顶到上万字符之外。
+    #   于是只截尾部 → 漏掉摘要行 → 明明红了却判成
+    #   「红的是别的用例」。
+    #
+    #   --tb=line 也**不足以**解决：断言消息本身
+    #   就包含整份源码（不是 traceback 才带），
+    #   所以正确做法是主动过滤，只留含 FAILED/PASSED 的行。
+    #   这比调大截取长度可靠 —— 后者只是把阈值往后挪，
+    #   源码再长一点又会漏。
+    lines = [
+        ln for ln in (proc.stdout or "").splitlines()
+        if "FAILED" in ln or "passed" in ln or "failed" in ln
+        or "error" in ln.lower()
+    ]
+    return proc.returncode, "\n".join(lines)
 
 
 def _named_test_failed(out: str, expect: str) -> bool:

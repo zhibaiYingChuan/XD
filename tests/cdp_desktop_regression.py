@@ -140,6 +140,23 @@ class Backend:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    def _post(self, path, payload, timeout=8):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload or {}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8"))
+            except Exception:
+                return {"ok": False, "status": e.code}
+
     def health(self):
         try:
             return self._get("/health", timeout=3)
@@ -221,6 +238,14 @@ class Backend:
         """读单条日志详情（含脱敏记录 / 拦截依据）。"""
         try:
             return self._get(f"/api/logs/{log_id}", timeout=timeout)
+        except Exception:
+            return None
+
+    def unmark_safe(self, log_id, timeout=8):
+        """撤销误报标记（T12 收尾用，把用户统计还原）。"""
+        try:
+            return self._post(
+                f"/api/logs/{log_id}/unmark-safe", {}, timeout=timeout)
         except Exception:
             return None
 
@@ -1255,6 +1280,157 @@ def test_pause_resume(page, be: Backend):
         rec("T9 恢复后状态栏回到原状态", False, f"点击「恢复防护」失败: {e}")
 
 
+def test_mark_false_positive_lowers_count(page, be: Backend):
+    """T12「标记为误报」必须真的把首页数字改小。
+
+    ★ 这是本轮发现的第三个谎报，也是用户唯一能自己动手修的地方。
+      界面提示「后续统计将不再计入风险」，
+      而原实现只写 logs.marked_safe —— daily_stats 是累加缓存，
+      永远不会回退。用户点完按钮，首页「危险 N」纹丝不动。
+
+    ★★ 为什么这条必须放在 CDP 而不只用 pytest：
+      pytest 验的是 storage 层「调了 mark_safe 会降数」，
+      但用户点的是**界面按钮**，走的是 HTTP 接口 → React → 再轮询。
+      中间任何一环没接上（接口没调、响应没回来、界面没重取），
+      storage 层测试全绿而用户依然看不到变化。
+      端到端跑一遍才验得到他真正看到的东西。
+
+    ★ 收尾必须把标记撤掉，否则会污染用户的真实统计 ——
+      测试在用户自己的数据库上跑，留下一条被标成误报的真实记录
+      比留一条测试记录更糟。
+    """
+    goto(page, "日志")
+    page.wait_for_timeout(800)
+
+    before = (be.state() or {}).get("today") or {}
+    b_danger = before.get("danger_count")
+    if b_danger is None:
+        rec("T12 标记误报链路", False, "读不到后端今日统计", skip=True)
+        return
+    if b_danger <= 0:
+        rec("T12 标记误报链路", False,
+            f"当前危险计数为 {b_danger}，没有可标记的基线", skip=True)
+        return
+
+    try:
+        # 只在「已拦截」这一类里找，避免误标安全记录
+        page.locator("select, .filter select").first.select_option(
+            "block", timeout=5000) if page.locator(
+                "select, .filter select").count() else None
+        page.wait_for_timeout(700)
+    except Exception:
+        pass   # 筛选器结构变了也不该让本用例直接崩，下面的兜底会处理
+
+    # 兜底：直接问后端要一条 block 日志，绕开界面筛选
+    logs = be.block_logs(1) or {}
+    entries = logs.get("entries") or []
+    target = next(
+        (e for e in entries if not e.get("marked_safe")), None)
+    if target is None:
+        rec("T12 标记误报链路", False,
+            "找不到未标记的拦截日志（可能全被标过了）", skip=True)
+        return
+    log_id = target["id"]
+
+    # 打开该条详情
+    try:
+        row = page.locator(f"tbody tr:has-text('{target['summary'][:10]}')")
+        if row.count() == 0:
+            row = page.locator("tbody tr")
+        row.first.click(timeout=6000)
+        page.wait_for_timeout(900)
+    except Exception as e:
+        rec("T12 标记误报链路", False, f"打开日志详情失败: {e}")
+        return
+
+    try:
+        btn = page.locator("button:has-text('标记为误报')").first
+        if btn.count() == 0:
+            rec("T12 有「标记为误报」按钮", False, "详情里没有该按钮")
+            return
+        rec("T12 有「标记为误报」按钮", True, "按钮存在")
+        btn.click(timeout=6000)
+    except Exception as e:
+        rec("T12 有「标记为误报」按钮", False, f"点击失败: {e}")
+        _close_drawer(page)
+        return
+
+    # 核心判据：后端计数真的降了。
+    # ★ 用轮询而不是固定 sleep —— 统计是同步落库的，
+    #   但接口往返仍有毫秒级延迟。
+    after = {}
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        after = (be.state() or {}).get("today") or {}
+        cur = after.get("danger_count")
+        if cur is not None and cur < b_danger:
+            break
+        time.sleep(0.4)
+    a_danger = after.get("danger_count")
+    rec("T12 标记后危险计数下降", a_danger == b_danger - 1,
+        f"危险 {b_danger} → {a_danger}（期望 {b_danger - 1}）")
+
+    # 界面上也得跟着变（不是只有后端降了）
+    try:
+        _close_drawer(page)
+        goto(page, "首页")
+        page.wait_for_timeout(1500)
+        shown = page.evaluate(
+            """() => {
+                const el = [...document.querySelectorAll('.kpi')]
+                  .find(x => x.innerText.includes('危险'));
+                if (!el) return null;
+                return parseInt(el.innerText.replace(/[^0-9]/g, ''), 10);
+            }""",
+        )
+        rec("T12 首页「危险」同步下降", shown == b_danger - 1,
+            f"界面显示 {shown}（期望 {b_danger - 1}）")
+    except Exception as e:
+        rec("T12 首页「危险」同步下降", False, f"读首页失败: {e}")
+
+    # ── 收尾：撤销标记，把用户的统计还原 ──
+    # ★ 必须还原。测试跑在用户自己的数据库上，
+    #   留一条被标成误报的真实拦截记录 = 污染用户看到的统计，
+    #   比留一条测试记录更糟。
+    _close_drawer(page)
+    try:
+        ok = be.unmark_safe(log_id)
+        rec("T12 收尾：撤销标记还原统计", bool(ok),
+            f"日志 {log_id} 已撤销" if ok
+            else f"撤销失败（日志 {log_id} 仍被标为误报）")
+    except Exception as e:
+        rec("T12 收尾：撤销标记还原统计", False,
+            f"撤销调用失败: {e}（日志 {log_id} 需手动撤销）")
+
+    # 撤销后计数必须回到原值，否则「撤销」本身就是新的谎报
+    try:
+        back = {}
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            back = (be.state() or {}).get("today") or {}
+            if back.get("danger_count") == b_danger:
+                break
+            time.sleep(0.4)
+        rec("T12 撤销后计数回到原值",
+            back.get("danger_count") == b_danger,
+            f"危险 {a_danger} → {back.get('danger_count')}（期望 {b_danger}）")
+    except Exception as e:
+        rec("T12 撤销后计数回到原值", False, f"读后端失败: {e}")
+
+
+def _close_drawer(page):
+    """关闭日志详情抽屉，避免遮罩层拦下后续点击。"""
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(250)
+        if page.locator(".drawer-overlay").count() > 0:
+            page.locator(".drawer-overlay").first.click(
+                position={"x": 5, "y": 5}, timeout=3000)
+            page.wait_for_timeout(250)
+    except Exception:
+        pass
+
+
 def test_relay_test_button(page, be: Backend):
     """T8 设置页「测试连接」给出与事实相符的结论。
 
@@ -1569,6 +1745,11 @@ def main():
                     #   顺序不是风格问题，是安全与正确性问题。
                     ("T10 拦截全链路", lambda: test_block_end_to_end(page, be)),
                     ("T11 首页刷新", lambda: test_dashboard_refresh(page, be)),
+                    # ★ T12 会改动用户真实统计（标记一条拦截为误报），
+                    #   虽然收尾会撤销，但必须在 T9 暂停之前跑：
+                    #   暂停期间引擎直通，/api/state 仍可读，
+                    #   而恢复过程中的统计抖动会让「恰好 -1」的判据难辨。
+                    ("T12 标记误报降数", lambda: test_mark_false_positive_lowers_count(page, be)),
                     ("T9 暂停恢复", lambda: test_pause_resume(page, be)),
                     ("T6 异常边界", lambda: test_error_boundary(page)),
                     ("T7 控制台", lambda: test_console_clean(page)),

@@ -219,20 +219,94 @@ class PersonalStorage:
         return self._row_to_log(row) if row else None
 
     def mark_safe(self, log_id: int) -> bool:
-        """标记日志为误报（★ P1-9：文档 4.1 要求的「标记为安全」按钮）。"""
+        """标记日志为误报（★ P1-9：文档 4.1 要求的「标记为安全」按钮）。
+
+        ★★ 必须同时回退 daily_stats，否则界面在骗人。
+          界面上点完这个按钮会提示「后续统计将不再计入风险」，
+          而原实现只改 logs.marked_safe —— daily_stats 是累加缓存，
+          永远不会因标记而回退。
+          实测：标记前后 today 统计一模一样，
+          于是用户以为「这条已经不算风险了」，
+          首页的「危险 N」却纹丝不动，
+          唯一的解释就是「玄盾在骗我」或「玄盾坏了」。
+          一个防篡改产品的统计如果不能被用户纠正，
+          那它给出的每个数字都值得怀疑。
+        """
+        entry = self.get_log(log_id)
+        if entry is None:
+            return False
+        if entry.marked_safe:
+            return True   # 已标记，不重复扣减
         with self._conn:
             cur = self._conn.execute(
                 "UPDATE logs SET marked_safe = 1 WHERE id = ?", (log_id,)
             )
-        return bool(cur.rowcount)
+            if not cur.rowcount:
+                return False
+            self._adjust_daily_stats_for_mark(entry, delta=-1)
+        return True
 
     def unmark_safe(self, log_id: int) -> bool:
-        """取消误报标记。"""
+        """取消误报标记（统计随之加回）。"""
+        entry = self.get_log(log_id)
+        if entry is None:
+            return False
+        if not entry.marked_safe:
+            return True   # 本就未标记，不重复加回
         with self._conn:
             cur = self._conn.execute(
                 "UPDATE logs SET marked_safe = 0 WHERE id = ?", (log_id,)
             )
-        return bool(cur.rowcount)
+            if not cur.rowcount:
+                return False
+            self._adjust_daily_stats_for_mark(entry, delta=1)
+        return True
+
+    def _adjust_daily_stats_for_mark(
+        self, entry: LogEntry, delta: int
+    ) -> None:
+        """按 delta 回退/补回某条日志在 daily_stats 里占的份额。
+
+        ★ 只按 action 归类，不碰 redaction_count：
+          阻断路径本来就不计入打码数（那是诚实的 ——
+          阻断根本没打码），若这里再动它就会凭空多出或少掉打码数。
+          实测标注一条 block 日志会让「已打码 N 处」变成负数，
+          那是把一个谎报换成另一个谎报。
+        """
+        if delta not in (-1, 1):
+            raise ValueError("delta 只能是 -1 或 +1")
+        # 只有影响风险判定的两类才需要回退：
+        # block（危险）与 alert（可疑）。
+        # pass（安全）标记误报没有意义 —— 它本来就不算风险；
+        # 若也回退 safe_count，会让「安全」凭空变小，
+        # 同样是对用户的谎报。
+        if entry.action == Action.BLOCK.value:
+            col = "danger_count"
+        elif entry.action == Action.ALERT.value:
+            col = "suspect_count"
+        else:
+            return
+
+        import datetime as _dt
+        date_str = _dt.date.today().isoformat()
+        row = self._conn.execute(
+            "SELECT timestamp FROM logs WHERE id = ?", (entry.id,)
+        ).fetchone()
+        # 统计按「日志写入当天」归集，不按今天 ——
+        # 否则用户隔天补标一条昨天的日志，会错扣今天的数。
+        if row is not None:
+            date_str = _dt.datetime.fromtimestamp(
+                float(row["timestamp"])
+            ).date().isoformat()
+
+        with self._conn:
+            self._conn.execute(
+                f"""UPDATE daily_stats
+                    SET {col} = MAX(0, {col} + ?),
+                        total_calls = MAX(0, total_calls + ?)
+                    WHERE date = ?""",
+                (delta, delta, date_str),
+            )
 
     def export_logs(
         self,
