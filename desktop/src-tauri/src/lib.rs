@@ -1338,6 +1338,83 @@ async fn unmark_log_safe(app: tauri::AppHandle, id: u64) -> Result<serde_json::V
     .await
 }
 
+/// 已配置的中转站列表（v0.1.0，多中转站）。
+///
+/// ★ 路径是 /api/relays/configured 而非 /api/relays：
+///   后者已被「信誉列表」占用，FastAPI 遇到重复路径不报错，
+///   而是让先注册的那个生效 —— 同名新路由会静默失效。
+#[tauri::command]
+async fn get_configured_relays(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::GET,
+        "/api/relays/configured",
+        None,
+        REQ_NORMAL,
+    )
+    .await
+}
+
+/// 切换当前启用的中转站（显式切换，不做自动故障转移）。
+///
+/// ★ 刻意不做自动故障转移 / 轮询：
+///   探活是真实 HTTP 请求，本机实测平均延迟 13 秒，
+///   拿它做后台探测等于持续制造慢请求；
+///   而自动切换会让「这次请求扣了谁的钱」变得不可知。
+#[tauri::command]
+async fn switch_relay(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        "/api/relays/active",
+        Some(serde_json::json!({ "id": id })),
+        REQ_NORMAL,
+    )
+    .await
+}
+
+/// 新增一家中转站到列表（**不**设为启用项）。
+///
+/// ★ 没有这条命令，多中转站就只是「看得见的界面」：
+///   列表只能靠切换产生，而切换不会新增 —— 用户永远只有一家。
+#[tauri::command]
+async fn add_relay(
+    app: tauri::AppHandle,
+    name: String,
+    base_url: String,
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        "/api/relays/configured",
+        Some(serde_json::json!({
+            "name": name, "base_url": base_url, "api_key": api_key
+        })),
+        REQ_NORMAL,
+    )
+    .await
+}
+
+/// 从列表移除一家（不能移除当前启用项）。
+#[tauri::command]
+async fn remove_relay(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        "/api/relays/configured/remove",
+        Some(serde_json::json!({ "id": id })),
+        REQ_NORMAL,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn export_logs(
     app: tauri::AppHandle,
@@ -1643,6 +1720,10 @@ pub fn run() {
             export_logs,
             clear_logs,
             get_relays,
+            get_configured_relays,
+            switch_relay,
+            add_relay,
+            remove_relay,
             precheck_relay,
             test_relay,
             clear_reputation,

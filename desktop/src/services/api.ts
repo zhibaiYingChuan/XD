@@ -97,6 +97,29 @@ export interface LogDetail {
   redactions: RedactionRecord[];
 }
 
+/**
+ * ★ v0.1.0：已配置的中转站（配置视角，非信誉视角）。
+ *
+ * 与 RelayReputation 的区别：那个是「我用过哪些、它们表现如何」，
+ * 这个是「我配了哪些、现在用哪家」。刚填完还没发过对话时
+ * 信誉表是空的，两者混在一起会让用户以为配置没生效。
+ */
+export interface ConfiguredRelay {
+  id: string;
+  name: string;
+  base_url: string;
+  /** 规范化后的接入地址（实际请求用到的就是这个）。 */
+  normalized_base: string;
+  /** 掩码后的 Key，**永不下发明文**。 */
+  api_key_masked: string;
+  active: boolean;
+}
+
+export interface ConfiguredRelaysResponse {
+  relays: ConfiguredRelay[];
+  active_id: string;
+}
+
 export interface RelayReputation {
   domain: string;
   score: number;
@@ -499,6 +522,51 @@ export const api = {
 
   // ── 中转站信誉 ──
   getRelays: () => call<RelaysResponse>('get_relays', 'GET', '/api/relays'),
+
+  /**
+   * ★ v0.1.0：已配置的中转站列表（多中转站）。
+   *
+   * 路径刻意是 /api/relays/configured 而不是 /api/relays：
+   * 后者已被「信誉列表」占用，FastAPI 遇到重复路径不报错，
+   * 而是让先注册的那个生效 —— 同名的新路由会变成死代码。
+   */
+  getConfiguredRelays: () =>
+    call<ConfiguredRelaysResponse>(
+      'get_configured_relays', 'GET', '/api/relays/configured'),
+  /** 切换当前启用的中转站（显式切换，不做自动故障转移）。 */
+  switchRelay: (id: string) =>
+    call<{ ok: boolean; active_id: string }>(
+      'switch_relay', 'POST', '/api/relays/active',
+      undefined, TIMEOUT.NORMAL, { id }),
+  /**
+   * 新增一家中转站到列表（**不**设为启用项）。
+   *
+   * ★ 为什么必须有它：没有新增路径时，用户改「当前中转站」的地址
+   *   就等于把原来那家覆盖掉 —— 多中转站在界面上看得见、
+   *   在数据上永远只有一家，而用户毫无察觉。
+   */
+  addRelay: (relay: { name: string; base_url: string; api_key: string }) =>
+    call<{ ok: boolean; id: string; total: number }>(
+      'add_relay', 'POST', '/api/relays/configured', relay,
+      undefined,
+      // ★★★ 键名必须是 **camelCase**：Tauri v2 默认把命令实参
+      //   转成 camelCase 再交给 Rust 反序列化。
+      //   传 `{ base_url: ... }` 而 Rust 声明 `base_url: String` 时，
+      //   它找的是 `baseUrl` —— 找不到就报
+      //   「missing required key baseUrl」，
+      //   而界面上只显示一行「添加失败：invalid args …」，
+      //   用户既看不出原因，也丢掉了自己刚填的地址。
+      //   实测踩过：这条 Toast 是唯一线索。
+      {
+        name: relay.name,
+        baseUrl: relay.base_url,
+        apiKey: relay.api_key,
+      }),
+  /** 移除列表里的一家（不能移除当前启用项）。 */
+  removeRelay: (id: string) =>
+    call<{ ok: boolean; total: number }>(
+      'remove_relay', 'POST', '/api/relays/configured/remove',
+      undefined, TIMEOUT.NORMAL, { id }),
   /**
    * 中转站静态风险预检（Phase 7）。
    *

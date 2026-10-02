@@ -1558,6 +1558,189 @@ def _close_drawer(page):
         pass
 
 
+def test_multi_relay_settings(page, be: Backend):
+    """T14 多中转站：用户在界面上真能加、看到、切、移除。
+
+    ★★ 全部操作都必须在**界面上**点。
+      初版这个用例是先用后端 API 塞进第二家，再去界面找它 ——
+      结果只验到「列表能渲染」，没验到「用户能新增」。
+      而后者才是这条功能成立的前提：
+      没有新增路径时，列表只能靠切换产生，切换不新增，
+      于是界面上永远只有一行 —— 功能看起来存在，实际不可用。
+
+    ★ 加完必须**离开设置页再回来**：
+      loadConfigured 只在挂载与保存/切换/新增后跑；
+      用后端 API 塞数据不会触发它，
+      列表就还是加之前那一行 —— 那是测试自己造的假象。
+    """
+    before_cfg = (be.config() or {}).get("relay") or {}
+    orig_url = (before_cfg.get("base_url") or "").strip()
+    if not orig_url:
+        rec("T14 多中转站", False, "当前未配置中转站，无法验证", skip=True)
+        return
+
+    SECOND_URL = "https://relay-second.example.invalid"
+    SECOND_KEY = "sk-cdp-second-relay-key-000000"
+    SECOND_NAME = "CDP 第二家"
+
+    try:
+        goto(page, "设置")
+        page.wait_for_timeout(1200)
+
+        body = page.inner_text("body")
+        rec("T14 设置页有「已配置的中转站」区块",
+            "已配置的中转站" in body, "设置页没有该区块")
+
+        # ── 界面上新增第二家 ──
+        entry = page.locator("button:has-text('添加另一家')").first
+        if entry.count() == 0:
+            rec("T14 有「添加另一家」入口", False,
+                "设置页没有新增入口 —— 用户永远只有一家")
+            return
+        rec("T14 有「添加另一家」入口", True, "按钮存在")
+        entry.click(timeout=6000)
+        page.wait_for_timeout(400)
+
+        page.fill("input[aria-label='新增中转站的显示名']", SECOND_NAME)
+        page.fill("input[aria-label='新增中转站的地址']", SECOND_URL)
+        page.fill("input[aria-label='新增中转站的 API Key']", SECOND_KEY)
+        submit = page.locator("button:has-text('添加到列表')").first
+        if submit.count() == 0:
+            labels = page.locator("button:has-text('添加')").all_inner_texts()
+            rec("T14 有「添加到列表」按钮", False,
+                f"新增表单没有提交按钮，现有按钮文案={labels!r}")
+            return
+        before_err = len(_console_errors)
+        submit.click(timeout=6000)
+        page.wait_for_timeout(1500)
+        new_errs = _console_errors[before_err:]
+        if new_errs:
+            rec("T14 新增点击无控制台报错", False,
+                "；".join(e[:300] for e in new_errs))
+        # 抓 toast：失败原因只出现在提示里，不在控制台。
+        # ★ 锚点用 .toast-stack（本项目的真实类名，见 Toast.tsx）——
+        #   写成 .toast / [role=alert] 会一个都匹配不到，
+        #   于是这条诊断判据自身永远报「无反馈」，
+        #   把「有提示」和「没提示」混成同一个结论。
+        try:
+            toasts = page.locator(".toast-stack .toast-text").all_inner_texts()
+        except Exception:
+            toasts = []
+        rec("T14 点击后有可见反馈（成功或失败提示）", bool(toasts),
+            f"toast={toasts!r}")
+
+        # 后端确认（判据的依据必须是引擎真实状态，不是界面自述）
+        end = time.time() + 12
+        lst = {}
+        while time.time() < end:
+            lst = be._get("/api/relays/configured", timeout=8) or {}
+            if any(r.get("base_url") == SECOND_URL
+                   for r in lst.get("relays") or []):
+                break
+            time.sleep(0.4)
+        items = lst.get("relays") or []
+        rec("T14 界面新增真的落到后端",
+            any(r.get("base_url") == SECOND_URL for r in items),
+            f"列表地址={[r.get('base_url') for r in items]!r}")
+
+        cur = ((be.config() or {}).get("relay") or {})
+        rec("T14 新增不改动当前启用项", cur.get("base_url") == orig_url,
+            f"新增后当前项 base_url={cur.get('base_url')!r}，期望 {orig_url!r}")
+
+        blob = json.dumps(lst, ensure_ascii=False)
+        rec("T14 列表接口不下发明文 Key", SECOND_KEY not in blob,
+            f"响应含明文 Key：{SECOND_KEY in blob}")
+        rec("T14 列表接口给出掩码",
+            "api_key_masked" in blob and "****" in blob,
+            f"响应片段={blob[:160]!r}")
+
+        # ── 离开再回来，列表必须包含新加的 ──
+        goto(page, "首页")
+        page.wait_for_timeout(500)
+        goto(page, "设置")
+        page.wait_for_timeout(1500)
+
+        body = page.inner_text("body")
+        rec("T14 界面显示第二家", SECOND_NAME in body,
+            "列表里看不到刚新增的第二家")
+        rec("T14 界面不渲染明文 Key", SECOND_KEY not in body,
+            "设置页把明文 Key 渲染出来了")
+
+        # ── 界面上切到第二家 ──
+        btn = page.locator("button:has-text('切到这家')").first
+        rec("T14 有「切到这家」按钮", btn.count() > 0, "列表项没有切换按钮")
+        if btn.count() == 0:
+            return
+        btn.click(timeout=6000)
+
+        end = time.time() + 12
+        after = {}
+        while time.time() < end:
+            after = ((be.config() or {}).get("relay") or {})
+            if after.get("base_url") == SECOND_URL:
+                break
+            time.sleep(0.4)
+        rec("T14 界面切换后当前项确实变了",
+            after.get("base_url") == SECOND_URL,
+            f"切换后 base_url={after.get('base_url')!r}")
+
+        # 界面上的「当前使用中」标记必须跟着走
+        try:
+            page.wait_for_timeout(1500)
+            body2 = page.inner_text("body")
+            rec("T14 界面标出新的当前使用项",
+                "当前使用中" in body2 and SECOND_URL.replace(
+                    "https://", "") in body2,
+                f"界面未见第二家被标为当前使用中")
+        except Exception as e:
+            rec("T14 界面标出新的当前使用项", False, f"读取界面失败: {e}")
+
+        # ── 切换后配置不丢 ──
+        lst3 = be._get("/api/relays/configured", timeout=8) or {}
+        items3 = lst3.get("relays") or []
+        urls = [r.get("base_url") for r in items3]
+        rec("T14 切换后两家的地址都还在",
+            SECOND_URL in urls and orig_url in urls,
+            f"列表地址={urls!r}")
+        rec("T14 切换后列表没有重复项", len(items3) == len(set(urls)),
+            f"列表地址={urls!r}")
+        rec("T14 切换后启用项唯一",
+            sum(1 for r in items3 if r.get("active")) == 1,
+            f"active 标记={[r.get('active') for r in items3]}")
+    finally:
+        # ── 收尾：切回原项、移除测试这家 ──
+        # ★ 顺序不能反：先切回原配置再移除 ——
+        #   反过来会撞上「不能移除当前启用项」而失败，
+        #   测试留下的占位中转站就会永久留在用户配置里。
+        try:
+            lst = be._get("/api/relays/configured", timeout=8) or {}
+            items = lst.get("relays") or []
+            second = next(
+                (r for r in items if r.get("base_url") == SECOND_URL), None)
+            orig_item = next(
+                (r for r in items
+                 if r.get("base_url") == orig_url and not r.get("active")),
+                None)
+            if orig_item is not None:
+                be._post("/api/relays/active",
+                         {"id": orig_item.get("id")}, timeout=8)
+            if second is not None:
+                be._post("/api/relays/configured/remove",
+                         {"id": second.get("id")}, timeout=8)
+        except Exception as e:
+            rec("T14 收尾：清理测试中转站", False,
+                f"清理失败: {e}（{SECOND_URL} 可能残留，需手动移除）")
+        else:
+            rec("T14 收尾：清理测试中转站", True, "已移除测试用的第二家")
+
+        try:
+            now = ((be.config() or {}).get("relay") or {}).get("base_url")
+            rec("T14 收尾：启用项回到原样", now == orig_url,
+                f"当前项 base_url={now!r}，期望 {orig_url!r}")
+        except Exception as e:
+            rec("T14 收尾：启用项回到原样", False, f"核对失败: {e}")
+
+
 def test_relay_test_button(page, be: Backend):
     """T8 设置页「测试连接」给出与事实相符的结论。
 
@@ -1864,6 +2047,13 @@ def main():
                     ("T5 开关存在", lambda: test_settings_toggles(page, be)),
                     ("T5b 开关生效", lambda: test_toggle_applies(page, be)),
                     ("T8 测试连接", lambda: test_relay_test_button(page, be)),
+                    # ★ T14 会新增/切换/移除中转站配置。
+                    #   必须排在 T10（拦截全链路）**之前** ——
+                    #   T14 会临时把当前启用项切到 .invalid 占位地址，
+                    #   那个地址解析不了；T10 若在那之后跑，
+                    #   请求会因连不上而返回 502 而不是 403，
+                    #   拦截判据必然 FAIL。
+                    ("T14 多中转站切换", lambda: test_multi_relay_settings(page, be)),
                     # ★ T10 必须排在 T9（暂停恢复）**之前**：
                     #   T9 会把防护暂停掉，而防护暂停时引擎走的是
                     #   直通转发、不再执行检测 —— T10 在那种状态下跑，

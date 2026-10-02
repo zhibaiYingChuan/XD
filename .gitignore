@@ -162,7 +162,20 @@ tools/
 #      把用户自身导致的事件当成了中转站的罪证。
 #      这类故障代码审查看不出来（实现自洽），
 #      测试也不会红（公式没bug），只有把责任归属钉死才拦得住。
-#   八者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
+#   ⑨ test_multi_relay.py
+#      防「多中转站看得见、用不了」——用户同时用两家时，
+#      代理无条件用配置里的 Key 覆盖 Authorization，
+#      于是「以为在用 A、实际扣 B 的钱」，而界面上没有任何提示。
+#      本轮在这条链路上实测抓到三个静默故障：
+#        ① 保存配置时把其余中转站的真实 Key 全换成掩码串
+#           （前端整体回传 config.relay，而 others[].api_key 已是掩码）
+#           ——不可逆，之后切到那家必然 401 而界面看不出异常；
+#        ② 风险记到「当前启用项」头上而不是本次实际转发的那家；
+#        ③ _resolve_upstream 写成 async 而调用处漏 await，
+#           每个 AI 请求 500 ——单元测试全绿，因为它们只调它自己。
+#      另外「只有切换、没有新增」意味着列表永远长不出第二家：
+#      功能看起来存在，实际用户永远只有一家。
+#   九者都是：编译不报错、已有测试全绿，只有真实环境才暴露。
 #   2026-09-28 这几类问题里有三类是线上反馈才发现的。
 #
 #   用 /* 逐条排除而非 !tests/xxx 反向放行：
@@ -177,6 +190,7 @@ tests/*
 !tests/test_help_claims.py
 !tests/test_block_evidence.py
 !tests/test_reputation_score.py
+!tests/test_multi_relay.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py

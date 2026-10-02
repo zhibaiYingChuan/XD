@@ -22,6 +22,8 @@ import {
   RotateCcw,
   PlugZap,
   Loader2,
+  CheckCircle2,
+  Info,
 } from 'lucide-react';
 import {
   api,
@@ -32,6 +34,7 @@ import {
   type SecurityLevel,
   type RelayPrecheck,
   type RelayTestResult,
+  type ConfiguredRelay,
 } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard, openExternal } from '../lib/tauriShim';
@@ -103,6 +106,36 @@ export default function Settings() {
   //   否则会把基于旧地址的结论呈现给用户。
   const testSeqRef = useRef(0);
   const mountedRef = useRef(true);
+  // ★ v0.1.0：已配置的中转站列表 + 切换中的操作锁。
+  //   切换状态独立于 saving —— 保存配置与切换目标是两件事，
+  //   混用会让用户在保存失败后连切换也点不动。
+  const [configured, setConfigured] = useState<ConfiguredRelay[]>([]);
+  const [switching, setSwitching] = useState(false);
+  // ★ v0.1.0：新增中转站的草稿。
+  //   必须独立于顶部的 keyDraft —— 那是「当前启用项」的 Key，
+  //   两者共用一个 state 会让用户给第二家填的 Key
+  //   被当成当前项的 Key 保存出去。
+  // ★ adding(表单是否展开) 与 addingBusy(请求在飞) 必须是**两个** state：
+  //   共用一个会让用户刚点开表单、什么都没干，
+  //   按钮就已经显示「添加中…」—— 而实际并没有任何请求在发。
+  //   那是在对用户说谎，CDP 实测抓到过这个形态。
+  const [adding, setAdding] = useState(false);
+  const [addingBusy, setAddingBusy] = useState(false);
+  const [newRelay, setNewRelay] = useState({
+    name: '', base_url: '', api_key: '',
+  });
+
+  // 已配置列表的加载刻意**不并入**上面的 load()：
+  // 那是配置页的主数据，一旦它失败（引擎未起），
+  // 切换列表也会跟着空掉，而两者本不该互相拖累。
+  const loadConfigured = useCallback(async () => {
+    try {
+      const r = await api.getConfiguredRelays();
+      if (mountedRef.current) setConfigured(r.relays ?? []);
+    } catch {
+      if (mountedRef.current) setConfigured([]);
+    }
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -136,7 +169,96 @@ export default function Settings() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadConfigured();
+  }, [load, loadConfigured]);
+
+  // ★ v0.1.0：切换启用中的中转站。
+  //   声明刻意放在 load 之后 —— 它要 await load()，
+  //   放在前面会撞 TS2448（used before declaration）。
+  const switchTo = useCallback(
+    async (id: string, name: string) => {
+      if (switching) return;
+      setSwitching(true);
+      try {
+        await api.switchRelay(id);
+        // 必须整体重载：切换后 config.relay 指向的是另一家，
+        // 只刷新列表会让上面的地址输入框还显示旧那家的值。
+        await load();
+        await loadConfigured();
+        if (mountedRef.current) toast.success(`已切换到「${name}」`);
+      } catch (e) {
+        if (mountedRef.current) {
+          toast.error(
+            `切换失败：${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      } finally {
+        if (mountedRef.current) setSwitching(false);
+      }
+    },
+    [switching, toast, load, loadConfigured],
+  );
+
+  // ★ v0.1.0：新增一家到列表（不设为启用）。
+  const addRelay = useCallback(async () => {
+    if (addingBusy) return;
+    const name = newRelay.name.trim();
+    const baseUrl = newRelay.base_url.trim();
+    const key = newRelay.api_key.trim();
+    // 前端也拦一道：不是「后端会拒绝」，而是**别让用户白等一趟**。
+    // 但后端那道守卫不能省 —— 前端校验可以被绕过，
+    // 而掩码 Key 落盘的后果是静默且不可逆的。
+    if (!baseUrl) {
+      toast.error('请填写中转站地址');
+      return;
+    }
+    if (!key) {
+      toast.error('请填写 API Key');
+      return;
+    }
+    setAddingBusy(true);
+    try {
+      const r = await api.addRelay({
+        name: name || '未命名', base_url: baseUrl, api_key: key,
+      });
+      // ★ 刻意**不**调 load()：新增不改变当前启用项，
+      //   顶部那堆输入框不该被清掉 —— 用户填到一半的地址还在。
+      await loadConfigured();
+      setNewRelay({ name: '', base_url: '', api_key: '' });
+      setAdding(false);
+      if (mountedRef.current) toast.success(`已添加，现在共 ${r.total} 家`);
+    } catch (e) {
+      if (mountedRef.current) {
+        toast.error(
+          `添加失败：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    } finally {
+      if (mountedRef.current) setAddingBusy(false);
+    }
+  }, [addingBusy, newRelay, toast, loadConfigured]);
+
+  /** 从列表移除一家。当前启用项不给按钮，后端也会拒。 */
+  const dropRelay = useCallback(
+    async (id: string, name: string) => {
+      if (switching) return;
+      setSwitching(true);
+      try {
+        await api.removeRelay(id);
+        await loadConfigured();
+        if (mountedRef.current) toast.success(`已移除「${name}」`);
+      } catch (e) {
+        if (mountedRef.current) {
+          toast.error(
+            `移除失败：${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      } finally {
+        if (mountedRef.current) setSwitching(false);
+      }
+    },
+    [switching, toast, loadConfigured],
+  );
 
   // ── 通用保存 ──
   const save = useCallback(
@@ -279,6 +401,10 @@ export default function Settings() {
       // 保存成功后 api_key 会被掩码，需重新拉取
       setKeyDraft('');
       await load();
+      // ★ 新配的一家也要出现在切换列表里。
+      //   漏了这一步的话，用户保存完看不到自己刚加的中转站，
+      //   会以为保存失败了 —— 而提示明明说的是「已保存」。
+      await loadConfigured();
     }
   };
 
@@ -697,6 +823,135 @@ export default function Settings() {
         >
           {saving ? '保存中...' : '保存中转站配置'}
         </button>
+
+        {/* ★ v0.1.0：多中转站切换
+            ——
+            为什么要显式切换而不是自动路由：
+            带一个请求只发往一家，带宽不会被摊薄，
+            多配几家不会变慢（只多一次哈希查找，微秒级）。
+            反过来，自动故障转移必须靠探活，
+            而探活是真实请求 —— 本机实测平均延迟 13 秒，
+            拿它做后台探测等于持续制造慢请求。
+            而且自动切换会让「这次扣了谁的钱」变得不可知，
+            多中转站场景下最需要确定的恰恰就是这件事。 */}
+        <div className="field mb-24">
+          <div className="field-label">已配置的中转站</div>
+          {configured.length === 0 ? (
+            <div className="field-hint">还没有配置中转站。</div>
+          ) : (
+            <>
+              <div className="list">
+                {configured.map((r) => (
+                  <div key={r.id} className="list-item">
+                    <span className="list-icon" style={{
+                      color: r.active ? 'var(--xd-safe)' : 'var(--xd-text-dim)',
+                    }}>
+                      {r.active ? (
+                        <CheckCircle2 size={14} strokeWidth={1.5} />
+                      ) : (
+                        <Info size={14} strokeWidth={1.5} />
+                      )}
+                    </span>
+                    <span className="list-text">
+                      <b>{r.name}</b>
+                      <span className="faint mono" style={{ marginLeft: 8, fontSize: 11 }}>
+                        {r.normalized_base || r.base_url}
+                      </span>
+                      {r.active && (
+                        <span className="faint" style={{ marginLeft: 8, fontSize: 11 }}>
+                          · 当前使用中
+                        </span>
+                      )}
+                    </span>
+                    {!r.active && (
+                      <>
+                        <button
+                          className="btn ghost sm"
+                          disabled={switching}
+                          onClick={() => switchTo(r.id, r.name)}
+                        >
+                          切到这家
+                        </button>
+                        <button
+                          className="btn ghost sm"
+                          disabled={switching}
+                          aria-label={`移除 ${r.name}`}
+                          onClick={() => dropRelay(r.id, r.name)}
+                        >
+                          移除
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="field-hint">
+                请求会按你填的 API Key 自动识别该发给哪家；
+                Key 对不上时用「当前使用中」这家。
+                切换只改默认目标，不会改动任何一家的配置。
+              </div>
+            </>
+          )}
+
+          {/* ── 新增一家 ── */}
+          <div className="mt-12">
+            {adding ? (
+              <>
+                <div className="field-label">添加中转站</div>
+                <input
+                  className="input mb-8"
+                  placeholder="显示名（可留空）"
+                  aria-label="新增中转站的显示名"
+                  value={newRelay.name}
+                  onChange={(e) => setNewRelay(
+                    { ...newRelay, name: e.target.value })}
+                />
+                <input
+                  className="input mb-8"
+                  placeholder="中转站地址，如 https://api.example.com"
+                  aria-label="新增中转站的地址"
+                  value={newRelay.base_url}
+                  onChange={(e) => setNewRelay(
+                    { ...newRelay, base_url: e.target.value })}
+                />
+                <input
+                  className="input mb-8 mono"
+                  type="password"
+                  placeholder="API Key"
+                  aria-label="新增中转站的 API Key"
+                  value={newRelay.api_key}
+                  onChange={(e) => setNewRelay(
+                    { ...newRelay, api_key: e.target.value })}
+                />
+                <div className="flex items-center gap-8">
+                  <button
+                    className="btn primary sm"
+                    disabled={addingBusy}
+                    onClick={() => void addRelay()}
+                  >
+                    {addingBusy ? '添加中…' : '添加到列表'}
+                  </button>
+                  <button
+                    className="btn ghost sm"
+                    onClick={() => {
+                      setAdding(false);
+                      setNewRelay({ name: '', base_url: '', api_key: '' });
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+                <div className="field-hint">
+                  添加只是存起来备着，<b>不会</b>切换当前使用中的那家。
+                </div>
+              </>
+            ) : (
+              <button className="btn ghost sm" onClick={() => setAdding(true)}>
+                添加另一家
+              </button>
+            )}
+          </div>
+        </div>
 
         <div className="field">
           <label className="field-label" htmlFor="proxy-port">

@@ -45,6 +45,40 @@ _ENDPOINT_TAIL = re.compile(
 _MASK_MARK = "****"
 
 
+def normalize_relay_base(base_url: str) -> str:
+    """把用户粘贴的中转站地址规范化成可用的接入地址。
+
+    ★ v0.1.0 抽成模块级函数。
+      原先是 RelayConfig.normalized_base 的实现，
+      但多中转站后每一条都要用同一套规范化，
+      而它们是 dict 不是 RelayConfig 实例 ——
+      继续留在属性里就只能「为了转发临时造一个 RelayConfig」，
+      那会让 Key 与地址的对应关系变得难以追踪。
+      单一实现同时服务配置页展示与实际转发，两边不会漂移。
+
+    流程：去空白 → 去查询串 → 剥端点 → 补 /v1。
+    判据不能用 endswith("/v1")：那只认字面量 /v1，
+    而 /v1beta、/api/v4 会被再拼一层 /v1，请求直接 404。
+    """
+    base = (base_url or "").strip()
+    # 从文档复制时常带查询串/锚点，留着会污染请求路径
+    for sep in ("?", "#"):
+        base = base.split(sep, 1)[0]
+    base = base.rstrip("/")
+    # 剥掉误粘的端点尾巴（在补 /v1 之前做，才能得到干净的接入地址）
+    base = _ENDPOINT_TAIL.sub("", base).rstrip("/")
+    if not _VERSION_SEG.search(base):
+        base = f"{base}/v1"
+    return base
+
+
+def mask_relay_key(api_key: str) -> str:
+    """掩码显示 API Key。"""
+    if len(api_key) <= 8:
+        return "***"
+    return f"{api_key[:4]}{_MASK_MARK}{api_key[-4:]}"
+
+
 def is_masked_key(value: Any) -> bool:
     """该值是否是掩码串，而不是真实的 API Key。
 
@@ -96,12 +130,36 @@ class RelayConfig:
 
     ★ 这里**不**包含 model 字段：玄盾监控的是 API，不是某个模型。
       请求里的 model 原样透传给中转站，玄盾不改写它。
+
+    ★★ v0.1.0：从「单条」扩为「多条 + 一个当前启用项」。
+      动机是一个真实的坑：转发时**总是**用这份配置里的 api_key
+      （见 app.py::_forward_to_relay），所以
+      「AI 工具里填 A 家、玄盾里配 B 家」时，
+      用户以为在用 A 扣费，实际扣的是 B —— 账单打错且无人知晓。
+
+      为什么不做「多中转站轮询/负载均衡」：
+        ① 带宽不会被摊薄 —— 每个请求本来就只发往一家；
+        ② 自动故障转移必须靠**探活**，而探活是真实 HTTP 请求，
+           本机实测平均延迟 13123 ms，用它做定期探测等于
+           让后台一直在跑慢请求；
+        ③ 更根本的：自动切换会让「这次请求扣了谁的钱」变得不可知，
+           而这正是多中转站场景下最需要确定的事。
+      所以这里只做「按 Key 识别 + 显式切换」，不做自动路由。
     """
 
     name: str = "默认中转站"           # 显示名
     base_url: str = ""                 # 如 https://api.example.com
     api_key: str = ""                  # 中转站 API Key
     enabled: bool = True
+
+    # ★ v0.1.0：多中转站。新字段全部有默认值，
+    #   老配置（只有上面四个字段）加载后自动补齐，不丢任何设置。
+    #
+    #   存的是**完整副本**而不是引用当前启用项 ——
+    #   否则用户改「当前中转站」时会把列表里的原始配置一起改掉，
+    #   切回去发现已经不是原来的地址了。
+    others: List[Dict[str, Any]] = field(default_factory=list)
+    active_id: str = ""                 # 当前启用的 relay id
 
     def validate(self) -> List[str]:
         """校验配置，返回错误列表（空表示通过）。"""
@@ -112,7 +170,74 @@ class RelayConfig:
             errors.append("中转站地址必须以 http:// 或 https:// 开头")
         if not self.api_key:
             errors.append("中转站 API Key 不能为空")
+        # 多中转站：列表里每条都必须自身可用。
+        # 不校验的话，用户切到某一家才发现地址打错，
+        # 而那时请求已经在往外发了。
+        for i, r in enumerate(self.others):
+            name = str(r.get("name") or f"#{i + 1}")
+            url = str(r.get("base_url") or "")
+            if not url:
+                errors.append(f"中转站「{name}」地址为空")
+            elif not url.startswith(("http://", "https://")):
+                errors.append(
+                    f"中转站「{name}」地址必须以 http:// 或 https:// 开头"
+                )
+            if not str(r.get("api_key") or ""):
+                errors.append(f"中转站「{name}」API Key 为空")
         return errors
+
+    # ── 多中转站（v0.1.0）──
+
+    @staticmethod
+    def make_relay_id(base_url: str, api_key: str) -> str:
+        """生成中转站的稳定标识。
+
+        ★ 用「地址 + Key 的哈希」而不是名字或序号：
+          名字会重复、序号会随删除而变，
+          都会让「切回去」找不到原来的那一家。
+          而 Key 一变就是**另一家**了（同一家的 Key 轮换很常见），
+          所以把 Key 纳入哈希是符合语义的。
+        """
+        import hashlib
+
+        raw = f"{base_url}|{api_key}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:12]
+
+    def all_relays(self) -> List[Dict[str, Any]]:
+        """返回全部中转站（当前启用的排在最前）。
+
+        ★ 每项都含 id 与 active 标记，前端据此渲染切换列表。
+        """
+        cur = {
+            "id": self.active_id or self.make_relay_id(
+                self.base_url, self.api_key),
+            "name": self.name,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "enabled": self.enabled,
+            "active": True,
+        }
+        rest = [dict(r, active=False) for r in self.others]
+        return [cur] + rest
+
+    def relay_by_key(self, api_key: str) -> Optional[Dict[str, Any]]:
+        """按 API Key 找出对应中转站；找不到返回 None。
+
+        ★ 这是「账单打不错」的关键。
+          转发时若拿到的 Key 能匹配上某一家，就用那家的地址，
+          否则用当前启用项 —— 后者是兼容老配置的回退。
+
+          刻意**不做**「匹配不到就报错」：
+          用户可能刚在别处换了 Key，还没同步到玄盾，
+          此时直接拒绝会让整个 AI 工具不可用，
+          而静默用当前启用项只是延续现状（不会更糟）。
+        """
+        if not api_key:
+            return None
+        for r in self.all_relays():
+            if r.get("api_key") and r["api_key"] == api_key:
+                return r
+        return None
 
     @property
     def normalized_base(self) -> str:
@@ -132,22 +257,11 @@ class RelayConfig:
           ``.../provider/v1/chat/completions`` 实测路由命中
           （返回的是模型不支持，属另一层问题）。
         """
-        base = (self.base_url or "").strip()
-        # 从文档复制时常带查询串/锚点，留着会污染请求路径
-        for sep in ("?", "#"):
-            base = base.split(sep, 1)[0]
-        base = base.rstrip("/")
-        # 剥掉误粘的端点尾巴（在补 /v1 之前做，才能得到干净的接入地址）
-        base = _ENDPOINT_TAIL.sub("", base).rstrip("/")
-        if not _VERSION_SEG.search(base):
-            base = f"{base}/v1"
-        return base
+        return normalize_relay_base(self.base_url)
 
     def mask_key(self) -> str:
         """掩码显示 API Key。"""
-        if len(self.api_key) <= 8:
-            return "***"
-        return f"{self.api_key[:4]}****{self.api_key[-4:]}"
+        return mask_relay_key(self.api_key)
 
 
 @dataclass
@@ -264,6 +378,10 @@ class PersonalConfig:
             "guard": asdict(self.guard),
             "server": asdict(self.server),
         }
+        # ★ 磁盘上必须留**明文** Key（含 others 里的每一条）——
+        #   否则重启后无法按 Key 识别中转站，转发会 401。
+        #   这与单条 relay.api_key 的处理一致。
+        #   对外一律走 to_safe_dict（逐条掩码），文件权限在下方设为 0o600。
         CONFIG_FILE.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -295,9 +413,21 @@ class PersonalConfig:
     # ── 脱敏视图（供 API 返回，不含密钥明文）──
 
     def to_safe_dict(self) -> Dict[str, Any]:
-        """返回不含 API Key 明文的配置视图。"""
+        """返回不含 API Key 明文的配置视图。
+
+        ★ 多中转站的每一项都要单独掩码。
+          漏掉任何一条都等于把该家的 Key 明文发给前端 ——
+          前端是 Tauri 窗口内的 WebView，但它仍可能被
+          截图、注入脚本或日志采集拿到。
+        """
         relay = asdict(self.relay)
         relay["api_key"] = self.relay.mask_key()
+        # others 是 list[dict]，asdict 已深拷贝过，
+        # 这里可以安全就地替换而不会改到 self.relay.others。
+        relay["others"] = [
+            {**r, "api_key": mask_relay_key(str(r.get("api_key") or ""))}
+            for r in self.relay.others
+        ]
         return {
             "relay": relay,
             "guard": asdict(self.guard),

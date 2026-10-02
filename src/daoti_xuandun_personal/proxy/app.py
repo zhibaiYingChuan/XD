@@ -32,7 +32,12 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..config import PersonalConfig, RelayConfig, is_masked_key
+from ..config import (
+    PersonalConfig,
+    is_masked_key,
+    mask_relay_key,
+    normalize_relay_base,
+)
 from ..reputation.tracker import ReputationTracker
 from ..storage.db import PersonalStorage
 from ..types import Action, LogEntry, LogType, RedactionRecord, SecurityLevel
@@ -364,17 +369,33 @@ def create_app() -> FastAPI:
         session_id = request.headers.get("X-Session-Id") or "default"
         model = body.get("model", "")
         stream = bool(body.get("stream", False))
-        upstream_domain = _reputation.extract_domain(_config.relay.base_url) if _reputation else ""
+
+        # ★★ v0.1.0：先判定这次该转发给哪家。
+        #   必须在任何转发之前完成 —— 之后的日志、信誉、
+        #   基线全都依赖「实际发给了谁」，
+        #   否则多中转站下这些记录会全部记到当前启用项头上，
+        #   而用户实际用的是另一家。
+        resolved = _resolve_upstream(request) or {}
+        target_relay = resolved.get("relay")
+        matched_by = resolved.get("matched_by", "active")
+        upstream_domain = (
+            _reputation.extract_domain(str(target_relay.get("base_url") or ""))
+            if (_reputation and target_relay) else ""
+        )
 
         # 防护已暂停 → 直通
         if time.time() < _paused_until:
-            return await _relay_passthrough(body, stream, session_id)
+            return await _relay_passthrough(
+                body, stream, session_id, target=target_relay,
+                matched_by=matched_by,
+            )
 
         # ★ 未激活 / 已过期 → 只读模式（直通，但如实记录「未经检测」）
         if not _protection_enabled():
             return await _relay_passthrough(
                 body, stream, session_id,
                 note="未激活，本次请求未经检测直接转发",
+                target=target_relay, matched_by=matched_by,
             )
 
         # ══════ 第一层：请求侧脱敏 ══════
@@ -478,7 +499,8 @@ def create_app() -> FastAPI:
         # ══════ 转发到中转站 ══════
         t0 = time.time()
         try:
-            upstream_response = await _forward_to_relay(body, stream)
+            upstream_response = await _forward_to_relay(
+                body, stream, target_relay)
         except httpx.TimeoutException:
             return _proxy_error(upstream_domain, model, session_id,
                                 "中转站响应超时", t0, LogType.PROXY_ERROR)
@@ -501,7 +523,8 @@ def create_app() -> FastAPI:
             request_baseline,
         )
 
-    async def _forward_to_relay(body: Dict[str, Any], stream: bool):
+    async def _forward_to_relay(body: Dict[str, Any], stream: bool,
+                                target: Optional[Dict[str, Any]] = None):
         """转发请求到中转站（请求体原样透传，不改写 model）。
 
         ★ 玄盾监控的是 API，不是某个模型 —— 请求里的 model 属于用户
@@ -509,15 +532,24 @@ def create_app() -> FastAPI:
           「默认模型」覆盖请求 model，后果是：用户明明发的是 A 模型，
           中转站收到的是 B；而请求基线里记的也是被改写的 B，
           于是「模型降级」判据（中转站偷偷换模型）永远发现不了真降级。
+
+        ★★ v0.1.0：target 决定转发给哪家、用哪把 Key。
+          原实现无条件用配置里的 Key 覆盖 Authorization，
+          多中转站下会让用户「以为在用 A、实际扣 B 的钱」。
+          target 为 None 时回落到当前启用项（兼容单条配置）。
         """
         if _http_client is None or _config is None:
             raise httpx.ConnectError("代理未初始化")
 
+        target = resolve_forward_target(target)
+        base = target["base"]
+        api_key = target["api_key"]
+
         return await _http_client.post(
-            f"{_config.relay.normalized_base}/chat/completions",
+            f"{base}/chat/completions",
             json=body,
             headers={
-                "Authorization": f"Bearer {_config.relay.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
         )
@@ -527,10 +559,20 @@ def create_app() -> FastAPI:
         stream: bool,
         session_id: str,
         note: str = "防护已暂停，本次请求未经检测直接转发",
+        target: Optional[Dict[str, Any]] = None,
+        matched_by: str = "active",
     ):
-        """未经检测的直通转发（防护暂停 / 未激活只读模式）。"""
+        """未经检测的直通转发（防护暂停 / 未激活只读模式）。
+
+        ★ v0.1.0：日志里必须记**实际转发给的那家**。
+          原实现记的是配置里的当前启用项，
+          多中转站下会把「用户用的是 A」记成 B，
+          信誉与日志全记错对象。
+        """
+        if target is None and _config is not None:
+            target = _config.relay.all_relays()[0]
         try:
-            upstream = await _forward_to_relay(body, stream)
+            upstream = await _forward_to_relay(body, stream, target)
         except httpx.HTTPError as e:
             return JSONResponse(
                 status_code=502,
@@ -540,9 +582,17 @@ def create_app() -> FastAPI:
         #   从未被产生，导致日志页「正常转发」筛选项恒为空 ——
         #   一个用户看得见、却永远无结果的选项。防护暂停/未激活期间正是
         #   「未经检测的转发」，如实记录反而是透明度要求。
+        #
+        # ★ v0.1.0：把「本次实际发给了谁」写进摘要。
+        #   多中转站下这是用户唯一能确认账单的依据 ——
+        #   没有它，用户只能靠猜。
+        host = _extract_host(str((target or {}).get("base_url") or ""))
+        via = "按 Key 识别" if matched_by == "key" else "当前启用"
         _record_log(
             LogType.RELAY.value,
-            _reputation.extract_domain(_config.relay.base_url) if _reputation else "",
+            _reputation.extract_domain(
+                str((target or {}).get("base_url") or "")
+            ) if _reputation else "",
             Action.PASS.value,
             "low",
             str(body.get("model", "")),
@@ -550,7 +600,7 @@ def create_app() -> FastAPI:
             None,
             session_id,
             [],
-            text_preview=note,
+            text_preview=f"{note}（本次转发给 {host or '-'} · {via}）",
         )
         if stream:
             return StreamingResponse(
@@ -1083,7 +1133,9 @@ def create_app() -> FastAPI:
         if not api_key:
             raise HTTPException(status_code=400, detail="请先填写中转站 API Key")
 
-        base = RelayConfig(base_url=base_url).normalized_base
+        # ★ 直接用模块级函数，不再「为了规范化临时造一个 RelayConfig」——
+        #   那样做会让这家的 Key 与地址的对应关系散落在两个地方。
+        base = normalize_relay_base(base_url)
         headers = {"Authorization": f"Bearer {api_key}"}
         # ★ 用专用超时而不是共用的 _http_client：共用客户端的 read 超时是
         #   request_timeout_s（本机为 300s）。测试按钮要让用户等 300 秒
@@ -1254,6 +1306,24 @@ def create_app() -> FastAPI:
                             ),
                         )
                     setattr(_config.relay, k, v)
+            # ★★ 多中转站：列表里每一条的 api_key 同样要过掩码守卫。
+            #   前端 config.relay 整体回传时，others[].api_key 拿到的
+            #   已经是掩码串（见 config.to_safe_dict）——
+            #   原实现只守了顶层 api_key，于是用户**每保存一次配置**，
+            #   就把其余中转站的真实 Key 全换成 `sk-a…CD⟪…⟫`，
+            #   之后切到那家就是 401，而配置页看起来一切正常。
+            #   这比「不写 others」严重得多：单中转站时代它不会发生。
+            bad = find_masked_key_in_others(payload["relay"].get("others"))
+            if bad is not None:
+                idx, key = bad
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"第 {idx + 1} 条中转站配置的 API Key 看起来是脱敏后的串"
+                        "（含 ****），已拒绝保存。若这不是你填的，"
+                        "说明列表里的 Key 已被掩码污染。"
+                    ),
+                )
         if "guard" in payload:
             for k, v in payload["guard"].items():
                 if hasattr(_config.guard, k) and v is not None:
@@ -1281,6 +1351,158 @@ def create_app() -> FastAPI:
 
         _config.save()
         return {"ok": True, "config": _config.to_safe_dict()}
+
+    @app.get("/api/relays/configured")
+    async def list_relays_conf():
+        """★ 已配置的中转站列表（v0.1.0）。
+
+        ★★ 路径必须是 /api/relays/configured，**不能**是 /api/relays。
+          /api/relays 已经被「信誉列表」占用了（见上方 list_relays）。
+          FastAPI 遇到重复路径不会报错，
+          而是**按注册顺序让先注册的那个生效** ——
+          新加的同名路由会变成一段永远不被调用的死代码，
+          且没有任何异常提示。这类冲突极难发现：
+          代码读起来完全正常，只是「接口没生效」。
+
+        与 /api/relays（信誉）**刻意分开**：
+          前者答「我配了哪些、现在用哪家」，
+          后者答「我用过哪些、它们表现如何」。
+          刚填完还没发过对话时信誉表是空的，
+          混在一起会让用户以为配置没生效。
+        """
+        if _config is None:
+            raise HTTPException(status_code=503, detail="配置未就绪")
+        items = _config.relay.all_relays()
+        return {
+            "relays": [
+                {
+                    "id": r.get("id"),
+                    "name": r.get("name") or "未命名",
+                    "base_url": r.get("base_url") or "",
+                    "normalized_base": normalize_relay_base(
+                        str(r.get("base_url") or "")),
+                    "api_key_masked": mask_relay_key(
+                        str(r.get("api_key") or "")),
+                    "active": bool(r.get("active")),
+                }
+                for r in items
+            ],
+            "active_id": items[0].get("id") if items else "",
+        }
+
+    @app.post("/api/relays/configured")
+    async def add_relay(payload: Dict[str, Any] = Body(...)):
+        """★ 新增一家中转站到列表（不设为启用）。
+
+        ★★ 为什么必须有这个接口：
+          多中转站原本只做了「切换」，而 others 只能靠切换产生 ——
+          于是**没有任何路径能把第二家加进去**：
+          设置页保存的是「当前启用项」，直接改地址等于覆盖原来那家。
+          功能看起来存在，实际用户永远只有一家，
+          而界面上「已配置的中转站」永远只有一行。
+          这类「有渲染、无数据来源」的缺陷在界面上完全看不出来。
+
+        ★ 刻意**不**设为启用项：
+          新增即切换会改变用户正在用的目标，
+          而他只是「先存着以后用」。
+        """
+        if _config is None:
+            raise HTTPException(status_code=503, detail="配置未就绪")
+        relay_cfg = _config.relay
+
+        name = str(payload.get("name") or "").strip() or "未命名"
+        base_url = str(payload.get("base_url") or "").strip()
+        api_key = str(payload.get("api_key") or "").strip()
+
+        errors: List[str] = []
+        if not base_url:
+            errors.append("中转站地址不能为空")
+        elif not base_url.startswith(("http://", "https://")):
+            errors.append("中转站地址必须以 http:// 或 https:// 开头")
+        if not api_key:
+            errors.append("中转站 API Key 不能为空")
+        elif is_masked_key(api_key):
+            # 与 update_config 同一条守卫：掩码串绝不能落成真实 Key
+            errors.append("这个 API Key 看起来是脱敏后的串（含 ****），已拒绝保存")
+        if errors:
+            raise HTTPException(status_code=400, detail={"errors": errors})
+
+        new_id = relay_cfg.make_relay_id(base_url, api_key)
+        if new_id == relay_cfg.make_relay_id(
+                relay_cfg.base_url, relay_cfg.api_key):
+            raise HTTPException(
+                status_code=400, detail="这家已经是当前使用中的中转站")
+        if any(str(r.get("id") or "") == new_id for r in relay_cfg.others):
+            raise HTTPException(status_code=400, detail="这家已经在列表里了")
+
+        relay_cfg.others = list(relay_cfg.others) + [{
+            "id": new_id, "name": name, "base_url": base_url,
+            "api_key": api_key, "enabled": True,
+        }]
+        _config.save()
+        logger.info("已新增中转站到列表: %s（未设为启用）", name)
+        return {"ok": True, "id": new_id, "total": len(relay_cfg.others) + 1}
+
+    @app.post("/api/relays/configured/remove")
+    async def remove_relay(payload: Dict[str, Any] = Body(...)):
+        """从列表里移除一家（**不能**移除当前启用项）。
+
+        ★ 为什么不允许移除启用项：
+          移除掉当前在用的那家等于让用户的 AI 工具立刻失去目标，
+          而界面上不会有任何提示。必须先「切到这家」。
+        """
+        if _config is None:
+            raise HTTPException(status_code=503, detail="配置未就绪")
+        relay_cfg = _config.relay
+        want = str(payload.get("id") or "").strip()
+        if not want:
+            raise HTTPException(status_code=400, detail="缺少中转站 id")
+        cur_id = relay_cfg.make_relay_id(relay_cfg.base_url, relay_cfg.api_key)
+        if want == cur_id or want == relay_cfg.active_id:
+            raise HTTPException(
+                status_code=400,
+                detail="不能移除当前使用中的中转站，请先切到另一家")
+
+        before = len(relay_cfg.others)
+        relay_cfg.others = [
+            r for r in relay_cfg.others if str(r.get("id") or "") != want
+        ]
+        if len(relay_cfg.others) == before:
+            raise HTTPException(status_code=404, detail="中转站不存在")
+        _config.save()
+        logger.info("已从列表移除中转站: %s", want)
+        return {"ok": True, "total": len(relay_cfg.others) + 1}
+
+    @app.post("/api/relays/active")
+    async def switch_active_relay(payload: Dict[str, Any] = Body(...)):
+        """切换当前启用的中转站（显式切换，不做自动故障转移）。
+
+        ★ 切换只改「默认发给谁」，**不删改**任何一条配置。
+          原实现把列表里的原始项当成当前项直接覆盖，
+          用户切一下就发现原来那家的地址被改了 ——
+          再切回去已经不是原来的配置。
+        """
+        if _config is None:
+            raise HTTPException(status_code=503, detail="配置未就绪")
+        relay_cfg = _config.relay
+        want = str(payload.get("id") or "").strip()
+        if not want:
+            raise HTTPException(status_code=400, detail="缺少中转站 id")
+
+        # 真正的重排逻辑在 apply_relay_switch（模块级、可被测试直接调用）。
+        # 路由只负责翻译错误码 —— 把算法写在这里会让它无法被单独验证，
+        # 而这类「切换后配置被改坏」的 bug 恰恰只在真切换一次时才暴露。
+        try:
+            result = apply_relay_switch(relay_cfg, want)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="中转站不存在")
+
+        errors = _config.validate()
+        if errors:
+            raise HTTPException(status_code=400, detail={"errors": errors})
+        _config.save()
+        logger.info("已切换当前中转站，启用 id=%s", result["active_id"])
+        return {"ok": True, "active_id": result["active_id"]}
 
     @app.post("/api/pause")
     async def pause_protection(duration_min: int = Body(30, embed=True)):
@@ -1940,6 +2162,183 @@ def _record_log(
         logger.warning("日志记录失败: %s", e)
 
 
+def find_masked_key_in_others(
+    others: Optional[List[Any]],
+) -> Optional[Tuple[int, str]]:
+    """在中转站列表里找出第一个「掩码串冒充真 Key」的条目。
+
+    ★ 为什么必须单独抽出来：
+      这条守卫的失效后果是**静默且不可逆** ——
+      用户每点一次「保存中转站配置」，其余中转站的真实 Key
+      就被替换成 `sk-a…CD⟪…⟫` 落进磁盘；之后切到那家必然 401，
+      而配置页显示一切正常，用户只会以为中转站封了他。
+
+    ★ 判据放在模块级而非路由闭包内：
+      写在闭包里就只能靠「读源码找 is_masked_key 字样」来判断，
+      而那种判据是恒真的 —— 把判断条件改掉、字样还在，测试照样绿。
+
+    Returns: (下标, 该条的值)；没有则 None
+    """
+    for i, item in enumerate(others or []):
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("api_key") or "")
+        if is_masked_key(key):
+            return i, key
+    return None
+
+
+def resolve_forward_target(
+    target: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """把「转发给哪家」解析成真正要用的接入地址与 Key。
+
+    ★★ 这是「账单打不错」的最后一道关。
+      历史实现是「先按 Key 识别出目标，转发时又用配置里的
+      启用 Key 无条件覆盖 Authorization」——
+      识别对了却在最后一步被推平，结果是拿 A 的 Key 请求 B 的地址。
+
+    ★ 抽成模块级纯函数的原因同 apply_relay_switch：
+      闭包内的写法无法被测试直接调用，
+      只能靠「读源码确认没有 `_config.relay.api_key`」来判断 ——
+      而那种判据是恒真的，把赋值挪个位置照样绿。
+
+    Returns: {"base": 规范化后的地址, "api_key": 该家的 Key, "relay": 原项}
+    """
+    if _config is None:
+        raise httpx.ConnectError("代理未初始化")
+    relay_cfg = _config.relay
+    if target is None:
+        target = relay_cfg.all_relays()[0]
+    return {
+        "base": normalize_relay_base(str(target.get("base_url") or "")),
+        # 目标缺 Key 时才回落 —— 回落方向必须是「启用的那把」，
+        # 绝不能反过来无条件覆盖成启用项的 Key。
+        "api_key": str(target.get("api_key") or relay_cfg.api_key),
+        "relay": target,
+    }
+
+
+def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
+    """按请求带来的 Key 判定「这次该转发给哪家」。
+
+    ★★ 刻意**不是** async —— 这里只读 header 与配置，不做任何 I/O。
+      原实现写成 `async def` 而调用处忘了 await，
+      于是拿到的是一个 coroutine 对象，`resolved.get("relay")` 直接抛
+      AttributeError → 每个 AI 请求 500。
+      单元测试当时全绿是因为它们只调 `_resolve_upstream` 自己
+      （自己包了 asyncio.run），从没走调用点 ——
+      这类「只在拼装处才暴露」的错误必须由端到端用例兜住。
+
+    ★★ 这是多中转站里最关键的一步。
+      原实现无条件用配置里的 api_key 覆盖 Authorization，
+      于是「AI 工具里填 A 家、玄盾里配 B 家」时，
+      用户以为在用 A 扣费，实际扣的是 B ——
+      账单打错，而且两边都不知道。
+
+    ★ 判定顺序
+      1) 请求带了 Authorization → 去掉 "Bearer " 前缀后按 Key 匹配；
+      2) 命中已配置的中转站 → 用那家的地址与 Key；
+      3) 没命中（老配置只有一家，或用户刚换了 Key）
+         → 回退到当前启用项，并把实际用的那家回报给调用方，
+            让日志与界面能显示「本次实际转发给了谁」。
+
+    ★ 不做自动故障转移、不做轮询：
+      探活是真实 HTTP 请求，本机平均延迟 13 秒，
+      拿它做后台探测等于持续制造慢请求；
+      而自动切换会让「这次扣了谁的钱」变得不可知 ——
+      多中转站场景下最需要确定的就是这件事。
+
+    Returns: {"relay": {...}, "matched_by": "key"|"active"}；无配置时 None
+    """
+    if _config is None:
+        return None
+    relay_cfg = _config.relay
+    incoming = ""
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        incoming = auth[7:].strip()
+
+    matched = relay_cfg.relay_by_key(incoming) if incoming else None
+    if matched is not None:
+        logger.info(
+            "按 Key 识别到中转站：%s（%s）",
+            matched.get("name") or "-", _extract_host(matched.get("base_url")),
+        )
+        return {"relay": matched, "matched_by": "key"}
+
+    return {"relay": relay_cfg.all_relays()[0], "matched_by": "active"}
+
+
+def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:
+    """把 id 为 want 的那家提为当前启用项，其余留在列表里。**就地修改** relay_cfg。
+
+    ★★ 必须**重排**而不是覆盖，这是本轮最容易写坏的地方。
+      原实现（也是最容易写出的直觉写法）是把目标项直接赋给
+      base_url/api_key/name，再把 others 清空或原样留着 ——
+      结果：用户切一下，原来那家的地址就被覆盖了，
+      再切回去已经不是它；而目标项还留在 others 里，成了重复项。
+
+      正确形态：旧当前项 → 备份进列表尾部；目标项 → 提为当前项；
+      其余项原序保留。切换前后「地址 + Key」的集合必须完全相同。
+
+    ★ 为什么抽成模块级纯函数：
+      路由里的闭包无法被测试直接调用，于是这类结构性错误
+      只能靠「读源码找字符串」来判断 —— 而那种判据是恒真的：
+      把赋值改坏、字符串都还在，测试照样绿。
+      抽出来后测试能真的切换一次并逐字段核对。
+
+    Returns: {"ok": bool, "active_id": str, "changed": bool}
+    Raises: KeyError —— want 不在列表里
+    """
+    cur_id = relay_cfg.make_relay_id(relay_cfg.base_url, relay_cfg.api_key)
+    if want == cur_id:
+        return {"ok": True, "active_id": want, "changed": False}
+
+    target = next(
+        (r for r in relay_cfg.others
+         if str(r.get("id") or "") == want), None)
+    if target is None:
+        raise KeyError(want)
+
+    new_active = {
+        "id": relay_cfg.make_relay_id(
+            str(target.get("base_url") or ""),
+            str(target.get("api_key") or ""),
+        ),
+        "name": str(target.get("name") or "未命名"),
+        "base_url": str(target.get("base_url") or ""),
+        "api_key": str(target.get("api_key") or ""),
+        "enabled": bool(target.get("enabled", True)),
+    }
+    current_backup = {
+        "id": cur_id,
+        "name": relay_cfg.name,
+        "base_url": relay_cfg.base_url,
+        "api_key": relay_cfg.api_key,
+        "enabled": relay_cfg.enabled,
+    }
+    remaining = [
+        r for r in relay_cfg.others if str(r.get("id") or "") != want
+    ]
+    relay_cfg.base_url = new_active["base_url"]
+    relay_cfg.api_key = new_active["api_key"]
+    relay_cfg.name = new_active["name"]
+    relay_cfg.enabled = new_active["enabled"]
+    relay_cfg.active_id = new_active["id"]
+    relay_cfg.others = [current_backup] + remaining
+    return {"ok": True, "active_id": new_active["id"], "changed": True}
+
+
+def _extract_host(url: str) -> str:
+    """取地址里的主机名（日志用，避免把完整 URL 和 Key 混在一行）。"""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url or "").hostname or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _record_reputation(
     domain: str,
     action: str,
@@ -1952,12 +2351,25 @@ def _record_reputation(
     ★ categories 决定这次风险算谁头上（见 tracker._classify）。
       不传就退化成「全算用户自己的」——
       宁可漏扣也不在无证据时指控中转站。
+
+    ★★ domain 必须由调用方传入「本次实际转发的那家」的域名。
+      原实现用 `_config.relay.base_url` —— 那是**当前启用项**，
+      不是这次请求发去的地方。多中转站下会把 B 家的风险
+      记到 A 家头上：用户明明用 B，一次异常就把 A 的分数打下去，
+      而 A 什么都没做。这是本轮最隐蔽的一处归因错误，
+      因为单中转站时代它完全正确（两者是同一个东西）。
+      domain 为空时才回退到启用项（老调用点兼容）。
     """
-    if _reputation is None or not domain or _config is None:
+    if _reputation is None or _config is None:
+        return
+    if not domain:
+        domain = _reputation.extract_domain(_config.relay.base_url)
+    if not domain:
         return
     try:
         rep = _reputation.record_call(
-            _config.relay.base_url, action, latency_ms, content,
+            domain if domain.startswith("http") else f"https://{domain}",
+            action, latency_ms, content,
             categories=categories,
         )
         if _storage is not None:

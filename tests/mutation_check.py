@@ -398,6 +398,334 @@ MUTATIONS = [
         ],
         "test_startup_recomputes_and_persists",
     ),
+    # ── 多中转站（2026-10-02）──
+    #   用户同时用两家时，代理无条件用配置里的 Key 覆盖 Authorization，
+    #   「以为在用 A、实际扣 B 的钱」。且每次保存配置会把
+    #   其余中转站的真实 Key 全换成掩码串。
+    (
+        "转发时又用启用项的 Key 覆盖（按 Key 识别被推平）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"        target = resolve_forward_target\(target\)\n"
+                r'        base = target\["base"\]\n'
+                r'        api_key = target\["api_key"\]',
+                "        # 变异：忽略解析结果，直接用启用项\n"
+                '        base = normalize_relay_base(_config.relay.base_url)\n'
+                "        api_key = _config.relay.api_key",
+            )
+        ],
+        "test_route_really_sends_the_target_relays_key",
+    ),
+    (
+        "_resolve_upstream 又变回 async（调用处漏 await → 每个请求 500）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"def _resolve_upstream\(request\) -> "
+                r"Optional\[Dict\[str, Any\]\]:",
+                "async def _resolve_upstream(request) -> "
+                "Optional[Dict[str, Any]]:  # 变异",
+            )
+        ],
+        "test_route_really_sends_the_target_relays_key",
+    ),
+    (
+        "转发时不看 target，直接用 all_relays()[0]",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    relay_cfg = _config\.relay\n"
+                r"    if target is None:\n"
+                r"        target = relay_cfg\.all_relays\(\)\[0\]",
+                "    relay_cfg = _config.relay\n"
+                "    target = relay_cfg.all_relays()[0]  # 变异：忽略传入目标",
+            )
+        ],
+        "test_forward_target_carries_its_own_key",
+    ),
+    (
+        "转发时用启用项的 Key 覆盖目标的 Key",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r'        "api_key": str\(target\.get\("api_key"\) '
+                r"or relay_cfg\.api_key\),",
+                '        "api_key": relay_cfg.api_key,  # 变异：无条件覆盖',
+            )
+        ],
+        "test_forward_target_carries_its_own_key",
+    ),
+    (
+        "配置列表接口下发明文 Key",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r'"api_key_masked": mask_relay_key\(\s*'
+                r'str\(r\.get\("api_key"\) or ""\)\),',
+                '"api_key_masked": r.get("api_key"),  # 变异',
+            )
+        ],
+        "test_configured_endpoint_masks_every_key",
+    ),
+    (
+        "to_safe_dict 不再掩码列表里的 Key",
+        "src/daoti_xuandun_personal/config.py",
+        [
+            (
+                r'        relay\["others"\] = \[\s*\n'
+                r'            \{\*\*r, "api_key": mask_relay_key\('
+                r'str\(r\.get\("api_key"\) or ""\)\)\}\s*\n'
+                r"            for r in self\.relay\.others\s*\n        \]",
+                "        # 变异：others 原样输出\n"
+                "        relay['others'] = list(self.relay.others)",
+            )
+        ],
+        "test_safe_dict_masks_others",
+    ),
+    (
+        "保存配置时不再校验列表里的掩码 Key",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    for i, item in enumerate\(others or \[\]\):\s*\n"
+                r"        if not isinstance\(item, dict\):\s*\n"
+                r"            continue\s*\n"
+                r'        key = str\(item\.get\("api_key"\) or ""\)\s*\n'
+                r"        if is_masked_key\(key\):\s*\n"
+                r"            return i, key",
+                "    return None  # 变异：不再校验",
+            )
+        ],
+        "test_backend_rejects_masked_key_in_others",
+    ),
+    (
+        "掩码守卫只报下标不报值（错误文案会指错家）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"            return i, key",
+                "            return i, ''  # 变异：丢掉具体值",
+            )
+        ],
+        "test_masked_guard_finds_the_offending_index",
+    ),
+    (
+        "切换中转站时不备份当前项（切走即删除）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    relay_cfg\.others = \[current_backup\] \+ remaining",
+                "    relay_cfg.others = remaining  # 变异：丢弃当前项",
+            )
+        ],
+        "test_switching_does_not_lose_configuration",
+    ),
+    (
+        "按 Key 识别改为只认第一项",
+        "src/daoti_xuandun_personal/config.py",
+        [
+            (
+                r"        for r in self\.all_relays\(\):\s*\n"
+                r'            if r\.get\("api_key"\) and r\["api_key"\] '
+                r"== api_key:\s*\n                return r",
+                "        return self.all_relays()[0]  # 变异：不比对 Key",
+            )
+        ],
+        "test_matching_key_returns_that_relay",
+    ),
+    (
+        "未识别的 Key 不再回退，直接报错",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    matched = relay_cfg\.relay_by_key\(incoming\) "
+                r"if incoming else None",
+                "    matched = relay_cfg.relay_by_key(incoming)"
+                " if incoming else None\n"
+                "    if incoming and matched is None:\n"
+                "        raise ValueError('未识别的 Key')  # 变异",
+            )
+        ],
+        "test_resolve_upstream_falls_back_to_active",
+    ),
+    (
+        "风险又记到当前启用项头上（串台）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r'        rep = _reputation\.record_call\(\s*\n'
+                r'            domain if domain\.startswith\("http"\) '
+                r'else f"https://\{domain\}",',
+                "        rep = _reputation.record_call(\n"
+                "            _config.relay.base_url,  # 变异：串台",
+            )
+        ],
+        "test_record_reputation_respects_domain_argument",
+    ),
+    (
+        "配置列表改用 /api/relays（与信誉列表撞车成死代码）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r'@app\.get\("/api/relays/configured"\)',
+                '@app.get("/api/relays")  # 变异：与信誉列表同名',
+            )
+        ],
+        "test_no_duplicate_routes",
+    ),
+    (
+        "切换接口不再重建列表（目标项留在列表里重复）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    remaining = \[\s*\n"
+                r'        r for r in relay_cfg\.others '
+                r"if str\(r\.get\(\"id\"\) or \"\"\) != want\s*\n    \]",
+                "    remaining = relay_cfg.others  # 变异：不剔除目标项",
+            )
+        ],
+        "test_switch_keeps_all_relays",
+    ),
+    (
+        "切到自己也算一次变更（列表里会多出重复项）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    if want == cur_id:\s*\n"
+                r'        return \{"ok": True, "active_id": want, '
+                r'"changed": False\}',
+                "    # 变异：不再短路，继续往下走",
+            )
+        ],
+        "test_switch_reports_when_nothing_changed",
+    ),
+    (
+        "「表单已打开」又和「请求在飞」共用一个 state",
+        "desktop/src/pages/Settings.tsx",
+        [
+            (
+                r"\{addingBusy \? '添加中…' : '添加到列表'\}",
+                "{addingBusy ? '添加到列表' : '添加到列表'}"
+                "  # 变异：不再区分请求态",
+            ),
+            (
+                r"\{adding \? \(\s*<>\s*\n(\s*)<div className=\"field-label\">"
+                r"添加中转站</div>",
+                "{addingBusy ? (\n\\1<div className=\"field-label\">"
+                "添加中转站</div>",
+            ),
+        ],
+        "test_form_open_state_is_not_the_request_state",
+    ),
+    (
+        "新增按钮不再禁用（可连点重复提交）",
+        "desktop/src/pages/Settings.tsx",
+        [
+            (
+                r"                    disabled=\{addingBusy\}\n"
+                r"                    onClick=\{\(\) => void addRelay\(\)\}",
+                "                    onClick={() => void addRelay()}"
+                "  # 变异：不禁用",
+            )
+        ],
+        "test_form_open_state_is_not_the_request_state",
+    ),
+    (
+        "新增后调用 load()（会清掉用户填到一半的表单）",
+        "desktop/src/pages/Settings.tsx",
+        [
+            (
+                r"      await loadConfigured\(\);\n"
+                r"      setNewRelay\(",
+                "      await load();  # 变异：多余的重载\n"
+                "      await loadConfigured();\n"
+                "      setNewRelay(",
+            )
+        ],
+        "test_frontend_add_does_not_touch_current_item",
+    ),
+    (
+        "新增接口接受掩码 Key（静默且不可逆）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"        if not api_key:\n"
+                r'            errors\.append\("中转站 API Key 不能为空"\)\n'
+                r"        elif is_masked_key\(api_key\):",
+                "        if not api_key:\n"
+                '            errors.append("中转站 API Key 不能为空")\n'
+                "        elif False:  # 变异：不再拒绝掩码",
+            )
+        ],
+        "test_add_rejects_masked_key",
+    ),
+    (
+        "新增允许重复添加当前那家（列表出现重复项）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"        if new_id == relay_cfg\.make_relay_id\(\s*\n"
+                r"                relay_cfg\.base_url, relay_cfg\.api_key\):",
+                "        if False:  # 变异：不检查重复",
+            )
+        ],
+        "test_add_rejects_the_current_one",
+    ),
+    (
+        "允许移除当前启用项（AI 工具立刻失去目标）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"        if want == cur_id or want == relay_cfg\.active_id:",
+                "        if False:  # 变异：允许移除启用项",
+            )
+        ],
+        "test_remove_refuses_the_active_one",
+    ),
+    (
+        "移除时把所有中转站都清掉",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"        relay_cfg\.others = \[\s*\n"
+                r'            r for r in relay_cfg\.others '
+                r"if str\(r\.get\(\"id\"\) or \"\"\) != want\s*\n        \]",
+                "        relay_cfg.others = []  # 变异：一锅端",
+            )
+        ],
+        "test_remove_drops_only_that_one",
+    ),
+    (
+        "前端把 add_relay 的键名写成 snake_case（Tauri 找不到）",
+        "desktop/src/services/api.ts",
+        [
+            (
+                r"      \{\n        name: relay\.name,\n"
+                r"        baseUrl: relay\.base_url,\n"
+                r"        apiKey: relay\.api_key,\n      \}\),",
+                "      {  # 变异：Tauri 只认 camelCase\n"
+                "        name: relay.name,\n"
+                "        base_url: relay.base_url,\n"
+                "        api_key: relay.api_key,\n"
+                "      }),",
+            )
+        ],
+        "test_tauri_arg_shapes_match_the_rust_signatures",
+    ),
+    (
+        "切换时不存在的 id 静默成功",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"    if target is None:\s*\n        raise KeyError\(want\)",
+                "    if target is None:\n"
+                "        return {'ok': True, 'active_id': want,"
+                " 'changed': False}  # 变异",
+            )
+        ],
+        "test_switch_unknown_id_raises",
+    ),
 ]
 
 
@@ -406,7 +734,7 @@ def run_tests(pattern: str) -> tuple[int, str]:
         [
             sys.executable, "-m", "pytest",
             "tests/test_relay_config.py", "tests/test_block_evidence.py",
-            "tests/test_reputation_score.py",
+            "tests/test_reputation_score.py", "tests/test_multi_relay.py",
             "-q", "-k", pattern, "--tb=line", "-rf",
         ],
         cwd=ROOT,
