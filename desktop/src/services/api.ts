@@ -111,8 +111,26 @@ export interface RelayReputation {
   watermark_detected: boolean;
   notes: string[];
   level: 'safe' | 'normal' | 'risky' | 'malicious';
-  /** 延迟突变次数（Phase 7）。评分扣分项之一，用于向用户解释分数来源。 */
+  /** 延迟突变次数。评分扣分项之一，用于向用户解释分数来源。 */
   latency_anomalies?: number;
+  /**
+   * ★ v0.1.0：中转站责任的可疑次数（参与评分）。
+   *
+   * 只有确实指向中转站本身的检测项才计在这里
+   * （恶意 tool_call、隐藏指令、隐写、语义违规、敏感泄露）。
+   * 「响应长度突变」不算 —— 那取决于你问了什么。
+   */
+  relay_danger_count?: number;
+  relay_suspect_count?: number;
+  /**
+   * ★ v0.1.0：用户自身造成的风险次数（**不**参与评分）。
+   *
+   * 例如在对话里粘贴了密钥被请求侧拦截 ——
+   * 那是你的操作问题，不是中转站的问题：
+   * 请求在发往中转站之前就被拦下了，它从未收到过这些内容。
+   */
+  self_danger_count?: number;
+  self_suspect_count?: number;
 }
 
 /**

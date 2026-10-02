@@ -74,6 +74,51 @@ _WATERMARK_PATTERNS: List[Tuple[str, str]] = [
 
 
 # ══════════════════════════════════════════════════════════════
+# 评分口径
+# ══════════════════════════════════════════════════════════════
+
+# 只有这些检测项才**指向中转站本身**，才参与扣分。
+#
+# ★ 这个清单是本次修复的核心，也是最容易改错的地方。
+#   判断标准只有一条：**它出现时，中转站有没有做错什么？**
+#
+#   算中转站责任的：
+#     tool_call_dangerous       —— 中转站返回了危险的工具调用
+#     hidden_instruction        —— 中转站塞了隐藏指令
+#     unicode_steganography     —— 中转站用不可见字符藏指令
+#     system_prompt_inject      —— 响应含违规语义方向
+#     sensitive_leak            —— 响应里泄出了敏感信息
+#
+#   **不算**中转站责任的（用户自己造成的）：
+#     length_anomaly            —— 你问了什么决定响应多长
+#     structure_anomaly         —— 同上，字符分布随内容变
+#     request_sanitize 类        —— 你的请求里带了密钥
+#
+#   宁可漏扣也不能错扣：错扣等于在没有证据的情况下
+#   毁掉一个可能完全诚信的服务商，用户会因此白白弃用它。
+_RELAY_ATTRIBUTABLE: frozenset = frozenset({
+    "tool_call_dangerous",
+    "hidden_instruction",
+    "unicode_steganography",
+    "system_prompt_inject",
+    "sensitive_leak",
+})
+
+# 定性证据的固定扣分（一次即扣，不被比例稀释）
+_WATERMARK_PENALTY = 30.0    # 检测到中转站自述保留数据
+_PATTERN_PENALTY = 15.0      # 域名属滥用高发模式
+
+# 行为证据的扣分上限。
+# ★ 刻意设成 55 而不是 100：
+#   分数是给用户看的**参考**，不是判决。
+#   即便中转站侧每一次都有问题，也该留 45 分 ——
+#   因为分数低不等于有罪，它只意味着「需要人工看一眼」，
+#   而把分数归零会让「有风险」和「确认恶意」这两件事
+#   在界面上变成同一句话，丢掉最关键的那个区分。
+_BEHAVIOR_MAX_PENALTY = 55.0
+
+
+# ══════════════════════════════════════════════════════════════
 # 信誉追踪器
 # ══════════════════════════════════════════════════════════════
 
@@ -112,6 +157,7 @@ class ReputationTracker:
         action: str,
         latency_ms: float = 0.0,
         content: str = "",
+        categories: Optional[List[str]] = None,
     ) -> RelayReputation:
         """记录一次调用并更新信誉。
 
@@ -120,6 +166,10 @@ class ReputationTracker:
             action: 本次调用的处置（pass/redact/block/alert）
             latency_ms: 响应延迟
             content: 响应内容（用于水印检测）
+            categories: 本次触发的检测项类别。**评分的关键输入** ——
+                同样是 block，凭什么扣分必须看是哪一类：
+                「中转站返回了恶意 tool_call」该扣，
+                「响应长度比历史长」不该扣（那是你问了什么决定的）。
 
         Returns:
             更新后的 RelayReputation
@@ -136,11 +186,25 @@ class ReputationTracker:
         rep.last_seen = now
         rep.total_calls += 1
 
-        # 更新计数
+        # ── 按检测项分类计数 ──
+        # ★ 这是本次修复的核心：把「谁的责任」记清楚。
+        #   过去 danger_count/suspect_count 是混在一起的，
+        #   长度突变也算「危险」，于是分数被自己人打崩。
+        relay_risk, self_risk = self._classify(categories)
         if action == Action.BLOCK.value:
-            rep.danger_count += 1
+            if relay_risk:
+                rep.relay_danger_count += 1
+            else:
+                rep.self_danger_count += 1
         elif action == Action.ALERT.value:
-            rep.suspect_count += 1
+            if relay_risk:
+                rep.relay_suspect_count += 1
+            else:
+                rep.self_suspect_count += 1
+        # 兼容旧字段：保留总量，供「今日统计」与展示沿用。
+        # 评分**不再**读这两个字段（见 _compute_score）。
+        rep.danger_count = rep.relay_danger_count + rep.self_danger_count
+        rep.suspect_count = rep.relay_suspect_count + rep.self_suspect_count
 
         # 延迟统计
         if latency_ms > 0:
@@ -186,27 +250,98 @@ class ReputationTracker:
 
     # ── 评分 ──
 
+    @staticmethod
+    def _classify(categories: Optional[List[str]]) -> Tuple[bool, bool]:
+        """判断本次风险该记在谁头上。
+
+        Returns:
+            (是否中转站的责任, 是否用户自己的责任)
+
+        ★ 为什么必须分类
+          「响应长度突变」和「中转站注入恶意 tool_call」
+          在旧实现里都只是 block，都扣 20 分。
+          但前者取决于**你问了什么**（问「你好」3 字、
+          回一段代码 11000 字，长度突变是必然的），
+          把它算成中转站的罪状，是让中转站替你的提问背锅。
+
+          而后者 —— 隐藏指令、恶意 tool_call、
+          数据留存声明 —— 确实指向中转站本身。
+
+        ★ 未知类别一律**不**算中转站的责任。
+          宁可漏扣（分数偏高）也不能错扣：
+          错扣会让用户误以为中转站有问题而弃用，
+          那是在没有证据的情况下毁掉一个可能完全诚信的服务。
+        """
+        if not categories:
+            return False, True
+
+        for c in categories:
+            if c in _RELAY_ATTRIBUTABLE:
+                return True, False
+        return False, True
+
     def _compute_score(self, rep: RelayReputation) -> int:
         """计算信誉分数（0-100）。
 
-        扣分权重（与本函数实现严格一致）：
-            danger_count  × 20  （危险响应）
-            suspect_count ×  4  （可疑响应）
-            延迟突变次数  ×  8  （条件触发型攻击信号）
-            watermark     × 10  （数据保留迹象）
-            高风险模式    × 15  （免费域名等滥用高发特征）
+        ★★ 改为**按比例**扣分，不再用固定权重累减。
+
+        旧公式的问题（实测）：
+            分数 = 100 - 危险×20 - 可疑×4 - ...
+        只要累计超过 5 次危险，分数就永久触底为 0，
+        此后**新增多少风险都显示 0** ——
+        一个恒为 0 的分数等于没有分数，
+        而首页「19 次危险」只会让人误以为中转站有毒。
+
+        新公式：
+            1) 只有**中转站责任**的风险参与扣分
+               （长度突变等用户自身导致的不算）；
+            2) 按**占比**扣分，不按绝对次数 ——
+               5/100 次可疑和 5/5 次可疑，风险完全不同；
+            3) 硬证据（恶意库 / 数据留存）仍然可以直接判死，
+               因为它们不依赖次数。
+
+        保留固定的严重项扣分：水印与域名高风险模式是定性证据，
+        一次就说明问题，不该被比例稀释。
         """
         if rep.known_malicious:
             return 0
 
+        # ── 定性证据：一次即扣，不参与比例 ──
         score = 100.0
-        score -= rep.danger_count * 20
-        score -= rep.suspect_count * 4
-        score -= self.latency_anomaly_count(rep.domain) * 8
         if rep.watermark_detected:
-            score -= 10
+            score -= _WATERMARK_PENALTY
         if any(n.startswith("高风险模式") for n in rep.notes):
-            score -= 15
+            score -= _PATTERN_PENALTY
+
+        # ── 行为证据：按占比 ──
+        #
+        # ★★ 分母**必须排除用户自己造成的那些调用**。
+        #   实测踩过：用 total_calls 当分母时，
+        #   用户贴 1000 次密钥能把中转站的分数从 60 抬到 96 ——
+        #   风险率被自己造成的调用稀释了。
+        #   那等于把评分变成用户能操纵的开关：
+        #   「多贴几次密钥就能洗白中转站」，
+        #   而这正是本轮要修的那类「分数没有意义」。
+        #
+        #   正确分母 = 中转站侧风险 + 正常转发，
+        #   即「真正经过中转站、且中转站确实表现异常的」。
+        relay_risk = rep.relay_danger_count + rep.relay_suspect_count
+        normal = rep.total_calls - relay_risk - (
+            rep.self_danger_count + rep.self_suspect_count
+        )
+        denominator = relay_risk + max(0, normal)
+        #
+        # ★ 系数 4 而不是 2 的理由（实测调过）：
+        #   1/100 次命中恶意 tool_call 时，
+        #   系数 2 只扣 3 分 —— 一次明确的恶意工具调用
+        #   几乎被当成噪声抹平了，那等于没检测。
+        #   系数 4 让它扣 6 分：分数明显下来但不到 risky，
+        #   符合「出现了但不多，值得看一眼」。
+        if denominator > 0 and relay_risk > 0:
+            # 中转站侧的高危比可疑更严重，故权重 2
+            weighted = rep.relay_danger_count * 2 + rep.relay_suspect_count
+            ratio = weighted / denominator
+            score -= min(_BEHAVIOR_MAX_PENALTY, ratio * _BEHAVIOR_MAX_PENALTY * 4)
 
         return int(max(0, min(100, score)))
 
@@ -240,13 +375,38 @@ class ReputationTracker:
     # ── 查询 ──
 
     def import_reputation(self, rep: RelayReputation) -> None:
-        """从持久化存储导入信誉记录（★ P2-10：重启后恢复数据）。"""
+        """从持久化存储导入信誉记录（★ P2-10：重启后恢复数据）。
+
+        ★★ 必须**重算分数**，不能直接用库里存的 score。
+
+          实测踩过：升级前的老库里存着旧算法算出的 score=0
+          （危险 19×20 + 可疑 59×4 = −616，钳到 0）。
+          新算法下这些事件全部归为「用户自身操作」，
+          正确分数是 100 —— 但直接读库会继续显示 0，
+          用户看到的还是那个错误的分数，
+          而所有新记录都已按新算法落库，
+          于是同一个中转站出现「历史 0 分、现在 100 分」的分裂。
+
+          更麻烦的是它**不会自愈**：
+          record_call 只在被调用时重算，
+          长期不再调用的中转站会永远卡在旧分数上。
+
+          分数是**派生值**，永远不该信任持久化的副本 ——
+          算法一改，所有历史分数都必须重算。
+        """
+        # 延迟突变计数依赖内存里的延迟窗口，
+        # 导入时无法复原，但 _compute_score 已不再使用它，
+        # 所以这里直接重算即可。
+        rep.score = self._compute_score(rep)
         self._reputations[rep.domain] = rep
         if rep.latency_samples > 0 and rep.avg_latency_ms > 0:
             # 恢复延迟基线（前 5 个样本作为初始基线）
             n = min(5, rep.latency_samples)
             self._latencies[rep.domain] = [rep.avg_latency_ms] * n
-        logger.debug("已导入中转站信誉: %s (score=%d)", rep.domain, rep.score)
+        logger.info(
+            "已导入中转站信誉: %s (分数按当前算法重算为 %d)",
+            rep.domain, rep.score,
+        )
 
     def get_reputation(self, upstream_url: str) -> RelayReputation:
         """查询（或创建）中转站信誉。"""

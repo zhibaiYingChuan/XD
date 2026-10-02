@@ -171,8 +171,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ★ P2-10 修复：原实现只写不读，lifespan 从未调用 load_reputations()，
     #   导致信誉数据纯驻内存、重启即丢，首页「当前中转站」显示未配置空态。
+    #
+    # ★ v0.1.0：导入时会把分数**按当前算法重算**（见
+    #   tracker.import_reputation）。重算结果必须立刻写回库，
+    #   否则库里留着的仍是旧算法的错值（比如被扣到 0 的那个）。
+    #   内存是对的、库是错的 —— 这种不一致会在下次
+    #   「设置页重置信誉」或任何直接读库的地方重新冒出来，
+    #   而用户看到的 0 分正来源于此。
     for rep in _storage.load_reputations():
         _reputation.import_reputation(rep)
+        try:
+            _storage.upsert_reputation(rep)
+        except Exception as e:  # noqa: BLE001
+            # 重算后的分数写回失败不应阻断启动：
+            # 内存里的值已经是正确的，接口照常可用。
+            logger.warning("信誉分数回写失败（内存值仍正确）: %s", e)
 
     # ③ HTTP 客户端
     timeout_s = _config.server.request_timeout_s
@@ -612,7 +625,8 @@ def create_app() -> FastAPI:
                 model, findings, payload, session_id, redaction_records,
                 text_preview=content,
             )
-            _record_reputation(domain, Action.BLOCK.value, latency_ms, content)
+            _record_reputation(domain, Action.BLOCK.value, latency_ms, content,
+                               categories=_finding_categories(findings))
             return JSONResponse(
                 status_code=502,
                 content={
@@ -630,7 +644,8 @@ def create_app() -> FastAPI:
             model, findings, payload, session_id, redaction_records,
             text_preview=content,
         )
-        _record_reputation(domain, action, latency_ms, content)
+        _record_reputation(domain, action, latency_ms, content,
+                           categories=_finding_categories(findings))
         return JSONResponse(status_code=upstream.status_code, content=payload)
 
     # ══════════════════════════════════════════════════════════
@@ -790,7 +805,8 @@ def create_app() -> FastAPI:
                     model, findings, None, session_id, redaction_records,
                     text_preview=joined,
                 )
-                _record_reputation(domain, action, latency_ms, joined)
+                _record_reputation(domain, action, latency_ms, joined,
+                                   categories=_finding_categories(findings))
 
         return StreamingResponse(
             _generator(),
@@ -1924,18 +1940,35 @@ def _record_log(
         logger.warning("日志记录失败: %s", e)
 
 
-def _record_reputation(domain: str, action: str, latency_ms: float, content: str) -> None:
-    """更新中转站信誉。"""
+def _record_reputation(
+    domain: str,
+    action: str,
+    latency_ms: float,
+    content: str,
+    categories: Optional[List[str]] = None,
+) -> None:
+    """更新中转站信誉。
+
+    ★ categories 决定这次风险算谁头上（见 tracker._classify）。
+      不传就退化成「全算用户自己的」——
+      宁可漏扣也不在无证据时指控中转站。
+    """
     if _reputation is None or not domain or _config is None:
         return
     try:
         rep = _reputation.record_call(
-            _config.relay.base_url, action, latency_ms, content
+            _config.relay.base_url, action, latency_ms, content,
+            categories=categories,
         )
         if _storage is not None:
             _storage.upsert_reputation(rep)
     except Exception as e:  # noqa: BLE001
         logger.warning("信誉记录失败: %s", e)
+
+
+def _finding_categories(findings) -> List[str]:
+    """从 findings 里取出检测项类别，供信誉归因使用。"""
+    return [f.category for f in findings if getattr(f, "category", "")]
 
 
 def _proxy_error(domain, model, session_id, message, t0, log_type):

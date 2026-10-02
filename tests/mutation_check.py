@@ -233,6 +233,171 @@ MUTATIONS = [
         ],
         "test_toast_matches_reality",
     ),
+    # ── 评分归因（2026-10-02）──
+    #   用户看到 0/100，扣分明细 −380。查库发现那 19 次「危险」
+    #   全部是「响应长度突变」——用户问了个长问题，
+    #   中转站被扣了 380 分。评分算法必须按责任归因。
+    (
+        "长度突变又算回中转站的责任",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"_RELAY_ATTRIBUTABLE: frozenset = frozenset\(\{\n"
+                r'    "tool_call_dangerous",',
+                '_RELAY_ATTRIBUTABLE: frozenset = frozenset({\n'
+                '    "length_anomaly",  # 变异\n'
+                '    "tool_call_dangerous",',
+            )
+        ],
+        "test_length_anomaly_is_not_relay_fault",
+    ),
+    (
+        "评分改回按绝对次数累减（会触底）",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"            weighted = rep\.relay_danger_count \* 2"
+                r" \+ rep\.relay_suspect_count\n"
+                r"            ratio = weighted / denominator\n"
+                r"            score -= min\(_BEHAVIOR_MAX_PENALTY,"
+                r" ratio \* _BEHAVIOR_MAX_PENALTY \* 4\)",
+                "            score -= rep.relay_danger_count * 20"
+                "  # 变异\n"
+                "            score -= rep.relay_suspect_count * 4",
+            )
+        ],
+        "test_score_is_not_bottomed_out",
+    ),
+    (
+        "分母不排除用户自身事件（可被洗白）",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"        relay_risk = rep\.relay_danger_count"
+                r" \+ rep\.relay_suspect_count\n"
+                r"        normal = rep\.total_calls - relay_risk - \(\n"
+                r"            rep\.self_danger_count \+ rep\.self_suspect_count\n"
+                r"        \)\n"
+                r"        denominator = relay_risk \+ max\(0, normal\)",
+                "        denominator = rep.total_calls  # 变异",
+            )
+        ],
+        "test_user_side_events_cannot_inflate_the_score",
+    ),
+    (
+        "分母改用 total_calls（用户侧可洗白分数）",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"            ratio = weighted / denominator",
+                "            ratio = weighted / rep.total_calls  # 变异",
+            )
+        ],
+        "test_user_side_events_cannot_inflate_the_score",
+    ),
+    (
+        "评分不再有下限（可被稀释到 0）",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"_BEHAVIOR_MAX_PENALTY = 55\.0",
+                "_BEHAVIOR_MAX_PENALTY = 500.0  # 变异",
+            )
+        ],
+        "test_score_never_reaches_zero_from_behaviour_alone",
+    ),
+    (
+        "用户侧事件被算进扣分（可刷分）",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"            weighted = rep\.relay_danger_count \* 2"
+                r" \+ rep\.relay_suspect_count",
+                "            weighted = (rep.relay_danger_count"
+                " + rep.self_danger_count) * 2"
+                " + rep.relay_suspect_count + rep.self_suspect_count"
+                "  # 变异",
+            )
+        ],
+        "test_user_side_events_cannot_inflate_the_score",
+    ),
+    (
+        "水印扣分被稀释进比例",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"        if rep\.watermark_detected:\n"
+                r"            score -= _WATERMARK_PENALTY",
+                "        if rep.watermark_detected:\n"
+                "            score -= _WATERMARK_PENALTY / 10  # 变异",
+            )
+        ],
+        "test_watermark_penalised_once_and_hard",
+    ),
+    (
+        "恶意库不再直接归零",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"        if rep\.known_malicious:\n            return 0",
+                "        # 变异：不再直接归零",
+            )
+        ],
+        "test_known_malicious_still_zeroes_it",
+    ),
+    (
+        "前端扣分权重与后端脱钩",
+        "desktop/src/pages/Dashboard.tsx",
+        [
+            (
+                r"  watermark: 30,",
+                "  watermark: 10,  # 变异",
+            )
+        ],
+        "test_weights_match_backend_constants",
+    ),
+    (
+        "新字段不落库（重启后归因丢失）",
+        "src/daoti_xuandun_personal/storage/db.py",
+        [
+            (
+                r"                    rep\.relay_danger_count, rep\.self_danger_count,\n"
+                r"                    rep\.relay_suspect_count, rep\.self_suspect_count,",
+                "                    0, 0, 0, 0,  # 变异",
+            )
+        ],
+        "test_new_columns_survive_round_trip",
+    ),
+    (
+        "导入时不重算分数（沿用旧算法的错值）",
+        "src/daoti_xuandun_personal/reputation/tracker.py",
+        [
+            (
+                r"        rep\.score = self\._compute_score\(rep\)\n"
+                r"        self\._reputations\[rep\.domain\] = rep",
+                "        # 变异：不重算\n"
+                "        self._reputations[rep.domain] = rep",
+            )
+        ],
+        "test_score_is_recomputed_on_load",
+    ),
+    (
+        "重算结果不写回库（内存对库里错）",
+        "src/daoti_xuandun_personal/proxy/app.py",
+        [
+            (
+                r"        _reputation\.import_reputation\(rep\)\n"
+                r"        try:\n"
+                r"            _storage\.upsert_reputation\(rep\)\n"
+                r"        except Exception as e:  # noqa: BLE001\n"
+                r"            # 重算后的分数写回失败不应阻断启动：\n"
+                r"            # 内存里的值已经是正确的，接口照常可用。\n"
+                r"            logger\.warning\(\"信誉分数回写失败（内存值仍正确）: %s\", e\)",
+                "        _reputation.import_reputation(rep)  # 变异：不回写",
+            )
+        ],
+        "test_startup_recomputes_and_persists",
+    ),
 ]
 
 
@@ -241,6 +406,7 @@ def run_tests(pattern: str) -> tuple[int, str]:
         [
             sys.executable, "-m", "pytest",
             "tests/test_relay_config.py", "tests/test_block_evidence.py",
+            "tests/test_reputation_score.py",
             "-q", "-k", pattern, "--tb=line", "-rf",
         ],
         cwd=ROOT,

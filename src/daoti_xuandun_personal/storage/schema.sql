@@ -66,7 +66,14 @@ CREATE TABLE IF NOT EXISTS relay_reputation (
     latency_samples    INTEGER NOT NULL DEFAULT 0,
     known_malicious    INTEGER NOT NULL DEFAULT 0,
     watermark_detected INTEGER NOT NULL DEFAULT 0,
-    notes              TEXT    NOT NULL DEFAULT '[]'
+    notes              TEXT    NOT NULL DEFAULT '[]',
+    -- ★ v0.1.0：中转站责任与用户自身责任分列。
+    --   只有 relay_* 参与评分（见 tracker._RELAY_ATTRIBUTABLE）。
+    --   旧的 danger_count/suspect_count 保留为两者之和，供展示沿用。
+    relay_danger_count   INTEGER NOT NULL DEFAULT 0,
+    self_danger_count    INTEGER NOT NULL DEFAULT 0,
+    relay_suspect_count  INTEGER NOT NULL DEFAULT 0,
+    self_suspect_count   INTEGER NOT NULL DEFAULT 0
 );
 
 -- ══════════════════════════════════════════════════════════════

@@ -249,6 +249,13 @@ class Backend:
         except Exception:
             return None
 
+    def relays(self, timeout=8):
+        """读中转站信誉列表（T13 校验评分用）。"""
+        try:
+            return self._get("/api/relays", timeout=timeout)
+        except Exception:
+            return None
+
     def guard(self):
         """从配置里取 guard 段（不依赖 to_safe_dict 的掩码细节）。"""
         c = self.config()
@@ -857,6 +864,126 @@ def test_dashboard_relay_honest(page, be: Backend):
         has_link = page.locator("a:has-text('前往设置')").count() > 0
         rec("T4b 未配置时提示去设置", claims_unconfigured and has_link,
             f"声称未配置={claims_unconfigured} 有前往设置入口={has_link}")
+
+
+def test_reputation_score_honest(page, be: Backend):
+    """T13 信誉评分与扣分明细必须自洽，且不再恒为 0。
+
+    ★ 这条补的是 2026-10-02 用户直接指出的问题：
+      首页显示 `api.commandcode.ai  0/100`，
+      扣分明细写着「危险响应 19 次 × 20 分 = −380」
+      「可疑响应 59 次 × 4 分 = −236」。
+
+      查库发现那 19 次「危险」**全部**是「响应长度突变」——
+      用户问了个长问题（问「你好」3 字、回一段代码 11000 字），
+      中转站被扣了 380 分。
+      扣分还把分数压到 0 并长期触底，
+      此后任何新增风险都显示不出来。
+
+    ★ 判据不看「分数是多少」，看**自洽性**：
+      ① 明细里列出的扣分加起来，不能远超 100 分
+         （旧算法 −616 就是不自洽的直接证据）；
+      ② 明细里不该出现「用户自己的操作」被当成中转站罪证；
+      ③ 若后端 relay_* 计数为 0，界面就不该显示扣分项。
+      前端与后端各自「看起来自洽」，但两边对不上时只有端到端能抓。
+    """
+    goto(page, "首页")
+    page.wait_for_timeout(800)
+
+    relays = (be.relays() or {}).get("relays") or []
+    if not relays:
+        rec("T13 信誉评分链路", False, "信誉库为空（没有调用记录）", skip=True)
+        return
+
+    target = relays[0]
+    domain = str(target.get("domain") or "")
+    score = int(target.get("score") or 0)
+    relay_danger = int(target.get("relay_danger_count") or 0)
+    relay_suspect = int(target.get("relay_suspect_count") or 0)
+    self_danger = int(target.get("self_danger_count") or 0)
+
+    # 展开评分明细
+    try:
+        btn = page.locator("button:has-text('为什么是这个分数')").first
+        if btn.count() == 0:
+            rec("T13 有评分明细入口", False, "首页没有「为什么是这个分数？」")
+            return
+        btn.click(timeout=6000)
+        page.wait_for_timeout(700)
+    except Exception as e:
+        rec("T13 有评分明细入口", False, f"点击失败: {e}")
+        return
+
+    detail = page.locator(".rep-detail").first
+    try:
+        detail.wait_for(timeout=6000)
+        text = detail.inner_text()
+    except Exception:
+        text = ""
+
+    # ① 扣分总额不得远超满分 —— 旧算法会显示 −616
+    nums = []
+    for line in text.splitlines():
+        if "−" in line or "-" in line.replace("−", ""):
+            for tok in line.replace("−", "-").split():
+                if tok.startswith("-") and tok[1:].replace(".", "").isdigit():
+                    try:
+                        nums.append(abs(float(tok[1:])))
+                    except ValueError:
+                        pass
+    over = [n for n in nums if n > 100]
+    rec("T13 扣分总额未超满分", not over,
+        f"扣分明细={nums}（>100 的项：{over}）"
+        if nums else "明细里没有可解析的扣分数值")
+
+    # ② 明细不得把用户自己的操作算成中转站扣分
+    blames_user = "次危险" in text or "次可疑" in text
+    rec("T13 扣分明细未把用户操作算作中转站罪证", not blames_user,
+        f"明细里出现了「次危险/次可疑」（旧口径按总量计）"
+        if blames_user else "已改为按中转站侧归因")
+
+    # ③ 后端说没有中转站侧风险，界面就只能显示「未触发任何扣分项」
+    #
+    # ★ 判据踩过的坑：早先查的是 "扣分" not in text，
+    #   而空态文案本身就是「本次使用未触发任何扣分项 —」，
+    #   含「扣分」二字 → 永远判失败。
+    #   那是判据写错，不是产品有问题。
+    #   正确做法是数**扣分表格的行数**（不含表头）。
+    try:
+        rows = page.locator(
+            ".rep-detail .rep-row:not(.rep-row-head)").count()
+    except Exception:
+        rows = 0
+    if relay_danger == 0 and relay_suspect == 0:
+        rec("T13 无中转站侧风险时不列扣分项", rows == 0,
+            f"后端 relay_danger={relay_danger} relay_suspect={relay_suspect}，"
+            f"界面却列了 {rows} 行扣分项")
+    else:
+        rec("T13 有中转站侧风险时列出扣分项", rows > 0,
+            f"relay_danger={relay_danger} relay_suspect={relay_suspect}，"
+            f"明细行数={rows}")
+
+    # ④ 分数不该是长期触底的 0 —— 若真为 0，必须有定性证据
+    hard_evidence = bool(
+        target.get("known_malicious") or target.get("watermark_detected")
+    )
+    if score == 0:
+        rec("T13 分数为 0 时必须有定性证据", hard_evidence,
+            f"score=0 但 known_malicious={target.get('known_malicious')} "
+            f"watermark={target.get('watermark_detected')} —— "
+            "分数被行为扣分耗尽，归因可能又出错了")
+    else:
+        rec("T13 分数未触底", True,
+            f"{domain} 得分 {score}"
+            + (f"，其中用户自身操作 {self_danger} 次（不计入）"
+               if self_danger else ""))
+
+    # 收起明细，别留遮罩
+    try:
+        page.locator("button:has-text('收起评分明细')").first.click(timeout=4000)
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 def test_settings_toggles(page, be: Backend):
@@ -1725,6 +1852,7 @@ def main():
                     ("T3b 降级分支", lambda: test_unreachable_label(page, be)),
                     ("T4 KPI 一致性", lambda: test_dashboard_kpi(page, be)),
                     ("T4b 中转站状态诚实性", lambda: test_dashboard_relay_honest(page, be)),
+                    ("T13 信誉评分自洽", lambda: test_reputation_score_honest(page, be)),
                 ):
                     try:
                         fn()

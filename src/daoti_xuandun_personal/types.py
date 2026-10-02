@@ -246,6 +246,29 @@ class RelayReputation:
     known_malicious: bool = False            # 命中内置恶意指纹库
     watermark_detected: bool = False         # 检测到中转站水印
     notes: List[str] = field(default_factory=list)
+    # ★★ v0.1.0：把「中转站的责任」与「用户自己的操作」分开计数。
+    #
+    #   实测问题：danger_count 里混着大量**与中转站无关**的事件 ——
+    #   19 条全是「响应长度突变」（AI 对话长度天然天差地别，
+    #   问「你好」3 字、回一段代码 11000 字），
+    #   59 条可疑全是「字符类分布突变」。
+    #   这些判的是「你在哪儿提问」，不是「中转站是否可信」，
+    #   却扣了中转站的分 —— 用户问了个长问题，
+    #   中转站就被扣 20 分。
+    #
+    #   后果实测：危险 19×20 + 可疑 59×4 = 616 分，
+    #   远超满分 100 → 分数长期触底恒为 0，
+    #   此后**任何新增风险都看不出来**（都显示 0）。
+    #   一个恒为 0 的分数等于没有分数。
+    #
+    #   所以拆成两组：
+    #     relay_danger_count  —— 确实指向中转站的风险（扣分依据）
+    #     self_danger_count   —— 用户自己造成的（如把密钥贴进提问）
+    #   只有前者进评分。
+    relay_danger_count: int = 0
+    self_danger_count: int = 0
+    relay_suspect_count: int = 0
+    self_suspect_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

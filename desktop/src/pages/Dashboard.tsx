@@ -61,18 +61,21 @@ const RELAY_LEVEL_TEXT: Record<string, string> = {
 };
 
 /**
- * 信誉评分扣分明细（Phase 7）。
+ * 信誉评分扣分明细。
  *
- * ★ 权重必须与后端 `_compute_score` 严格一致：
+ * ★★★ 权重必须与后端 `_compute_score` 严格一致：
  *   这里是给用户看的「为什么是这个分」，一旦后端调权重而前端没跟上，
  *   界面就会给出一套自相矛盾的解释，比不给解释更糟。
+ *
+ * ★★ v0.1.0 起算法已改（详见后端 tracker._compute_score）：
+ *   1. 只有**中转站责任**的风险参与扣分；
+ *   2. 按**占比**扣分，不按绝对次数 —— 分数不再触底恒为 0；
+ *   3. 定性证据（水印 / 域名模式）一次即扣，不被比例稀释。
  */
 const SCORE_WEIGHTS = {
-  danger: 20,
-  suspect: 4,
-  latencyAnomaly: 8,
-  watermark: 10,
+  watermark: 30,
   suspiciousPattern: 15,
+  behaviorMax: 55,
 } as const;
 
 // ══════════════════════════════════════════════════════════════
@@ -330,9 +333,48 @@ export default function Dashboard() {
         ? '今天开始使用'
         : '';
 
-  // ── Phase 7：评分扣分明细 ──
-  // 只列出**实际发生**的扣分项。全列出来等于用 0 填充噪声，
-  // 用户会以为每项都检测过而误判检测覆盖面。
+  // ── 评分扣分明细 ──
+  // ★★★ 只列**实际命中**的扣分项。
+  //   两处关键改动（v0.1.0）：
+  //   ① 「中转站侧危险/可疑」用的是 relay_* 计数，
+  //      不再把用户自己贴密钥造成的拦截算到中转站头上 ——
+  //      旧版界面显示「19 次危险 −380」，实测那 19 条全是
+  //      「响应长度突变」：用户问了个长问题，
+  //      中转站被扣 380 分。而真正的中转站风险是 0。
+  //   ② 行为扣分按占比、有上限，不会再出现 −616 这种数字 ——
+  //      分数一旦触底就恒为 0，之后所有新增风险都看不出来。
+  const relayRisk = (primaryRelay?.relay_danger_count ?? 0)
+    + (primaryRelay?.relay_suspect_count ?? 0);
+  const selfRisk = (primaryRelay?.self_danger_count ?? 0)
+    + (primaryRelay?.self_suspect_count ?? 0);
+  // 与后端 _compute_score 的比例公式**逐字对应**：
+  //   relayRisk   = relay_danger + relay_suspect
+  //   normal      = total_calls − relayRisk − selfRisk
+  //   denominator = relayRisk + normal        ← 排除用户自身造成的调用
+  //   ratio       = (relay_danger×2 + relay_suspect) / denominator
+  //   penalty     = min(behaviorMax, ratio × behaviorMax × 4)
+  //
+  // ★ 分母排除 selfRisk 不是可选项，实测踩过：
+  //   用 total_calls 当分母时，用户多贴几次密钥就能把中转站分数抬高
+  //   （实测 60 → 96）—— 分数被用户的操作洗白了。
+  // ★ 系数 4 与分母口径都必须与后端一致，改一边就要改两边 ——
+  //   不一致的后果是界面解释的扣分与实际分数对不上，
+  //   而这正是「评分明细没有意义」的另一种表现。
+  const denominator = primaryRelay
+    ? Math.max(
+        0,
+        relayRisk
+          + (primaryRelay.total_calls - relayRisk - selfRisk),
+      )
+    : 0;
+  const rawRatio = denominator > 0
+    ? ((primaryRelay?.relay_danger_count ?? 0) * 2
+        + (primaryRelay?.relay_suspect_count ?? 0)) / denominator
+    : 0;
+  const behaviorPenalty = Math.min(
+    SCORE_WEIGHTS.behaviorMax,
+    rawRatio * SCORE_WEIGHTS.behaviorMax * 4,
+  );
   const repDeductions = primaryRelay
     ? [
         {
@@ -343,29 +385,8 @@ export default function Dashboard() {
           hit: primaryRelay.known_malicious,
         },
         {
-          key: 'danger',
-          label: '危险响应',
-          detail: `${primaryRelay.danger_count} 次 × ${SCORE_WEIGHTS.danger} 分`,
-          points: primaryRelay.danger_count * SCORE_WEIGHTS.danger,
-          hit: primaryRelay.danger_count > 0,
-        },
-        {
-          key: 'suspect',
-          label: '可疑响应',
-          detail: `${primaryRelay.suspect_count} 次 × ${SCORE_WEIGHTS.suspect} 分`,
-          points: primaryRelay.suspect_count * SCORE_WEIGHTS.suspect,
-          hit: primaryRelay.suspect_count > 0,
-        },
-        {
-          key: 'latency',
-          label: '响应延迟突变',
-          detail: `${primaryRelay.latency_anomalies ?? 0} 次 × ${SCORE_WEIGHTS.latencyAnomaly} 分（条件触发型攻击信号）`,
-          points: (primaryRelay.latency_anomalies ?? 0) * SCORE_WEIGHTS.latencyAnomaly,
-          hit: (primaryRelay.latency_anomalies ?? 0) > 0,
-        },
-        {
           key: 'watermark',
-          label: '数据保留迹象',
+          label: '检测到数据保留迹象',
           detail: `响应中出现中转站自述留存 · ${SCORE_WEIGHTS.watermark} 分`,
           points: primaryRelay.watermark_detected ? SCORE_WEIGHTS.watermark : 0,
           hit: primaryRelay.watermark_detected,
@@ -378,6 +399,17 @@ export default function Dashboard() {
             ? SCORE_WEIGHTS.suspiciousPattern
             : 0,
           hit: primaryRelay.notes.some((n) => n.startsWith('高风险模式')),
+        },
+        {
+          key: 'behavior',
+          label: '中转站侧可疑响应占比',
+          detail:
+            `危险 ${primaryRelay.relay_danger_count ?? 0} 次`
+            + `（权重 2）+ 可疑 ${primaryRelay.relay_suspect_count ?? 0} 次`
+            + `，共 ${primaryRelay.total_calls} 次调用`
+            + ` → 扣 ${behaviorPenalty.toFixed(1)} 分（上限 ${SCORE_WEIGHTS.behaviorMax}）`,
+          points: Number(behaviorPenalty.toFixed(1)),
+          hit: relayRisk > 0,
         },
       ].filter((d) => d.hit)
     : [];
@@ -497,11 +529,24 @@ export default function Dashboard() {
                   {usedLabel}
                   {usedLabel && ' · '}
                   {primaryRelay.total_calls} 次调用
-                  {primaryRelay.danger_count > 0 && (
+                  {/* ★ 只把「中转站侧」的风险算到中转站头上。
+                      旧版这里显示的是 danger_count（总量），
+                      实测 19 次里全部是「响应长度突变」——
+                      用户问了个长问题，中转站被写成「19 次危险」。
+                      那会让用户白白弃用一个没问题的服务商。 */}
+                  {(primaryRelay.relay_danger_count ?? 0) > 0 && (
                     <>
                       {' · '}
                       <span style={{ color: 'var(--xd-danger)' }}>
-                        {primaryRelay.danger_count} 次危险
+                        {(primaryRelay.relay_danger_count ?? 0) + (primaryRelay.relay_suspect_count ?? 0)} 次可疑响应
+                      </span>
+                    </>
+                  )}
+                  {(primaryRelay.self_danger_count ?? 0) > 0 && (
+                    <>
+                      {' · '}
+                      <span title="这些请求在发往中转站之前就被拦下了，中转站从未收到">
+                        你有 {primaryRelay.self_danger_count} 次操作被拦截
                       </span>
                     </>
                   )}
@@ -544,10 +589,18 @@ export default function Dashboard() {
 
             {showRepDetail && (
               <div className="rep-detail mt-12">
-                {repDeductions.length === 0 ? (
+                {relayRisk === 0 && repDeductions.length === 0 ? (
                   <div className="faint" style={{ fontSize: 12, lineHeight: 1.7 }}>
                     本次使用未触发任何扣分项 —
-                    没有危险或可疑响应、没有检测到数据保留迹象，域名也不在风险特征库中。
+                    没有中转站侧的危险或可疑响应、没有检测到数据保留迹象，域名也不在风险特征库中。
+                    {selfRisk > 0 && (
+                      <>
+                        <br />
+                        另有 {selfRisk} 次拦截来自你自己的操作（如在对话里粘贴了密钥），
+                        按设计不计入中转站信誉 ——
+                        请求在发往中转站之前就被拦下了，中转站从未收到过这些内容。
+                      </>
+                    )}
                   </div>
                 ) : (
                   <>

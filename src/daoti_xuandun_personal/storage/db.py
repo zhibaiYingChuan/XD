@@ -76,6 +76,20 @@ class PersonalStorage:
         """
         migrations = [
             ("logs", "marked_safe", "INTEGER NOT NULL DEFAULT 0"),
+            # ★ v0.1.0：评分口径变更 —— 责任分列。
+            #   老库里 danger_count/suspect_count 是混在一起的，
+            #   无法区分是长度突变（用户提问导致）还是恶意 tool_call。
+            #   迁移策略：老数据一律记为 relay_* = 0，
+            #   即「旧记录不作为中转站的罪证」——
+            #   宁可分数偏高，也不在没有依据的情况下指控中转站。
+            ("relay_reputation", "relay_danger_count",
+             "INTEGER NOT NULL DEFAULT 0"),
+            ("relay_reputation", "self_danger_count",
+             "INTEGER NOT NULL DEFAULT 0"),
+            ("relay_reputation", "relay_suspect_count",
+             "INTEGER NOT NULL DEFAULT 0"),
+            ("relay_reputation", "self_suspect_count",
+             "INTEGER NOT NULL DEFAULT 0"),
         ]
         for table, column, decl in migrations:
             cols = {
@@ -482,8 +496,10 @@ class PersonalStorage:
                 """INSERT INTO relay_reputation
                    (domain, score, first_seen, last_seen, total_calls,
                     danger_count, suspect_count, avg_latency_ms, latency_samples,
-                    known_malicious, watermark_detected, notes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    known_malicious, watermark_detected, notes,
+                    relay_danger_count, self_danger_count,
+                    relay_suspect_count, self_suspect_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(domain) DO UPDATE SET
                      score=excluded.score, last_seen=excluded.last_seen,
                      total_calls=excluded.total_calls,
@@ -493,13 +509,19 @@ class PersonalStorage:
                      latency_samples=excluded.latency_samples,
                      known_malicious=excluded.known_malicious,
                      watermark_detected=excluded.watermark_detected,
-                     notes=excluded.notes""",
+                     notes=excluded.notes,
+                     relay_danger_count=excluded.relay_danger_count,
+                     self_danger_count=excluded.self_danger_count,
+                     relay_suspect_count=excluded.relay_suspect_count,
+                     self_suspect_count=excluded.self_suspect_count""",
                 (
                     rep.domain, rep.score, rep.first_seen, rep.last_seen,
                     rep.total_calls, rep.danger_count, rep.suspect_count,
                     rep.avg_latency_ms, rep.latency_samples,
                     int(rep.known_malicious), int(rep.watermark_detected),
                     json.dumps(rep.notes, ensure_ascii=False),
+                    rep.relay_danger_count, rep.self_danger_count,
+                    rep.relay_suspect_count, rep.self_suspect_count,
                 ),
             )
 
@@ -514,6 +536,18 @@ class PersonalStorage:
                 notes = json.loads(r["notes"])
             except (json.JSONDecodeError, TypeError):
                 notes = []
+
+            def _i(key: str) -> int:
+                # 老库可能缺列（迁移失败/被手工改过），缺失当 0。
+                # 用 keys() 判断而不是直接下标 ——
+                # 直接取会抛 IndexError，把一次读库失败变成崩溃。
+                if key not in r.keys():
+                    return 0
+                try:
+                    return int(r[key])
+                except (TypeError, ValueError):
+                    return 0
+
             result.append(
                 RelayReputation(
                     domain=str(r["domain"]),
@@ -528,6 +562,10 @@ class PersonalStorage:
                     known_malicious=bool(r["known_malicious"]),
                     watermark_detected=bool(r["watermark_detected"]),
                     notes=notes,
+                    relay_danger_count=_i("relay_danger_count"),
+                    self_danger_count=_i("self_danger_count"),
+                    relay_suspect_count=_i("relay_suspect_count"),
+                    self_suspect_count=_i("self_suspect_count"),
                 )
             )
         return result
