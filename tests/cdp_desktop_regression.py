@@ -588,7 +588,7 @@ def complete_wizard(page):
 # ══════════════════════════════════════════════════════════════
 
 
-def test_boot(page):
+def test_boot(page, be: Backend):
     """T1 应用启动 + 主界面导航齐全。"""
     title = page.title()
     rec("T1 应用启动", title != "", f"title={title!r}")
@@ -601,6 +601,32 @@ def test_boot(page):
     missing = [r for r in required if not any(r in x for x in labels)]
     rec("T1 侧边导航齐全", not missing,
         f"共 {len(labels)} 项，缺失: {missing or '无'}；实际={labels}")
+
+    # ★ 版本号必须与引擎自报的**同一个来源**。
+    #   用户判断「我装的是不是新版」只看界面上这一行；
+    #   若它与 tauri.conf.json 里的版本漂移了，
+    #   用户看到的版本号就是假的 —— 而报障时没人会想到去核对它。
+    #   这里刻意不写死期望值：那是「照着实现写测试」，
+    #   升版本时必假失败。改为与引擎自报的版本比对。
+    try:
+        shown = page.evaluate(
+            """() => {
+                const m = document.body.innerText.match(/v\\d+\\.\\d+\\.\\d+[\\w.\\-]*/);
+                return m ? m[0] : null;
+            }"""
+        )
+        # ★ 对照源用 /openapi.json 而不是 /api/docs：
+        #   docs_url 指的是 Swagger UI（返回 HTML），
+        #   引擎自报的版本号在 OpenAPI 规范的 info.version 里。
+        #   实测踩过：取 /api/docs 会拿到 404，
+        #   而判据若因此「读不到就不报」，就成了永远绿的假通过。
+        spec = be._get("/openapi.json", timeout=5) or {}
+        api_ver = (spec.get("info") or {}).get("version")
+        rec("T1 界面显示的版本号与引擎一致",
+            bool(shown) and bool(api_ver) and shown.lstrip("v") == api_ver,
+            f"界面={shown!r} 引擎 openapi.info.version={api_ver!r}")
+    except Exception as e:
+        rec("T1 界面显示的版本号与引擎一致", False, f"读取失败: {e}")
 
 
 def test_pages_render(page):
@@ -2028,7 +2054,7 @@ def main():
             else:
                 section("主界面与状态诚实性")
                 for name, fn in (
-                    ("T1 启动与导航", lambda: test_boot(page)),
+                    ("T1 启动与导航", lambda: test_boot(page, be)),
                     ("T2 页面渲染", lambda: test_pages_render(page)),
                     ("T2b 激活页诚实性", lambda: test_activate_page_honest(page, be)),
                     ("T3 状态诚实性", lambda: test_status_bar_honest(page, be)),

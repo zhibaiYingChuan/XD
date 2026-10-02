@@ -55,6 +55,192 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
+# ══════════════════════════════════════════════════════════════
+# 版本号必须处处一致
+# ══════════════════════════════════════════════════════════════
+
+
+class TestVersionIsConsistentEverywhere:
+    """★ 版本号散落在 9 个文件里，此前**没有任何检查**。
+
+    为什么这是个真实缺陷（不是洁癖）
+    ────────────────────────────────────────────────────────────
+    升版本时要改 9 处，漏掉任何一处的后果都很难自己发现：
+
+      · 漏了 tauri.conf.json → 安装包文件名与界面显示的版本不一致，
+        用户报「装的是新版，界面却写着旧版」，而两处都是真的；
+      · 漏了 package.json → npm 缓存与锁文件对不上，
+        下次构建拉到的可能是旧依赖；
+      · 漏了 __init__.py → /api/docs 显示旧版本，
+        而用户就是照着文档核对版本的。
+
+    最坏的一种是「只改了一半」：
+    界面显示 0.1.1、引擎自报 0.1.0 —— 两者都真实，
+    没有任何报错，只有一个报障时才被发现的矛盾。
+
+    判据做法
+    ────────────────────────────────────────────────────────────
+    ★ 以 **Cargo.toml 为唯一基准**，逐处比对而不是逐处写死版本号：
+      写死的话，升级时连本文件都要改，就失去了它存在的意义。
+      而 Cargo.toml 是 Tauri 打包与 /api/docs 的实际来源，
+      它错的时候其他 8 处全对也没有意义。
+    """
+
+    VERSION_FILES = {
+        "Cargo.toml": ROOT / "desktop" / "src-tauri" / "Cargo.toml",
+        "package.json": ROOT / "desktop" / "package.json",
+        "tauri.conf.json": ROOT / "desktop" / "src-tauri" / "tauri.conf.json",
+        "__init__.py": (
+            ROOT / "src" / "daoti_xuandun_personal" / "__init__.py"),
+        "app.py": ROOT / "src" / "daoti_xuandun_personal" / "proxy" / "app.py",
+        "tauriShim.ts": ROOT / "desktop" / "src" / "lib" / "tauriShim.ts",
+        "Layout.tsx": ROOT / "desktop" / "src" / "components" / "Layout.tsx",
+        # ★ 锁文件也要锁。
+        #   Cargo.lock 与 package-lock.json 里各有一份本包的版本；
+        #   不一致时 cargo/npm 会认为「版本没变」而复用旧缓存，
+        #   CI 编出来的产物就带着上一次的依赖 ——
+        #   而本机 `cargo build` 完全正常，只有发版才出问题。
+        "Cargo.lock": ROOT / "desktop" / "src-tauri" / "Cargo.lock",
+        "package-lock.json": ROOT / "desktop" / "package-lock.json",
+    }
+
+    def _baseline(self) -> str:
+        cargo = _read(self.VERSION_FILES["Cargo.toml"])
+        m = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.M)
+        assert m, "Cargo.toml 里找不到 version 字段"
+        return m.group(1)
+
+    @staticmethod
+    def _strip_comments(text: str) -> str:
+        """去掉 Python / TS / JSON 注释。
+
+        ★ 为什么必须先剥注释：
+          源码里有大量「★ v0.1.0：……」这样的**变更标注**，
+          它们记录的是「这段代码是哪一版写的」，不是版本声明。
+          不剥掉就会把它们当成版本号，
+          于是每次升版本都要去改十几条历史注释 ——
+          那既不可能做对，也会把真实声明的漂移淹没在噪音里。
+
+          判据要问的是「有哪些地方**声明**了版本」，
+          不是「哪些地方提到了版本」。
+        """
+        text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)   # /* */
+        text = re.sub(r'(?m)^\s*//.*$', '', text)           # // ...
+        # ★ docstring 也要剥。
+        #   Python 的文档字符串是**字符串字面量**而非注释，
+        #   但它承担的完全是注释的职责 ——
+        #   实测踩过：`"""★★ v0.1.0：target 决定转发给哪家"""`
+        #   这种写法在源码里有十几处，不剥就会全部被误判成版本声明。
+        text = re.sub(r'(?s)"""(?:.|\n)*?"""', '', text)
+        text = re.sub(r"(?s)'''(?:.|\n)*?'''", '', text)
+        # Python 行注释：避开字符串里的 #（如颜色值、URL 片段）
+        out = []
+        for line in text.splitlines():
+            in_s = False
+            cut = len(line)
+            for i, ch in enumerate(line):
+                if ch in "'\"":
+                    in_s = not in_s
+                elif ch == "#" and not in_s:
+                    cut = i
+                    break
+            out.append(line[:cut])
+        return "\n".join(out)
+
+    def test_every_file_declares_the_same_version(self):
+        base = self._baseline()
+        wrong = {}
+        for label, path in self.VERSION_FILES.items():
+            if label in ("Cargo.toml", "Cargo.lock"):
+                continue
+            body = self._strip_comments(_read(path))
+            found = set(re.findall(r'0\.1\.\d+[\w.\-]*', body))
+            off = {v for v in found if v != base}
+            if off:
+                wrong[label] = sorted(off)
+        assert not wrong, (
+            f"版本号应统一为 {base}，但下列文件里声明了别的版本：{wrong}。"
+            "后果：安装包文件名、界面显示、/api/docs 三者可能互相矛盾，"
+            "而每一处单独看都是对的。"
+        )
+
+    def test_our_own_entry_in_lockfiles(self):
+        """★ 锁文件只看**本包那一节**，不看全文。
+
+        实测踩过：Cargo.lock 里有 200 多个第三方依赖，
+        它们的版本号（0.1.11、0.1.65…）与本产品毫无关系。
+        全文扫一遍会把它们全当成「版本不一致」——
+        判据直接失效，而且它失效的方式是**永远报错**，
+        久而久之就没人看它的输出了。
+
+        正确做法：定位 name = "xuandun-personal" 那一段，
+        只读它紧邻的 version。
+        """
+        base = self._baseline()
+
+        lock = _read(self.VERSION_FILES["Cargo.lock"])
+        m = re.search(
+            r'name = "xuandun-personal"\s*\nversion = "([^"]+)"', lock)
+        assert m, "Cargo.lock 里找不到 xuandun-personal 这一节"
+        assert m.group(1) == base, (
+            f"Cargo.lock 里本包是 {m.group(1)}，应为 {base}。"
+            "不一致时 cargo 会认为版本没变而复用旧缓存，"
+            "CI 编出来的产物带着上一次的依赖。"
+        )
+
+        plock = _read(self.VERSION_FILES["package-lock.json"])
+        got = re.findall(r'"version": "([^"]+)"', plock)[:2]
+        assert got, "package-lock.json 里找不到版本字段"
+        assert all(v == base for v in got), (
+            f"package-lock.json 里的版本是 {got}，应为 {base}"
+        )
+
+    def test_comment_stripping_does_not_hide_declarations(self):
+        """★ 反向自证：剥注释不会把真实声明也一起剥掉。
+
+        判据自身出错比没有判据更糟 ——
+        若剥离逻辑写坏了，它会把所有版本号都清空，
+        上面那条「全部一致」就会永远为真。
+        """
+        sample = (
+            "# 注释里的 0.1.0 不算数\n"
+            '"""docstring 里的 0.1.0 也不算。"""\n'
+            '__version__ = "0.1.1-alpha"\n'
+        )
+        got = set(re.findall(
+            r'0\.1\.\d+[\w.\-]*', self._strip_comments(sample)))
+        assert got == {"0.1.1-alpha"}, (
+            f"剥注释后应只剩声明处的版本，实际得到 {got}"
+        )
+
+    def test_pyproject_uses_the_numeric_part(self):
+        """pyproject 用 PEP 440 写法（0.1.1a0），但数字部分必须一致。"""
+        base = self._baseline()
+        core = re.match(r"(\d+\.\d+\.\d+)", base)
+        assert core, f"Cargo.toml 的版本号形状异常：{base}"
+        want = core.group(1)
+        got = _read(ROOT / "pyproject.toml")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', got, re.M)
+        assert m, "pyproject.toml 里找不到 version"
+        assert m.group(1).startswith(want), (
+            f"pyproject.toml 的版本是 {m.group(1)}，"
+            f"应与 {base} 的数字部分 {want} 一致"
+        )
+
+    def test_readme_states_the_current_version(self):
+        """README 顶部的版本标注必须是真的。
+
+        ★ 用户核对版本时第一眼看的就是这里。
+        """
+        want = self._baseline()
+        readme = _read(ROOT / "README.md")
+        m = re.search(r"\*\*版本\*\*：v([0-9][^\s（(]*)", readme)
+        assert m, "README 里找不到「**版本**：vX.Y.Z」标注"
+        assert m.group(1).strip() == want, (
+            f"README 写着 v{m.group(1)}，实际版本是 {want}"
+        )
+
+
 class TestTrayStatesDescribedHonestly:
     """托盘常驻状态：源码只有「绿/灰」两态 + 红色瞬时脉冲。"""
 

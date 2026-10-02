@@ -726,6 +726,48 @@ MUTATIONS = [
         ],
         "test_switch_unknown_id_raises",
     ),
+    # ── 版本号一致性（2026-10-02）──
+    #   版本散落在 9 个文件里且此前无任何检查。
+    #   漏改一处不会编译失败、不会测试变红，
+    #   只会让「安装包文件名 / 界面显示 / /api/docs」互相矛盾 ——
+    #   而每一处单独看都是真的。
+    (
+        "tauri.conf.json 漏改版本（安装包与界面显示矛盾）",
+        "desktop/src-tauri/tauri.conf.json",
+        [(r'"version": "0\.1\.1-alpha"', '"version": "0.1.0-alpha"')],
+        "test_every_file_declares_the_same_version",
+    ),
+    (
+        "界面版本号漏改（Layout 与引擎自报不一致）",
+        "desktop/src/components/Layout.tsx",
+        [(r"useState\('0\.1\.1-alpha'\)", "useState('0.1.0-alpha')")],
+        "test_every_file_declares_the_same_version",
+    ),
+    (
+        "锁文件里的本包版本漏改（CI 会复用旧依赖）",
+        "desktop/src-tauri/Cargo.lock",
+        [
+            (
+                r'(name = "xuandun-personal"\nversion = ")0\.1\.1-alpha',
+                r"\g<1>0.1.0-alpha",
+            )
+        ],
+        "test_our_own_entry_in_lockfiles",
+    ),
+    (
+        "剥注释时把 docstring 也当声明（判据误报）",
+        "tests/test_help_claims.py",
+        [
+            (
+                r"        text = re\.sub\(r'\(\?s\)\"\"\"\(\?:\.\|\\n\)\*\?\"\"\"', "
+                r"'', text\)\n"
+                r"        text = re\.sub\(r\"\(\?s\)'''\(\?:\.\|\\n\)\*\?'''\", "
+                r"'', text\)",
+                "        # 变异：不剥 docstring",
+            )
+        ],
+        "test_comment_stripping_does_not_hide_declarations",
+    ),
 ]
 
 
@@ -735,6 +777,7 @@ def run_tests(pattern: str) -> tuple[int, str]:
             sys.executable, "-m", "pytest",
             "tests/test_relay_config.py", "tests/test_block_evidence.py",
             "tests/test_reputation_score.py", "tests/test_multi_relay.py",
+            "tests/test_help_claims.py",
             "-q", "-k", pattern, "--tb=line", "-rf",
         ],
         cwd=ROOT,
