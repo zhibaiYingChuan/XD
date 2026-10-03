@@ -196,10 +196,18 @@ tests/*
 #   test_statistical_never_blocks —— 统计类信号不得阻断（曾 88% 误报）
 #   test_log_filters —— 日志列表与总数口径必须一致（曾「筛不出来」）
 #   test_route_order —— 静态路由须在参数路由之前（曾 422 而无人能查因）
+#   test_log_deletion_consistency —— 删日志后统计须跟着重算，
+#     且原始敏感值必须连带删除（曾「清空了首页数字还在」，
+#     而界面承诺的「不留存原始敏感值」当时是假的）
+#   test_delete_e2e —— 同一条契约的真实 HTTP 端到端版。
+#     上一份只调存储方法，而历史失效形态恰恰是
+#     「底层方法对、路由没走它」，所以判据必须落在端点上。
 !tests/test_dev_isolation.py
 !tests/test_statistical_never_blocks.py
 !tests/test_log_filters.py
 !tests/test_route_order.py
+!tests/test_log_deletion_consistency.py
+!tests/test_delete_e2e.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py

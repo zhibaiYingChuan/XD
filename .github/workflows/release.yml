@@ -293,9 +293,14 @@ jobs:
             exit 1
           fi
           echo "引擎：$ENGINE"
-          # 日志筛选修复引入的 SQL 片段（storage/db.py 的 _log_filters）
+          # 每条标识都对应一个「装出来才发现功能不对」的历史缺陷：
+          #   marked_safe = ?      ← 日志筛选条件（曾「共 128 条却筛不出来」）
+          #   top_domains          ← 日志概览统计
+          #   _recompute_daily_stats ← 删日志后首页统计同步（曾清空了数字还在）
+          #   wal_checkpoint        ← 原始敏感值真正离开磁盘
           MISSING=0
-          for MARK in 'marked_safe = ?' 'top_domains'; do
+          for MARK in 'marked_safe = ?' 'top_domains' \
+                      '_recompute_daily_stats' 'wal_checkpoint'; do
             if grep -qa -- "$MARK" "$ENGINE"; then
               echo "  ✓ $MARK"
             else

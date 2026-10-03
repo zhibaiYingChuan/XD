@@ -41,7 +41,6 @@ def default_db_path() -> Path:
     """
     return paths.data_file("xuandun_personal.db")
 
-
 def _log_filters(
     log_type: Optional[str] = None,
     action: Optional[str] = None,
@@ -109,10 +108,25 @@ class PersonalStorage:
         logger.info("个人版存储就绪: %s", self._db_path)
 
     def _init_schema(self) -> None:
-        """初始化表结构 + 向后兼容迁移。"""
+        """初始化表结构 + 向后兼容迁移。
+
+        ★★ PRAGMA secure_delete=ON（2026-10-03）
+          SQLite 默认 secure_delete=OFF，删行只是把内容标记为「可复用」，
+          **明文仍留在数据库文件的空闲页里**（WAL 旁文件同理）。
+          实测：清空日志后用二进制搜索仍能在 xuandun_personal.db-wal 里
+          搜到用户原始的 API Key。
+
+          而清空日志的确认框与产品文档都写着「本地不留存任何原始敏感值」——
+          这句话在关闭 secure_delete 时是假的：
+          数据在逻辑表里没了，在磁盘上还在，而且能被任何拿到文件的人搜出来。
+
+          代价是删除时多一次覆写（.db 文件通常只有几 MB），
+          换来的是「删了就是真删了」。
+        """
         with self._conn:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA secure_delete=ON")
             self._conn.executescript(_SCHEMA_FILE.read_text(encoding="utf-8"))
             self._migrate_schema()
 
@@ -266,7 +280,8 @@ class PersonalStorage:
 
         ★ 连带删除脱敏记录：那些行经 detail_json 与 CSV 导出外发，
           留着它们等于日志删了但内容还在。
-          外键声明为 ON DELETE CASCADE，删 logs 行会自动带走。
+          log_id 上没有任何外键约束（schema.sql 里没写 REFERENCES），
+          所以必须显式 DELETE —— 不能指望级联。
         """
         where, params = _log_filters(
             log_type=log_type, action=action, relay_domain=relay_domain,
@@ -274,8 +289,24 @@ class PersonalStorage:
             marked_safe=marked_safe,
         )
         with self._conn:
+            if where:
+                victims = self._conn.execute(
+                    f"SELECT id FROM logs {where}", params
+                ).fetchall()
+            else:
+                victims = self._conn.execute("SELECT id FROM logs").fetchall()
             cur = self._conn.execute(f"DELETE FROM logs {where}", params)
-        return int(cur.rowcount or 0)
+            deleted = int(cur.rowcount or 0)
+            if victims:
+                marks = ",".join("?" * len(victims))
+                self._conn.execute(
+                    f"DELETE FROM redaction_records WHERE log_id IN ({marks})",
+                    [int(v["id"]) for v in victims],
+                )
+            self._recompute_daily_stats()
+        if deleted:
+            self._scrub_wal()
+        return deleted
 
     def log_breakdown(self) -> Dict[str, Any]:
         """日志概览统计（供日志管理界面展示）。
@@ -459,7 +490,19 @@ class PersonalStorage:
         return [self._row_to_log(r) for r in rows]
 
     def clear_logs(self, before_ts: Optional[float] = None) -> int:
-        """清空日志（可指定仅清某时间之前）。"""
+        """清空日志（可指定仅清某时间之前）。
+
+        ★★ 2026-10-03 修复：必须连带清理两处，否则界面在骗人。
+          ① daily_stats —— 首页那些数字来自这张累加缓存表，
+             删日志不会碰它，于是「今日已检查 N 次」纹丝不动。
+             实测：插入 1 条 + 统计，清空后 today 仍是非零。
+             而清空按钮的确认框明确写着「此操作不可恢复」，
+             用户清完回首页看到数字没变，只能认为玄盾坏了。
+          ② redaction_records —— 这张表存着**原始敏感值**，
+             而 schema 里 log_id 没有任何外键约束，
+             所以删日志后原始 API Key / 手机号仍留在库里。
+             界面承诺「本地不留存任何原始敏感值」，那句话当时是假的。
+        """
         with self._conn:
             if before_ts is None:
                 cur = self._conn.execute("DELETE FROM logs")
@@ -467,13 +510,117 @@ class PersonalStorage:
                 cur = self._conn.execute(
                     "DELETE FROM logs WHERE timestamp < ?", (before_ts,)
                 )
-        return int(cur.rowcount or 0)
+            deleted = int(cur.rowcount or 0)
+            self._conn.execute("DELETE FROM redaction_records")
+            self._recompute_daily_stats()
+        self._scrub_wal()
+        return deleted
+
+    def _scrub_wal(self) -> None:
+        """把 WAL 旁文件落回主库并清空，让敏感数据真的离开磁盘。
+
+        ★★ 为什么 secure_delete 开着还不够（2026-10-03 实测）：
+          WAL 是**追加写**的 —— 每次事务把新页追加到文件末尾，
+          即使页内内容已被 secure_delete 覆写，**旧帧仍在文件里**。
+          实测开启 secure_delete 后，二进制搜索仍能在
+          ``xuandun_personal.db-wal`` 里搜到原始 API Key。
+
+          所以删除敏感数据后必须：
+            ① wal_checkpoint(TRUNCATE) —— 把 WAL 内容写回主库并**截断**文件；
+            ② 再由主库页的 secure_delete 覆写原位置。
+          顺序不能反：先截断再让主库覆写，才不会把明文又写回去。
+
+          失败不抛异常 —— 这是清理动作，不该让「删除成功」的返回值变成报错。
+        """
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # 截断后 WAL 里仍有本页刚写的帧，再 checkpoint 一次覆盖掉
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("WAL 清理失败（不影响本次删除结果）: %s", e)
 
     def delete_log(self, log_id: int) -> bool:
         """删除单条日志。"""
         with self._conn:
             cur = self._conn.execute("DELETE FROM logs WHERE id = ?", (log_id,))
-        return bool(cur.rowcount)
+            ok = bool(cur.rowcount)
+            if ok:
+                self._conn.execute(
+                    "DELETE FROM redaction_records WHERE log_id = ?", (log_id,)
+                )
+                self._recompute_daily_stats()
+        if ok:
+            self._scrub_wal()
+        return ok
+
+    def _recompute_daily_stats(self) -> None:
+        """按 logs 表里**实际剩下的**记录重算每日统计。
+
+        ★ 为什么必须重算而不是简单置零：
+          「清空全部」置零没问题，但 clear_logs(before_ts) 支持
+          「只清某时间之前」—— 用户清掉昨天的日志，今天的统计不该跟着归零。
+          置零会把「清理旧记录」变成「篡改今日数据」，
+          那是把一个谎报换成另一个谎报。
+
+        ★ 为什么以 logs 为准而不是在删除时做减法：
+          daily_stats 是累加缓存，任何一次漏记/重复记都会让它永久漂移。
+          从明细重算则天然自愈 —— 这是唯一能让两个口径长期不打架的做法。
+          代价只是一次 COUNT，而它把「统计可能骗人」变成了「统计不可能骗人」。
+
+        ★ redaction_count 不能从 logs 重算：
+          打码数是「本条日志打了几处」，日志表里没存这个数，
+          而 redaction_records 按 log_id 存着明细行数。
+          所以它取自 redaction_records 的行数 ——
+          删日志时上面已连带删掉对应行，两者天然同步。
+        """
+        with self._conn:
+            rows = self._conn.execute(
+                "SELECT DISTINCT date(timestamp, 'unixepoch', 'localtime') AS d "
+                "FROM logs"
+            ).fetchall()
+            dates = [str(r["d"]) for r in rows if r["d"]]
+            if dates:
+                marks = ",".join("?" * len(dates))
+                self._conn.execute(
+                    f"DELETE FROM daily_stats WHERE date NOT IN ({marks})", dates
+                )
+                for d in dates:
+                    agg = self._conn.execute(
+                        "SELECT COUNT(*) AS total, "
+                        "SUM(action = 'block') AS danger, "
+                        "SUM(action = 'alert') AS suspect, "
+                        "SUM(action = 'pass') AS safe "
+                        "FROM logs WHERE date(timestamp, 'unixepoch', 'localtime') = ?",
+                        (d,),
+                    ).fetchone()
+                    redactions = self._conn.execute(
+                        "SELECT COUNT(*) AS c FROM redaction_records r "
+                        "JOIN logs l ON l.id = r.log_id "
+                        "WHERE date(l.timestamp, 'unixepoch', 'localtime') = ?",
+                        (d,),
+                    ).fetchone()
+                    self._conn.execute(
+                        """INSERT INTO daily_stats
+                           (date, total_calls, danger_count, suspect_count,
+                            safe_count, redaction_count)
+                           VALUES (?,?,?,?,?,?)
+                           ON CONFLICT(date) DO UPDATE SET
+                             total_calls = excluded.total_calls,
+                             danger_count = excluded.danger_count,
+                             suspect_count = excluded.suspect_count,
+                             safe_count = excluded.safe_count,
+                             redaction_count = excluded.redaction_count""",
+                        (
+                            d,
+                            int(agg["total"] or 0),
+                            int(agg["danger"] or 0),
+                            int(agg["suspect"] or 0),
+                            int(agg["safe"] or 0),
+                            int(redactions["c"] or 0) if redactions else 0,
+                        ),
+                    )
+            else:
+                self._conn.execute("DELETE FROM daily_stats")
 
     # ══════════════════════════════════════════════════════════
     # 脱敏记录
