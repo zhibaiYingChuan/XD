@@ -458,6 +458,24 @@ def _check_hidden_instructions(text: str) -> List[VerificationFinding]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 统计类信号名单（「误报不阻断」的唯一事实源）
+# ══════════════════════════════════════════════════════════════
+
+#: 反映内容「长得不一样」，但证明不了「被动了手脚」。
+#:
+#: ★ 这份名单是「误报不阻断」的唯一事实源（2026-10-03）。
+#:   长度突变是**症状**不是**证据**：用户问「你好」回 3 字、
+#:   问技术问题回 11000 字，在统计上完全正常 ——
+#:   实测本机 41 条响应侧阻断里 36 条是长度突变。
+#:   拿「偏离 124σ」当罪证，等于把用户的正常提问当成攻击；
+#:   而用户此时正等着 AI 干活，被拦住只会让他失去对工具的信任。
+STATISTICAL_SIGNALS: frozenset = frozenset({
+    "length_anomaly",
+    "structure_anomaly",
+})
+
+
+# ══════════════════════════════════════════════════════════════
 # 第 3 类：响应模式异常（长度/结构突变 3σ）
 # ══════════════════════════════════════════════════════════════
 
@@ -467,7 +485,15 @@ class PatternTracker:
 
     攻击特征：中转站在前 N 次调用中表现正常（建立信任），
     在第 N+1 次突然返回恶意内容。长度/结构突变是重要信号。
+
+    ★★ 本类产出的统计类信号一律不具备阻断能力
+      （v0.1.1，闸门见 ``decide_response_action``）。
     """
+
+    #: 指向模块级 STATISTICAL_SIGNALS 这唯一事实源，不另立一份：
+    #: 两份名单一旦漂移，就会出现「检测点认为不阻断、闸门却拦下」，
+    #: 而两边各自的单测都还是绿的。
+    _STATISTICAL = STATISTICAL_SIGNALS
 
     def __init__(self, window_size: int = 10, sigma_threshold: float = 3.0):
         self._window_size = window_size
@@ -517,7 +543,12 @@ class PatternTracker:
                     findings.append(
                         VerificationFinding(
                             category="length_anomaly",
-                            severity="medium",
+                            # ★ 恒为 low：统计信号不得推高整体严重程度。
+                            #   原实现按 |σ| 把它升到 high（实测有 124σ 的记录），
+                            #   而 high 在均衡档直接等于 BLOCK ——
+                            #   于是「你这次问得长」被当成「中转站攻击了你」。
+                            #   长度再异常也只是「不一样」，证明不了「被篡改」。
+                            severity="low",
                             detail=(
                                 f"响应长度异常：本次 {length} 字符，"
                                 f"历史稳定在 {int(mean_len)} 字符（超过 2 倍）"
@@ -532,7 +563,8 @@ class PatternTracker:
                     findings.append(
                         VerificationFinding(
                             category="length_anomaly",
-                            severity="medium" if abs(sigma) < 5 else "high",
+                            # ★ 同上：恒为 low，不因|σ| 升高而具备阻断能力
+                            severity="low",
                             detail=(
                                 f"响应长度{direction}：本次 {length} 字符，"
                                 f"偏离历史均值 {mean_len:.0f} 达 {sigma:.1f}σ"
@@ -550,8 +582,12 @@ class PatternTracker:
                     findings.append(
                         VerificationFinding(
                             category="structure_anomaly",
-                            severity="medium",
-                            detail="响应结构与历史显著不同（字符类分布突变），中转站可能篡改了内容类型",
+                            # ★ 同为统计信号：字符类分布变化只说明
+                            #   「这次内容类型和以前不同」—— 让模型写代码
+                            #   就会从散文变成代码，分布必然变。
+                            #   证明不了中转站篡改了什么，故恒为 low。
+                            severity="low",
+                            detail="响应结构与历史显著不同（字符类分布突变），仅作记录，不阻断",
                             evidence=signature[:60],
                         )
                     )
@@ -597,6 +633,72 @@ def _structure_distance(a: str, b: str) -> float:
             j += 1
     similarity = common / max(len(a), len(b))
     return 1.0 - similarity
+
+
+# ══════════════════════════════════════════════════════════════
+# 响应侧处置决策
+# ══════════════════════════════════════════════════════════════
+
+
+def decide_response_action(
+    level: str, findings: List[Any]
+) -> Tuple[str, str]:
+    """把本轮全部 findings 汇总成 (处置动作, 最高严重程度)。
+
+    ★★ 这是响应侧唯一的决策闸门（v0.1.1）
+    ────────────────────────────────────────────────────────────
+    规则一：整体严重程度取所有 findings 的最大值
+    规则二：**只有统计类信号时，永不阻断**
+
+    规则二为什么放在这里而不是各检测点：
+      · 放在各检测点（把 severity 固定为 low）不够 ——
+        整体严重程度取的是最大值，将来任何人给统计类标 high，
+        阻断就会复活，而所有单点测试照样绿。
+      · 必须是独立于 severity 取值的一道判断，才拦得住这种回归。
+
+    规则二为什么是「只有」而不是「含有统计类就放过」：
+      攻击者只要同时制造一次长度突变就能绕过 —— 那是可利用的漏洞。
+
+    这段刻意做成模块级纯函数：测试可以直接调它验证闸门，
+    而不必复制一份逻辑（复制 = 测试永远绿 = 假护栏）。
+    """
+    if not findings:
+        return Action.PASS.value, "low"
+
+    order = {"low": 0, "medium": 1, "high": 2}
+    max_sev = max(
+        (getattr(f, "severity", "low") for f in findings),
+        key=lambda s: order.get(s, 0),
+    )
+    action = _threshold_for_level(level, max_sev)
+
+    categories = {getattr(f, "category", "") for f in findings}
+    if action == Action.BLOCK.value and categories <= STATISTICAL_SIGNALS:
+        logger.info(
+            "仅有统计类信号（%s），不阻断：%s",
+            "/".join(sorted(categories)),
+            getattr(findings[0], "detail", ""),
+        )
+        action = Action.ALERT.value
+
+    return action, max_sev
+
+
+def _threshold_for_level(level: str, severity: str) -> str:
+    """某严重程度在给定安全级别下的处置。"""
+    if severity == "high":
+        return {
+            "lenient": Action.ALERT.value,
+            "balanced": Action.BLOCK.value,
+            "strict": Action.BLOCK.value,
+        }.get(level, Action.BLOCK.value)
+    if severity == "medium":
+        return {
+            "lenient": Action.PASS.value,
+            "balanced": Action.ALERT.value,
+            "strict": Action.BLOCK.value,
+        }.get(level, Action.ALERT.value)
+    return Action.PASS.value
 
 
 # ══════════════════════════════════════════════════════════════
@@ -652,20 +754,13 @@ class ResponseVerifier:
         logger.info("响应模式异常检测已%s", "开启" if enabled else "关闭")
 
     def _threshold_for(self, severity: str) -> str:
-        """返回某严重程度在当前安全级别下的整体处置。"""
-        if severity == "high":
-            return {
-                "lenient": Action.ALERT.value,
-                "balanced": Action.BLOCK.value,
-                "strict": Action.BLOCK.value,
-            }[self._level]
-        if severity == "medium":
-            return {
-                "lenient": Action.PASS.value,
-                "balanced": Action.ALERT.value,
-                "strict": Action.BLOCK.value,
-            }[self._level]
-        return Action.PASS.value
+        """返回某严重程度在当前安全级别下的整体处置。
+
+        ★ 委托给模块级 ``_threshold_for_level`` ——
+          两处各写一份映射表，必然漂移；而漂移的后果是
+          「verify() 判block、外层日志判 alert」，界面与日志对不上。
+        """
+        return _threshold_for_level(self._level, severity)
 
     def verify(
         self,
@@ -716,17 +811,14 @@ class ResponseVerifier:
         if not findings:
             return VerifyResult(action=Action.PASS.value, severity="low")
 
-        # 综合：取最高严重程度，按当前级别映射整体处置
-        order = {"low": 0, "medium": 1, "high": 2}
-        max_sev = max(findings, key=lambda f: order.get(f.severity, 0)).severity
-        overall = self._threshold_for(max_sev)
+        action, max_sev = decide_response_action(self._level, findings)
 
         return VerifyResult(
-            action=overall,
+            action=action,
             severity=max_sev,
             findings=findings,
             blocked_reason=(
-                findings[0].detail if overall == Action.BLOCK.value else None
+                findings[0].detail if action == Action.BLOCK.value else None
             ),
         )
 

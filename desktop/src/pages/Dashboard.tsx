@@ -463,7 +463,12 @@ export default function Dashboard() {
             </div>
             <div className="kpi">
               <div className="kpi-value suspect">{today.suspect_count}</div>
-              <div className="kpi-label">可疑</div>
+              {/* ★ 「可疑」→「提示」。
+                  「可疑」暗示「出问题了」，但这一栏现在装的是
+                  「回答长度/结构与平时不同」这类统计信号 ——
+                  它不指向任何问题。用户看到「可疑 42」只会莫名紧张，
+                  反而看不到真正该看的「危险」。 */}
+              <div className="kpi-label">提示</div>
             </div>
             <div className="kpi">
               <div className="kpi-value danger">{today.danger_count}</div>
@@ -490,7 +495,7 @@ export default function Dashboard() {
             </div>
             <div className="empty-text">
               {today && today.total_calls > 0
-                ? '今天还没有发现可疑响应，你的 AI 对话很安全'
+                ? '今天没有发现危险响应，你的 AI 对话很安全'
                 : '还没有检测记录 — 使用 AI 工具发起一次对话试试'}
             </div>
           </div>

@@ -80,6 +80,31 @@ export interface LogsResponse {
   total: number;
 }
 
+/** 日志筛选条件（列表查询与按条件删除共用同一套）。 */
+export interface LogFilterParams {
+  log_type?: string;
+  action?: string;
+  search?: string;
+  days?: number;
+  marked_safe?: boolean;
+}
+
+/**
+ * 日志概览统计（2026-10-03）。
+ *
+ * ★ 界面上「共 N 条」只是分页器需要的一个数字，回答不了
+ *   用户真正会问的「我这些日志都是些什么」。
+ */
+export interface LogBreakdown {
+  total: number;
+  marked_safe: number;
+  oldest_ts: number;
+  newest_ts: number;
+  by_type: Record<string, number>;
+  by_action: Record<string, number>;
+  top_domains: Array<{ domain: string; count: number }>;
+}
+
 export interface RedactionRecord {
   id: number;
   session_id: string;
@@ -457,6 +482,8 @@ export const api = {
     search?: string;
     /** 时间范围筛选（天）。后端支持但此前未接线 */
     days?: number;
+    /** 只看 / 只不看 被标记为误报的（2026-10-03） */
+    marked_safe?: boolean;
   } = {}) => {
     const q = new URLSearchParams();
     if (params.limit) q.set('limit', String(params.limit));
@@ -465,6 +492,11 @@ export const api = {
     if (params.action) q.set('action', params.action);
     if (params.search) q.set('search', params.search);
     if (params.days) q.set('days', String(params.days));
+    // ★ 布尔必须显式判 undefined：写成 if (params.marked_safe) 会漏掉 false，
+    //   而 false 正是「只看未标记误报的」这一档 —— 漏掉它该筛选静默失效。
+    if (params.marked_safe !== undefined) {
+      q.set('marked_safe', String(params.marked_safe));
+    }
     const qs = q.toString();
     // ★ P0-3 修复：Tauri 模式下 Rust 侧从 payload 读取筛选参数，
     //   原实现只把参数拼进 HTTP query string 导致桌面端筛选/搜索/分页全失效
@@ -519,6 +551,39 @@ export const api = {
     call<{ ok: boolean; deleted: number }>('clear_logs', 'POST', '/api/logs/clear', {
       before_days: beforeDays,
     }),
+
+  /**
+   * ★ 日志概览统计（2026-10-03）。
+   * 此前日志页一个数字都没有，用户想知道「我这些日志都是什么」
+   * 「有没有一直记着同一个中转站」只能自己翻。
+   */
+  getLogStats: () =>
+    call<LogBreakdown>('get_logs_stats', 'GET', '/api/logs/stats'),
+
+  /**
+   * ★ 按当前筛选条件删除（两步确认，2026-10-03）。
+   *
+   * 为什么要两步：删除不可恢复，而「当前筛选条件」是个隐式概念 ——
+   * 用户点了筛选就以为范围是那几十条，实际上可能是全部。
+   * 第一步只回报 matched（将要删多少条），让用户看清范围再决定。
+   *
+   * 此前只有「清空全部」一条路：想清理筛选结果就只能全清，
+   * 于是要么留着垃圾、要么把有用记录一起删掉。
+   */
+  countFilteredLogs: (params: LogFilterParams = {}) =>
+    call<{ ok: boolean; matched: number }>(
+      'count_filtered_logs',
+      'POST',
+      '/api/logs/delete-filtered',
+      params,
+    ),
+  deleteFilteredLogs: (params: LogFilterParams = {}) =>
+    call<{ ok: boolean; deleted: number }>(
+      'delete_filtered_logs',
+      'POST',
+      '/api/logs/delete-filtered/confirm',
+      params,
+    ),
 
   // ── 中转站信誉 ──
   getRelays: () => call<RelaysResponse>('get_relays', 'GET', '/api/relays'),
@@ -707,6 +772,71 @@ export const SEVERITY_LABELS: Record<Severity, string> = {
   medium: '中',
   high: '高',
 };
+
+/**
+ * 把检测类别翻译成「用户能不能据此判断」的说话方式。
+ *
+ * ★ 为什么不能直接把 detail 原文给用户（2026-10-03）
+ * ────────────────────────────────────────────────────────────
+ * 引擎给出的 detail 是给排障看的，含 σ 倍数、字符偏移、哈希：
+ *   「响应长度突然变长：本次 23851 字符，偏离历史均值 1742 达 124.0σ」
+ *   「第 3 处 · API 密钥 · 位于 用户提问 · 第 41673-41693 字符」
+ * 普通用户看不懂 σ 是什么，也看不到第 41673 个字符在哪 ——
+ * 于是日志对他只有「玄盾说有问题，但不知道是什么问题」这一信息量，
+ * 于是「误报」几乎成了默认结论。
+ *
+ * 这里给出「是什么问题 + 这意味着什么 + 你该怎么做」三段。
+ */
+export const FINDING_LABELS: Record<string, { title: string; meaning: string }> = {
+  length_anomaly: {
+    title: '这次回答的长度和平时不太一样',
+    meaning: '仅作记录，不影响使用。回答变长变短通常只是你换了话题。',
+  },
+  structure_anomaly: {
+    title: '这次回答的内容类型和平时不太一样',
+    meaning: '仅作记录，不影响使用。比如你让AI 写代码，它就会从聊天变成代码。',
+  },
+  structure_drift: {
+    title: '这次回答的结构和之前声明的不一致',
+    meaning: '中转站可能改了回答的组织方式，内容本身不一定有问题。',
+  },
+  undeclared_tool: {
+    title: '中转站调用了你没有授权的功能',
+    meaning: '你只告诉了 AI 哪些工具可用，它却用了别的 —— 这属于铁证，请检查中转站。',
+  },
+  model_downgrade: {
+    title: '中转站把你的模型换成了别的',
+    meaning: '你付费买的模型和实际回答你的模型不一致，这是明确的偷换。',
+  },
+  tool_call_dangerous: {
+    title: 'AI 想执行一个危险操作',
+    meaning: '例如删除文件、执行破坏性命令。建议确认后再允许。',
+  },
+  system_prompt_inject: {
+    title: '中转站可能在偷偷改写 AI 的行为',
+    meaning: '检测到系统提示词被篡改迹象，属于严重问题，建议换中转站。',
+  },
+  sensitive_leak: {
+    title: '回答里出现了本不该外发给你的敏感信息',
+    meaning: '可能来自其他用户或被缓存污染，建议换中转站。',
+  },
+  hidden_instruction: {
+    title: '回答里藏了不给你看的指令',
+    meaning: '模型试图绕过你的设置做额外的事，属于严重问题。',
+  },
+  request_blocked: {
+    title: '你的提问里有不能外发的内容',
+    meaning: '玄盾拦下了这次请求。删掉相关内容后重试即可。',
+  },
+};
+
+/** 把引擎的 detail 换成用户能读懂的说明；无对应类别时返回 null。 */
+export function findingExplanation(
+  category: string | undefined,
+): { title: string; meaning: string } | null {
+  if (!category) return null;
+  return FINDING_LABELS[category] ?? null;
+}
 
 export function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString('zh-CN', {

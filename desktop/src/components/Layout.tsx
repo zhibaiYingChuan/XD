@@ -50,7 +50,13 @@ function deriveTrayState(
     return { state: 'danger', detail: `今日已阻断 ${today.danger_count} 次` };
   }
   if (today.suspect_count > 0) {
-    return { state: 'suspect', detail: `今日 ${today.suspect_count} 次可疑` };
+    /* ★ 统计类信号不再把状态染成黄色「可疑」。
+       它只说明「回答长度/结构与平时不同」，不指向任何安全问题 ——
+       而状态栏是用户判断「我现在安不安全」的唯一依据。
+       之前只要有统计命中就显示「可疑」，等于把正常的编程对话
+       报成「可疑」，用户要么被无谓惊吓、要么学会忽略这个信号。
+       现在它只作为右侧的计数出现（见下方 status-stat）。 */
+    return { state: 'safe', detail: `今日 ${today.suspect_count} 条提示` };
   }
   return { state: 'safe', detail: `今日已检查 ${today.total_calls} 次` };
 }
@@ -164,8 +170,12 @@ function StatusBar() {
             </span>
           )}
           {today.suspect_count > 0 && (
+            /* ★ 「可疑」改成「提示」。
+               「可疑」暗示「出问题了」，而统计类信号（回答长度与平时不同）
+               根本不指向任何问题 —— 用户看到它只会莫名紧张。
+               改为中性的「提示」，与「危险」形成清晰的轻重区分。 */
             <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
-              可疑 <b className="mono">{today.suspect_count}</b>
+              提示 <b className="mono">{today.suspect_count}</b>
             </span>
           )}
           {today.redaction_count > 0 && (

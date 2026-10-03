@@ -270,6 +270,42 @@ jobs:
         # 公钥缺失就是发布阻断，不是可选项。
         run: python build_engine.py
 
+      # ★★ 引擎必须编入**本次构建时**的源码（2026-10-03 新增）
+      #
+      #   本地踩过的坑：改完 Python 源码后没有重新 build_engine，
+      #   于是产物里是旧代码 —— 而「引擎文件时间晚于源码文件时间」
+      #   看起来完全正常，检查通过了，装机后功能却是旧的。
+      #
+      #   症状极具误导性：装上去能启动、界面正常、
+      #   只有「新加的那个接口」报 422 或404，
+      #   而报错信息与「引擎是旧的」毫无关系。
+      #
+      #   判据：引擎二进制里必须含本轮新增功能的独有标识。
+      #   选标识的原则是「只在修复后才出现」——
+      #   用修复前就存在的字符串做判据，等于没检查。
+      - name: Assert engine contains this build's code
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE=$(find desktop/src-tauri/resources/engine -name 'xuandun-engine-*' -type f -print -quit)
+          if [ -z "$ENGINE" ]; then
+            echo "::error::引擎产物不存在"
+            exit 1
+          fi
+          echo "引擎：$ENGINE"
+          # 日志筛选修复引入的 SQL 片段（storage/db.py 的 _log_filters）
+          MISSING=0
+          for MARK in 'marked_safe = ?' 'top_domains'; do
+            if grep -qa -- "$MARK" "$ENGINE"; then
+              echo "  ✓ $MARK"
+            else
+              echo "::error::引擎缺少标识「$MARK」—— 编译的是旧源码，请重新运行 build_engine.py"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+          test "$MISSING" -eq 0 || exit 1
+          echo "PASS：引擎已编入本次构建的代码"
+
       # ★★★ 产物级断言：本 workflow 存在的核心理由
       #
       #   前面所有检查都是「源码/配置对不对」，这两条是

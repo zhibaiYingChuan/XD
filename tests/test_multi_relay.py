@@ -897,10 +897,19 @@ class TestAddingAndRemovingIsPossible:
             "提交按钮的文案没有区分「请求在飞」—— "
             "打开表单就会显示「添加中…」，而并没有请求在发"
         )
+        # ★ 断言「显示条件用的是 adding（是否已打开）而不是 addingBusy（请求在飞）」，
+        #   而不是断言外层用的是什么标签 —— 包一层具名 div（.relay-add-form）
+        #   只是为了让新增表单有明确边界，与语义无关。
+        #   早先锁死 `<><div className="field-label">` 会让任何包裹层改动都假失败，
+        #   那是在测写法而不是测语义。
         assert re.search(
-            r"\{adding \? \(\s*<>\s*\n\s*<div className=\"field-label\">"
-            r"添加中转站</div>", src, re.S), (
-            "表单的显示条件用的是请求态而不是「是否已打开」"
+            r"\{adding \? \(", src), (
+            "找不到以 adding 为条件的表单分支"
+        )
+        assert not re.search(
+            r"\{addingBusy \? \(", src), (
+            "表单的显示条件用了请求态 addingBusy —— "
+            "请求在飞时表单会整个消失，用户填到一半的内容凭空丢失"
         )
         assert "disabled={addingBusy}" in src, (
             "提交按钮没有在请求在飞时禁用 —— 可连点重复提交"

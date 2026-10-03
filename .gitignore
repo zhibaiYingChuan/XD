@@ -191,6 +191,15 @@ tests/*
 !tests/test_block_evidence.py
 !tests/test_reputation_score.py
 !tests/test_multi_relay.py
+# ★ 本轮新增（2026-10-03）。四条都是「把踩过的坑固化成门禁」：
+#   test_dev_isolation —— 开发/测试与稳定版的数据隔离（曾污染用户配置）
+#   test_statistical_never_blocks —— 统计类信号不得阻断（曾 88% 误报）
+#   test_log_filters —— 日志列表与总数口径必须一致（曾「筛不出来」）
+#   test_route_order —— 静态路由须在参数路由之前（曾 422 而无人能查因）
+!tests/test_dev_isolation.py
+!tests/test_statistical_never_blocks.py
+!tests/test_log_filters.py
+!tests/test_route_order.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py

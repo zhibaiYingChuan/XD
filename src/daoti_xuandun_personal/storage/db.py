@@ -6,19 +6,20 @@
 """个人版本地存储（SQLite）。
 
 数据 100% 本地，无任何外发。
-默认路径：`%LOCALAPPDATA%/com.daoti.xuandun-personal/xuandun_personal.db`
+默认路径：``paths.data_dir()/xuandun_personal.db``
+（设了 ``XUANDUN_DATA_DIR`` 时改写到该目录，用于开发/测试隔离）
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import paths
 from ..types import (
     Action,
     LogEntry,
@@ -33,13 +34,60 @@ _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
 
 def default_db_path() -> Path:
-    """返回默认数据库路径。"""
-    base = os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME")
-    if base:
-        directory = Path(base) / "com.daoti.xuandun-personal"
-    else:
-        directory = Path.home() / ".xuandun-personal"
-    return directory / "xuandun_personal.db"
+    """返回默认数据库路径。
+
+    ★ 走 paths.data_dir()：设了 XUANDUN_DATA_DIR 时，
+      开发/测试的库与稳定版分开，测试日志不会污染用户真实统计。
+    """
+    return paths.data_file("xuandun_personal.db")
+
+
+def _log_filters(
+    log_type: Optional[str] = None,
+    action: Optional[str] = None,
+    relay_domain: Optional[str] = None,
+    start_ts: Optional[float] = None,
+    end_ts: Optional[float] = None,
+    search: Optional[str] = None,
+    marked_safe: Optional[bool] = None,
+) -> tuple:
+    """把过滤条件编译成 (WHERE 子句, 参数列表)。
+
+    ★★ query_logs / count_logs / delete_logs 三处**必须**共用它
+      （2026-10-03 修复）
+      此前三处各写一套 WHERE：query_logs 支持 search 与时间范围，
+      count_logs 只支持 log_type/action/时间 —— 于是搜索时
+      列表被过滤而总数没被过滤，分页器显示「共 954 条 / 48 页」，
+      点第 2 页却是空列表。用户看到的正是「筛不出来」，且无任何报错。
+
+      这类 bug 的特征是「每个函数单测都绿、拼起来就错」，
+      所以过滤条件只允许写一次。
+    """
+    clauses: List[str] = []
+    params: List[Any] = []
+    if log_type:
+        clauses.append("log_type = ?")
+        params.append(log_type)
+    if action:
+        clauses.append("action = ?")
+        params.append(action)
+    if relay_domain:
+        clauses.append("relay_domain = ?")
+        params.append(relay_domain)
+    if start_ts is not None:
+        clauses.append("timestamp >= ?")
+        params.append(start_ts)
+    if end_ts is not None:
+        clauses.append("timestamp <= ?")
+        params.append(end_ts)
+    if search:
+        clauses.append("(summary LIKE ? OR text_preview LIKE ?)")
+        pattern = f"%{search}%"
+        params.extend([pattern, pattern])
+    if marked_safe is not None:
+        clauses.append("marked_safe = ?")
+        params.append(1 if marked_safe else 0)
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
 
 
 class PersonalStorage:
@@ -148,32 +196,19 @@ class PersonalStorage:
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         search: Optional[str] = None,
+        marked_safe: Optional[bool] = None,
     ) -> List[LogEntry]:
-        """查询日志（多条件过滤 + 客户端搜索）。"""
-        clauses: List[str] = []
-        params: List[Any] = []
+        """查询日志（多条件过滤 + 客户端搜索）。
 
-        if log_type:
-            clauses.append("log_type = ?")
-            params.append(log_type)
-        if action:
-            clauses.append("action = ?")
-            params.append(action)
-        if relay_domain:
-            clauses.append("relay_domain = ?")
-            params.append(relay_domain)
-        if start_ts is not None:
-            clauses.append("timestamp >= ?")
-            params.append(start_ts)
-        if end_ts is not None:
-            clauses.append("timestamp <= ?")
-            params.append(end_ts)
-        if search:
-            clauses.append("(summary LIKE ? OR text_preview LIKE ?)")
-            pattern = f"%{search}%"
-            params.extend([pattern, pattern])
-
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        ★ 过滤条件走 ``_log_filters``，与 count_logs / delete_logs 同源 ——
+          少一处就会让「列表」与「总数」口径分叉，
+          表现为分页器显示的总页数点进去是空列表。
+        """
+        where, params = _log_filters(
+            log_type=log_type, action=action, relay_domain=relay_domain,
+            start_ts=start_ts, end_ts=end_ts, search=search,
+            marked_safe=marked_safe,
+        )
         sql = (
             f"SELECT * FROM logs {where} "
             f"ORDER BY timestamp DESC LIMIT ? OFFSET ?"
@@ -183,26 +218,109 @@ class PersonalStorage:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_log(r) for r in rows]
 
-    def count_logs(self, **filters: Any) -> int:
-        """统计日志数量（支持与 query_logs 相同的过滤条件）。"""
-        clauses: List[str] = []
-        params: List[Any] = []
-        for key, col in (("log_type", "log_type"), ("action", "action"),
-                         ("relay_domain", "relay_domain")):
-            if filters.get(key):
-                clauses.append(f"{col} = ?")
-                params.append(filters[key])
-        if filters.get("start_ts") is not None:
-            clauses.append("timestamp >= ?")
-            params.append(filters["start_ts"])
-        if filters.get("end_ts") is not None:
-            clauses.append("timestamp <= ?")
-            params.append(filters["end_ts"])
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    def count_logs(
+        self,
+        log_type: Optional[str] = None,
+        action: Optional[str] = None,
+        relay_domain: Optional[str] = None,
+        start_ts: Optional[float] = None,
+        end_ts: Optional[float] = None,
+        search: Optional[str] = None,
+        marked_safe: Optional[bool] = None,
+    ) -> int:
+        """统计日志数量。
+
+        ★★ 过滤条件必须与 query_logs **完全一致**（2026-10-03 修复）
+          原实现只支持 log_type/action/时间，漏了 search ——
+          于是搜索时列表被过滤而总数没被过滤，分页器显示
+          「共 954 条 / 48 页」，点第 2 页得到空列表，
+          用户看到的正是「筛不出来」，且没有任何报错。
+          这是典型的「两边各自都对、拼起来错」：
+          列表走一套条件、计数走另一套条件。
+        """
+        where, params = _log_filters(
+            log_type=log_type, action=action, relay_domain=relay_domain,
+            start_ts=start_ts, end_ts=end_ts, search=search,
+            marked_safe=marked_safe,
+        )
         row = self._conn.execute(
             f"SELECT COUNT(*) AS c FROM logs {where}", params
         ).fetchone()
         return int(row["c"]) if row else 0
+
+    def delete_logs(
+        self,
+        log_type: Optional[str] = None,
+        action: Optional[str] = None,
+        relay_domain: Optional[str] = None,
+        start_ts: Optional[float] = None,
+        end_ts: Optional[float] = None,
+        search: Optional[str] = None,
+        marked_safe: Optional[bool] = None,
+    ) -> int:
+        """按条件删除日志，返回删除条数。
+
+        ★ 与查询同源过滤条件（``_log_filters``）——
+          删除范围必须与用户看到的列表范围一致，
+          否则「删掉我看到的这些」会变成「删掉别的」。
+
+        ★ 连带删除脱敏记录：那些行经 detail_json 与 CSV 导出外发，
+          留着它们等于日志删了但内容还在。
+          外键声明为 ON DELETE CASCADE，删 logs 行会自动带走。
+        """
+        where, params = _log_filters(
+            log_type=log_type, action=action, relay_domain=relay_domain,
+            start_ts=start_ts, end_ts=end_ts, search=search,
+            marked_safe=marked_safe,
+        )
+        with self._conn:
+            cur = self._conn.execute(f"DELETE FROM logs {where}", params)
+        return int(cur.rowcount or 0)
+
+    def log_breakdown(self) -> Dict[str, Any]:
+        """日志概览统计（供日志管理界面展示）。
+
+        回答用户真正会问的三件事：
+          · 我这些日志都是些什么（按类型 / 按结果的分布）
+          · 有多少是被我标记过误报的（这些不必再留着）
+          · 最早记录是什么时候（决定要不要清理）
+        """
+        by_type = {
+            str(r["log_type"]): int(r["c"])
+            for r in self._conn.execute(
+                "SELECT log_type, COUNT(*) AS c FROM logs "
+                "GROUP BY log_type ORDER BY c DESC"
+            ).fetchall()
+        }
+        by_action = {
+            str(r["action"]): int(r["c"])
+            for r in self._conn.execute(
+                "SELECT action, COUNT(*) AS c FROM logs "
+                "GROUP BY action ORDER BY c DESC"
+            ).fetchall()
+        }
+        domains = [
+            {"domain": str(r["relay_domain"] or ""), "count": int(r["c"])}
+            for r in self._conn.execute(
+                "SELECT relay_domain, COUNT(*) AS c FROM logs "
+                "GROUP BY relay_domain ORDER BY c DESC LIMIT 5"
+            ).fetchall()
+        ]
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c, "
+            "SUM(CASE WHEN marked_safe = 1 THEN 1 ELSE 0 END) AS marked, "
+            "MIN(timestamp) AS oldest, MAX(timestamp) AS newest "
+            "FROM logs"
+        ).fetchone()
+        return {
+            "total": int(row["c"] or 0),
+            "marked_safe": int(row["marked"] or 0),
+            "oldest_ts": float(row["oldest"] or 0),
+            "newest_ts": float(row["newest"] or 0),
+            "by_type": by_type,
+            "by_action": by_action,
+            "top_domains": domains,
+        }
 
     @staticmethod
     def _row_to_log(row: sqlite3.Row) -> LogEntry:

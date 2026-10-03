@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import paths
 from .types import SecurityLevel
 
 logger = logging.getLogger("xuandun-personal.config")
@@ -97,11 +98,9 @@ def is_masked_key(value: Any) -> bool:
 
 
 # 配置文件路径
-_CONFIG_DIR = (
-    Path(os.getenv("LOCALAPPDATA") or Path.home() / ".config")
-    / "com.daoti.xuandun-personal"
-)
-CONFIG_FILE = _CONFIG_DIR / "config.json"
+# ★ 统一走 paths.data_dir()：设了 XUANDUN_DATA_DIR 时，
+#   开发/测试与稳定版的配置彻底分开，互不污染。
+CONFIG_FILE = paths.data_file("config.json")
 
 
 def _known_fields(cls: type, raw: Any) -> Dict[str, Any]:

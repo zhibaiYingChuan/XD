@@ -824,6 +824,7 @@ export default function Settings() {
           {saving ? '保存中...' : '保存中转站配置'}
         </button>
 
+        {/* ═══ 多中转站 ═══ */}
         {/* ★ v0.1.0：多中转站切换
             ——
             为什么要显式切换而不是自动路由：
@@ -834,39 +835,44 @@ export default function Settings() {
             拿它做后台探测等于持续制造慢请求。
             而且自动切换会让「这次扣了谁的钱」变得不可知，
             多中转站场景下最需要确定的恰恰就是这件事。 */}
-        <div className="field mb-24">
-          <div className="field-label">已配置的中转站</div>
+        <div className="card relay-section">
+          <div className="card-title">
+            <span>已配置的中转站</span>
+            <span className="relay-count">{configured.length} 家</span>
+          </div>
+
           {configured.length === 0 ? (
-            <div className="field-hint">还没有配置中转站。</div>
+            <div className="relay-empty">
+              <Info size={16} strokeWidth={1.5} />
+              <span>还没有配置中转站。在上方填入地址与 Key 后保存即可。</span>
+            </div>
           ) : (
             <>
-              <div className="list">
+              <div className="relay-cards">
                 {configured.map((r) => (
-                  <div key={r.id} className="list-item">
-                    <span className="list-icon" style={{
-                      color: r.active ? 'var(--xd-safe)' : 'var(--xd-text-dim)',
-                    }}>
+                  <div key={r.id} className={`relay-card ${r.active ? 'active' : ''}`}>
+                    <span className={`relay-card-icon ${r.active ? 'active' : ''}`}>
                       {r.active ? (
-                        <CheckCircle2 size={14} strokeWidth={1.5} />
+                        <CheckCircle2 size={16} strokeWidth={1.8} />
                       ) : (
-                        <Info size={14} strokeWidth={1.5} />
+                        <Info size={16} strokeWidth={1.5} />
                       )}
                     </span>
-                    <span className="list-text">
-                      <b>{r.name}</b>
-                      <span className="faint mono" style={{ marginLeft: 8, fontSize: 11 }}>
+
+                    <div className="relay-card-main">
+                      <div className="relay-card-head">
+                        <span className="relay-card-name">{r.name}</span>
+                        {r.active && <span className="relay-badge">当前使用中</span>}
+                      </div>
+                      <div className="relay-card-url mono">
                         {r.normalized_base || r.base_url}
-                      </span>
-                      {r.active && (
-                        <span className="faint" style={{ marginLeft: 8, fontSize: 11 }}>
-                          · 当前使用中
-                        </span>
-                      )}
-                    </span>
+                      </div>
+                    </div>
+
                     {!r.active && (
-                      <>
+                      <div className="relay-card-actions">
                         <button
-                          className="btn ghost sm"
+                          className="btn primary sm"
                           disabled={switching}
                           onClick={() => switchTo(r.id, r.name)}
                         >
@@ -880,7 +886,7 @@ export default function Settings() {
                         >
                           移除
                         </button>
-                      </>
+                      </div>
                     )}
                   </div>
                 ))}
@@ -896,7 +902,7 @@ export default function Settings() {
           {/* ── 新增一家 ── */}
           <div className="mt-12">
             {adding ? (
-              <>
+              <div className="relay-add-form">
                 <div className="field-label">添加中转站</div>
                 <input
                   className="input mb-8"
@@ -944,10 +950,15 @@ export default function Settings() {
                 <div className="field-hint">
                   添加只是存起来备着，<b>不会</b>切换当前使用中的那家。
                 </div>
-              </>
+              </div>
             ) : (
-              <button className="btn ghost sm" onClick={() => setAdding(true)}>
-                添加另一家
+              /* ★ 此前是 .btn.ghost sm：透明背景 + --xd-text-dim 前景，
+                 在深色卡片上与辅助文字几乎同色，用户报告「基本看不见」。
+                 这里改成虚线边框的整行按钮，前景用主色，
+                 既有明确边界又与旁边的说明文字明确区分。 */
+              <button className="relay-add-btn" onClick={() => setAdding(true)}>
+                <Plus size={15} strokeWidth={2} />
+                添加另一家中转站
               </button>
             )}
           </div>

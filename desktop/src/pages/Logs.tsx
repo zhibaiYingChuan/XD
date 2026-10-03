@@ -24,16 +24,21 @@ import {
   Download,
   ShieldOff,
   ShieldCheck,
+  Filter,
 } from 'lucide-react';
 import {
   api,
   ACTION_LABELS,
   LOG_TYPE_LABELS,
   CATEGORY_LABELS,
+  findingExplanation,
   formatDateTime,
   actionBadgeClass,
   type LogEntry,
   type LogDetail,
+  type LogBreakdown,
+  type LogFilterParams,
+  type LogType,
 } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard, downloadText } from '../lib/tauriShim';
@@ -63,6 +68,15 @@ const TIME_OPTIONS = [
   { value: '1', label: '今天' },
   { value: '7', label: '近 7 天' },
   { value: '30', label: '近 30 天' },
+];
+
+// ★ 只看误报（2026-10-03）
+//   三档而非两档：用户既想清掉「已确认误报」，也想排除它们看剩下的。
+//   两档的话，「不看误报」只能靠逐条取消，954 条里若有 40 条误报就是 40 次操作。
+const MARKED_OPTIONS = [
+  { value: '', label: '全部记录' },
+  { value: 'only', label: '仅看误报' },
+  { value: 'exclude', label: '排除误报' },
 ];
 
 // ══════════════════════════════════════════════════════════════
@@ -241,8 +255,16 @@ function DetailDrawer({
 
               {findings.length > 0 && (
                 <div className="mt-24">
-                  <div className="field-label">触发规则</div>
-                  {findings.map((f: { category?: string; detail?: string; severity?: string; evidence?: string }, i: number) => (
+                  {/* ★ 标题从「触发规则」改为「发现了什么」。
+                      「规则」是实现视角；用户关心的是「出了什么事」。
+                      统计类命中额外标出「不影响使用」——
+                      否则用户看到红色就以为防护坏了。 */}
+                  <div className="field-label">发现了什么</div>
+                  {findings.map((f: { category?: string; detail?: string; severity?: string; evidence?: string }, i: number) => {
+                    const explain = findingExplanation(f.category);
+                    const advisory = f.category === 'length_anomaly'
+                      || f.category === 'structure_anomaly';
+                    return (
                     <div key={i} className="detail-row" style={{ alignItems: 'flex-start' }}>
                       <span className="detail-key" style={{ paddingTop: 1 }}>
                         <span
@@ -266,18 +288,47 @@ function DetailDrawer({
                         </span>
                       </span>
                       <span className="detail-val">
-                        <div>{f.detail}</div>
-                        {/* ★ 掩码后的命中片段。
-                            没有它，用户只能看到「检测到 JWT 令牌」这类结论，
-                            无法核对究竟拦了什么 —— 这正是「疑似误报」的根源。 */}
-                        {f.evidence && (
-                          <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
-                            片段：{f.evidence}
+                        {/* 先说人话，再给技术细节。
+                            ★ 技术 detail 收进 <details>：直接摊在页面上
+                              「偏离历史均值 1742 达 124.0σ」会让人以为在报故障，
+                              而用户判断「是不是我自己的问题」只需要第一句话。 */}
+                        <div style={{ fontWeight: explain ? 500 : undefined }}>
+                          {explain ? explain.title : f.detail}
+                        </div>
+                        {explain && (
+                          <div className="faint" style={{ fontSize: 12, marginTop: 2, lineHeight: 1.7 }}>
+                            {explain.meaning}
                           </div>
+                        )}
+                        {advisory && (
+                          <div
+                            className="faint"
+                            style={{ fontSize: 11, marginTop: 2, color: 'var(--xd-text-dim)' }}
+                          >
+                            这类检查只作记录，不会拦下你的对话。
+                          </div>
+                        )}
+                        {/* 掩码后的命中片段：给愿意核对的人看，不给不愿看的人添堵 */}
+                        {f.evidence && (
+                          <details style={{ marginTop: 4 }}>
+                            <summary
+                              className="faint"
+                              style={{ fontSize: 11, cursor: 'pointer', listStyle: 'none' }}
+                            >
+                              查看技术细节
+                            </summary>
+                            <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
+                              {f.detail}
+                            </div>
+                            <div className="mono faint" style={{ fontSize: 11 }}>
+                              片段：{f.evidence}
+                            </div>
+                          </details>
                         )}
                       </span>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -304,12 +355,18 @@ function DetailDrawer({
                         <div className="mono" style={{ color: 'var(--xd-safe)' }}>
                           {r.redacted}
                         </div>
+                        {/* ★ 不再截断。
+                            _mask_value 的输出形如
+                            `sk-a…9f⟪118 字符⟫`，长度标记⟪n 字符⟫
+                            是用户判断「这是不是我的Key」的关键信息。
+                            此处按 40 字截断会把 ⟪118 字符⟫ 切成
+                            「…⟪11」—— 用户看到的是个坏掉的数字，
+                            反而更容易误判成误报。 */}
                         <div
                           className="mono faint"
                           style={{ fontSize: 11, textDecoration: 'line-through' }}
                         >
-                          {r.original.slice(0, 40)}
-                          {r.original.length > 40 ? '…' : ''}
+                          {r.original}
                         </div>
                       </span>
                     </div>
@@ -378,12 +435,49 @@ export default function Logs() {
   const [logType, setLogType] = useState('');
   const [action, setAction] = useState('');
   const [days, setDays] = useState('');
+  const [markedFilter, setMarkedFilter] = useState('');
+  const [stats, setStats] = useState<LogBreakdown | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const requestIdRef = useRef(0);
   const mountedRef = useRef(true);
+
+  // ★★ 当前筛选条件必须是**唯一一份**（2026-10-03）
+  //   列表查询与「按筛选删除」都从这里取。
+  //   原实现列表在 load() 里现拼一套，删除若另拼一套，
+  //   两者一旦漂移就会出现「我看到的」与「我删掉的」不是同一批 ——
+  //   而删除不可恢复，这种错必须从结构上杜绝，不能靠记得对齐。
+  const currentFilters = useMemo<LogFilterParams>(() => ({
+    log_type: logType || undefined,
+    action: action || undefined,
+    search: debouncedSearch || undefined,
+    days: days ? Number(days) : undefined,
+    marked_safe:
+      markedFilter === 'only'
+        ? true
+        : markedFilter === 'exclude'
+          ? false
+          : undefined,
+  }), [logType, action, debouncedSearch, days, markedFilter]);
+
+  // 概览统计：与筛选无关，回答「我这些日志都是些什么」
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api.getLogStats();
+        if (!cancelled) setStats(s);
+      } catch {
+        // 概览是辅助信息，取不到不该影响主功能
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [total]);
 
   // 搜索防抖
   useEffect(() => {
@@ -408,10 +502,7 @@ export default function Logs() {
       const res = await api.getLogs({
         limit: PAGE_SIZE,
         offset,
-        log_type: logType || undefined,
-        action: action || undefined,
-        search: debouncedSearch || undefined,
-        days: days ? Number(days) : undefined,
+        ...currentFilters,
       });
       if (rid !== requestIdRef.current) return;   // 丢弃过时响应
       setEntries(res.entries);
@@ -424,7 +515,7 @@ export default function Logs() {
     } finally {
       if (rid === requestIdRef.current && mountedRef.current) setLoading(false);
     }
-  }, [offset, logType, action, debouncedSearch, days]);
+  }, [offset, currentFilters]);
 
   useEffect(() => {
     load();
@@ -466,6 +557,44 @@ export default function Logs() {
     }
   };
 
+  /**
+   * ★ 按当前筛选条件删除（两步确认，2026-10-03）。
+   *
+   * 第一步只问「有多少条会被删」，用户看清范围再决定 ——
+   * 删除不可恢复，而「当前筛选条件」对用户是隐式的，
+   * 他可能以为筛出了几十条，实际会删掉全部。
+   */
+  const handleDeleteFiltered = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      const probe = await api.countFilteredLogs(currentFilters);
+      if (probe.matched === 0) {
+        toast.error('当前筛选条件下没有可删除的记录');
+        return;
+      }
+      const all = !currentFilters.log_type && !currentFilters.action
+        && !currentFilters.search && !currentFilters.days
+        && currentFilters.marked_safe === undefined;
+      const scope = all ? '全部日志' : '当前筛选结果';
+      if (!window.confirm(
+        `将删除${scope}中的 ${probe.matched} 条记录。\n\n`
+        + '此操作不可恢复（脱敏记录会一并删除）。\n'
+        + '确定继续吗？',
+      )) {
+        return;
+      }
+      const r = await api.deleteFilteredLogs(currentFilters);
+      toast.success(`已删除 ${r.deleted} 条记录`);
+      setOffset(0);
+      load();
+    } catch (e) {
+      toast.error(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <div>
       <div className="page-header flex items-center justify-between">
@@ -480,12 +609,61 @@ export default function Logs() {
             <Download size={15} strokeWidth={1.5} />
             {exporting ? '导出中...' : '导出'}
           </button>
+          {/* ★ 按筛选删除（2026-10-03）。
+              此前只有「清空全部」一条路：想清理筛选结果就只能全清，
+              于是要么留着垃圾、要么把有用记录一起删掉。 */}
+          <button
+            className="btn secondary"
+            onClick={handleDeleteFiltered}
+            disabled={total === 0 || deleting}
+          >
+            <Filter size={15} strokeWidth={1.5} />
+            {deleting ? '处理中...' : '删除筛选结果'}
+          </button>
           <button className="btn secondary" onClick={handleClearAll} disabled={total === 0}>
             <Trash2 size={15} strokeWidth={1.5} />
             清空
           </button>
         </div>
       </div>
+
+      {/* ★ 概览统计（2026-10-03）。
+          此前界面上只有分页器需要的一个总数，
+          用户想知道「我这些日志都是些什么」只能自己翻。 */}
+      {stats && stats.total > 0 && (
+        <div className="log-overview">
+          <div className="log-overview-item">
+            <span className="log-overview-num mono">{stats.total}</span>
+            <span className="log-overview-label">条记录</span>
+          </div>
+          {stats.marked_safe > 0 && (
+            <div className="log-overview-item">
+              <span className="log-overview-num mono">{stats.marked_safe}</span>
+              <span className="log-overview-label">已标记误报</span>
+            </div>
+          )}
+          <div className="log-overview-item">
+            <span className="log-overview-num mono">
+              {Object.entries(stats.by_type)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 2)
+                .map(([k, v]) => `${LOG_TYPE_LABELS[k as LogType] ?? k} ${v}`)
+                .join(' · ')}
+            </span>
+            <span className="log-overview-label">主要构成</span>
+          </div>
+          {stats.top_domains[0] && (
+            <div className="log-overview-item">
+              <span className="log-overview-num mono truncate">
+                {stats.top_domains[0].domain || '—'}
+              </span>
+              <span className="log-overview-label">
+                主要中转站（{stats.top_domains[0].count} 条）
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 工具栏 */}
       <div className="toolbar">
@@ -547,6 +725,20 @@ export default function Logs() {
           }}
         >
           {TIME_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <select
+          className="select"
+          value={markedFilter}
+          onChange={(e) => {
+            setMarkedFilter(e.target.value);
+            setOffset(0);
+          }}
+        >
+          {MARKED_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>

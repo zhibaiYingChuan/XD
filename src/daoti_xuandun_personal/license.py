@@ -53,6 +53,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from . import paths
+
 _ISSUER = "xuanDun-personal"
 _AUDIENCE = "xuandun-personal-desktop"
 _PREFIX = "XDACT-"
@@ -288,11 +290,7 @@ _REVOKED_FILE = "revoked_jtis.json"
 
 
 def _revoked_path() -> str:
-    return os.path.join(
-        os.getenv("LOCALAPPDATA") or os.path.expanduser("~/.config"),
-        "com.daoti.xuandun-personal",
-        _REVOKED_FILE,
-    )
+    return str(paths.data_file(_REVOKED_FILE))
 
 
 def load_revoked() -> Optional[set]:
@@ -523,13 +521,7 @@ def load_public_key() -> Optional[str]:
         pass
 
     # ④ 用户配置目录（开发态手工放置）
-    candidates.append(
-        os.path.join(
-            os.getenv("LOCALAPPDATA") or os.path.expanduser("~/.config"),
-            "com.daoti.xuandun-personal",
-            "license_pub.pem",
-        )
-    )
+    candidates.append(str(paths.data_file("license_pub.pem")))
 
     for path in candidates:
         try:
@@ -553,11 +545,7 @@ def load_public_key() -> Optional[str]:
 
 
 def _seen_path() -> str:
-    return os.path.join(
-        os.getenv("LOCALAPPDATA") or os.path.expanduser("~/.config"),
-        "com.daoti.xuandun-personal",
-        _STATE_FILE,
-    )
+    return str(paths.data_file(_STATE_FILE))
 
 
 def read_last_seen() -> Optional[int]:

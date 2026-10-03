@@ -371,6 +371,173 @@ textarea {
 }
 
 /* ══════════════════════════════════════════════════════════════
+   多中转站区块
+   ══════════════════════════════════════════════════════════════
+   为什么要单独一套类名而不用 .list：
+   通用 .list-item 只有一条底边线，项与项之间没有任何区分，
+   在深色卡片上「哪一家正在用」几乎看不出来 ——
+   而这恰恰是用户唯一真正关心的信息。
+   这里给每家一个独立卡片，并把「当前使用中」做成实心徽标 +
+   左侧色条 + 绿色边框，让当前生效的那家在余光里就能被认出。 */
+
+.relay-section {
+  border-color: var(--xd-border-light);
+}
+
+.relay-count {
+  font-size: var(--xd-fs-caption);
+  font-weight: 400;
+  color: var(--xd-text-dim);
+  padding: 2px 9px;
+  border: 1px solid var(--xd-border-light);
+  border-radius: 999px;
+}
+
+.relay-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+  border: 1px dashed var(--xd-border-light);
+  border-radius: var(--xd-radius-sm);
+  color: var(--xd-text-dim);
+  font-size: var(--xd-fs-caption);
+}
+
+.relay-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.relay-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--xd-bg);
+  border: 1px solid var(--xd-border);
+  border-left: 3px solid var(--xd-border-light);
+  border-radius: var(--xd-radius-sm);
+  transition: border-color var(--xd-transition), background var(--xd-transition);
+}
+
+/* 当前启用项：左侧色条 + 绿色边框 + 略亮的底色，
+   三重信号叠加，扫一眼就能定位「现在在用哪家」。 */
+.relay-card.active {
+  border-color: var(--xd-safe);
+  border-left-color: var(--xd-safe);
+  background: var(--xd-safe-dim);
+}
+
+.relay-card-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--xd-card);
+  color: var(--xd-text-dim);
+}
+
+.relay-card-icon.active {
+  background: var(--xd-safe);
+  color: #06231C;
+}
+
+.relay-card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.relay-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 名称用 --xd-text（最亮）且字号偏大：
+   此前用 <b> + 11px 辅助色，域名和名称挤在一行里，谁是主谁是次看不出来。 */
+.relay-card-name {
+  font-size: var(--xd-fs-body);
+  font-weight: 600;
+  color: var(--xd-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relay-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--xd-safe);
+  background: var(--xd-safe-dim);
+  border: 1px solid var(--xd-safe);
+  border-radius: 999px;
+  padding: 0 8px;
+}
+
+.relay-card-url {
+  font-size: var(--xd-fs-caption);
+  color: var(--xd-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.relay-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 「添加另一家」按钮
+   ★ 此前用 .btn.ghost.sm：透明背景 + --xd-text-dim 前景，
+     在深色卡片上与旁边的说明文字几乎同色，用户报告「基本看不见」。
+     改为：虚线边框（明确是个可点的区域）+ 主色前景 + 整行宽度，
+     文字与背景的对比靠边框和颜色双重保证，不再依赖肉眼分辨灰度。 */
+.relay-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 16px;
+  background: var(--xd-primary-dim);
+  border: 1px dashed var(--xd-primary);
+  border-radius: var(--xd-radius-sm);
+  color: #A9C4F5;
+  font-size: var(--xd-fs-body);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--xd-transition), color var(--xd-transition);
+}
+
+.relay-add-btn:hover:not(:disabled) {
+  background: var(--xd-primary);
+  border-style: solid;
+  color: #fff;
+}
+
+.relay-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.relay-add-form {
+  padding: 14px;
+  background: var(--xd-bg);
+  border: 1px solid var(--xd-border-light);
+  border-radius: var(--xd-radius-sm);
+}
+
+/* ══════════════════════════════════════════════════════════════
    首页英雄区
    ══════════════════════════════════════════════════════════════ */
 .hero {
@@ -920,15 +1087,65 @@ textarea {
   gap: 10px;
   margin-bottom: 16px;
   align-items: center;
+  /* ★ 允许换行：筛选器从 3 个增到 4 个后，1100px 宽窗口下
+     挤成一行会把搜索框压到不足 100px，输入中文都放不下。 */
+  flex-wrap: wrap;
 }
 
 .toolbar .input {
   flex: 1;
+  /* ★ 换行后仍要有下限，否则会被压成一条缝 */
+  min-width: 180px;
 }
 
 .toolbar .select {
   width: auto;
-  min-width: 128px;
+  min-width: 118px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   日志概览（2026-10-03）
+   ══════════════════════════════════════════════════════════════
+   分页器上的「共 N 条」只是翻页需要的数字，回答不了用户
+   真正会问的「我这些日志都是些什么」。这里把分布摆出来，
+   让人一眼看出「绝大多数是转发记录，危险只有几条」。 */
+
+.log-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.log-overview-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 14px;
+  min-width: 0;
+  /* ★ 半透明底而非实心卡片：概览是辅助信息，
+     不该在视觉上与「日志列表」这个主体抢注意力。 */
+  background: var(--xd-card);
+  border: 1px solid var(--xd-border);
+  border-radius: var(--xd-radius-sm);
+}
+
+.log-overview-num {
+  font-size: var(--xd-fs-body);
+  font-weight: 600;
+  color: var(--xd-text);
+  /* ★ 长域名必须截断：域名可能很长，
+     不限宽会把整行挤变形，旁边的数字被挤出可视区。 */
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-overview-label {
+  font-size: 11px;
+  color: var(--xd-text-faint);
+  white-space: nowrap;
 }
 
 /* ══════════════════════════════════════════════════════════════

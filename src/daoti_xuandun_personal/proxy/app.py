@@ -32,6 +32,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .. import paths
 from ..config import (
     PersonalConfig,
     is_masked_key,
@@ -51,6 +52,11 @@ logger = logging.getLogger("xuandun-personal.app")
 # 流式响应中期验证阈值（字节）
 STREAM_VERIFY_THRESHOLD = 8192
 
+# 统计类信号（见 verifier.PatternTracker._STATISTICAL）。
+# 这里用于「给用户报哪一条」时跳过它们 ——
+# 「本次长度偏离 124σ」对用户毫无意义，说了只会让他更困惑。
+_STATISTICAL_SIGNALS = frozenset({"length_anomaly", "structure_anomaly"})
+
 # 全局单例（lifespan 初始化）
 _config: Optional[PersonalConfig] = None
 _storage: Optional[PersonalStorage] = None
@@ -60,6 +66,11 @@ _restorer: Optional[ContentRestorer] = None
 _reputation: Optional[ReputationTracker] = None
 _http_client: Optional[httpx.AsyncClient] = None
 _paused_until: float = 0.0     # 暂停截止时间戳
+
+# ★ run() 解析出的**实际**监听端口（含 --port / 环境变量覆盖）。
+#   lifespan 里的 _config 是独立 load() 的对象，带的是配置文件里的端口，
+#   与实际监听值可能不同 —— 日志必须用这个，否则会报出错的端口。
+_actual_port: Optional[int] = None
 
 # 授权结论的短 TTL 缓存：(许可证文件 mtime, 判定时刻, 是否启用防护)。
 # 存在理由见 _protection_enabled 的 docstring —— 那里每个 AI 请求都会调用。
@@ -78,14 +89,9 @@ def _license_file_path() -> str:
       两边读的不是同一个文件时，会出现「界面说已激活、
       引擎说未激活」——用户激活成功了却仍在只读模式，
       且两边都觉得自己是对的，极难排查。
+    ★ 目录走 paths.data_dir()：开发/测试隔离时两侧一起挪走。
     """
-    import os as _os
-
-    return _os.path.join(
-        _os.getenv("LOCALAPPDATA") or _os.path.expanduser("~/.config"),
-        "com.daoti.xuandun-personal",
-        "license.json",
-    )
+    return str(paths.data_file("license.json"))
 
 
 # 构建期生成的密钥文件名（由 build_engine.py 写入引擎目录）
@@ -202,9 +208,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
     )
 
+    # ★ 必须报**实际**监听端口，不能报 _config.server.port。
+    #   两者在 --port 传参时不相等：run() 解析出的 actual_port 写进了
+    #   run() 里的局部 config，而模块级 _config 是 lifespan 里
+    #   独立 load() 出来的另一个对象，仍带着配置文件里的旧端口。
+    #   日志于是显示 18765 而实际监听 18766 ——
+    #   排查时会被直接带偏：这正是「日志说一套、实际做另一套」。
     logger.info(
-        "个人版代理就绪: http://%s:%d → %s",
-        _config.server.host, _config.server.port, _config.relay.base_url or "(未配置)",
+        "个人版代理就绪: http://%s:%s → %s（数据目录 %s）",
+        _config.server.host, _actual_port or _config.server.port,
+        _config.relay.base_url or "(未配置)",
+        paths.data_dir(),
     )
 
     yield
@@ -682,7 +696,7 @@ def create_app() -> FastAPI:
                 content={
                     "error": {
                         "type": "relay_response_blocked",
-                        "message": findings[0].detail if findings else "响应含高危内容，已阻断",
+                        **_blocked_advice(findings),
                         "findings": [f.to_dict() for f in findings],
                     }
                 },
@@ -756,11 +770,14 @@ def create_app() -> FastAPI:
                         if result.action == Action.BLOCK.value and result.severity == "high":
                             state["blocked"] = True
                             # 发送 SSE error 事件后关闭流
+                            # ★★ 与非流式路径共用 _blocked_advice()：
+                            #   两处各写一份文案必然漂移——
+                            #   而漂移的后果是「流式能给出路、非流式只给结论」，
+                            #   用户换 AI 工具后行为就变了，且没人发现。
                             error_payload = {
                                 "error": {
                                     "type": "relay_response_blocked",
-                                    "message": result.findings[0].detail
-                                    if result.findings else "响应含高危内容",
+                                    **_blocked_advice(result.findings),
                                 }
                             }
                             yield (
@@ -848,6 +865,10 @@ def create_app() -> FastAPI:
                     if state["blocked"]
                     else _resolve_action(severity, None)
                 )
+                # ★ low 档必须留痕，不能静默 pass：
+                #   统计类信号 severity 恒为 low，若映射成 pass，
+                #   用户在日志里看不到任何记录 ——
+                #   「计数动了却什么都不显示」会让他以为防护根本没开。
                 if findings and action == Action.PASS.value:
                     action = Action.ALERT.value
                 _record_log(
@@ -943,6 +964,7 @@ def create_app() -> FastAPI:
         action: Optional[str] = None,
         search: Optional[str] = None,
         days: Optional[int] = Query(None, ge=1, le=365),
+        marked_safe: Optional[bool] = None,
     ):
         """日志列表。`days` 用于文档 4.1 要求的「今天」筛选。"""
         if _storage is None:
@@ -951,13 +973,43 @@ def create_app() -> FastAPI:
         entries = _storage.query_logs(
             limit=limit, offset=offset, log_type=log_type,
             action=action, search=search, start_ts=start_ts,
+            marked_safe=marked_safe,
         )
+        # ★★ total 与 entries 必须用**同一组**过滤条件（2026-10-03 修复）
+        #   原实现漏传 search，于是搜索时列表被过滤而计数没被过滤：
+        #   搜「你好」只剩 3 条，分页器却显示「共 954 条 / 48 页」，
+        #   点第 2 页得到空列表 —— 用户看到的正是「筛不出来」。
+        #   query_logs 与 count_logs 的条件必须逐项对齐，
+        #   少传任何一项都会让两套口径分叉。
         return {
             "entries": [e.to_dict() for e in entries],
             "total": _storage.count_logs(
-                log_type=log_type, action=action, start_ts=start_ts
+                log_type=log_type, action=action, start_ts=start_ts,
+                search=search, marked_safe=marked_safe,
             ),
         }
+
+    # ★★ 必须注册在 /api/logs/{log_id} **之前**（2026-10-03 修复）
+    #   FastAPI 按注册顺序匹配路由，而 {log_id} 是路径参数：
+    #   它会贪婪地吃掉 /api/logs/stats 里的 "stats"，
+    #   尝试转成 int 失败 → 422 Unprocessable Entity。
+    #   症状极隐蔽：端点明明写好了、函数名也对，
+    #   但请求永远到不了它，且报错信息（422）指向"参数格式错"，
+    #   与真实原因（路由被抢占）毫无关系。
+    #
+    #   凡是「静态段 + 参数段」混在同一前缀下，都必须把静态段放前面：
+    #   /api/logs/stats、/api/logs/export、/api/logs/clear 都受此约束。
+    @app.get("/api/logs/stats")
+    async def logs_stats():
+        """★ 日志管理页的概览统计（2026-10-03 新增）。
+
+        回答用户真正会问的三件事：「我这些日志都是些什么」
+        「有多少是我标记过误报的」「最早记录是什么时候」。
+        此前界面上一个数字都没有，用户只能自己翻。
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        return _storage.log_breakdown()
 
     @app.get("/api/logs/{log_id}")
     async def get_log_detail(log_id: int):
@@ -1064,6 +1116,55 @@ def create_app() -> FastAPI:
         before_ts = time.time() - before_days * 86400 if before_days > 0 else None
         count = _storage.clear_logs(before_ts)
         return {"ok": True, "deleted": count}
+
+    @app.post("/api/logs/delete-filtered")
+    async def delete_filtered_logs(
+        log_type: Optional[str] = None,
+        action: Optional[str] = None,
+        search: Optional[str] = None,
+        days: Optional[int] = Query(None, ge=1, le=365),
+        marked_safe: Optional[bool] = None,
+    ):
+        """★ 按当前筛选条件删除日志（2026-10-03 新增）。
+
+        为什么必须有这个功能：
+          此前只有「清空全部」一条路。用户筛出「今天 200 条告警」想清理，
+          只能全清 —— 于是要么留着垃圾、要么把有用记录一起删掉。
+          「筛选」与「清理」是两个动作，不该绑在一起。
+
+        ★ 安全约束：dry_run 为真时只回报将删除多少条，不真删。
+          这是不可恢复的操作，必须让用户先看清范围再确认；
+          前端也据此做二次确认。
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        start_ts = time.time() - days * 86400 if days else None
+        filters: Dict[str, Any] = {
+            "log_type": log_type, "action": action,
+            "search": search, "start_ts": start_ts,
+            "marked_safe": marked_safe,
+        }
+        matched = _storage.count_logs(**filters)
+        return {"ok": True, "matched": matched, "deleted": 0, "dry_run": True}
+
+    @app.post("/api/logs/delete-filtered/confirm")
+    async def delete_filtered_logs_confirm(
+        log_type: Optional[str] = None,
+        action: Optional[str] = None,
+        search: Optional[str] = None,
+        days: Optional[int] = Query(None, ge=1, le=365),
+        marked_safe: Optional[bool] = None,
+    ):
+        """确认执行按筛选条件删除（真正动数据的那一步）。"""
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        start_ts = time.time() - days * 86400 if days else None
+        deleted = _storage.delete_logs(
+            log_type=log_type, action=action, search=search,
+            start_ts=start_ts, marked_safe=marked_safe,
+        )
+        logger.info("按筛选条件删除日志 %d 条", deleted)
+        return {"ok": True, "deleted": deleted, "dry_run": False}
 
     @app.get("/api/relays")
     async def list_relays():
@@ -1875,9 +1976,16 @@ def _resolve_action(max_sev: str, verify_result: Any) -> str:
       于是「high 级发现」既不阻断、又被记成 safe。
 
     复用 verifier 的级别映射，保证两条路径的处置口径完全一致。
+
+    ★★ low 档必须返回 ALERT 而不是 PASS（2026-10-03）
+      统计类信号（长度/结构突变）在 v0.1.1 起severity 恒为 low，
+      若low 仍映射成 PASS，用户在日志里看不到任何记录 ——
+      「计数动了却什么都不显示」比「有提示但不好看」更糟：
+      它会让用户以为防护根本没开。
     """
     if max_sev == "low":
-        return Action.PASS.value
+        # 有发现项才提示；确实一个发现都没有时才是真的 pass
+        return Action.PASS.value if not verify_result else Action.ALERT.value
     if _verifier is not None:
         try:
             return _verifier._threshold_for(max_sev)
@@ -2016,6 +2124,47 @@ def _block_evidence(
             }
         )
     return out
+
+
+def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
+    """生成阻断时给用户的 error 字段。
+
+    ★★ 这里决定用户被拦住之后会看到什么（v0.1.1）
+    ────────────────────────────────────────────────────────────
+    原文只有一句「响应含高危内容」。用户正等着 AI 把活干完，
+    被拦住却既不知道发生了什么，也不知道该做什么 —— 这是最糟的形态：
+    产品既没保护好他，也没能帮他继续。
+
+    真实处境是：用户无法修中转站（那是他花钱买的第三方服务），
+    但手上有必须完成的任务。所以唯一有用的出路是
+    **把任务换到官方 API 上继续做**，顺带让他判断是否误报。
+
+    报哪一条也有讲究：优先报非统计类的命中。
+    「本次长度偏离历史均值 124σ」用户看不懂，说了只会更困惑；
+    「中转站调用了你没声明的工具」他能立刻判断对不对。
+    """
+    hit = next(
+        (f for f in findings if getattr(f, "category", "") not in _STATISTICAL_SIGNALS),
+        None,
+    )
+    if hit is None:
+        hit = findings[0] if findings else None
+    reason = getattr(hit, "detail", "") or "响应含高危内容"
+
+    advice = (
+        f"玄盾拦下了这次响应（{reason}）。"
+        "当前中转站被判定不可信，它可能已经影响了回答质量。"
+        "如果任务还没完成，建议把 AI 工具的 API 地址改回模型厂商官方地址继续做，"
+        "或在设置页换一家中转站后重试。这段对话在换地址前无法继续。"
+    )
+    return {
+        "message": advice,
+        "advice": advice,
+        "reason": reason,
+        "categories": sorted({
+            getattr(f, "category", "") for f in findings if getattr(f, "category", "")
+        }),
+    }
 
 
 def _evidence_preview(records: List[Any]) -> str:
@@ -2442,6 +2591,10 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
     actual_port = args.port or port or config.server.port
     if args.log_level:
         config.server.log_level = args.log_level
+
+    # ★ 记下实际端口，供 lifespan 的日志使用（见 _actual_port 注释）
+    global _actual_port
+    _actual_port = int(actual_port)
 
     # 再次校验（Tauri 传入的 host 同样受安全底线约束）
     config.server.host = actual_host

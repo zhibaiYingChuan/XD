@@ -27,7 +27,7 @@ pytest 覆盖的是**检测逻辑**（baseline / verifier / sanitizer），
 
 运行前提
 ────────────────────────────────────────────────────────────────
-  1. 启动桌面端（debug 构建会自动开 CDP 端口 9224）：
+  1. 启动桌面端（debug 构建会自动开 CDP 端口，默认 19224）：
        cd personal/desktop/src-tauri
        cargo run
      release 构建需先设环境变量：
@@ -35,6 +35,25 @@ pytest 覆盖的是**检测逻辑**（baseline / verifier / sanitizer），
   2. 另开终端执行：
        cd personal
        python tests/cdp_desktop_regression.py
+
+隔离档案（★ 不要在稳定版上跑本测试）
+────────────────────────────────────────────────────────────────
+本测试会**真实改动用户配置**：写入占位中转站、切换启用项、
+生成拦截日志、标记/撤销误报。而用户已从线上仓库装了稳定版在正常使用。
+若两者共用同一份数据目录，一次测试就会改掉用户正在用的中转站配置、
+污染其真实统计 —— 测试本身成了风险源。
+
+因此本脚本按下面这组环境变量与稳定版隔离（未设置时用括号内默认值）：
+
+  · XUANDUN_DATA_DIR   隔离数据目录（%TEMP%/xuandun-devprofile）
+                       config.json / 数据库 / 激活状态都在这里
+  · XUANDUN_PROXY_PORT 引擎监听端口（18771，与稳定版 18765 错开）
+  · XUANDUN_CDP_PORT   WebView2 CDP 端口（19231，与默认 9224 错开）
+
+★ CDP 端口错开尤其重要：两个 WebView2 都监听同一端口时，
+  先启动的那个占住端口，CDP 实际连到的是**另一个进程** ——
+  于是测试驱动的是用户正在使用的稳定版窗口。
+★ 脚本启动时会校验数据目录，若与稳定版相同则**直接拒绝执行**。
 
 副作用与还原
 ────────────────────────────────────────────────────────────────
@@ -74,9 +93,36 @@ except ImportError:
     sys.exit(0)
 
 
-CDP_BASE = "http://127.0.0.1:9224"
-DEFAULT_PROXY_PORT = 18765
+# ★ 开发版默认端口。刻意避开 18766 —— 记忆库记载企业版网关
+#   曾用 18766 跑 uvicorn，两者撞端口会让「引擎起不来」或
+#   「测试连到别的服务」，而症状都只是超时，排查方向会被带偏。
+#   18771/19231 是本项目自留段，与稳定版 18765/9224 均不重叠。
+CDP_PORT = int(os.getenv("XUANDUN_CDP_PORT", "19231"))
+CDP_BASE = f"http://127.0.0.1:{CDP_PORT}"
+DEFAULT_PROXY_PORT = int(os.getenv("XUANDUN_PROXY_PORT", "18771"))
 ONBOARDING_KEY = "xuandun-personal-onboarded"
+
+# 隔离档案的环境变量名（须与 src-tauri/src/lib.rs::env_keys 一致）
+ENV_DATA_DIR = "XUANDUN_DATA_DIR"
+ENV_PROXY_PORT = "XUANDUN_PROXY_PORT"
+ENV_CDP_PORT = "XUANDUN_CDP_PORT"
+
+# 默认隔离目录。★ 不能落在稳定版目录里 —— 那样测试仍会改用户配置。
+_DEFAULT_DATA_DIR = (
+    Path(os.getenv("TEMP") or os.getenv("TMP") or Path.home())
+    / "xuandun-devprofile"
+)
+
+
+def data_dir() -> Path:
+    """返回本轮测试使用的隔离数据目录。
+
+    ★ 用户已从线上仓库装了稳定版并正常使用。本测试会真实写配置
+      （占位中转站、切换启用项）与造日志，若与稳定版共用目录，
+      一次测试就会改掉用户正在用的中转站配置、污染其真实统计。
+    ★ 未显式指定时默认落到临时目录，与稳定版数据目录完全分开。
+    """
+    return Path(os.getenv(ENV_DATA_DIR) or _DEFAULT_DATA_DIR)
 
 # 走完向导时写入的占位中转站。
 # 刻意用 .invalid 保留域（RFC 2606 保留，永不可解析）——
@@ -276,8 +322,9 @@ def cdp_browser_ver():
 
 
 def config_file() -> Path:
-    base = Path(os.getenv("LOCALAPPDATA") or (Path.home() / ".config"))
-    return base / "com.daoti.xuandun-personal" / "config.json"
+    # ★ 必须与 paths.data_dir() / Rust data_dir() 同规则，
+    #   否则测试备份的是稳定版的配置，还原时会把用户的真实配置覆盖掉。
+    return data_dir() / "config.json"
 
 
 class ConfigGuard:
@@ -805,8 +852,18 @@ def test_dashboard_kpi(page, be: Backend):
     today = real.get("today") or {}
     page.wait_for_timeout(600)
 
+    # ★ 键名用「后端字段名」而不是界面文案。
+    #   界面 2026-10-03 起把「可疑」改成了「提示」（统计类信号
+    #   不该让用户以为「可疑」），若这里按文案定位，
+    #   改名当天就会全绿失败 —— 而失败原因是测试跟文案绑死了，
+    #   不是产品坏了。
+    FIELD_BY_LABEL = {
+        "安全": "safe_count",
+        "提示": "suspect_count",
+        "危险": "danger_count",
+    }
     vals = {}
-    for label in ("安全", "可疑", "危险"):
+    for label in FIELD_BY_LABEL:
         el = page.locator(f".kpi:has(.kpi-label:text-is('{label}')) .kpi-value")
         try:
             vals[label] = int(el.first.inner_text(timeout=3000).strip())
@@ -814,9 +871,8 @@ def test_dashboard_kpi(page, be: Backend):
             vals[label] = None
 
     want = {
-        "安全": today.get("safe_count"),
-        "可疑": today.get("suspect_count"),
-        "危险": today.get("danger_count"),
+        label: today.get(field)
+        for label, field in FIELD_BY_LABEL.items()
     }
     mismatch = {
         k: (vals[k], want[k])
@@ -1141,6 +1197,22 @@ def test_block_end_to_end(page, be: Backend):
     #   _POLICY 里两者在三档安全级别下都是 BLOCK，
     #   所以无论用户设的是宽松/均衡/严格，这条都会被拦 ——
     #   判据不依赖当前安全级别设置。
+    # ★★ 必须先确认防护真的开着（2026-10-03 修复）
+    #   未激活时引擎处于**只读模式**：请求原样转发，不执行任何拦截。
+    #   此时发密钥载荷会走到转发阶段，而占位中转站是 .invalid
+    #   保留域（必然 DNS 失败）→ 返回 502 upstream_error。
+    #   原实现把这记成 FAIL「敏感信息请求被阻断」——
+    #   而只读模式放行一切是**正确行为**，防护并没有失效。
+    #   结果是：隔离档案（未激活）下每次跑都稳定红一条，
+    #   而真正的产品缺陷反而被这条噪声掩盖。
+    #   与 T8/T12 同一原则：前置不成立 → SKIP，不记在产品账上。
+    real = be.state() or {}
+    if real.get("read_only"):
+        rec("T10 敏感信息请求被阻断", True,
+            "跳过：引擎处于只读模式（未激活），本用例前置不成立",
+            skip=True)
+        return
+
     payload = {
         "model": "gpt-4o-mini",
         "messages": [{
@@ -1615,7 +1687,9 @@ def test_multi_relay_settings(page, be: Backend):
 
         body = page.inner_text("body")
         rec("T14 设置页有「已配置的中转站」区块",
-            "已配置的中转站" in body, "设置页没有该区块")
+            "已配置的中转站" in body,
+            "区块存在" if "已配置的中转站" in body
+            else "设置页没有该区块")
 
         # ── 界面上新增第二家 ──
         entry = page.locator("button:has-text('添加另一家')").first
@@ -1688,9 +1762,13 @@ def test_multi_relay_settings(page, be: Backend):
 
         body = page.inner_text("body")
         rec("T14 界面显示第二家", SECOND_NAME in body,
-            "列表里看不到刚新增的第二家")
+            f"列表里看得到刚新增的第二家（{SECOND_NAME}）"
+            if SECOND_NAME in body
+            else "列表里看不到刚新增的第二家")
         rec("T14 界面不渲染明文 Key", SECOND_KEY not in body,
-            "设置页把明文 Key 渲染出来了")
+            "设置页未渲染明文 Key（正确）"
+            if SECOND_KEY not in body
+            else "设置页把明文 Key 渲染出来了")
 
         # ── 界面上切到第二家 ──
         btn = page.locator("button:has-text('切到这家')").first
@@ -1717,7 +1795,9 @@ def test_multi_relay_settings(page, be: Backend):
             rec("T14 界面标出新的当前使用项",
                 "当前使用中" in body2 and SECOND_URL.replace(
                     "https://", "") in body2,
-                f"界面未见第二家被标为当前使用中")
+                "界面已标出第二家为当前使用中"
+                if "当前使用中" in body2 else
+                "界面未见「当前使用中」标记")
         except Exception as e:
             rec("T14 界面标出新的当前使用项", False, f"读取界面失败: {e}")
 
@@ -1869,8 +1949,8 @@ def clear_onboarding_flag(page=None):
         except Exception:
             pass
 
-    base = Path(os.getenv("LOCALAPPDATA") or (Path.home() / ".config"))
-    ldb = base / "com.daoti.xuandun-personal" / "EBWebView"
+    base = data_dir()
+    ldb = base / "EBWebView"
     try:
         for f in ldb.rglob("Local Storage/leveldb/*"):
             f.unlink()
@@ -1912,6 +1992,11 @@ def launch_desktop():
     ★ release 下 CDP 默认关闭（见 lib.rs::enable_cdp_debug_port），
       开放该端口等于允许任意本地进程注入 JS 篡改界面显示，
       所以必须显式设环境变量 —— 这也是脚本只在本地跑的原因。
+
+    ★★ 必须注入隔离环境变量（数据目录 / 引擎端口）：
+      用户从线上仓库装了稳定版正在正常使用，而本测试会真实改动配置
+      （写入占位中转站、切换启用项、造拦截日志、改端口）。
+      不隔离就会把用户稳定版的配置改掉、统计写脏 —— 测试本身成了风险源。
     """
     exe = os.environ.get(
         "XUANDUN_EXE", r"G:\rust-target\release\xuandun-personal.exe"
@@ -1925,15 +2010,57 @@ def launch_desktop():
         return None
     env = os.environ.copy()
     env["XUANDUN_ENABLE_CDP_DEBUG"] = "1"
+    env[ENV_DATA_DIR] = str(data_dir())
+    env[ENV_PROXY_PORT] = str(DEFAULT_PROXY_PORT)
+    env[ENV_CDP_PORT] = str(CDP_PORT)
     proc = subprocess.Popen([exe], env=env)
     print(f"  已启动桌面端: {exe}  (PID {proc.pid})")
+    print(f"  隔离档案: 数据目录={data_dir()}")
+    print(f"            引擎端口={DEFAULT_PROXY_PORT}  CDP={CDP_PORT}")
     return proc
+
+
+def assert_isolated_profile():
+    """拒绝在稳定版数据目录上跑测试。
+
+    ★ 这是一道**主动拒绝**而不是提示：用户正在使用稳定版，
+      而本脚本会真实改配置、切启用项、造日志。一旦在稳定版目录上跑，
+      损害已经发生，事后再补救也难还原用户的中转站配置。
+      与其事后解释，不如直接停在这里。
+    """
+    stable = (
+        Path(os.getenv("LOCALAPPDATA") or (Path.home() / ".config"))
+        / "com.daoti.xuandun-personal"
+    ).resolve()
+    target = data_dir().resolve()
+    if target == stable:
+        print("[FATAL] 拒绝执行：测试的数据目录与稳定版相同。")
+        print(f"  当前: {target}")
+        print("  本测试会改配置、切中转站、写日志，会破坏你正在使用的稳定版。")
+        print("  请设置独立目录后重试，例如：")
+        print(f'    $env:{ENV_DATA_DIR}="$env:TEMP\\xuandun-devprofile"')
+        return False
+    return True
 
 
 def main():
     print("=" * 74)
-    print("  玄盾个人版 — 桌面端 CDP 回归测试")
+    print(" 玄盾个人版 — 桌面端 CDP 回归测试")
     print("=" * 74)
+
+    # ★ 先落定隔离档案：本脚本自己会用这些值定位配置/引擎，
+    #   拉起的桌面端也继承同一组 —— 两侧必须一致，否则测试打到的
+    #   是稳定版的引擎，而备份/还原的却是开发版的配置。
+    os.environ[ENV_DATA_DIR] = str(data_dir())
+    os.environ[ENV_PROXY_PORT] = str(DEFAULT_PROXY_PORT)
+    os.environ[ENV_CDP_PORT] = str(CDP_PORT)
+
+    if not assert_isolated_profile():
+        return 2
+
+    print(f"  隔离档案: 数据目录={data_dir()}")
+    print(f"            引擎端口={DEFAULT_PROXY_PORT}  CDP={CDP_PORT}")
+    print()
 
     proc = None
     if not cdp_browser_ver():
@@ -1950,7 +2077,7 @@ def main():
 
     browser_ver = cdp_browser_ver()
     if not browser_ver:
-        print("[FATAL] CDP 端口 9224 不可用。")
+        print(f"[FATAL] CDP 端口 {CDP_PORT} 不可用。")
         print("  请先启动桌面端：")
         print("    cd personal/desktop/src-tauri")
         print("    cargo run            # debug 构建自动开启 CDP")

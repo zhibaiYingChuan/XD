@@ -43,6 +43,36 @@ use tray::TrayController;
 /// 本地代理默认端口（仅本机监听，★ 安全底线：绝不监听 0.0.0.0）
 const DEFAULT_PROXY_PORT: u16 = 18765;
 
+/// 开发/测试隔离用的环境变量名。
+///
+/// ★ 为什么需要隔离
+///   用户从线上仓库装了稳定版正在正常使用，而 CDP 回归测试会真实
+///   改动配置：写入占位中转站、切换启用项、造拦截日志。
+///   若开发版与稳定版共用同一份 config.json / 数据库 / 端口，
+///   一次测试就会把用户稳定版的配置改掉、统计写脏。
+///   设了下面三个变量，整个进程（引擎 + 桌面端）就与稳定版彻底分开。
+mod env_keys {
+    /// 数据目录（config.json / 数据库 / 激活状态），需与引擎侧一致
+    pub const DATA_DIR: &str = "XUANDUN_DATA_DIR";
+    /// 引擎监听端口
+    pub const PROXY_PORT: &str = "XUANDUN_PROXY_PORT";
+    /// WebView2 CDP 调试端口
+    pub const CDP_PORT: &str = "XUANDUN_CDP_PORT";
+}
+
+/// 本轮进程使用的 CDP 调试端口。
+///
+/// ★ 与稳定版错开：两个 WebView2 都监听 9224 时，
+///   先启动的那个会占住端口，CDP 实际连到的是另一个进程——
+///   于是测试驱动的是稳定版窗口，用户正在用的界面被点、被改。
+fn cdp_port() -> u16 {
+    std::env::var(env_keys::CDP_PORT)
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p >= 1024)
+        .unwrap_or(9224)
+}
+
 /// HTTP 请求超时（前端侧）
 const REQ_FAST: Duration = Duration::from_secs(5);
 const REQ_NORMAL: Duration = Duration::from_secs(15);
@@ -66,6 +96,29 @@ const ENGINE_MAX_FAILURES: u32 = 5;
 // 代理端口解析
 // ══════════════════════════════════════════════════════════════
 
+/// 用户数据目录（配置 / 数据库 / 激活状态）。
+///
+/// ★ 必须与 Python 侧 ``paths.data_dir()`` 完全一致。
+///   两边读的不是同一份 config.json 时，桌面端会按 A 端口连 B 端口、
+///   或界面显示的配置与引擎实际用的不是同一份 —— 且两边都觉得自己是对的。
+///   设 ``XUANDUN_DATA_DIR`` 即可把开发/测试挪到独立目录。
+fn data_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os(env_keys::DATA_DIR) {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+
+    let base = std::env::var("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".config")
+        })
+        .join("com.daoti.xuandun-personal");
+    base
+}
+
 /// 从 Python 侧配置文件读出监听端口。
 ///
 /// 为什么需要读配置（★ P1-10）：
@@ -76,14 +129,17 @@ const ENGINE_MAX_FAILURES: u32 = 5;
 /// 注意：本函数只在进程启动时调用一次（见 lock_proxy_port），不热重读。
 /// 读取失败回退默认端口：配置文件不存在是正常情况（首次运行）。
 fn proxy_port() -> u16 {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".config")
-        })
-        .join("com.daoti.xuandun-personal")
-        .join("config.json");
+    // 环境变量优先：开发/测试用独立端口，避免与稳定版抢占 18765。
+    if let Ok(v) = std::env::var(env_keys::PROXY_PORT) {
+        if let Ok(p) = v.trim().parse::<u16>() {
+            if (1024..=65535).contains(&p) {
+                return p;
+            }
+        }
+        eprintln!("[WARN] {} 取值非法，已回退默认端口: {:?}", env_keys::PROXY_PORT, v);
+    }
+
+    let base = data_dir().join("config.json");
 
     let Ok(text) = std::fs::read_to_string(&base) else {
         return DEFAULT_PROXY_PORT;
@@ -678,6 +734,14 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
     )
     .env("PYTHONUNBUFFERED", "1")
     .env("PYTHONIOENCODING", "utf-8");
+
+    // ★ 必须把数据目录透传给引擎，否则隔离是假的：
+    //   引擎会按自己的默认路径去读**稳定版**的 config.json，
+    //   于是开发版界面显示的配置与引擎实际使用的不是同一份 ——
+    //   用户在开发版里改地址，引擎仍按稳定版的旧地址转发。
+    if let Some(dir) = std::env::var_os(env_keys::DATA_DIR) {
+        cmd.env(env_keys::DATA_DIR, dir);
+    }
 
     #[cfg(target_os = "windows")]
     {
@@ -1299,6 +1363,13 @@ async fn get_logs(
             }
         }
     }
+    // ★ marked_safe 是布尔，走 as_u64 / as_str 都取不到 —— 必须单独处理（2026-10-03）。
+    //   漏了它，「只看误报」筛选在桌面端会静默失效：
+    //   参数没进 query string，后端按未筛选返回，用户看到的
+    //   是「筛不出来」而不是「没有符合条件的记录」。
+    if let Some(b) = p.and_then(|x| x.get("marked_safe")).and_then(|x| x.as_bool()) {
+        qs.push(format!("marked_safe={b}"));
+    }
 
     let path = if qs.is_empty() {
         "/api/logs".to_string()
@@ -1307,6 +1378,86 @@ async fn get_logs(
     };
 
     proxy_call(reqwest::Method::GET, &sanitize_local_path(&path), None, REQ_NORMAL).await
+}
+
+/// 把筛选条件编译成 query string（日志按条件删除用）。
+///
+/// ★ 与 get_logs 的拼装逻辑同源，但**独立实现**：
+///   这里处理的是 POST 查询参数（body），那边是 GET 日志列表。
+///   两处条件必须一致 —— 否则用户点「删除这些」时，
+///   实际删掉的范围与他在界面上看到的筛选结果不是一回事。
+fn filter_query(p: Option<&serde_json::Value>) -> String {
+    let Some(p) = p else {
+        return String::new();
+    };
+    let mut qs: Vec<String> = Vec::new();
+    for key in ["log_type", "action", "search"] {
+        if let Some(s) = p.get(key).and_then(|x| x.as_str()) {
+            if !s.is_empty() {
+                let enc: String = s
+                    .bytes()
+                    .map(|b| match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                            (b as char).to_string()
+                        }
+                        _ => format!("%{b:02X}"),
+                    })
+                    .collect();
+                qs.push(format!("{key}={enc}"));
+            }
+        }
+    }
+    if let Some(n) = p.get("days").and_then(|x| x.as_u64()) {
+        qs.push(format!("days={n}"));
+    }
+    // ★ 布尔必须显式处理：false 是「只看未标记误报的」这一档，
+    //   漏掉它该筛选会静默失效（退化成「不筛选」）。
+    if let Some(b) = p.get("marked_safe").and_then(|x| x.as_bool()) {
+        qs.push(format!("marked_safe={b}"));
+    }
+    qs.join("&")
+}
+
+/// 日志概览统计。
+#[tauri::command]
+async fn get_logs_stats(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(reqwest::Method::GET, "/api/logs/stats", None, REQ_NORMAL).await
+}
+
+/// 按筛选条件删除日志 —— 第一步：只回报将删除多少条（dry run）。
+///
+/// ★ 两步确认不可省：删除不可恢复，而「当前筛选条件」对用户是隐式的。
+///   先看清范围再决定，是这类操作的基本要求。
+#[tauri::command]
+async fn count_filtered_logs(
+    app: tauri::AppHandle,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    let qs = filter_query(payload.as_ref().map(|p| &p.0));
+    let path = if qs.is_empty() {
+        "/api/logs/delete-filtered".to_string()
+    } else {
+        format!("/api/logs/delete-filtered?{qs}")
+    };
+    proxy_call(reqwest::Method::POST, &sanitize_local_path(&path), Some(serde_json::json!({})), REQ_NORMAL).await
+}
+
+/// 按筛选条件删除日志 —— 第二步：真正执行。
+#[tauri::command]
+async fn delete_filtered_logs(
+    app: tauri::AppHandle,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    let qs = filter_query(payload.as_ref().map(|p| &p.0));
+    let path = if qs.is_empty() {
+        "/api/logs/delete-filtered/confirm".to_string()
+    } else {
+        format!("/api/logs/delete-filtered/confirm?{qs}")
+    };
+    proxy_call(reqwest::Method::POST, &sanitize_local_path(&path), Some(serde_json::json!({})), REQ_NORMAL).await
 }
 
 #[tauri::command]
@@ -1671,14 +1822,15 @@ fn enable_cdp_debug_port() -> bool {
     let enable = cfg!(debug_assertions)
         || std::env::var("XUANDUN_ENABLE_CDP_DEBUG").is_ok();
     if enable {
+        let port = cdp_port();
         // ★ --remote-allow-origins=* 不可省略：
         //   WebView2 仅设 --remote-debugging-port 会导致 Playwright/Node/Python
         //   客户端全部被拒（403），且报错信息不会提示缺这个参数。
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--remote-debugging-port=9224 --remote-allow-origins=*",
+            format!("--remote-debugging-port={port} --remote-allow-origins=*"),
         );
-        eprintln!("[WARN] CDP 调试端口已开启: 9224（debug 构建或设置了 XUANDUN_ENABLE_CDP_DEBUG）");
+        eprintln!("[WARN] CDP 调试端口已开启: {port}（debug 构建或设置了 XUANDUN_ENABLE_CDP_DEBUG）");
         eprintln!("[WARN] 任意本地进程可通过 CDP 注入 JS 篡改界面显示，仅限调试环境使用");
     }
     enable
@@ -1719,6 +1871,9 @@ pub fn run() {
             unmark_log_safe,
             export_logs,
             clear_logs,
+            get_logs_stats,
+            count_filtered_logs,
+            delete_filtered_logs,
             get_relays,
             get_configured_relays,
             switch_relay,

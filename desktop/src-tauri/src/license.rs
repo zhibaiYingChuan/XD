@@ -173,6 +173,14 @@ pub struct LicenseState {
 }
 
 pub fn license_file() -> PathBuf {
+    // ★ 必须与 Python 侧 paths.data_file("license.json") 完全一致，
+    //   且同样支持 XUANDUN_DATA_DIR 隔离 —— 否则开发/测试会去写
+    //   稳定版的激活状态，用户已激活的版本会凭空变成未激活。
+    if let Some(dir) = std::env::var_os("XUANDUN_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("license.json");
+        }
+    }
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
