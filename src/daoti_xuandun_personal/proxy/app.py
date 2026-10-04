@@ -2592,14 +2592,21 @@ def _migrate_relay_keys_to_fingerprint() -> None:
     ★ 为什么只在**无歧义**时迁移
       该主机在配置里只对应一家 → 旧记录必然属于它，迁移是确定的。
       同一主机配了多个账号时，旧记录没存指纹、信息上拆不开 ——
-      强行归给其中一家会把另一家的账也记上去，比不迁移更糟。
-      这类记录保持原样（仍按主机聚合），用户下次发请求时各自建立新键。
+      强行逐家分配会把两家的账都算到同一家头上。
+
+    ★ 但有歧义时也不能**跳过**（2026-10-04 修回归）
+      跳过会让旧键（纯主机）与新键（含指纹）同时存在，
+      而前端按 diagnostics 给的新键去匹配，永远匹配不上 ——
+      首页「当前中转站」显示成「已配置 · 尚未产生调用记录」，
+      用户明明一直在用却看到空态。
+      折中做法：归给**当前启用项**（all_relays()[0]）。
+      这是唯一不会把两家的账都算错、又能保证界面有东西可显示的近似。
 
     ★ 幂等
       迁移后旧键不再存在，重复执行是空操作。
 
     ★ 失败不阻断启动
-      迁移只是数据整理；失败时旧的按主机聚合仍然可用。
+      迁移只是数据整理；失败时旧数据仍可用。
     """
     if _storage is None or _config is None:
         return
@@ -2614,19 +2621,33 @@ def _migrate_relay_keys_to_fingerprint() -> None:
             if netloc and key and key != netloc:
                 by_netloc.setdefault(netloc, []).append(key)
 
+        # 当前启用项的域名与键 —— 有歧义时的归属目标
+        active_netloc = ReputationTracker.extract_domain(
+            _config.relay.base_url or ""
+        )
+        active_key = ReputationTracker.reputation_key(
+            _config.relay.base_url or "",
+            getattr(_config.relay, "api_key", "") or "",
+        )
+
         moved = 0
-        ambiguous = 0
+        merged_history = 0
         for netloc, keys in by_netloc.items():
-            if len(keys) != 1:
-                ambiguous += 1
+            if len(keys) == 1:
+                target = keys[0]
+            elif netloc == active_netloc and active_key:
+                target = active_key
+                merged_history += 1
+            else:
                 continue
-            moved += _storage.migrate_relay_key(netloc, keys[0])["logs"]
+            moved += _storage.migrate_relay_key(netloc, target)["logs"]
         if moved:
             logger.info("信誉键升级为含 Key 指纹：迁移 %d 条记录", moved)
-        if ambiguous:
+        if merged_history:
             logger.info(
-                "%d 个主机下配了多个账号，其历史记录无法拆分，"
-                "保持按主机聚合（新调用将分别计数）", ambiguous,
+                "%d 个主机下配了多个账号，旧记录无法逐家拆分，"
+                "已归到当前启用项名下（新调用将按账号分别计数）",
+                merged_history,
             )
     except Exception as e:  # noqa: BLE001 — 迁移失败不该阻断启动
         logger.warning("信誉键迁移失败（不影响使用）: %s", e)

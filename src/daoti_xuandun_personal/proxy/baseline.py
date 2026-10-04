@@ -1009,6 +1009,34 @@ def _collect_tool_arguments(obj: Any, depth: int = 0) -> str:
     return "\n".join(p for p in parts if p)
 
 
+#: 工具名的合法形态：短标识符（字母数字 + . - _ / :）。
+#:
+#: ★ 为什么必须校验形态（2026-10-04 实测缺陷）
+#:   某些模型/网关会把工具调用写成**文本**（`<invoke name="Grep">`、
+#:   命令行、XML 标签），而那段文本可能落进 `name` 字段。
+#:   实测用户日志里出现了一个 200 字符、含换行与引号的「工具名」——
+#:   它被判成「响应调用了未声明的工具」并**阻断**了对话，
+#:   而那条 detail 里写的是「你只声明了 27 个工具：…」，
+#:   用户唯一的结论是玄盾认错了。
+#:
+#:   工具名不可能是那个样子：真实工具名都很短、无空白。
+#:   这条校验与来源无关 —— 无论哪个字段漏进长文本都拦得住。
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-/:]{1,64}$")
+
+
+def _looks_like_tool_name(value: Any) -> bool:
+    """该值是否像工具名（而不是一段被误填进来的文本）。"""
+    if not isinstance(value, str):
+        return False
+    return bool(_TOOL_NAME_RE.match(value.strip()))
+
+
+def _push_tool_name(out: List[str], value: Any) -> None:
+    """只在值确实像工具名时才收集。"""
+    if _looks_like_tool_name(value):
+        out.append(str(value).strip())
+
+
 def _collect_tool_names(obj: Any, out: List[str], depth: int = 0) -> None:
     """递归收集响应中出现的工具调用名。
 
@@ -1030,27 +1058,27 @@ def _collect_tool_names(obj: Any, out: List[str], depth: int = 0) -> None:
                 if isinstance(tc, dict):
                     fn = tc.get("function")
                     if isinstance(fn, dict) and fn.get("name"):
-                        out.append(str(fn["name"]))
+                        _push_tool_name(out, fn["name"])
                     elif tc.get("name"):
-                        out.append(str(tc["name"]))
+                        _push_tool_name(out, tc["name"])
         # Anthropic: type == "tool_use"
         if obj.get("type") == "tool_use" and obj.get("name"):
-            out.append(str(obj["name"]))
+            _push_tool_name(out, obj["name"])
         # ★ OpenAI Responses API: type == "function_call"
         if obj.get("type") == "function_call" and obj.get("name"):
-            out.append(str(obj["name"]))
+            _push_tool_name(out, obj["name"])
         # ★ Anthropic MCP: type == "mcp_tool_use" / "server_tool_use"
         if obj.get("type") in ("mcp_tool_use", "server_tool_use",
                                "web_search_tool_result") \
                 and obj.get("name"):
-            out.append(str(obj["name"]))
+            _push_tool_name(out, obj["name"])
         # ★ Google Gemini: functionCall.name
         fc = obj.get("functionCall") or obj.get("function_call")
         if isinstance(fc, dict) and fc.get("name"):
-            out.append(str(fc["name"]))
+            _push_tool_name(out, fc["name"])
         # 独立的函数调用形态
         if obj.get("type") == "function" and isinstance(obj.get("name"), str):
-            out.append(obj["name"])
+            _push_tool_name(out, obj["name"])
         for v in obj.values():
             _collect_tool_names(v, out, depth + 1)
     elif isinstance(obj, list):

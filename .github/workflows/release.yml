@@ -302,11 +302,13 @@ jobs:
           #   rebuild_from_facts    ← 中转站计数随日志重算
           #   _PKG_DAILY_WORDS      ← 日常词不再被判成 typosquat（曾拦下编码对话）
           #   reputation_key        ← 信誉按「主机#Key指纹」区分账号
+          #   _TOOL_NAME_RE         ← 工具名形态校验（曾把命令行文本当工具名）
           MISSING=0
           for MARK in 'marked_safe = ?' 'top_domains' \
                       '_recompute_daily_stats' 'wal_checkpoint' \
                       'OBSERVATION_ONLY_SIGNALS' 'rebuild_from_facts' \
-                      '_PKG_DAILY_WORDS' 'reputation_key'; do
+                      '_PKG_DAILY_WORDS' 'reputation_key' \
+                      '_TOOL_NAME_RE'; do
             if grep -qa -- "$MARK" "$ENGINE"; then
               echo "  ✓ $MARK"
             else

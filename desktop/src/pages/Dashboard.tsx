@@ -6,7 +6,7 @@
    信息层级：
      ① 英雄区：大字状态 + 今日概览
      ② KPI 三卡：安全 / 可疑 / 危险
-     ③ 最近拦截：最近 5 条非安全事件
+     ③ 近期安全记录：最近 5 条非安全事件
      ④ 当前中转站：信誉评分
      ⑤ 快速操作：暂停防护 / 打开日志 / 分享诊断
 */
@@ -501,10 +501,10 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* ② 最近拦截 */}
+      {/* ② 近期安全记录 */}
       <div className="card">
         <div className="card-title">
-          <span>最近拦截</span>
+          <span>近期安全记录</span>
           <Link to="/logs" className="btn ghost sm">
             查看全部
             <span style={{ transform: 'translateX(1px)' }}>→</span>

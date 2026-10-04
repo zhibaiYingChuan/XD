@@ -258,3 +258,150 @@ class TestLegacyKeyMigration:
         assert reps["api.x.com#abc12345"].total_calls == 7, (
             "迁移覆盖了已存在的新键数据"
         )
+
+
+class TestToolNameMustLookLikeAName:
+    """⑤ 只有「像工具名」的值才算工具名。
+
+    ★ 实测缺陷（2026-10-04）：某些模型/网关把工具调用写成文本
+      （`<invoke name="Grep">`、命令行），而那段文本落进了 name 字段。
+      日志里于是出现一个 200 字符、含换行与引号的「工具名」，
+      被判成「响应调用了未声明的工具」并**阻断**了对话。
+    """
+
+    def _facts_of_name(self, name: str):
+        payload = {"tool_calls": [{"function": {
+            "name": name, "arguments": "{}",
+        }}]}
+        return extract_response_facts(payload, "")
+
+    def test_command_line_text_is_not_a_tool_name(self):
+        got = self._facts_of_name(
+            'Get-ChildItem -Path "h:\\sjfh\\x" -Recurse -Filter "*.json" '
+            "| Select-Object -First 5 FullName"
+        )
+        assert got["tool_names"] == [], (
+            "一段命令行文本被当成了工具名 —— "
+            "会触发「调用了未声明的工具」并阻断对话"
+        )
+
+    def test_multiline_xml_invoke_is_not_a_tool_name(self):
+        got = self._facts_of_name(
+            'Get-ChildItem</command>\n</invoke>\n<invoke name="Grep'
+        )
+        assert got["tool_names"] == []
+
+    def test_real_tool_names_still_collected(self):
+        assert self._facts_of_name("Edit")["tool_names"] == ["Edit"]
+        assert self._facts_of_name("RunCommand")["tool_names"] == ["RunCommand"]
+
+    @pytest.mark.parametrize("name", [
+        "mcp__fs__read_file", "filesystem/read_file", "str.replace",
+        "get_weather", "github.create_issue",
+    ])
+    def test_mcp_style_names_are_allowed(self, name):
+        """MCP / 带命名空间的名字是合法的，不能被形态校验误杀。"""
+        assert self._facts_of_name(name)["tool_names"] == [name]
+
+
+class TestAmbiguousMigrationFallsBackToActive:
+    """⑥ 同一主机多个账号时，旧记录归给当前启用项。
+
+    ★ 修的是 v0.1.5 引入的回归：跳过不迁会让旧键与新键并存，
+      而前端按新键匹配不到 —— 首页「当前中转站」显示成
+      「已配置 · 尚未产生调用记录」，用户明明一直在用却看到空态。
+    """
+
+    def _run_migration(self, store, active, others):
+        from daoti_xuandun_personal.proxy import app as app_mod
+        from daoti_xuandun_personal.reputation.tracker import ReputationTracker
+
+        class _Relay:
+            base_url = active["base_url"]
+            api_key = active["api_key"]
+
+            def all_relays(self):
+                return [dict(active, id="a")] + [
+                    dict(o, id=f"o{i}") for i, o in enumerate(others)
+                ]
+
+        class _Cfg:
+            relay = _Relay()
+
+        old = (app_mod._storage, app_mod._config, app_mod._reputation)
+        app_mod._storage = store
+        app_mod._config = _Cfg()
+        app_mod._reputation = ReputationTracker()
+        try:
+            app_mod._migrate_relay_keys_to_fingerprint()
+        finally:
+            app_mod._storage, app_mod._config, app_mod._reputation = old
+
+    @pytest.fixture()
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XUANDUN_DATA_DIR", str(tmp_path))
+        import importlib
+
+        from daoti_xuandun_personal import paths
+        importlib.reload(paths)
+        from daoti_xuandun_personal.storage import db as db_mod
+        importlib.reload(db_mod)
+        yield db_mod.PersonalStorage(db_path=tmp_path / "amb.db")
+        monkeypatch.delenv("XUANDUN_DATA_DIR", raising=False)
+        importlib.reload(paths)
+
+    def test_same_host_multiple_accounts_goes_to_active(self, store):
+        from daoti_xuandun_personal.reputation.tracker import ReputationTracker
+        from daoti_xuandun_personal.types import RelayReputation
+
+        store.upsert_reputation(RelayReputation(
+            domain="api.x.com", total_calls=5, first_seen=time.time(),
+        ))
+        active = {"base_url": "https://api.x.com/v1", "api_key": "sk-active"}
+        other = {"base_url": "https://api.x.com/v1", "api_key": "sk-other"}
+
+        self._run_migration(store, active, [other])
+
+        active_key = ReputationTracker.reputation_key(
+            active["base_url"], active["api_key"]
+        )
+        reps = {r.domain: r for r in store.load_reputations()}
+        assert active_key in reps, (
+            f"旧记录没归到当前启用项：{sorted(reps)} —— "
+            "首页「当前中转站」会显示「尚未产生调用记录」空态"
+        )
+        assert reps[active_key].total_calls == 5, "迁移丢了历史计数"
+
+    def test_single_account_still_migrates(self, store, tmp_path):
+        """无歧义时照旧直接迁移。"""
+        from daoti_xuandun_personal.reputation.tracker import ReputationTracker
+        from daoti_xuandun_personal.types import RelayReputation
+
+        store.upsert_reputation(RelayReputation(domain="api.y.com"))
+        active = {"base_url": "https://api.y.com/v1", "api_key": "sk-only"}
+        self._run_migration(store, active, [])
+        key = ReputationTracker.reputation_key(
+            active["base_url"], active["api_key"]
+        )
+        assert [r.domain for r in store.load_reputations()] == [key]
+
+    def test_logs_domain_migrates_so_recount_works(self, store):
+        """★ 日志域名必须一起迁，否则重算时匹配不到新键、计数归零。"""
+        from daoti_xuandun_personal.reputation.tracker import ReputationTracker
+        from daoti_xuandun_personal.types import (
+            Action, LogEntry, LogType, RelayReputation,
+        )
+
+        store.upsert_reputation(RelayReputation(domain="api.x.com"))
+        store.insert_log(LogEntry(
+            timestamp=time.time(),
+            log_type=LogType.RESPONSE_VERIFY.value,
+            relay_domain="api.x.com", action=Action.PASS.value,
+            severity="low", model="m", finding_count=0, summary="x",
+        ))
+        active = {"base_url": "https://api.x.com/v1", "api_key": "sk-a"}
+        self._run_migration(store, active, [])
+        key = ReputationTracker.reputation_key(
+            active["base_url"], active["api_key"]
+        )
+        assert store.iter_log_facts()[0]["domain"] == key
