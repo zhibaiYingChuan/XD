@@ -31,13 +31,13 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
 /** 应用版本（仅 Tauri 环境可用）。 */
 export async function getAppVersion(): Promise<string> {
   if (!isTauri()) {
-    return import.meta.env.VITE_APP_VERSION ?? '0.1.6-alpha';
+    return import.meta.env.VITE_APP_VERSION ?? '0.1.7-alpha';
   }
   try {
     const mod = await import('@tauri-apps/api/app');
     return await mod.getVersion();
   } catch {
-    return import.meta.env.VITE_APP_VERSION ?? '0.1.6-alpha';
+    return import.meta.env.VITE_APP_VERSION ?? '0.1.7-alpha';
   }
 }
 
