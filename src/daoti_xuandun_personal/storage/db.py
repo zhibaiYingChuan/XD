@@ -376,9 +376,13 @@ class PersonalStorage:
           ``[f.to_dict() for f in findings]``。解析失败当空列表 ——
           「宁可少扣也不在无依据时指控中转站」与 tracker._classify
           的取向一致。
+
+        ★ text_preview 一并返回（2026-10-04）：水印等**定性证据**也
+          必须能从日志重算，否则清空日志后它仍会扣分 ——
+          用户会看到「一条记录都没有，分数却还扣着」。
         """
         rows = self._conn.execute(
-            "SELECT relay_domain, action, detail_json FROM logs "
+            "SELECT relay_domain, action, detail_json, text_preview FROM logs "
             "WHERE log_type = ?",
             (LogType.RESPONSE_VERIFY.value,),
         ).fetchall()
@@ -397,6 +401,7 @@ class PersonalStorage:
                 "domain": str(r["relay_domain"] or ""),
                 "action": str(r["action"] or ""),
                 "categories": cats,
+                "text_preview": str(r["text_preview"] or ""),
             })
         return facts
 
@@ -917,6 +922,23 @@ class PersonalStorage:
                 (new_key, old_key),
             )
             return {"reputation": reps, "logs": int(cur2.rowcount or 0)}
+
+    def delete_reputation(self, domain: str) -> bool:
+        """删除一条中转站信誉记录（用于清理孤儿行）。
+
+        ★ 什么时候会成孤儿（2026-10-04）：
+          信誉键从「纯主机」升级为「主机#Key指纹」的迁移过程中，
+          以及旧版本遗留的裸主机行 —— 它们既不在当前配置的键集合里，
+          也没有任何日志引用。留着会让设置页/卡片出现「一行 0 次调用的
+          陌生记录」，用户以为数据坏了。
+        """
+        if not domain:
+            return False
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM relay_reputation WHERE domain = ?", (domain,)
+            )
+        return bool(cur.rowcount)
 
     def clear_reputations(self) -> int:
         """清空信誉记录。"""

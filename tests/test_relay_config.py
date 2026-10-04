@@ -140,32 +140,50 @@ class TestMaskedKeyIsNotAKey:
         assert not is_masked_key(None)
 
     def test_update_config_rejects_masked_key_loudly(self) -> None:
-        """掩码回传必须**报错**，不能只记日志就跳过。
+        """掩码回传必须**报错**，且必须**在写内存之前**报错。
 
         ★ 静默跳过的后果：用户收到「中转站配置已保存并立即生效」，
           而真实 Key 根本没换 —— 下一次请求 401，
           且用户无从把这次 401 与这次保存联系起来。
           守卫本身绝不能制造它要消灭的那种失效。
 
-        ★ 判据直接读源码：断言「raise HTTPException」真的在守卫分支里，
-          而不是「logger.warning 之后 continue」。
+        ★★ 判据是「顺序」而不是「某段文本里有 raise」（2026-10-04 改）
+          原判据按 `split("is_masked_key(v)")` 定位守卫分支 ——
+          一旦代码结构微调就失效：把校验前移那次重构立刻让它
+          抛 IndexError，测试红了却与真实风险无关。
+
+          真正要守的性质是：**校验必须先于任何 setattr**。
+          否则抛 400 时磁盘虽然没坏（save 未执行），
+          但运行中的进程已经坏了 —— `_config.relay.others` 里躺着掩码串，
+          之后切到那家中转站必然 401。
         """
-        app_py = (ROOT / "src" / "daoti_xuandun_personal" / "proxy" / "app.py").read_text(
-            encoding="utf-8"
-        )
+        app_py = (
+            ROOT / "src" / "daoti_xuandun_personal" / "proxy" / "app.py"
+        ).read_text(encoding="utf-8")
         body = app_py.split("async def update_config", 1)[1]
         body = body.split('if "guard" in payload', 1)[0]
-        guard = body.split("is_masked_key(v)", 1)[1]
-        # 守卫分支必须在 raise 之前不再有 continue —— continue 会让
-        # 掩码被静默吞掉，用户却拿到成功提示。
-        head = guard.split("setattr", 1)[0]
-        assert "raise HTTPException" in head, (
-            "掩码 Key 的守卫分支没有抛错 —— 它会静默跳过，"
-            "用户收到「已保存」但 Key 未生效，之后所有请求 401 且无从追查"
+
+        first_setattr = body.find("setattr(_config.relay")
+        assert first_setattr != -1, "没找到写内存的位置，判据失效"
+
+        idx_top = body.find("is_masked_key(")
+        assert idx_top != -1, "没找到掩码判定，判据失效"
+        assert idx_top < first_setattr, (
+            "顶层 api_key 的掩码校验出现在 setattr **之后** —— "
+            "抛 400 时内存已被污染，之后切到那家中转站必然 401，"
+            "而界面只显示过一次「保存失败」，用户无从关联"
         )
-        assert "continue" not in head, (
-            "掩码 Key 的守卫分支里仍有 continue —— 那等于静默吞掉，"
-            "正是本守卫要消灭的失效模式"
+
+        idx_others = body.find("find_masked_key_in_others(")
+        assert idx_others != -1, "没找到 others 的掩码守卫，判据失效"
+        assert idx_others < first_setattr, (
+            "others 的掩码校验在 setattr 之后 —— 保存失败会污染内存"
+        )
+
+        head = body[:first_setattr]
+        assert "raise HTTPException" in head, (
+            "掩码 Key 的守卫没有抛错 —— 它会静默跳过，"
+            "用户收到「已保存」但 Key 未生效，之后所有请求 401 且无从追查"
         )
 
     def test_stale_test_result_is_discarded(self) -> None:

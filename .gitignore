@@ -208,6 +208,9 @@ tests/*
 #   test_pkg_and_relay_identity —— 代码内容不得当成「即将安装的包」
 #     （曾把 label 判成 babel 的错拼并拦下对话），
 #     以及同一主机不同 Key 的信誉须分开统计（曾两家的账混在一起）。
+#   test_derived_state_consistency —— 派生数据必须能从日志解释
+#     （曾出现「日志一条没有、卡片还扣着分」「干净响应被记成已告警」
+#      「信誉指纹被 URL 解析吃掉」三处，共同特征是函数对、调用点错）。
 !tests/test_dev_isolation.py
 !tests/test_statistical_never_blocks.py
 !tests/test_log_filters.py
@@ -216,6 +219,7 @@ tests/*
 !tests/test_delete_e2e.py
 !tests/test_content_policy_and_relay_sync.py
 !tests/test_pkg_and_relay_identity.py
+!tests/test_derived_state_consistency.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py

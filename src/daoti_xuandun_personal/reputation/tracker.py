@@ -203,6 +203,7 @@ class ReputationTracker:
         content: str = "",
         categories: Optional[List[str]] = None,
         api_key: str = "",
+        relay_key: Optional[str] = None,
     ) -> RelayReputation:
         """记录一次调用并更新信誉。
 
@@ -217,11 +218,25 @@ class ReputationTracker:
                 「响应长度比历史长」不该扣（那是你问了什么决定的）。
             api_key: 本次实际使用的 Key。用于把「同一地址的不同账号」
                 分开统计 —— 见 reputation_key。
+            relay_key: **已算好的信誉键**。传入时直接使用，
+                不再从 upstream_url 重新解析。
+
+        ★★ 为什么必须支持 relay_key（2026-10-04 实测缺陷）
+        ────────────────────────────────────────────────────────────
+          键的形态是「主机#Key指纹」，而 `#` 在 URL 里是 fragment 分隔符：
+
+              urlparse("https://api.x.com#abc12345").netloc == "api.x.com"
+
+          指纹被静默丢掉。生产调用点曾把已算好的键再拼回
+          `https://{键}` 传进来，于是每次写回都落到**裸域名**那一行，
+          而界面（/api/diagnostics）读的是带指纹那一行 ——
+          表现为「卡片调用数永远不涨、分数停在旧值」，
+          且日志里看不出任何异常。
 
         Returns:
             更新后的 RelayReputation
         """
-        key = self.reputation_key(upstream_url, api_key)
+        key = relay_key or self.reputation_key(upstream_url, api_key)
         now = time.time()
 
         rep = self._reputations.get(key)
@@ -304,38 +319,44 @@ class ReputationTracker:
         return rep
 
     def rebuild_from_facts(self, facts: List[Dict[str, Any]]) -> None:
-        """按日志明细重算各中转站的计数与分数。**就地修改内存态**。
+        """按日志明细重算各中转站的全部派生字段。**就地修改内存态**。
 
         ★★ 为什么必须有（2026-10-04）
         ────────────────────────────────────────────────────────────
-        relay_reputation 的计数是**累加**的，删日志（清空 / 按筛选删 /
-        删单条）都不会回退。实测：
+        relay_reputation 是**累加**表，删日志（清空 / 按筛选删 /
+        删单条）都不会回退它。实测：
 
             清空日志后   首页今日调用 3 → 0 ✓
                          中转站卡片总调用 3 → 3 ✗
 
         两个数字各自都"对"，只是口径不同 —— 用户看到的是软件坏了。
-        要长期一致，只能以 logs 为唯一事实源重算。
+        要长期一致，唯一可行的是**以 logs 为唯一事实源重算**。
 
-        ★ 只重算「从日志可推导」的字段：
-          total_calls / relay_* / self_* / danger_count /
-          suspect_count / score。
+        ★★ 定性证据也一并重算（2026-10-04 修正）
+        ────────────────────────────────────────────────────────────
+        上一版把 watermark_detected / notes 当作「服务商固有属性」保留，
+        理由是「它发生过，不该因为你删日志就忘记」。
+        但用户实测反馈：**日志一条都没有了，卡片还扣着 30 分**——
+        那条扣分已经没有可核对的依据，用户唯一能得出的结论是软件坏了。
 
-          first_seen / last_seen / latency_* / known_malicious /
-          watermark_detected / notes **原样保留** ——
-          它们记的是服务商的历史属性（这家什么时候开始用、
-          有没有自述保留数据），不随你删日志而消失，
-          也无法从日志重建（日志里没有这些信息）。
+        所以现在改为：**凡是能从日志再现的，就跟着日志走**。
+          · watermark_detected / 「检测到数据保留迹象」← 重跑水印正则
+          · 「命中恶意库」/「高风险模式」← 从域名重判（与日志无关）
+        日志清空 → 这些证据一起归零，分数回到满分。诚实且可核对。
+
+        ★ 仍然保留的字段（确实无法从日志重建）：
+          first_seen / last_seen / avg_latency_ms / latency_samples ——
+          它们是「这家什么时候开始用、有多快」的时间属性，
+          与日志存不存在无关。
 
         ★ 计数清零而不是删除记录：
           用户清掉日志后，「这家我用过」这件事仍然成立，
-          界面显示 0 次调用是诚实的；把记录整条删掉会让它退回
-          「查无此人」，反而更像数据丢了。
+          界面显示 0 次调用是诚实的。
 
         ★ 未知域名的日志将被忽略（不凭空创建信誉条目）——
-          信誉条目由 record_call 在真实请求时建立，
-          重算只负责把已有条目的计数对齐事实。
+          信誉条目由 record_call 在真实请求时建立。
         """
+        # ── 1) 清零全部派生字段 ──
         for rep in self._reputations.values():
             rep.total_calls = 0
             rep.relay_danger_count = 0
@@ -344,7 +365,12 @@ class ReputationTracker:
             rep.self_suspect_count = 0
             rep.danger_count = 0
             rep.suspect_count = 0
+            # 定性证据同样清零，随后从日志/域名重建
+            rep.watermark_detected = False
+            rep.known_malicious = False
+            rep.notes = []
 
+        # ── 2) 从日志事实重建计数与水印证据 ──
         for f in facts:
             domain = str(f.get("domain") or "")
             if not domain:
@@ -370,13 +396,54 @@ class ReputationTracker:
             rep.danger_count = rep.relay_danger_count + rep.self_danger_count
             rep.suspect_count = rep.relay_suspect_count + rep.self_suspect_count
 
+            # 水印证据：从该条日志存下的内容片段重跑正则。
+            # ★ 用 text_preview（截断 500 字符）而非原始响应 ——
+            #   精度略低，但换来「证据必须能被日志解释」这个性质。
+            if not rep.watermark_detected:
+                preview = str(f.get("text_preview") or "")
+                if preview:
+                    for pattern, label in _WATERMARK_PATTERNS:
+                        if re.search(pattern, preview, re.IGNORECASE):
+                            rep.watermark_detected = True
+                            rep.notes.append(f"检测到数据保留迹象：{label}")
+                            break
+
+        # ── 3) 从域名重建「固有属性」（与日志无关）──
+        #    恶意库与高风险模式判的是**域名本身**，
+        #    不依赖任何一次具体调用，所以无论日志在不在都要重判。
+        for rep in self._reputations.values():
+            netloc = self.display_domain(rep.domain)
+            if not netloc:
+                continue
+            for frag, reason in KNOWN_MALICIOUS.items():
+                if frag in netloc:
+                    rep.known_malicious = True
+                    rep.notes.append(f"命中恶意库：{reason}")
+                    break
+            if not rep.known_malicious:
+                for frag, reason in SUSPICIOUS_PATTERNS.items():
+                    if netloc.endswith(frag) or f"{frag}." in netloc:
+                        rep.notes.append(f"高风险模式：{reason}")
+                        break
+
+        # ── 4) 重算分数 ──
         for rep in self._reputations.values():
             rep.score = self._compute_score(rep)
 
         logger.info(
-            "中转站计数已按日志重算：%d 家，共 %d 条事实",
+            "中转站派生数据已按日志重算：%d 家，共 %d 条事实",
             len(self._reputations), len(facts),
         )
+
+    def forget(self, key: str) -> bool:
+        """从内存里移除一条信誉（供清理孤儿行使用）。
+
+        ★ 只删内存不够、只删库也不够：两边都删才是真的消失。
+          库由 storage.delete_reputation 负责，这里负责内存与延迟历史。
+        """
+        existed = self._reputations.pop(key, None) is not None
+        self._latencies.pop(key, None)
+        return existed
 
     # ── 评分 ──
 

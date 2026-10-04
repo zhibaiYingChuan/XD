@@ -203,6 +203,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # 内存里的值已经是正确的，接口照常可用。
             logger.warning("信誉分数回写失败（内存值仍正确）: %s", e)
 
+    # ★★ 启动时对齐派生数据（2026-10-04）
+    #   必须在 load_reputations **之后**（否则内存里还没有条目可重算），
+    #   且必须在迁移之后（否则迁过来的旧键会被当成孤儿清掉）。
+    #   作用：让旧版本留下的脏数据自愈 ——
+    #   典型现象是「日志一条都没有，中转站卡片还扣着分」。
+    _align_derived_state()
+
     # ③ HTTP 客户端
     timeout_s = _config.server.request_timeout_s
     _http_client = httpx.AsyncClient(
@@ -694,7 +701,11 @@ def create_app() -> FastAPI:
         #   action=="pass" 不阻断、还被记为 safe ——
         #   一个 high 级发现被计入「今日安全」，信誉分也不受影响。
         #   现在按合并后的最高严重度重新走一次级别映射。
-        action = _resolve_action(max_sev, verify_result)
+        #
+        #   ★★ 第二个参数传「这一轮有没有发现」，不能传 verify_result 对象
+        #     —— 它是 dataclass、恒为真值，会让「零发现」的干净响应
+        #     也被记成「已告警」（见 _resolve_action 的说明）。
+        action = _resolve_action(max_sev, findings or None)
 
         # 高危阻断
         if max_sev == "high" and action == Action.BLOCK.value:
@@ -882,10 +893,11 @@ def create_app() -> FastAPI:
                 #   而不是「有 findings 就一律 ALERT」——
                 #   否则流式下 high 级发现永远不会被记为 BLOCK，
                 #   信誉分的 danger_count 也就永远不涨。
+                #   ★ 第二个参数同样传「有没有发现」，与非流式路径同一个口径。
                 action = (
                     Action.BLOCK.value
                     if state["blocked"]
-                    else _resolve_action(severity, None)
+                    else _resolve_action(severity, findings or None)
                 )
                 # ★ low 档必须留痕，不能静默 pass：
                 #   统计类信号 severity 恒为 low，若映射成 pass，
@@ -1403,45 +1415,33 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="配置未就绪")
 
         if "relay" in payload:
-            for k, v in payload["relay"].items():
-                if hasattr(_config.relay, k) and v is not None:
-                    # 空字符串表示"保持原密钥不变"
-                    if k == "api_key" and v == "":
-                        continue
-                    # ★ 掩码值绝不能落成真实 Key（判据在 config.is_masked_key）。
-                    #   读取配置返回的是掩码（xxxx****yyyy），前端原样回传时
-                    #   若被写回磁盘，真实 Key 就被掩码串替换了 —— 之后所有
-                    #   请求 401，而配置页看起来一切正常，用户只会以为
-                    #   中转站封了他。这是**静默**的：没有报错、没有日志。
-                    #
-                    # ★ 必须报错而不是 warning 后 continue：
-                    #   真实 Key 里含 **** 的情况确实存在（部分中转站会这样签发），
-                    #   静默丢弃的后果是「提示保存成功、实际没生效」——
-                    #   而用户下一次请求就 401，且无从关联到这次保存。
-                    #   那正是本条守卫要消灭的失效模式，不能自己再犯一次。
-                    if k == "api_key" and is_masked_key(v):
-                        logger.warning(
-                            "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
-                        )
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                "这个 API Key 看起来是脱敏后的串（含 ****），"
-                                "已拒绝保存。若这是新填的 Key，请确认复制完整；"
-                                "若不修改 Key，请把该输入框清空后再保存。"
-                            ),
-                        )
-                    setattr(_config.relay, k, v)
-            # ★★ 多中转站：列表里每一条的 api_key 同样要过掩码守卫。
-            #   前端 config.relay 整体回传时，others[].api_key 拿到的
-            #   已经是掩码串（见 config.to_safe_dict）——
-            #   原实现只守了顶层 api_key，于是用户**每保存一次配置**，
-            #   就把其余中转站的真实 Key 全换成 `sk-a…CD⟪…⟫`，
-            #   之后切到那家就是 401，而配置页看起来一切正常。
-            #   这比「不写 others」严重得多：单中转站时代它不会发生。
-            bad = find_masked_key_in_others(payload["relay"].get("others"))
+            relay_payload = payload["relay"]
+
+            # ★★ 全部校验前移 —— 必须在任何 setattr 之前（2026-10-04 修）
+            # ────────────────────────────────────────────────────────────
+            # 原实现是「边写内存边校验」：先把 relay 的字段逐个 setattr
+            # 进内存（含 others 这个列表本身），**之后**才检查
+            # others[].api_key 是不是掩码串。于是抛 400 时：
+            #   磁盘没事（_config.save() 还没执行），
+            #   但**运行中的进程已经坏了** —— _config.relay.others 里
+            #   躺着掩码串，此后切到那家必然 401。
+            # 而界面只显示过一次「保存失败」，用户无从把它和随后的 401
+            # 联系起来 —— 这正是这条守卫本来要消灭的静默失效，
+            # 却在守卫自己被触发时又制造了一次。
+            #
+            # 校验能否通过，应当是「写内存」的**前置条件**，不是后续步骤。
+
+            # ① 其余中转站列表里的 Key
+            #    ★ 前端 config.relay 整体回传时，others[].api_key 拿到的
+            #      已经是掩码串（见 config.to_safe_dict）。原实现只守了
+            #      顶层 api_key，于是用户**每保存一次配置**就把其余中转站
+            #      的真实 Key 全换成 `sk-a…CD⟪…⟫`，切过去必然 401。
+            bad = find_masked_key_in_others(relay_payload.get("others"))
             if bad is not None:
-                idx, key = bad
+                idx, _key = bad
+                logger.warning(
+                    "拒绝保存：第 %d 条中转站的 api_key 是掩码串", idx + 1
+                )
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -1450,6 +1450,33 @@ def create_app() -> FastAPI:
                         "说明列表里的 Key 已被掩码污染。"
                     ),
                 )
+
+            # ② 顶层 api_key
+            #    ★ 必须报错而不是 warning 后 continue：真实 Key 里含 ****
+            #      的情况确实存在（部分中转站会这样签发），静默丢弃的后果是
+            #      「提示保存成功、实际没生效」—— 用户下一次请求就 401，
+            #      且无从关联到这次保存。
+            top_key = relay_payload.get("api_key")
+            if isinstance(top_key, str) and top_key and is_masked_key(top_key):
+                logger.warning(
+                    "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "这个 API Key 看起来是脱敏后的串（含 ****），"
+                        "已拒绝保存。若这是新填的 Key，请确认复制完整；"
+                        "若不修改 Key，请把该输入框清空后再保存。"
+                    ),
+                )
+
+            # ③ 全部校验通过后才写内存
+            for k, v in relay_payload.items():
+                if not hasattr(_config.relay, k) or v is None:
+                    continue
+                if k == "api_key" and v == "":
+                    continue      # 空字符串表示"保持原密钥不变"
+                setattr(_config.relay, k, v)
         if "guard" in payload:
             for k, v in payload["guard"].items():
                 if hasattr(_config.guard, k) and v is not None:
@@ -1996,7 +2023,7 @@ def _extract_sse_content(sse_text: str) -> str:
     return _extract_sse_frames(sse_text)[0]
 
 
-def _resolve_action(max_sev: str, verify_result: Any) -> str:
+def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
     """按合并后的最高严重度决定整体处置。
 
     ★ 为什么需要它：verifier.verify() 自己算出的 action 只覆盖它
@@ -2012,10 +2039,19 @@ def _resolve_action(max_sev: str, verify_result: Any) -> str:
       若low 仍映射成 PASS，用户在日志里看不到任何记录 ——
       「计数动了却什么都不显示」比「有提示但不好看」更糟：
       它会让用户以为防护根本没开。
+
+    ★★ 第二个参数只回答「这一轮有没有发现」（2026-10-04 修）
+      空列表与 None 都表示「没有」，非空容器表示「有」。
+      绝不能传 VerifyResult 这类对象 —— 它是 dataclass、无 __bool__，
+      **恒为真值**，于是 `not verify_result` 永远不成立，
+      连「一个发现都没有」的干净响应也被判成 ALERT：
+      每一次非流式的正常回答都进「今日提示」，KPI 的「安全」恒为 0。
+      实测形态：非流式路径传的是 verify_result 对象，而流式路径传 None ——
+      同一个函数、两条路径语义相反，且两边各自的单测都是绿的。
     """
     if max_sev == "low":
         # 有发现项才提示；确实一个发现都没有时才是真的 pass
-        return Action.PASS.value if not verify_result else Action.ALERT.value
+        return Action.PASS.value if not findings_or_none else Action.ALERT.value
     if _verifier is not None:
         try:
             return _verifier._threshold_for(max_sev)
@@ -2570,10 +2606,17 @@ def _record_reputation(
     if not domain:
         return
     try:
+        # ★★ 直接用已算好的键，**不要**再拼成 URL（2026-10-04 修）
+        #   键的形态是「主机#Key指纹」，而 `#` 是 URL 的 fragment 分隔符：
+        #       urlparse("https://api.x.com#abc12345").netloc == "api.x.com"
+        #   指纹被静默吃掉，于是每次写回都落到**裸域名**那一行，
+        #   而界面读的是带指纹那一行 ——
+        #   表现为「卡片调用数永远不涨、分数停在旧值」。
         rep = _reputation.record_call(
-            domain if domain.startswith("http") else f"https://{domain}",
+            domain,
             action, latency_ms, content,
             categories=categories,
+            relay_key=domain,
         )
         if _storage is not None:
             _storage.upsert_reputation(rep)
@@ -2584,6 +2627,58 @@ def _record_reputation(
 def _finding_categories(findings) -> List[str]:
     """从 findings 里取出检测项类别，供信誉归因使用。"""
     return [f.category for f in findings if getattr(f, "category", "")]
+
+
+def _align_derived_state() -> None:
+    """启动时把全部派生数据对齐到 logs（唯一事实源）。
+
+    ★★ 为什么必须在启动时做（2026-10-04）
+    ────────────────────────────────────────────────────────────
+    重算此前只在「删除日志」时触发。于是：
+      · 用户在任何旧版本里清空过日志 → 残留永远不会消失
+      · 升级带来的键形态变化 → 留下孤儿行
+
+    实测用户反馈：「安全日志一条都没有，中转站卡片还扣着 30 分」——
+    而那次清空是旧版本做的，新版本不会自愈。
+    启动时对齐一次，这类残留就能自动消失。
+
+    ★ 顺序不能反：
+      ① 重算全部派生字段（计数 / 水印 / 恶意库 / 分数）
+      ② 落库
+      ③ 清孤儿 —— 必须**在重算之后**，因为重算会把孤儿也清零，
+         而清零后它们看起来与「用过但零调用」的正常记录一样，
+         只能靠「不在配置键集合、也不被任何日志引用」来识别。
+
+    ★ 失败不阻断启动：对齐只是数据整理。
+    """
+    if _storage is None or _reputation is None:
+        return
+    try:
+        facts = _storage.iter_log_facts()
+        _reputation.rebuild_from_facts(facts)
+        for rep in _reputation.list_all():
+            _storage.upsert_reputation(rep)
+
+        # ① 哪些键是「有来源」的：当前配置里的 + 日志里出现过的
+        alive = {str(f.get("domain") or "") for f in facts}
+        if _config is not None:
+            for r in _config.relay.all_relays():
+                alive.add(ReputationTracker.reputation_key(
+                    str(r.get("base_url") or ""),
+                    str(r.get("api_key") or ""),
+                ))
+        alive.discard("")
+
+        removed = 0
+        for rep in _reputation.list_all():
+            if rep.domain and rep.domain not in alive:
+                if _storage.delete_reputation(rep.domain):
+                    _reputation.forget(rep.domain)
+                    removed += 1
+        if removed:
+            logger.info("已清理 %d 条无来源的中转站记录", removed)
+    except Exception as e:  # noqa: BLE001 — 对齐失败不该阻断启动
+        logger.warning("派生数据对齐失败（不影响启动）: %s", e)
 
 
 def _migrate_relay_keys_to_fingerprint() -> None:

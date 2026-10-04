@@ -272,11 +272,19 @@ class TestRelayCountsFollowLogs:
             "把直通日志也算进去会让调用次数凭空变大"
         )
 
-    def test_rebuild_keeps_service_history(self, store):
-        """first_seen / known_malicious 这类服务商历史属性不得被清掉。"""
+    def test_rebuild_clears_evidence_but_keeps_time_attributes(self, store):
+        """★ 定性证据随日志归零，时间属性保留（2026-10-04 改）。
+
+        上一版把「检测到数据保留迹象」当作服务商固有属性保留，
+        理由是「它发生过，不该因为你删日志就忘记」。
+        但用户实测反馈：**日志一条都没有了，卡片还扣着 30 分**——
+        那条扣分已经没有可核对的依据，用户唯一能得出的是软件坏了。
+
+        现在改为：凡是能从日志再现的就跟着日志走；
+        first_seen / latency 这类确实无法重建的才保留。
+        """
         from daoti_xuandun_personal.reputation.tracker import ReputationTracker
         from daoti_xuandun_personal.types import Action
-        from daoti_xuandun_personal.storage import db as db_mod  # noqa: F401
 
         tracker = ReputationTracker()
         self._write(store, tracker, Action.PASS.value, [])
@@ -291,12 +299,46 @@ class TestRelayCountsFollowLogs:
 
         after = tracker.list_all()[0]
         assert after.total_calls == 0
-        assert after.watermark_detected is True, (
-            "重算把「中转站自述保留数据」这条历史证据清掉了 —— "
-            "它是服务商属性，不随你删日志而消失"
+        assert after.watermark_detected is False, (
+            "日志已清空，水印扣分却还在 —— 用户看到「一条记录都没有"
+            "却扣着分」，无从核对"
         )
-        assert after.first_seen == first_seen
-        assert after.score < 100, "水印证据仍在，分数不该回到满分"
+        assert after.notes == []
+        assert after.score == 100, "可核对的证据都没了，分数该回满分"
+        assert after.first_seen == first_seen, (
+            "first_seen 是时间属性，不该被重算丢掉"
+        )
+
+    def test_watermark_is_rebuilt_from_surviving_logs(self, store):
+        """★ 反向：日志还在时，水印证据必须被重算出来。
+
+        否则「跟着日志走」会变成「一律清掉」——
+        那是把误报修成了漏报。
+        """
+        from daoti_xuandun_personal.reputation.tracker import ReputationTracker
+        from daoti_xuandun_personal.types import (
+            Action, LogEntry, LogType,
+        )
+
+        tracker = ReputationTracker()
+        self._write(store, tracker, Action.PASS.value, [])
+        # 日志里存下含「本平台保留数据」声明的片段
+        store.insert_log(LogEntry(
+            timestamp=time.time(),
+            log_type=LogType.RESPONSE_VERIFY.value,
+            relay_domain="a.example.invalid", action=Action.PASS.value,
+            severity="low", model="m", finding_count=0, summary="x",
+            text_preview="本平台保留您的对话记录用于改进服务",
+        ))
+
+        tracker.rebuild_from_facts(store.iter_log_facts())
+
+        after = tracker.list_all()[0]
+        assert after.watermark_detected is True, (
+            "日志里明明有保留数据声明，重算却没识别出来 —— "
+            "「跟着日志走」不能变成「一律清掉」"
+        )
+        assert after.score < 100
 
     def test_rebuild_is_idempotent(self, store):
         from daoti_xuandun_personal.reputation.tracker import ReputationTracker
