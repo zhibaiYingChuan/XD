@@ -13,6 +13,14 @@
 # 正常的讲解里也会提到 delete 方法。
 #
 # 新增规则只需在此追加，无需改动任何 Python 代码。
+#
+# ⚠️ 以下章节**当前未被代码读取**（检测器用的是 verifier.py 里的同名常量）：
+#     invisible_chars / html_hidden / unicode_steganography /
+#     prompt_inject / sensitive_leak / watermark
+#   只有下列三节是**生效**的（经 verifier._rules() 读取，空则回退内置表）：
+#     dangerous_commands / sensitive_paths / dangerous_urls
+#   修改上面那六节不会有任何运行时效果 —— 改它们之前请先把它接到代码上，
+#   或直接改 verifier.py 的同名常量。此处保留全文仅为「规则清单可见」。
 
 version: 3
 updated: "2026-09-27"
@@ -69,7 +77,10 @@ sensitive_paths:
     label: 读取 SSH 私钥
   - pattern: '\.aws/credentials\b'
     label: 读取 AWS 凭证
-  - pattern: '\.env(\.|$|\s)'
+  # ★★ 2026-10-04（误报修复）：必须排除 `process.env.X` / `os.environ`。
+  #   旧写法 '\.env(\.|$|\s)' 会把 JS/TS 最常见的 `process.env.PORT`
+  #   判成「读取 .env 文件」→ 阻断，而那是编程助手回答里的正常写法。
+  - pattern: '(?<![A-Za-z0-9_])\.env\b'
     label: 读取环境变量文件
   - pattern: '\.docker/config\.json\b'
     label: 读取 Docker 凭证
@@ -159,9 +170,16 @@ prompt_inject:
 sensitive_leak:
   # ★ 字符类必须含 '-'：sk-proj- / sk-svcacct- 是现役格式，
   #   不含 '-' 只能匹配老格式，现代密钥全部漏放。
-  - pattern: 'sk-[A-Za-z0-9\-_]{20,}'
+  #
+  # ★★ 2026-10-04（误报修复）：前缀必须带左边界 (?<![A-Za-z0-9_])。
+  #   无边界时 `sk-` 会匹配到普通英文复合词中间
+  #   （risk-assessment-… / task-orchestration-… / disk-usage-…），
+  #   把正常回答判成「敏感信息泄露」并拦截（用户实测 id=2059 即此）。
+  #   ⚠️ 注意：本节的生效副本在 verifier.py::ResponseVerifier._SENSITIVE_LEAK_RE，
+  #   改这里不会立刻生效（见文件头说明）。
+  - pattern: '(?<![A-Za-z0-9_])sk-[A-Za-z0-9\-_]{20,}'
     label: OpenAI 风格密钥
-  - pattern: 'AKIA[0-9A-Z]{16}'
+  - pattern: '(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}'
     label: AWS Access Key
   - pattern: '-----BEGIN\s+\w*\s*PRIVATE KEY-----'
     label: PEM 私钥

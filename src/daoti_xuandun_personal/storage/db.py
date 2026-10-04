@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -89,6 +90,65 @@ def _log_filters(
     return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
 
 
+class _LockedConn:
+    """把 sqlite3 连接包一层，用同一把可重入锁串行化所有访问。
+
+    ★★ 为什么需要（M4，2026-10-04）
+    ────────────────────────────────────────────────────────────
+    `PersonalStorage` 用 `check_same_thread=False` 建连接 ——
+    这**关掉了 SQLite 自带的线程守卫**，却没有提供任何替代保护。
+    当前所有访问都发生在 uvicorn 的同一个事件循环线程上，所以暂时
+    不会触发；但只要将来有任何一处代码走到线程池 / 后台线程
+    （FastAPI 的同步路由、定时任务、批量导出……），就会变成
+    「多线程共用一条连接」：轻则读到半提交状态，
+    重则 `sqlite3.ProgrammingError` / 数据库损坏。
+
+    这里用一把 RLock 把所有 `execute / executemany / executescript`
+    以及 `with conn:` 事务块串行化：
+      · 单个语句：加锁 → 执行 → 释放；
+      · 事务块（`with self._conn:`）：进入时加锁并持有到退出，
+        保证块内多条语句的原子性——这是 RLock 可重入的意义所在
+        （内部 execute 会再次加锁，同线程直接通过）。
+    这样即使将来引入多线程，也不会发生交错写入。
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, *args, **kwargs):
+        with self._lock:
+            return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        with self._lock:
+            return self._conn.executemany(*args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        with self._lock:
+            return self._conn.executescript(*args, **kwargs)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self):
+        # 事务块：持有锁直到 __exit__，保证块内原子性
+        self._lock.acquire()
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return self._conn.__exit__(exc_type, exc, tb)
+        finally:
+            self._lock.release()
+
+
 class PersonalStorage:
     """个人版 SQLite 存储。
 
@@ -102,10 +162,66 @@ class PersonalStorage:
     def __init__(self, db_path: Optional[Path] = None):
         self._db_path = db_path or default_db_path()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        # ★ M4：所有连接访问共用这一把可重入锁（见 _LockedConn）
+        self._lock = threading.RLock()
+        self._conn = self._connect_with_recovery()
         logger.info("个人版存储就绪: %s", self._db_path)
+
+    def _connect_with_recovery(self) -> "_LockedConn":
+        """建立连接并完成建表；文件损坏时隔离旧文件后重建空库（★ M3）。
+
+        ★★ 为什么必须能自愈（2026-10-04）
+        ────────────────────────────────────────────────────────────
+        原实现直接 `sqlite3.connect(...)` + `_init_schema()`：
+        数据库文件一旦损坏（断电写坏、磁盘坏道、被别的程序改坏），
+        第一次查询就抛 `sqlite3.DatabaseError`，而它在 lifespan 里
+        无人接住 —— **整个引擎起不来**，桌面端表现为「服务启动失败」，
+        用户完全无从得知真实原因是历史库损坏。
+
+        现在：探测到损坏 → 把 `.db/.db-wal/.db-shm` 隔离成
+        `.corrupt-<时间戳>` 备份 → 用空库重建 → 引擎照常启动。
+        历史日志与信誉不可避免地丢失，但**原始文件保留**（可人工抢救），
+        且应用不会因为一个坏文件整体报废。
+        """
+        for attempt in (1, 2):
+            raw = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            raw.row_factory = sqlite3.Row
+            self._conn = _LockedConn(raw, self._lock)
+            try:
+                self._init_schema()
+                return self._conn
+            except sqlite3.DatabaseError as e:
+                # 首次访问（PRAGMA / 建表）就会暴露「文件不是数据库」
+                # 或「database disk image is malformed」。
+                try:
+                    self._conn.close()
+                except Exception:  # noqa: BLE001 — 关闭失败不影响后续重建
+                    pass
+                if attempt == 1:
+                    self._quarantine_db(e)
+                    continue
+                raise
+        raise RuntimeError("数据库重建失败")  # pragma: no cover — 循环内必返回或抛出
+
+    def _quarantine_db(self, err: Exception) -> None:
+        """把损坏的数据库文件（含 WAL/SHM 旁文件）改名隔离，供人工抢救。"""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        moved: List[str] = []
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(f"{self._db_path}{suffix}")
+            if not src.exists():
+                continue
+            dst = src.with_name(f"{src.name}.corrupt-{stamp}")
+            try:
+                src.replace(dst)
+                moved.append(dst.name)
+            except OSError:
+                pass
+        logger.error(
+            "数据库损坏（%s），已隔离为 %s 并重建空库。"
+            "历史日志与中转站信誉不再可用；原文件已保留，可人工抢救。",
+            err, ", ".join(moved) or "(无)",
+        )
 
     def _init_schema(self) -> None:
         """初始化表结构 + 向后兼容迁移。

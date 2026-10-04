@@ -389,14 +389,23 @@ class TestKeyIdentifiesTheRelay:
 
         class _FakeResp:
             status_code = 200
+            headers = {"content-type": "application/json"}
 
-            def json(self):
-                return {"ok": True}
+            async def aread(self):
+                return b'{"ok": true}'
+
+            async def aclose(self):
+                return None
 
         class _FakeClient:
-            async def post(self, url, json=None, headers=None):
+            # ★ H1 改造后：转发改用 build_request + send(stream=True)，
+            #   假客户端据此捕获真实发出的 URL 与请求头。
+            def build_request(self, method, url, json=None, headers=None):
                 sent["url"] = url
                 sent["headers"] = headers or {}
+                return {"method": method, "url": url}
+
+            async def send(self, request, stream=False):
                 return _FakeResp()
 
         scope = {

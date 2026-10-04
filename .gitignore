@@ -220,6 +220,18 @@ tests/*
 !tests/test_content_policy_and_relay_sync.py
 !tests/test_pkg_and_relay_identity.py
 !tests/test_derived_state_consistency.py
+#   test_upstream_protocol_and_recovery —— 上游协议适配与损坏自愈
+#     （H1 流式非真流式 / H2 Anthropic SSE 绕过检测 / H3 上游非 JSON 500 /
+#      H4 上游 4xx/5xx 被记成「检测通过」 / H5 多客户端会话串号 /
+#      M1 桌面端天数被丢弃 / M2 配置损坏静默丢失 /
+#      M3 数据库损坏导致引擎起不来 / M4 跨线程无锁）。
+#   test_false_positive_guards —— 误报护栏（2026-10-04）
+#     （sk- 无左边界命中英文复合词并拦截、
+#      .env 规则命中 process.env、正文危险命令被当成 tool_call、
+#      emoji 组合的 ZWJ 被当成隐藏指令、HTML 注释被当成高危、
+#      提到「系统提示词」被当中转站篡改）。
+!tests/test_upstream_protocol_and_recovery.py
+!tests/test_false_positive_guards.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py

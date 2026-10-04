@@ -529,16 +529,16 @@ pub fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 
     if let Some(p) = pid {
-        std::thread::spawn(move || {
-            for _ in 0..10 {
-                if !process_alive(p) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            // 唯一有效的手段：杀进程树
-            kill_cmd("/T", "/F", p);
-        });
+        // ★★ 2026-10-04（H6）：强杀必须在 app.exit(0) **之前同步完成**。
+        //   原实现把 taskkill 丢进 detached 线程，紧接着就 app.exit(0) ——
+        //   而进程退出会立即杀死所有线程，那个线程连第一次 200ms 睡眠
+        //   都未必走完。于是「唯一有效的手段」几乎从未真正执行过，
+        //   结果是退出后留下监听 18765 的孤儿引擎（下次启动端口被占）。
+        //
+        //   child.kill() 对该引擎无效（本文件多处实测结论），
+        //   所以这里不再「先轮询 2 秒再强杀」，而是直接强杀进程树：
+        //   taskkill /T /F 对已退出的 pid 只会报错，无害。
+        kill_cmd("/T", "/F", p);
     }
     app.exit(0);
 }
@@ -1311,9 +1311,24 @@ async fn get_stats(
     app: tauri::AppHandle,
     payload: Option<Payload>,
 ) -> Result<serde_json::Value, String> {
-    let _ = &payload;
     ensure_engine_running(&app).await?;
-    proxy_call(reqwest::Method::GET, "/api/stats?days=7", None, REQ_NORMAL).await
+    // ★ M1 修复（2026-10-04）：原实现把请求天数写死为 7，
+    //   前端传入的 days 被静默丢弃 —— 桌面端「最近 N 天趋势」永远只有
+    //   7 天，把天数调大调小都没反应，用户只会以为图表是坏的。
+    //   现从 payload 读取并夹到后端允许的 1..=90。
+    let days = payload
+        .as_ref()
+        .and_then(|p| p.0.get("days"))
+        .and_then(|x| x.as_u64())
+        .filter(|d| (1..=90).contains(d))
+        .unwrap_or(7);
+    proxy_call(
+        reqwest::Method::GET,
+        &format!("/api/stats?days={days}"),
+        None,
+        REQ_NORMAL,
+    )
+    .await
 }
 
 #[tauri::command]

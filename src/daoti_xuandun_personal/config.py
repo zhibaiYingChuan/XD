@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -121,6 +122,43 @@ def _known_fields(cls: type, raw: Any) -> Dict[str, Any]:
     if unknown:
         logger.info("%s 忽略未知配置项: %s", cls.__name__, ", ".join(unknown))
     return {k: v for k, v in raw.items() if k in known}
+
+
+def _backup_corrupt_config(raw_text: str, err: Exception) -> Optional[Path]:
+    """把损坏的配置文件另存一份，返回备份路径（失败返回 None）。
+
+    ★★ 为什么必须有（M2，2026-10-04）
+    ────────────────────────────────────────────────────────────
+    原实现遇到 JSON 解析失败就 `return PersonalConfig()` ——
+    整套设置（中转站地址、API Key、安全级别、端口）静默归零，
+    只在日志里留一行 warning。
+
+    更糟的是它**不可逆**：用户此后任何一次保存（改个安全级别、
+    暂停防护）都会用「全默认」覆盖掉那个损坏文件 ——
+    原始数据从此彻底消失，连人工抢救的机会都没有。
+
+    所以这里在任何降级之前，先把损坏内容落到 sidecar 文件
+    （``config.json.corrupt-<时间戳>``），并**用 error 级**打日志。
+    配置丢失是用户必须知道的事，不该藏在 info/warning 里。
+    """
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.corrupt-{stamp}")
+        backup.write_text(raw_text, encoding="utf-8")
+        logger.error(
+            "配置文件解析失败（%s）。原始内容已备份到 %s；"
+            "本次将使用默认配置，请用备份文件人工恢复后覆盖回来，"
+            "否则下次保存会用默认值覆盖原文件。",
+            err, backup,
+        )
+        return backup
+    except OSError as e:  # noqa: BLE001 — 备份失败不影响降级
+        logger.error(
+            "配置文件解析失败（%s），且备份失败（%s）："
+            "原始设置将丢失，请立即手动检查 %s",
+            err, e, CONFIG_FILE,
+        )
+        return None
 
 
 @dataclass
@@ -346,6 +384,15 @@ class PersonalConfig:
             logger.info("配置文件不存在，使用默认配置: %s", CONFIG_FILE)
             return PersonalConfig()
 
+        # ★ M2 修复：把「读不出来」与「解析不了」分开处理。
+        #   只有后者才是「文件损坏」，需要备份；前者读不到内容，
+        #   备份也无从谈起（备份空字符串没意义）。
+        try:
+            raw_text = CONFIG_FILE.read_text(encoding="utf-8-sig")
+        except OSError as e:
+            logger.warning("配置文件读取失败（%s），使用默认配置", e)
+            return PersonalConfig()
+
         try:
             # ★★ 必须用 utf-8-sig 而不是 utf-8。
             #   Windows 记事本、PowerShell 的 Out-File、某些同步工具
@@ -354,9 +401,10 @@ class PersonalConfig:
             #   用户的全部设置（中转站地址、安全级别、API Key）
             #   随之被丢弃，且只留一行 warning，多数人不会注意到。
             #   utf-8-sig 对有无 BOM 都正确，是这里唯一该用的编码。
-            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("配置文件读取失败（%s），使用默认配置", e)
+            raw = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            # ★ M2：先备份再降级，避免后续 save() 把这唯一的原始数据覆盖掉
+            _backup_corrupt_config(raw_text, e)
             return PersonalConfig()
 
         try:

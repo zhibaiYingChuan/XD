@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
 import time
@@ -30,7 +32,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .. import paths
 from ..config import (
@@ -392,7 +394,7 @@ def create_app() -> FastAPI:
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="请求体不是合法 JSON")
 
-        session_id = request.headers.get("X-Session-Id") or "default"
+        session_id = _derive_session_id(request)
         model = body.get("model", "")
         stream = bool(body.get("stream", False))
 
@@ -544,6 +546,15 @@ def create_app() -> FastAPI:
 
         latency_ms = (time.time() - t0) * 1000
 
+        # ★★ 2026-10-04（H4）：上游非 2xx 必须先分类，不能进入检测管道。
+        #   这是唯一的下游入口 —— 放在这里一处，流式/非流式同时受保护：
+        #   否则 401/429/500 会被当作「已检测的响应」记成 pass，
+        #   首页「安全」与中转站信誉都被污染。
+        if upstream_response.status_code >= 400:
+            return await _handle_upstream_error(
+                upstream_response, session_id, upstream_domain, model,
+            )
+
         # ══════ 第二层 + 第三层 ══════
         if stream:
             return await _handle_stream(
@@ -579,7 +590,17 @@ def create_app() -> FastAPI:
         base = target["base"]
         api_key = target["api_key"]
 
-        return await _http_client.post(
+        # ★★ 2026-10-04（H1）：改为**真正流式**发送。
+        #   原实现用 `_http_client.post()` —— 它会把上游响应**完整读进内存**
+        #   后才返回。于是流式请求的 `upstream.aiter_bytes()` 只是在内存里
+        #   逐块回放：用户要等上游吐完最后一个字节才看到第一个字，
+        #   首字延迟等于整段响应时长，与「流式」的承诺完全相反。
+        #
+        #   现在改用 build_request + send(stream=True)：响应体按到达顺序
+        #   逐块可取。**调用方必须负责关闭**（await upstream.aclose()），
+        #   否则连接不会归还连接池 —— 每条流泄漏一条连接，很快耗尽 pool。
+        request = _http_client.build_request(
+            "POST",
             f"{base}/chat/completions",
             json=body,
             headers={
@@ -587,6 +608,7 @@ def create_app() -> FastAPI:
                 "Content-Type": "application/json",
             },
         )
+        return await _http_client.send(request, stream=True)
 
     async def _relay_passthrough(
         body: Dict[str, Any],
@@ -622,28 +644,87 @@ def create_app() -> FastAPI:
         #   没有它，用户只能靠猜。
         host = _extract_host(str((target or {}).get("base_url") or ""))
         via = "按 Key 识别" if matched_by == "key" else "当前启用"
-        _record_log(
-            LogType.RELAY.value,
+        domain = (
             _reputation.reputation_key(
                 str((target or {}).get("base_url") or ""),
                 str((target or {}).get("api_key") or ""),
-            ) if _reputation else "",
+            ) if _reputation else ""
+        )
+        model = str(body.get("model", ""))
+
+        # ★★ 2026-10-04（H4）：直通也会遇到上游错误。
+        #   原实现无条件把结果记成 PASS/"low" 并转发 upstream.json()——
+        #   于是上游 5xx 在日志里看起来是「正常转发」，
+        #   既误导用户，又让「正常转发」筛选里混进一堆错误。
+        #   现在先看状态码：非 2xx 记为链路错误，且只透传真实错误体。
+        if upstream.status_code >= 400:
+            return await _handle_upstream_error(
+                upstream, session_id, domain, model
+            )
+
+        _record_log(
+            LogType.RELAY.value,
+            domain,
             Action.PASS.value,
             "low",
-            str(body.get("model", "")),
+            model,
             [],
             None,
             session_id,
             [],
             text_preview=f"{note}（本次转发给 {host or '-'} · {via}）",
         )
+
         if stream:
             return StreamingResponse(
-                upstream.aiter_bytes(),
+                _aiter_and_close(upstream),
                 status_code=upstream.status_code,
                 media_type="text/event-stream",
             )
-        return JSONResponse(status_code=upstream.status_code, content=upstream.json())
+
+        # ★★ 2026-10-04（H3）：上游非 JSON 时不能 500。
+        #   原实现直接 `upstream.json()`，遇到 HTML 错误页 / 纯文本网关
+        #   会抛 JSONDecodeError，用户拿到一个与上游无关的 500。
+        #   现改为：能解析就解析，不能就按原样字节 + 原 content-type 透传。
+        body_bytes = await upstream.aread()
+        await upstream.aclose()
+        media_type = upstream.headers.get("content-type", "application/json")
+        try:
+            payload = json.loads(body_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return Response(
+                content=body_bytes,
+                status_code=upstream.status_code,
+                media_type=media_type,
+            )
+        return JSONResponse(status_code=upstream.status_code, content=payload)
+
+    async def _handle_upstream_error(
+        upstream, session_id: str, domain: str, model: str,
+    ):
+        """上游返回 4xx/5xx 时的统一处理（★ H4 防腐层）。
+
+        ★★ 为什么必须单独一条路径
+        ────────────────────────────────────────────────────────────
+        检测管道的每一步都假设「上游给了正常响应」：
+        提取内容 → 验证 → 记录为 pass。而 401/429/500 根本没有可检测的内容，
+        原实现却仍走完整管道，于是把「上游拒绝了这次请求」
+        记成「本次检查通过」—— 首页「安全」数被错误刷高，
+        中转站信誉里也混进一次并不存在的「正常调用」。
+
+        现在：读掉并关闭响应体 → 记一条链路级日志（low，不进 KPI 的三档）
+        → 把上游的真实错误体与状态码**原样透传**给 AI 工具。
+        透传很关键：401 要能让工具提示「Key 无效」、429 要能触发退避，
+        换成我们自造的 502 会让工具做出错误判断。
+        """
+        status = upstream.status_code
+        try:
+            body_bytes = await upstream.aread()
+        finally:
+            await upstream.aclose()
+        media_type = upstream.headers.get("content-type", "application/json")
+        _log_upstream_error(domain, model, status, body_bytes)
+        return Response(content=body_bytes, status_code=status, media_type=media_type)
 
     # ══════════════════════════════════════════════════════════
     # 非流式响应处理
@@ -654,11 +735,23 @@ def create_app() -> FastAPI:
         domain, model, latency_ms, redaction_records,
         request_baseline=None,
     ):
-        """非流式响应：验证 → 恢复 → 返回。"""
+        """非流式响应：验证 → 恢复 → 返回。
+
+        ★★ 2026-10-04（H1/H3）：响应以 stream=True 取得，必须先读全量
+          再解析；并确保无论走哪条分支都关闭响应（归还连接池）。
+        """
         try:
-            payload = upstream.json()
-        except json.JSONDecodeError:
-            payload = {"raw": upstream.text}
+            body_bytes = await upstream.aread()
+        except httpx.HTTPError:
+            body_bytes = b""
+        finally:
+            # 已读全量 → 立即关闭，把连接归还连接池
+            await upstream.aclose()
+        # ★ 上游非 JSON 属正常情况（如纯文本网关），不能让它变成异常。
+        try:
+            payload = json.loads(body_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = {"raw": body_bytes.decode("utf-8", errors="ignore")}
 
         content = _extract_content(payload)
 
@@ -875,6 +968,14 @@ def create_app() -> FastAPI:
                         last_verified_len = total_len
             finally:
                 # 流结束后的收尾（无论正常/异常结束都执行）
+                # ★★ 2026-10-04（H1）：响应是 stream=True 取得的，
+                #   必须显式关闭 —— 否则上游连接不会归还连接池。
+                #   无论是正常读完、被阻断提前 break、还是中途异常，
+                #   都在这里收口，避免「每条流泄漏一条连接」。
+                try:
+                    await upstream.aclose()
+                except Exception:  # noqa: BLE001 — 关闭失败不该影响收尾
+                    pass
                 if _restorer is not None:
                     _restorer.clear_after_response(restore_session)
                 if _storage is not None:
@@ -1414,6 +1515,19 @@ def create_app() -> FastAPI:
         if _config is None:
             raise HTTPException(status_code=503, detail="配置未就绪")
 
+        # ★★ M5（2026-10-04）：整段写入用「快照 + 回滚」包住。
+        #   relay 的掩码校验此前已前移（C3），但 guard / server 的 setattr
+        #   仍发生在 `_config.validate()` **之前** —— 一旦校验失败
+        #   （例如把端口填成 80），抛 400 时磁盘没变、**内存已被改成非法值**：
+        #   与 C3 是同一类「校验失败却污染运行态」的静默失效。
+        #   这里在任何写入之前留一份深拷贝，任何失败都回滚，保证
+        #   「校验没通过 ⇒ 运行态一字未动」。
+        snapshot = (
+            copy.deepcopy(_config.relay),
+            copy.deepcopy(_config.guard),
+            copy.deepcopy(_config.server),
+        )
+
         if "relay" in payload:
             relay_payload = payload["relay"]
 
@@ -1470,25 +1584,32 @@ def create_app() -> FastAPI:
                     ),
                 )
 
-            # ③ 全部校验通过后才写内存
-            for k, v in relay_payload.items():
-                if not hasattr(_config.relay, k) or v is None:
-                    continue
-                if k == "api_key" and v == "":
-                    continue      # 空字符串表示"保持原密钥不变"
-                setattr(_config.relay, k, v)
-        if "guard" in payload:
-            for k, v in payload["guard"].items():
-                if hasattr(_config.guard, k) and v is not None:
-                    setattr(_config.guard, k, v)
-        if "server" in payload:
-            for k, v in payload["server"].items():
-                if hasattr(_config.server, k) and v is not None:
-                    setattr(_config.server, k, v)
+        # ③ 全部校验通过后才写内存；任何失败都回滚到快照
+        try:
+            if "relay" in payload:
+                relay_payload = payload["relay"]
+                for k, v in relay_payload.items():
+                    if not hasattr(_config.relay, k) or v is None:
+                        continue
+                    if k == "api_key" and v == "":
+                        continue      # 空字符串表示"保持原密钥不变"
+                    setattr(_config.relay, k, v)
+            if "guard" in payload:
+                for k, v in payload["guard"].items():
+                    if hasattr(_config.guard, k) and v is not None:
+                        setattr(_config.guard, k, v)
+            if "server" in payload:
+                for k, v in payload["server"].items():
+                    if hasattr(_config.server, k) and v is not None:
+                        setattr(_config.server, k, v)
 
-        errors = _config.validate()
-        if errors:
-            raise HTTPException(status_code=400, detail={"errors": errors})
+            errors = _config.validate()
+            if errors:
+                raise HTTPException(status_code=400, detail={"errors": errors})
+        except HTTPException:
+            # 校验失败 ⇒ 运行态必须与写入前完全一致
+            (_config.relay, _config.guard, _config.server) = snapshot
+            raise
 
         # 应用到运行时组件
         if _sanitizer is not None:
@@ -1924,6 +2045,18 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
         ② 结构差分拿不到工具名，"未声明工具"判据在流式下永远失效；
         ③ 拿不到 model，"模型降级"判据同样失效。
 
+    ★★ 2026-10-04（H2）：补上 Anthropic 原生流式。
+      此前实现只在存在 `choices` 时才提取内容，而 Anthropic 的 SSE
+      是 `content_block_delta` / `input_json_delta` 事件，**没有 choices**
+      —— 于是整段响应在 `if not choices: continue` 处被跳过：
+      用 Claude 原生格式的用户，流式内容**完全绕过检测**，
+      且日志里看不出任何异常（表面上一切正常）。
+
+      现在按事件类型分派，两种协议互不干扰：
+        · message_start        → message.model
+        · content_block_start  → 文本块 / tool_use（id、name）
+        · content_block_delta  → text_delta 取文本；input_json_delta 拼参数
+
     SSE 的 tool_call 是分片增量到达的（先来 id+name，后续帧补 arguments），
     这里按 index 归并，还原成完整调用。
 
@@ -1934,6 +2067,9 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
     # index -> {"id":..., "name":..., "arguments": "..."}
     tool_acc: Dict[int, Dict[str, str]] = {}
     model = ""
+
+    def _slot(idx: int) -> Dict[str, str]:
+        return tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
 
     for raw_line in sse_text.split("\n"):
         line = raw_line.strip()
@@ -1949,6 +2085,53 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
         if not isinstance(obj, dict):
             continue
 
+        # ── Anthropic 原生事件（无 choices）──
+        etype = obj.get("type")
+        if isinstance(etype, str) and etype.startswith(
+            ("message_start", "message_delta", "message_stop",
+             "content_block_start", "content_block_delta", "content_block_stop")
+        ):
+            if etype == "message_start":
+                msg = obj.get("message")
+                if (
+                    not model
+                    and isinstance(msg, dict)
+                    and isinstance(msg.get("model"), str)
+                ):
+                    model = msg["model"]
+            elif etype == "content_block_start":
+                block = obj.get("content_block")
+                idx = obj.get("index")
+                if (
+                    isinstance(block, dict)
+                    and isinstance(idx, int)
+                    and block.get("type") == "tool_use"
+                ):
+                    slot = _slot(idx)
+                    if isinstance(block.get("id"), str):
+                        slot["id"] = block["id"]
+                    if isinstance(block.get("name"), str):
+                        slot["name"] = block["name"]
+            elif etype == "content_block_delta":
+                delta = obj.get("delta")
+                idx = obj.get("index")
+                if isinstance(delta, dict):
+                    if (
+                        delta.get("type") == "text_delta"
+                        and isinstance(delta.get("text"), str)
+                    ):
+                        parts.append(delta["text"])
+                    elif (
+                        delta.get("type") == "input_json_delta"
+                        and isinstance(delta.get("partial_json"), str)
+                        and isinstance(idx, int)
+                    ):
+                        _slot(idx)["arguments"] += delta["partial_json"]
+            # 其余 Anthropic 事件（message_stop / content_block_stop / ping）
+            # 无内容可提取，跳过即可。
+            continue
+
+        # ── OpenAI 兼容事件 ──
         if not model:
             m = obj.get("model")
             if isinstance(m, str):
@@ -1963,8 +2146,7 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
 
         delta = first.get("delta")
         if not isinstance(delta, dict):
-            # Anthropic 流式：content_block_delta / delta.text
-            delta = first.get("delta", {}) if isinstance(first.get("delta"), dict) else {}
+            delta = {}
 
         content = delta.get("content")
         if isinstance(content, str):
@@ -1985,9 +2167,7 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
             idx = tc.get("index")
             if not isinstance(idx, int):
                 idx = len(tool_acc)
-            slot = tool_acc.setdefault(
-                idx, {"id": "", "name": "", "arguments": ""}
-            )
+            slot = _slot(idx)
             if isinstance(tc.get("id"), str):
                 slot["id"] = tc["id"]
             fn = tc.get("function")
@@ -1996,9 +2176,6 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
                     slot["name"] = fn["name"]
                 if isinstance(fn.get("arguments"), str):
                     slot["arguments"] += fn["arguments"]
-            # Anthropic 流式：content_block_start 里的 tool_use
-            if tc.get("type") == "tool_use" and isinstance(tc.get("name"), str):
-                slot["name"] = tc["name"]
 
     tool_calls: List[Any] = []
     for idx in sorted(tool_acc):
@@ -2320,6 +2497,48 @@ class _BlockRequest(Exception):
 def _apply_sanitized(body: Dict[str, Any], sanitizer) -> None:
     """兼容旧签名：就地脱敏并写回（记录由 _sanitize_messages_inplace 返回）。"""
     _sanitize_messages_inplace(body, sanitizer)
+
+
+def _derive_session_id(request: Request) -> str:
+    """为本次请求派生一个会话标识。
+
+    ★★ 为什么不能用固定的 "default"（2026-10-04 修）
+    ────────────────────────────────────────────────────────────
+    会话标识是两条链路的键：
+      · 请求基线（build_baseline / save_request_baseline）
+      · 第三层脱敏占位符的恢复映射（_restorer.begin_session）
+
+    此前缺省一律写成 "default"，于是**同时开两个 AI 工具**
+    （Claude Code + Cursor）时，两个客户端共用同一个会话：
+    基线互相覆盖、占位符映射互相污染 —— 恢复时可能把 A 客户端的
+    占位符用 B 客户端的映射去还原，脱敏内容直接串号。
+
+    ★ 派生规则：显式头 > 鉴权凭据 > 客户端标识
+      ① 客户端显式给 X-Session-Id（可自行区分会话）→ 用它；
+      ② 否则用 Authorization / x-api-key 的指纹 —— 不同 AI 工具
+         用不同的 Key，天然分开，且同一工具的多次请求保持稳定
+         （稳定性是基线能累积的前提，不能每次请求都换一个）；
+      ③ 再退回「客户端地址 + User-Agent」的指纹。
+
+    绝不返回空串：空串会让所有请求重新挤进同一个桶。
+    """
+    explicit = request.headers.get("X-Session-Id")
+    if explicit:
+        return explicit.strip()[:128] or "default"
+
+    auth = (
+        request.headers.get("Authorization")
+        or request.headers.get("x-api-key")
+        or ""
+    )
+    user_agent = request.headers.get("User-Agent") or ""
+    client_host = request.client.host if request.client else ""
+
+    seed = "|".join((auth, user_agent, client_host))
+    if seed.strip("|"):
+        digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+        return f"sess-{digest}"
+    return "default"
 
 
 def _max_severity(findings: List[Any]) -> str:
@@ -2800,6 +3019,64 @@ def _proxy_error(domain, model, session_id, message, t0, log_type):
         status_code=502,
         content={"error": {"type": "proxy_error", "message": message}},
     )
+
+
+async def _aiter_and_close(upstream) -> AsyncGenerator[bytes, None]:
+    """逐块转发上游响应，并在结束/异常时关闭它（★ H1 配套）。
+
+    ★ 为什么必须包一层：`_forward_to_relay` 改用 stream=True 后，
+      响应体是「按需拉取」的 —— StreamingResponse 直接吃
+      `upstream.aiter_bytes()` 时，客户端中途断开或转发出错都不会
+      触发上游关闭，连接永不归还连接池。包一层 finally 把关闭收口。
+    """
+    try:
+        async for chunk in upstream.aiter_bytes():
+            yield chunk
+    finally:
+        try:
+            await upstream.aclose()
+        except Exception:  # noqa: BLE001 — 关闭失败不影响已转发的数据
+            pass
+
+
+def _log_upstream_error(
+    domain: str, model: str, status_code: int, body_bytes: bytes,
+) -> None:
+    """记录一次「上游返回错误状态」（★ H4）。
+
+    ★★ 为什么**不**走 `_record_log`
+    ────────────────────────────────────────────────────────────
+    `_record_log` 会把本次调用计入 daily_stats 的某一档
+    （pass→安全 / alert→提示 / block→危险）。
+    而上游 4xx/5xx 是**链路/鉴权级失败**，既不是「检测通过」，
+    也不是「检测到危险内容」—— 把它塞进任何一档都是在污染 KPI。
+    因此与 `_proxy_error` 同口径：只留一条 low 级日志供排查，
+    不碰 daily_stats，也不更新中转站信誉
+    （一次 500 不代表中转站内容有问题，不该扣它的信誉分）。
+
+    ★ summary 里带上状态码与错误体片段：用户排查 401/429 时，
+      最需要看到的就是上游自己给的那句话。
+    """
+    if _storage is None:
+        return
+    try:
+        snippet = _make_preview(body_bytes.decode("utf-8", errors="ignore"), 200)
+        summary = f"中转站返回 HTTP {status_code}"
+        if snippet:
+            summary = f"{summary}：{snippet}"
+        _storage.insert_log(LogEntry(
+            log_type=LogType.PROXY_ERROR.value,
+            relay_domain=domain,
+            action=Action.ALERT.value,
+            severity="low",
+            model=model,
+            summary=summary[:200],
+            text_preview=_make_preview(
+                body_bytes.decode("utf-8", errors="ignore"), 500
+            ),
+        ))
+    except Exception as e:  # noqa: BLE001 — 日志失败不该改变返回给上游的结果
+        logger.warning("上游错误日志写入失败: %s", e)
 
 
 # ══════════════════════════════════════════════════════════════

@@ -208,15 +208,27 @@ class TestNonStreamCleanResponseIsPass:
 
         class _FakeResp:
             status_code = 200
+            headers = {"content-type": "application/json"}
 
-            def json(self):
-                return {
+            def __init__(self):
+                # ★ H1 改造后：上游响应以 stream=True 取得，处理器按字节读全量，
+                #   不再调用 resp.json()。故假响应提供 aread()/aclose()。
+                self._body = json.dumps({
                     "model": "m",
                     "choices": [{"message": {"content": "你好，有什么可以帮你？"}}],
-                }
+                }).encode("utf-8")
+
+            async def aread(self):
+                return self._body
+
+            async def aclose(self):
+                return None
 
         class _FakeClient:
-            async def post(self, url, json=None, headers=None):
+            def build_request(self, method, url, json=None, headers=None):
+                return {"method": method, "url": url, "json": json, "headers": headers}
+
+            async def send(self, request, stream=False):
                 return _FakeResp()
 
         class _Relay:

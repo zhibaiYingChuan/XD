@@ -469,7 +469,11 @@ export const api = {
   // ── 状态与统计 ──
   getState: () => call<StateResponse>('get_state', 'GET', '/api/state', undefined, TIMEOUT.FAST),
   getStats: (days = 7) =>
-    call<StatsResponse>('get_stats', 'GET', `/api/stats?days=${days}`, undefined, TIMEOUT.NORMAL),
+    // ★ M1 修复（2026-10-04）：days 必须放进 payload 供 Rust 命令读取。
+    //   原实现只把 days 拼进 HTTP query string，而 Tauri 模式走的是
+    //   invoke('get_stats', { payload }) —— Rust 侧收不到 days，
+    //   只能硬编码 7 天，桌面端改天数没有任何效果。
+    call<StatsResponse>('get_stats', 'GET', `/api/stats?days=${days}`, { days }, TIMEOUT.NORMAL),
   getDiagnostics: () =>
     call<Diagnostics>('get_diagnostics', 'GET', '/api/diagnostics', undefined, TIMEOUT.NORMAL),
 
@@ -838,6 +842,13 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     title: '这段回答触发了内容合规词表',
     meaning: '只是回答里出现了敏感词，与中转站是否篡改无关，不会影响你使用。',
   },
+  dangerous_content: {
+    // ★ 2026-10-04 新增：与「结构化 tool_call 危险参数」分开。
+    //   正文/代码块里出现 rm -rf、eval( 是编程助手的正常输出，
+    //   仅作记录；真正需要警惕的是「它作为工具调用被执行」的形态。
+    title: '回答的正文或代码里出现了危险命令',
+    meaning: '仅作记录，不会阻断。让 AI 写含 rm -rf、eval( 的脚本是正常需求；只有当它作为可执行的工具调用出现时才会被拦截。',
+  },
 };
 
 /** 把引擎的 detail 换成用户能读懂的说明；无对应类别时返回 null。 */
@@ -857,6 +868,8 @@ export const OBSERVATION_ONLY_CATEGORIES = new Set([
   'length_anomaly',
   'structure_anomaly',
   'content_policy',
+  // ★ 2026-10-04 新增，与后端 verifier.OBSERVATION_ONLY_SIGNALS 对齐
+  'dangerous_content',
 ]);
 
 /**

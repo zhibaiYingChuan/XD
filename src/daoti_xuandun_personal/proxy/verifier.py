@@ -87,7 +87,13 @@ _BUILTIN_SENSITIVE_PATHS: List[Tuple[str, str]] = [
     (r"/etc/(passwd|shadow|sudoers)\b", "读取系统账户文件"),
     (r"\.ssh/(id_rsa|id_ed25519|authorized_keys)\b", "读取 SSH 私钥"),
     (r"\.aws/credentials\b", "读取 AWS 凭证"),
-    (r"\.env(\.|$|\s)", "读取环境变量文件"),
+    # ★★ 2026-10-04（误报修复）：必须排除 `process.env.X` / `os.environ`。
+    #   旧写法 `\.env(\.|$|\s)` 会把 JS/TS 里最常见的 `process.env.PORT`
+    #   判成「读取 .env 文件」→ tool_call_dangerous/high → 阻断。
+    #   那是编程助手回答里出现频率极高的正常写法。
+    #   真实文件访问左侧是分隔符（行首 / 空格 / 引号 / 斜杠），
+    #   而 `process.env` 的左侧是标识符字符 's'，加左边界即可分开。
+    (r"(?<![A-Za-z0-9_])\.env\b", "读取环境变量文件"),
     (r"\.docker/config\.json\b", "读取 Docker 凭证"),
     (r"\.git/config\b", "读取 Git 配置"),
     (r"\.npmrc\b|\.pypirc\b", "读取包管理凭证"),
@@ -210,6 +216,19 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                 )
 
     # ── 兜底：原始文本扫描（应对中转站返回非标准 tool call 格式）──
+    #
+    # ★★ 2026-10-04（误报修复）：兜底命中改为**独立类别 + 不阻断**。
+    #   结构化 tool_calls（上面那段）是「响应在指示客户端执行某命令」，
+    #   证据强、指向明确；而这里的原始文本扫描面对的是**散文与代码块** ——
+    #   一个编程助手回答里出现 `rm -rf node_modules`、`eval(`、
+    #   `subprocess.exec(` 都是完全正常的（用户就是要它写这些）。
+    #   旧实现把两者混为一类并标 high，于是「AI 回答里贴了段脚本」
+    #   会被直接拦下 —— 这恰恰是本产品要服务的场景（代理 Claude Code /
+    #   Cursor），把正常工作流打断，用户只会关掉防护。
+    #
+    #   所以：文本兜底归入 dangerous_content，severity=medium，
+    #   且该类别不阻断（见 OBSERVATION_ONLY_SIGNALS）——
+    #   仍然留痕、仍然解释，但不再冒充「中转站的罪证」。
     if not tool_call_texts:
         for pattern, label in dangerous_cmds:
             m = pattern.search(text)
@@ -217,9 +236,12 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                 seen_commands.add(m.group(0))
                 findings.append(
                     VerificationFinding(
-                        category="tool_call_dangerous",
-                        severity="high",
-                        detail=f"响应中包含{label}：{m.group(0)[:40]}",
+                        category="dangerous_content",
+                        severity="medium",
+                        detail=(
+                            f"回答正文/代码片段中出现{label}：{m.group(0)[:40]}"
+                            "（仅作记录，不阻断）"
+                        ),
                         evidence=_mask_evidence(text, m.start()),
                     )
                 )
@@ -268,8 +290,15 @@ def _mask_evidence(text: str, pos: int, window: int = 60) -> str:
 # ══════════════════════════════════════════════════════════════
 
 # 零宽/不可见字符（使用转义形式，避免源码中的不可见字符被工具静默修改）
+#
+# ★★ 2026-10-04（误报修复）：U+200D（ZWJ）**必须从通用零宽列表里拿出去**。
+#   它是 emoji 组合序列的合法组成部分：
+#       👨‍👩‍👧 = U+1F468 U+200D U+1F469 U+200D U+1F467
+#   一个「一家三口」emoji 就带 2 个 ZWJ，三个家庭 emoji 即 ≥3 个 →
+#   旧逻辑直接判 hidden_instruction + high → 拦截一条完全正常的回答。
+#   现在 ZWJ 用「不在 emoji 组合内」的表述单独判（见下方 _ZWJ_ALONE）。
 _INVISIBLE_CHARS: List[Tuple[str, str]] = [
-    (r"[\u200b\u200d\u2060\ufeff]", "零宽空格/连接符"),
+    (r"[\u200b\u2060\ufeff]", "零宽空格/连接符"),
     (r"\u00ad", "软连字符（防关键词绕过）"),
     (r"\u180e", "蒙古文零宽字符（常见于提示注入）"),
     (r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "控制字符"),
@@ -278,6 +307,14 @@ _INVISIBLE_CHARS: List[Tuple[str, str]] = [
     #   而它与 U+200B/U+200D 组合正是二进制隐写的标准载体
     #   （U+200B=0 / U+200C=1 / U+200D 终止符，Knostic 2025-10 实证）
     (r"[\u200c\u2061\u2062\u2063\u2064]", "零宽连接符/方向标记"),
+    # ★ ZWJ 只在**不处于 emoji 组合中**时才算可疑：
+    #   左邻不是 emoji 才计入 —— 这样 👨‍👩‍👧 / 👩‍💻 / 🏳️‍🌈 一律放行，
+    #   而「正文里凭空插一个连接符」仍会被抓到。
+    (
+        r"(?<![\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF"
+        r"\u2190-\u21FF\uFE0F])\u200d",
+        "零宽连接符（不在 emoji 组合内）",
+    ),
 ]
 
 # ★★ Unicode Tags 块（U+E0000–U+E007F）—— 最高危的隐藏指令载体 ★★
@@ -323,11 +360,18 @@ _HOMOGLYPH_SUSPECTS = (
 )
 
 # HTML 隐藏元素（视觉不可见但机器可读）
-_HTML_HIDDEN: List[Tuple[str, str]] = [
+#
+# ★★ 2026-10-04（误报修复）：第三项改为带**逐条严重度**。
+#   HTML 注释 `<!-- ... -->` 在 AI 输出的 Markdown / 代码片段里极其常见
+#   （`<!-- prettier-ignore -->`、文档占位注释、模板片段……），
+#   而它被旧实现一律标 high → 均衡档直接阻断。判据从「可能含隐藏指令」
+#   降为 medium（提示、不阻断）：它确实值得看一眼，但证明不了中转站篡改。
+#   真正的隐藏是 `display:none` 这类**视觉消失**的元素，仍保持 high。
+_HTML_HIDDEN: List[Tuple[str, str, str]] = [
     (r"<[^>]*style\s*=\s*[\"'][^\"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0)",
-     "HTML 隐藏元素"),
-    (r"<!--(?!-->)[\s\S]{0,500}?-->", "HTML 注释（可能含隐藏指令）"),
-    (r"<meta[^>]*http-equiv\s*=\s*[\"']refresh", "HTML meta 刷新跳转"),
+     "HTML 隐藏元素", "high"),
+    (r"<!--(?!-->)[\s\S]{0,500}?-->", "HTML 注释（可能含隐藏指令）", "medium"),
+    (r"<meta[^>]*http-equiv\s*=\s*[\"']refresh", "HTML meta 刷新跳转", "high"),
 ]
 
 
@@ -442,13 +486,13 @@ def _check_hidden_instructions(text: str) -> List[VerificationFinding]:
                 )
             )
 
-    for pattern, label in _HTML_HIDDEN:
+    for pattern, label, sev in _HTML_HIDDEN:
         m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         if m:
             findings.append(
                 VerificationFinding(
                     category="hidden_instruction",
-                    severity="high",
+                    severity=sev,
                     detail=f"响应包含{label}，人眼不可见但模型可读",
                     evidence=_mask_evidence(text, m.start(), window=80),
                 )
@@ -492,8 +536,18 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 #: block + system_prompt_inject，前端翻译成
 #: 「中转站可能在偷偷改写 AI 的行为」—— 张冠李戴，
 #: 而展示的「证据」片段正是模型自己生成的正常输出。
+#:
+#: ★ dangerous_content 为什么也要在这里
+#: ────────────────────────────────────────────────────────────
+#: 它是「响应正文/代码块里出现了危险命令」——判据来源是**模型自己的输出**，
+#: 而本产品的核心用户正用玄盾代理 Claude Code / Cursor。
+#: 让 AI 写一段含 `rm -rf` 的脚本、贴一段用 `eval(` 的代码，
+#: 都是正常诉求；把这些一律阻断，等于把产品的主战场变成雷区。
+#: 真正指向「中转站在指示客户端执行」的是结构化 tool_calls
+#: （类别仍为 tool_call_dangerous，仍阻断），两者必须分开。
 OBSERVATION_ONLY_SIGNALS: frozenset = STATISTICAL_SIGNALS | {
     "content_policy",
+    "dangerous_content",
 }
 
 
@@ -914,20 +968,44 @@ class ResponseVerifier:
 
         return findings
 
-    # 提示词注入特征（系统提示词/配置泄露方向）
-    _PROMPT_INJECT_RE = re.compile(
-        r"(?:my\s+instructions?|your\s+configuration|system\s+prompt|"
-        r"系统提示词|系统指令|系统设置|内部指令)",
-        re.IGNORECASE,
+    # 护栏 reason 里指向「提示词/指令泄露」的特征。
+    #
+    # ★★ 2026-10-04（误报修复）：这里**不再**用内容正则去猜提示词注入。
+    #   此前有个 `_PROMPT_INJECT_RE`，只要 content 里出现「系统提示词 /
+    #   系统指令 / internal instructions」几个字就归类为
+    #   system_prompt_inject（high）→ 阻断，前端再翻译成
+    #   「中转站可能在偷偷改写 AI 的行为」。
+    #
+    #   但「回答里提到这几个字」是极其常见的正常内容：
+    #   用户在问 prompt 工程、在讨论刚才那条拦截、在读一份安全文档……
+    #   把它当成「中转站篡改」是纯粹的张冠李戴，且会直接阻断。
+    #
+    #   判据改为：只看**护栏自己给出的 reason**。护栏是提示词注入的实际
+    #   检测器，它若真判了注入，reason 里必然出现「提示词 / 指令 / 注入 /
+    #   泄露方向」等词；它没说，我们就不替它下结论。
+    _PROMPT_INJECT_REASON_MARKS = (
+        "提示词", "系统指令", "内部指令", "注入",
+        "泄露方向", "prompt", "instruction",
     )
     # 敏感信息外泄特征（密钥/凭证形态出现在输出中）
     # ★ v0.1.0 修复：字符类原为 [A-Za-z0-9]，不含 '-'，
     #   匹配不到 sk-proj- / sk-svcacct- 这类带第二段前缀的现代密钥
     #   （实测泄漏样本被判成 system_prompt_inject，分类错误）。
     #   sanitizer.py 的同类规则早已含 '\-'，两侧此前不一致。
+    #
+    # ★★ 2026-10-04（误报修复，用户实测 id=2059）：前缀必须带**左边界**。
+    #   无边界时 `sk-` 会匹配到普通英文复合词中间，例如
+    #     risk-assessment-framework / task-orchestration-pipeline /
+    #     disk-usage-report-...  —— 「…sk-」后面凑满 20 个
+    #     [A-Za-z0-9\-_] 就命中，于是把一段完全正常的回答判成
+    #   「回答里出现了敏感信息」并**拦截**（实测那条正是这么来的）。
+    #   真实密钥左侧永远是分隔符（行首/空格/引号/=/:/`Bearer `），
+    #   加 (?<![A-Za-z0-9_]) 即可精确区分，且不影响任何真实密钥。
+    #   AKIA 同理。
     _SENSITIVE_LEAK_RE = re.compile(
-        r"(?:sk-[A-Za-z0-9\-_]{20,}|AKIA[0-9A-Z]{16}|"
-        r"-----BEGIN\s+\w*\s*PRIVATE KEY|"
+        r"(?:(?<![A-Za-z0-9_])sk-[A-Za-z0-9\-_]{20,}|"
+        r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}|"
+        r"-----BEGIN\s+\w*\s*PRIVATE KEY-----|"
         r"eyJ[A-Za-z0-9\-_]{8,}\.eyJ)",
     )
 
@@ -954,6 +1032,13 @@ class ResponseVerifier:
              直接命中 _PROMPT_INJECT_RE —— 于是护栏判的
              「违规语义」被 content 里的无关词改写成「提示词注入」。
 
+        ★★ 2026-10-04（误报修复）：③ 也改成**只看 reason**。
+          上一版把「内容里出现系统提示词字样」当作提示词注入的判据，
+          但那是极常见的正常内容（用户在问 prompt 工程、在讨论这条拦截、
+          在读安全文档），据此判 high + block 是纯粹的张冠李戴。
+          护栏才是提示词注入的实际检测器：它真判了，reason 里必然带
+          「提示词 / 指令 / 注入 / 泄露方向」等词；它没说，就不替它下结论。
+
         新顺序把**护栏自己的 reason 当权威**：它说这是内容合规，
         就归 content_policy，不再让 content 词表去覆盖它。
 
@@ -973,23 +1058,26 @@ class ResponseVerifier:
             return "sensitive_leak"
 
         # ② 护栏明确判的是「内容合规」→ 与中转站无关。
-        #    放在提示词正则之前：模型在正常对话里提到
+        #    放在提示词判据之前：模型在正常对话里提到
         #    「系统提示词」这几个字，不该被解读成中转站篡改。
         if any(k in reason_text for k in _CONTENT_POLICY_REASON_MARKS):
             return "content_policy"
 
-        # ③ 内容里出现系统提示词痕迹
-        if cls._PROMPT_INJECT_RE.search(content):
+        # ③ 护栏 reason 指向提示词/指令泄露 → system_prompt_inject。
+        #    ★ 2026-10-04（误报修复）：判据只看 reason，不再扫 content。
+        if any(k in reason_text for k in cls._PROMPT_INJECT_REASON_MARKS):
             return "system_prompt_inject"
 
         # ④ action 语义：redact 说明护栏认定内容含敏感信息
         if action == "redact":
             return "sensitive_leak"
 
-        # ⑤ reason 关键词（多语言）兜底，但**不做 risk==high 的无差别归类**
+        # ⑤ reason 关键词（多语言）兜底，但**不做 risk==high 的无差别归类**。
+        #    ★ 2026-10-04：系统类改为精确特征集，不再用裸「系统」——
+        #      否则 reason 里出现「系统错误」这类字样也会被判成提示词注入。
         if any(k in reason_text for k in ("敏感", "打码", "sensitive", "redact")):
             return "sensitive_leak"
-        if any(k in reason_text for k in ("系统", "指令", "提示词", "泄露方向", "prompt")):
+        if any(k in reason_text for k in cls._PROMPT_INJECT_REASON_MARKS):
             return "system_prompt_inject"
         return None
 

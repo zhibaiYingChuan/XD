@@ -304,12 +304,21 @@ jobs:
           #   reputation_key        ← 信誉按「主机#Key指纹」区分账号
           #   _TOOL_NAME_RE         ← 工具名形态校验（曾把命令行文本当工具名）
           #   _align_derived_state  ← 启动时对齐派生数据（曾日志空了还扣着分）
+          #   _handle_upstream_error ← 上游 4xx/5xx 不再记成「检测通过」
+          #   _derive_session_id     ← 多客户端会话隔离（曾共用 default 串号）
+          #   _LockedConn            ← 数据库跨线程串行化
+          #   _quarantine_db         ← 数据库损坏自动隔离重建（曾整体起不来）
+          #   dangerous_content      ← 正文危险命令不再阻断（曾拦下编程助手正常输出）
+          #   _PROMPT_INJECT_REASON_MARKS ← 提示词注入只看护栏 reason（曾误判中转站篡改）
           MISSING=0
           for MARK in 'marked_safe = ?' 'top_domains' \
                       '_recompute_daily_stats' 'wal_checkpoint' \
                       'OBSERVATION_ONLY_SIGNALS' 'rebuild_from_facts' \
                       '_PKG_DAILY_WORDS' 'reputation_key' \
-                      '_TOOL_NAME_RE' '_align_derived_state'; do
+                      '_TOOL_NAME_RE' '_align_derived_state' \
+                      '_handle_upstream_error' '_derive_session_id' \
+                      '_LockedConn' '_quarantine_db' \
+                      'dangerous_content' '_PROMPT_INJECT_REASON_MARKS'; do
             if grep -qa -- "$MARK" "$ENGINE"; then
               echo "  ✓ $MARK"
             else
