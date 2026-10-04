@@ -32,6 +32,7 @@ import {
   LOG_TYPE_LABELS,
   CATEGORY_LABELS,
   findingExplanation,
+  displayDomain,
   formatDateTime,
   actionBadgeClass,
   type LogEntry,
@@ -144,7 +145,7 @@ function DetailDrawer({
     const text = [
       `时间: ${formatDateTime(detail.entry.timestamp)}`,
       `类型: ${LOG_TYPE_LABELS[detail.entry.log_type]}`,
-      `中转站: ${detail.entry.relay_domain}`,
+      `中转站: ${displayDomain(detail.entry.relay_domain)}`,
       `结果: ${ACTION_LABELS[detail.entry.action]}`,
       `摘要: ${detail.entry.summary}`,
       '',
@@ -229,7 +230,7 @@ function DetailDrawer({
               </div>
               <div className="detail-row">
                 <span className="detail-key">中转站</span>
-                <span className="detail-val mono">{detail.entry.relay_domain || '—'}</span>
+                <span className="detail-val mono">{displayDomain(detail.entry.relay_domain) || '—'}</span>
               </div>
               <div className="detail-row">
                 <span className="detail-key">结果</span>
@@ -655,7 +656,7 @@ export default function Logs() {
           {stats.top_domains[0] && (
             <div className="log-overview-item">
               <span className="log-overview-num mono truncate">
-                {stats.top_domains[0].domain || '—'}
+                {displayDomain(stats.top_domains[0].domain) || '—'}
               </span>
               <span className="log-overview-label">
                 主要中转站（{stats.top_domains[0].count} 条）
@@ -824,7 +825,7 @@ export default function Logs() {
                     </div>
                   </td>
                   <td className="mono faint truncate" style={{ maxWidth: 150 }}>
-                    {e.relay_domain || '—'}
+                    {displayDomain(e.relay_domain) || '—'}
                   </td>
                   <td>
                     <span className={`badge ${actionBadgeClass(e)}`}>

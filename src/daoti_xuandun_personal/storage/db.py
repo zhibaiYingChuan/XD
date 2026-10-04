@@ -882,6 +882,42 @@ class PersonalStorage:
             )
         return result
 
+    def migrate_relay_key(self, old_key: str, new_key: str) -> Dict[str, int]:
+        """把信誉键与日志域名从 old_key 迁到 new_key（2026-10-04，一次性）。
+
+        ★ 为什么必须迁移
+         信誉键从「纯主机」改为「主机#Key指纹」后，旧记录会与新记录
+          并存 —— 界面上同一家出现两行（一行有历史数字、一行从 0 开始），
+          用户会以为数据重复了或软件坏了。
+
+        ★ 目标键已存在时**不覆盖**
+          正常升级路径下 new_key 还不存在；万一存在（用户已跑过新版），
+          说明新键的数据更新，应当保留。此时只迁日志域名，不动信誉行。
+
+        ★ logs.relay_domain 也要一起迁
+          否则按日志重算信誉时，旧日志匹配不到新键 —— 计数会被算成 0，
+          用户看到「日志有 200 条、卡片显示 0 次调用」，比不迁移更糟。
+        """
+        if not old_key or not new_key or old_key == new_key:
+            return {"reputation": 0, "logs": 0}
+        with self._conn:
+            exists = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM relay_reputation WHERE domain = ?",
+                (new_key,),
+            ).fetchone()
+            reps = 0
+            if not exists or not int(exists["c"]):
+                cur = self._conn.execute(
+                    "UPDATE relay_reputation SET domain = ? WHERE domain = ?",
+                    (new_key, old_key),
+                )
+                reps = int(cur.rowcount or 0)
+            cur2 = self._conn.execute(
+                "UPDATE logs SET relay_domain = ? WHERE relay_domain = ?",
+                (new_key, old_key),
+            )
+            return {"reputation": reps, "logs": int(cur2.rowcount or 0)}
+
     def clear_reputations(self) -> int:
         """清空信誉记录。"""
         with self._conn:

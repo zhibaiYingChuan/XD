@@ -259,23 +259,60 @@ _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # 早期实现会把 https、git、. 这些非包名片段当成包名 ——
 # 而 https 恰好与 httpx 只差一个字符，于是每次装 git 源依赖
 # 都会被判成「httpx 的 typosquat」。这类噪声必须从源头掐掉。
-_PKG_PATTERNS = [
-    re.compile(
-        r"(?:pip3?|conda)\s+install\s+"
-        r"(?:-{1,2}[\w-]+(?:\s+[^\s-][^\s]*)?\s+)*"
-        r"([A-Za-z0-9][A-Za-z0-9_.\-]*)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:npm|yarn|pnpm)\s+(?:i|install|add)\s+([A-Za-z0-9@/._\-]+)",
-        re.IGNORECASE,
-    ),
+#: 安装命令的「命令段」：从 install 之后取到行尾/分隔符。
+#:
+#: ★ 为什么是两段式（先取命令段、再拆包名）而不是单捕获组：
+#:   `pip install a b c` 里三个包都是安装目标，单捕获组只拿到第一个 ——
+#:   b/c 的 typosquat 会被整条漏掉。实测 `pip install requests reqeusts`
+#:   只提取出 requests。
+_PKG_INSTALL_CMD_PATTERNS = [
+    re.compile(r"(?:pip3?|conda)\s+install\s+([^\n;&|]+)", re.IGNORECASE),
+    re.compile(r"(?:npm|yarn|pnpm)\s+(?:i|install|add)\s+([^\n;&|]+)",
+               re.IGNORECASE),
+]
+
+#: 命令段里的单个包名 token（含 scope 与版本约束，交给 _normalize_pkg 处理）
+_PKG_TOKEN_RE = re.compile(r"@?[A-Za-z0-9][A-Za-z0-9@/._\-]*")
+
+
+def _extract_install_packages(text: str) -> Set[str]:
+    """从文本中的安装命令里提取**全部**包名。
+
+    ★ 只认「安装命令」这一个形态，是 2026-10-04 那次修复的核心：
+      工具调用参数里更常见的是**即将写入文件的代码内容**，
+      其中 `import x` / `"x": "1.0"` 描述的是「代码引用了什么」，
+      不是「将要装什么」。用代码形态去提取，会把普通词当包名 ——
+      实测 `label` 被当成 babel 的错拼并**阻断**了用户的编码对话。
+    """
+    if not text:
+        return set()
+    out: Set[str] = set()
+    for pat in _PKG_INSTALL_CMD_PATTERNS:
+        for m in pat.finditer(text):
+            for tok in _PKG_TOKEN_RE.findall(m.group(1) or ""):
+                if tok.startswith("-"):
+                    continue   # 选项，如 -i / --upgrade
+                name = _normalize_pkg(tok)
+                if name and len(name) > 1:
+                    out.add(name)
+    return out
+
+
+#: 代码内依赖声明形态：描述「这段代码引用了什么」。
+#:
+#: ★ 只用于 content（回答正文）——那里提到依赖是有信息量的
+#:   （「建议你装 requests」）。**不用于 tool_call 参数**，
+#:   原因见 _extract_install_packages。
+_PKG_CODE_PATTERNS = [
     re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
     re.compile(r"^\s*from\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import", re.MULTILINE),
     re.compile(r"^\s*(?:const|let|var)\s+.*?require\(['\"]([^'\"]+)['\"]\)",
                re.MULTILINE),
     re.compile(r'"([a-z0-9_\-]{3,})"\s*:\s*"[\^~]?[\d.]+', re.IGNORECASE),
 ]
+
+#: content 侧用全集：安装命令 + 代码依赖声明。
+_PKG_PATTERNS = _PKG_CODE_PATTERNS
 
 # 明显不是包名的片段（URL 协议、文件系统路径、VCS 关键字）
 _PKG_STOPWORDS = frozenset({
@@ -285,6 +322,28 @@ _PKG_STOPWORDS = frozenset({
     "latest", "master", "main", "develop", "stable",
     "pypi", "npm", "node", "python", "windows", "linux", "mac",
 })
+
+#: 日常技术词汇（2026-10-04 新增）。
+#:
+#: ★ 为什么需要单列：`detect_typosquat` 的判据是「与常用包差一次编辑」，
+#:   而英语里有大量日常词与包名只差一个字母 —— 实测 `label` 与 `babel`
+#:   只差首字母，于是模型在代码里写了个 `label` 变量就被判为
+#:   「疑似 babel 的错拼」并**阻断**了整段对话。
+#:
+#: ★ 为什么加它们不会削弱真实检测：
+#:   `detect_typosquat` 开头就有 `if name in table: return None` ——
+#:   真正的包名（requests/babel/axios…）本来就直接跳过。
+#:   这份词表只影响「不在基准表里的日常词」，而那正是误报的来源。
+_PKG_DAILY_WORDS = frozenset({
+    "label", "pattern", "value", "data", "name", "type", "text",
+    "code", "style", "class", "item", "list", "map", "key", "id",
+    "error", "result", "output", "input", "target", "source",
+    "field", "level", "status", "message", "request", "response",
+    "server", "client", "model", "token", "index", "total", "count",
+    "start", "stop", "state", "event", "action", "content", "format",
+    "string", "number", "object", "array", "buffer", "stream",
+})
+_PKG_STOPWORDS = _PKG_STOPWORDS | _PKG_DAILY_WORDS
 
 
 def _normalize_pkg(name: str) -> str:
@@ -699,8 +758,9 @@ def extract_response_facts(payload: Any, content: str) -> Dict[str, Any]:
     domains = {_host_of(u) for u in urls if _host_of(u)}
     ips = set(_IP_RE.findall(content))
 
-    pkgs: Set[str] = set()
-    for pat in _PKG_PATTERNS:
+    # content 侧：安装命令（可多包）+ 代码依赖声明
+    pkgs: Set[str] = _extract_install_packages(content)
+    for pat in _PKG_CODE_PATTERNS:
         for m in pat.finditer(content):
             name = _normalize_pkg(m.group(1))
             if name and len(name) > 1:
@@ -724,11 +784,12 @@ def extract_response_facts(payload: Any, content: str) -> Dict[str, Any]:
             }
             exec_domains = {_host_of(u) for u in exec_urls if _host_of(u)}
             exec_ips = set(_IP_RE.findall(arg_text))
-            for pat in _PKG_PATTERNS:
-                for m in pat.finditer(arg_text):
-                    name = _normalize_pkg(m.group(1))
-                    if name and len(name) > 1:
-                        exec_pkgs.add(name)
+            # ★★ 只取「安装命令」形态（2026-10-04 修）
+            #   工具调用参数里更常见的是**即将写入文件的代码内容**，
+            #   其中 `import x` / `"x": "1.0"` 描述的是「代码引用了什么」，
+            #   不是「将要装什么」。用全集会把普通词当包名 ——
+            #   实测 `label` 被当成 babel 的错拼并**阻断**了对话。
+            exec_pkgs = _extract_install_packages(arg_text)
 
     return {
         "urls": urls,
@@ -1149,7 +1210,11 @@ def diff_against_baseline(
     new_pkgs = {
         p for p in (set(response_facts.get("exec_packages") or [])
                     - baseline.request_packages)
-        if p not in _STOPWORD_PKGS and len(p) > 2
+        # ★ 2026-10-04：日常技术词一并排除。
+        #   实测 `pattern` 被判成「未声明依赖」并发出一条告警 ——
+        #   它只是模型代码里的一个普通变量/参数名。
+        if p not in _STOPWORD_PKGS and p not in _PKG_DAILY_WORDS
+        and len(p) > 2
     }
     if new_pkgs:
         findings.append({

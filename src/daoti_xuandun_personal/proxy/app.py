@@ -45,7 +45,7 @@ from ..types import Action, LogEntry, LogType, RedactionRecord, SecurityLevel
 from .baseline import build_baseline
 from .restorer import ContentRestorer
 from .sanitizer import RequestSanitizer
-from .verifier import ResponseVerifier
+from .verifier import OBSERVATION_ONLY_SIGNALS, ResponseVerifier
 
 logger = logging.getLogger("xuandun-personal.app")
 
@@ -189,6 +189,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     #   内存是对的、库是错的 —— 这种不一致会在下次
     #   「设置页重置信誉」或任何直接读库的地方重新冒出来，
     #   而用户看到的 0 分正来源于此。
+    # ★★ 迁移必须在 load_reputations **之前**（2026-10-04）：
+    #    否则加载进来的是旧键，而新请求写的是新键 ——
+    #    同一家在内存里出现两份，界面上重复显示。
+    _migrate_relay_keys_to_fingerprint()
+
     for rep in _storage.load_reputations():
         _reputation.import_reputation(rep)
         try:
@@ -392,8 +397,16 @@ def create_app() -> FastAPI:
         resolved = _resolve_upstream(request) or {}
         target_relay = resolved.get("relay")
         matched_by = resolved.get("matched_by", "active")
+        # ★ 2026-10-04：信誉键改为「主机#Key指纹」。
+        #   同一地址配两把 Key（同一家的两个账号）此前会被并成一条
+        #   信誉记录 —— 用户看到「一家」的分数，实际混了两家。
+        #   日志域名、信誉主键、结果里的「本次发给了谁」共用这一个键，
+        #   三条口径才不会分叉。
         upstream_domain = (
-            _reputation.extract_domain(str(target_relay.get("base_url") or ""))
+            _reputation.reputation_key(
+                str(target_relay.get("base_url") or ""),
+                str(target_relay.get("api_key") or ""),
+            )
             if (_reputation and target_relay) else ""
         )
 
@@ -604,8 +617,9 @@ def create_app() -> FastAPI:
         via = "按 Key 识别" if matched_by == "key" else "当前启用"
         _record_log(
             LogType.RELAY.value,
-            _reputation.extract_domain(
-                str((target or {}).get("base_url") or "")
+            _reputation.reputation_key(
+                str((target or {}).get("base_url") or ""),
+                str((target or {}).get("api_key") or ""),
             ) if _reputation else "",
             Action.PASS.value,
             "low",
@@ -855,6 +869,14 @@ def create_app() -> FastAPI:
                 if _storage is not None:
                     _storage.clear_redactions_for_session(restore_session)
                 joined = "".join(collected)
+                # ★ 2026-10-04：落库用**提取后的文本**，而不是 SSE 原文。
+                #   此前日志详情的「原始响应片段」显示的是一串
+                #   `data: {"id":...,"object":"chat.completion.chunk",...}` ——
+                #   用户完全看不懂自己「到底说了什么触发的」。
+                #   而同一份数据在验证侧早已通过 _extract_sse_content
+                #   提取过，只是没被复用（验证用提取文本、落库用原文，
+                #   两条口径分叉，用户看到的是分叉的那一半）。
+                readable = _extract_sse_content(joined)
                 severity = _max_severity(findings)
                 # ★ 与非流式路径统一：按合并后的最高严重度决定处置，
                 #   而不是「有 findings 就一律 ALERT」——
@@ -874,9 +896,9 @@ def create_app() -> FastAPI:
                 _record_log(
                     LogType.RESPONSE_VERIFY, domain, action, severity,
                     model, findings, None, session_id, redaction_records,
-                    text_preview=joined,
+                    text_preview=readable,
                 )
-                _record_reputation(domain, action, latency_ms, joined,
+                _record_reputation(domain, action, latency_ms, readable,
                                    categories=_finding_categories(findings))
 
         return StreamingResponse(
@@ -1774,8 +1796,13 @@ def create_app() -> FastAPI:
                 if _config else {}
             ),
             "relay_configured": bool(_config and _config.relay.base_url),
+            # ★ 必须与 /api/relays 的 domain 用同一个键（含 Key 指纹），
+            #   否则前端按域名匹配「当前中转站」时永远匹配不上，
+            #   卡片会一直显示「已配置 · 尚未产生调用记录」。
             "relay_domain": (
-                _reputation.extract_domain(_config.relay.base_url)
+                _reputation.reputation_key(
+                    _config.relay.base_url, _config.relay.api_key,
+                )
                 if (_config and _config.relay.base_url and _reputation)
                 else ""
             ),
@@ -2267,6 +2294,25 @@ def _max_severity(findings: List[Any]) -> str:
     return max(findings, key=lambda f: order.get(f.severity, 0)).severity
 
 
+def _headline_detail(findings: List[Any]) -> str:
+    """挑出该当头条的那条 detail。
+
+    ★ 为什么不直接取 findings[0]（2026-10-04）
+      检测器产出 findings 的顺序是**内部实现顺序**，与「哪个重要」无关。
+      实测用户日志 #1250：摘要写着「响应结构与历史显著不同，仅作记录，
+      不阻断」，而这条日志实际被**阻断**了 —— 因为同一批里还有一条
+      「工具调用参数中出现疑似 typosquat 的依赖包」。
+      摘要说「不阻断」、处置是「阻断」，用户唯一能得出的结论是软件坏了。
+
+    ★ 规则：优先取**非观测类**的发现项（它们才是处置的依据）；
+      整批都是观测类时，才退回取第一条。
+    """
+    for f in findings:
+        if getattr(f, "category", "") not in OBSERVATION_ONLY_SIGNALS:
+            return str(getattr(f, "detail", "") or "")
+    return str(getattr(findings[0], "detail", "") or "")
+
+
 def _record_log(
     log_type, domain, action, severity, model,
     findings, payload, session_id, redaction_records,
@@ -2282,7 +2328,7 @@ def _record_log(
     if _storage is None:
         return
     try:
-        summary = findings[0].detail if findings else "正常转发"
+        summary = _headline_detail(findings) if findings else "正常转发"
         if len(findings) > 1:
             summary += f"（共 {len(findings)} 项）"
         entry = LogEntry(
@@ -2515,7 +2561,12 @@ def _record_reputation(
     if _reputation is None or _config is None:
         return
     if not domain:
-        domain = _reputation.extract_domain(_config.relay.base_url)
+        # ★ 用 getattr 而不是直接取属性：老配置对象/测试桩可能没有
+        #   api_key 字段，直接取会抛 AttributeError 并让整条转发失败。
+        domain = _reputation.reputation_key(
+            _config.relay.base_url,
+            getattr(_config.relay, "api_key", "") or "",
+        )
     if not domain:
         return
     try:
@@ -2533,6 +2584,52 @@ def _record_reputation(
 def _finding_categories(findings) -> List[str]:
     """从 findings 里取出检测项类别，供信誉归因使用。"""
     return [f.category for f in findings if getattr(f, "category", "")]
+
+
+def _migrate_relay_keys_to_fingerprint() -> None:
+    """把旧的「纯主机」信誉键升级为「主机#Key指纹」（2026-10-04，一次性）。
+
+    ★ 为什么只在**无歧义**时迁移
+      该主机在配置里只对应一家 → 旧记录必然属于它，迁移是确定的。
+      同一主机配了多个账号时，旧记录没存指纹、信息上拆不开 ——
+      强行归给其中一家会把另一家的账也记上去，比不迁移更糟。
+      这类记录保持原样（仍按主机聚合），用户下次发请求时各自建立新键。
+
+    ★ 幂等
+      迁移后旧键不再存在，重复执行是空操作。
+
+    ★ 失败不阻断启动
+      迁移只是数据整理；失败时旧的按主机聚合仍然可用。
+    """
+    if _storage is None or _config is None:
+        return
+    try:
+        by_netloc: Dict[str, List[str]] = {}
+        for r in _config.relay.all_relays():
+            base = str(r.get("base_url") or "")
+            netloc = ReputationTracker.extract_domain(base)
+            key = ReputationTracker.reputation_key(
+                base, str(r.get("api_key") or "")
+            )
+            if netloc and key and key != netloc:
+                by_netloc.setdefault(netloc, []).append(key)
+
+        moved = 0
+        ambiguous = 0
+        for netloc, keys in by_netloc.items():
+            if len(keys) != 1:
+                ambiguous += 1
+                continue
+            moved += _storage.migrate_relay_key(netloc, keys[0])["logs"]
+        if moved:
+            logger.info("信誉键升级为含 Key 指纹：迁移 %d 条记录", moved)
+        if ambiguous:
+            logger.info(
+                "%d 个主机下配了多个账号，其历史记录无法拆分，"
+                "保持按主机聚合（新调用将分别计数）", ambiguous,
+            )
+    except Exception as e:  # noqa: BLE001 — 迁移失败不该阻断启动
+        logger.warning("信誉键迁移失败（不影响使用）: %s", e)
 
 
 def _sync_reputation_after_log_delete() -> None:

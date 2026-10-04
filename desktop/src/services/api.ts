@@ -879,6 +879,21 @@ export function primaryFindingCategory(
   }
 }
 
+/**
+ * 把信誉键（`主机#Key指纹`）还原成用户看得懂的域名。
+ *
+ * ★ 为什么要剥掉指纹（2026-10-04）
+ *   同一地址配多个账号时，信誉键带 Key 指纹以便分开统计 ——
+ *   但指纹是内部实现细节，直接显示会变成
+ *   `api.example.com#a1b2c3d4`，用户既看不懂也认不出是哪家。
+ *   注意：**匹配**（判断「是不是当前这家」）必须用完整的键，
+ *   只有**展示**才剥掉。
+ */
+export function displayDomain(key: string | undefined | null): string {
+  if (!key) return '';
+  return key.split('#', 1)[0];
+}
+
 export function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString('zh-CN', {
     hour: '2-digit',

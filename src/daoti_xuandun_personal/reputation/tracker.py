@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import statistics
@@ -37,6 +38,11 @@ from urllib.parse import urlparse
 from ..types import Action, RelayReputation
 
 logger = logging.getLogger("xuandun-personal.reputation")
+
+#: 信誉键里 Key 指纹的长度（截断的 SHA-1 十六进制位数）。
+#: 8 位 = 32 bit，对「一台机器上的几家中转站」绰绰有余，
+#: 且不可逆 —— 不会把用户的 Key 写进索引或日志。
+_KEY_FINGERPRINT_LEN = 8
 
 
 # ══════════════════════════════════════════════════════════════
@@ -142,12 +148,50 @@ class ReputationTracker:
 
     @staticmethod
     def extract_domain(upstream_url: str) -> str:
-        """从上游 URL 提取域名（用于信誉索引）。"""
+        """从上游 URL 提取主机名（展示用）。"""
         try:
             parsed = urlparse(upstream_url)
             return parsed.netloc or upstream_url[:60]
         except Exception:  # noqa: BLE001
             return upstream_url[:60]
+
+    @staticmethod
+    def reputation_key(upstream_url: str, api_key: str = "") -> str:
+        """信誉索引键 = ``主机#Key指纹``（2026-10-04）。
+
+        ★ 为什么要带 Key 指纹
+        ────────────────────────────────────────────────────────────
+        同一地址配两把 Key（同一家的两个账号）是常见用法，
+        而只按域名聚合会把两家的账并成一条 —— 用户看到「一家」的
+        分数，实际混了两家。实测用户配置：两条中转站的 netloc 与
+        path 完全相同，只有 Key 不同，于是信誉表里只有一行。
+
+        ★ 为什么不直接存 Key
+          Key 是敏感值，不该出现在任何索引、日志或数据库字段里。
+          取 SHA-1 前 8 位（32 bit）：足够区分一台机器上的少量配置，
+          且不可逆。
+
+        ★ 为什么只加 Key 不加路径
+          用户填 base_url 的习惯差异极大（带不带 /v1、带不带完整端点），
+          用路径会让**同一家**因为填法不同而分成两个键，
+          历史信誉凭空断档 —— 那是修一个坑挖一个更深的坑。
+          主机 + Key 指纹才是稳定的：主机区分服务商，Key 区分账号。
+
+        ★ 空 Key 时退化为纯主机
+          旧配置/未填 Key 的调用点保持原行为，不因此产生孤儿键。
+        """
+        netloc = ReputationTracker.extract_domain(upstream_url)
+        if not netloc or not api_key:
+            return netloc
+        fp = hashlib.sha1(
+            api_key.encode("utf-8")
+        ).hexdigest()[:_KEY_FINGERPRINT_LEN]
+        return f"{netloc}#{fp}"
+
+    @staticmethod
+    def display_domain(key: str) -> str:
+        """从信誉键里取出用于展示的域名（去掉 Key 指纹）。"""
+        return (key or "").split("#", 1)[0]
 
     # ── 记录 ──
 
@@ -158,6 +202,7 @@ class ReputationTracker:
         latency_ms: float = 0.0,
         content: str = "",
         categories: Optional[List[str]] = None,
+        api_key: str = "",
     ) -> RelayReputation:
         """记录一次调用并更新信誉。
 
@@ -170,18 +215,22 @@ class ReputationTracker:
                 同样是 block，凭什么扣分必须看是哪一类：
                 「中转站返回了恶意 tool_call」该扣，
                 「响应长度比历史长」不该扣（那是你问了什么决定的）。
+            api_key: 本次实际使用的 Key。用于把「同一地址的不同账号」
+                分开统计 —— 见 reputation_key。
 
         Returns:
             更新后的 RelayReputation
         """
-        domain = self.extract_domain(upstream_url)
+        key = self.reputation_key(upstream_url, api_key)
         now = time.time()
 
-        rep = self._reputations.get(domain)
+        rep = self._reputations.get(key)
         if rep is None:
-            rep = RelayReputation(domain=domain, first_seen=now)
-            self._reputations[domain] = rep
-            logger.info("首次记录中转站: %s", domain)
+            rep = RelayReputation(domain=key, first_seen=now)
+            self._reputations[key] = rep
+            # 日志里只记主机，不记指纹 —— 指纹虽不可逆，
+            # 但日志是用户会导出/外发的东西，没必要带上去。
+            logger.info("首次记录中转站: %s", self.display_domain(key))
 
         rep.last_seen = now
         rep.total_calls += 1
@@ -213,9 +262,15 @@ class ReputationTracker:
                 else (rep.avg_latency_ms * rep.latency_samples + latency_ms) / (rep.latency_samples + 1)
             )
             rep.latency_samples += 1
-            self._latencies.setdefault(domain, []).append(latency_ms)
-            if len(self._latencies[domain]) > self._window:
-                self._latencies[domain].pop(0)
+            self._latencies.setdefault(key, []).append(latency_ms)
+            if len(self._latencies[key]) > self._window:
+                self._latencies[key].pop(0)
+
+        # ★ 域名相关的判据一律用**去掉指纹的主机名**：
+        #   key 形如 `api.x.com#a1b2c3d4`，若直接对 key 做
+        #   endswith(".tk") 这类判断，后缀永远匹配不上 ——
+        #   高风险域名识别会静默失效。
+        netloc = self.display_domain(key)
 
         # 水印检测
         if not rep.watermark_detected and content:
@@ -223,16 +278,16 @@ class ReputationTracker:
                 if re.search(pattern, content, re.IGNORECASE):
                     rep.watermark_detected = True
                     rep.notes.append(f"检测到数据保留迹象：{label}")
-                    logger.info("中转站 %s 命中水印特征：%s", domain, label)
+                    logger.info("中转站 %s 命中水印特征：%s", netloc, label)
                     break
 
         # 恶意库匹配
         if not rep.known_malicious:
             for frag, reason in KNOWN_MALICIOUS.items():
-                if frag in domain:
+                if frag in netloc:
                     rep.known_malicious = True
                     rep.notes.append(f"命中恶意库：{reason}")
-                    logger.warning("中转站 %s 命中恶意库：%s", domain, reason)
+                    logger.warning("中转站 %s 命中恶意库：%s", netloc, reason)
                     break
 
         # 高风险模式匹配（★ P1-8：只降分不归零，避免误判导致误阻断）
@@ -240,9 +295,9 @@ class ReputationTracker:
             n.startswith("高风险模式") for n in rep.notes
         ):
             for frag, reason in SUSPICIOUS_PATTERNS.items():
-                if domain.endswith(frag) or f"{frag}." in domain:
+                if netloc.endswith(frag) or f"{frag}." in netloc:
                     rep.notes.append(f"高风险模式：{reason}")
-                    logger.info("中转站 %s 命中高风险模式：%s", domain, reason)
+                    logger.info("中转站 %s 命中高风险模式：%s", netloc, reason)
                     break
 
         rep.score = self._compute_score(rep)

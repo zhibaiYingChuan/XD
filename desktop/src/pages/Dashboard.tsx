@@ -36,6 +36,7 @@ import {
   actionBadgeClass,
   findingExplanation,
   primaryFindingCategory,
+  displayDomain,
   type StateResponse,
   type LogEntry,
   type RelayReputation,
@@ -267,7 +268,7 @@ export default function Dashboard() {
         // ★ P2-4 修复：原硬编码 127.0.0.1:18765，
         //   用户改过端口后报告会给出错误的排查指引
         `代理端口: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
-        `中转站: ${d.relay_domain || '(未配置)'}`,
+        `中转站: ${displayDomain(d.relay_domain) || '(未配置)'}`,
         `安全级别: ${d.verifier?.level ?? '-'}`,
         `企业版护栏: ${d.verifier?.guardrail_available ? '已加载' : '未加载'}`,
         `日志总数: ${d.storage?.total_logs ?? 0}`,
@@ -551,7 +552,7 @@ export default function Dashboard() {
           <>
             <div className="flex items-center justify-between gap-12">
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 500 }}>{primaryRelay.domain}</div>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>{displayDomain(primaryRelay.domain)}</div>
                 <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
                   {usedLabel}
                   {usedLabel && ' · '}
@@ -694,7 +695,7 @@ export default function Dashboard() {
                  甚至以为软件坏了。域名摆出来才能证明「收到了，正在用」。 */
               <div className="empty-text">
                 <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--xd-text)' }}>
-                  {currentDomain}
+                  {displayDomain(currentDomain)}
                 </div>
                 <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>
                   已配置 · 尚未产生调用记录

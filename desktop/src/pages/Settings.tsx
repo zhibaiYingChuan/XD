@@ -30,6 +30,7 @@ import {
   CATEGORY_LABELS,
   currentProxyPort,
   syncProxyPort,
+  displayDomain,
   type PersonalConfig,
   type SecurityLevel,
   type RelayPrecheck,
@@ -793,7 +794,7 @@ export default function Settings() {
                   : '这家中转站存在较高风险'}
               </b>
               <div className="mt-8">
-                你的 AI 对话会经过 <span className="mono">{relayRisk.domain}</span> 转发，
+                你的 AI 对话会经过 <span className="mono">{displayDomain(relayRisk.domain)}</span> 转发，
                 对方能看到并保留全部内容。
               </div>
               {relayRisk.notes.length > 0 && (
