@@ -828,6 +828,10 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     title: '你的提问里有不能外发的内容',
     meaning: '玄盾拦下了这次请求。删掉相关内容后重试即可。',
   },
+  content_policy: {
+    title: '这段回答触发了内容合规词表',
+    meaning: '只是回答里出现了敏感词，与中转站是否篡改无关，不会影响你使用。',
+  },
 };
 
 /** 把引擎的 detail 换成用户能读懂的说明；无对应类别时返回 null。 */
@@ -836,6 +840,43 @@ export function findingExplanation(
 ): { title: string; meaning: string } | null {
   if (!category) return null;
   return FINDING_LABELS[category] ?? null;
+}
+
+/**
+ * 只作记录、不指控中转站的类别。
+ * 与后端 verifier.OBSERVATION_ONLY_SIGNALS 对齐 —— 两边漂移会让
+ * 首页把「仅记录」的项显示成头条，那是另一种谎报。
+ */
+export const OBSERVATION_ONLY_CATEGORIES = new Set([
+  'length_anomaly',
+  'structure_anomaly',
+  'content_policy',
+]);
+
+/**
+ * 从日志的 detail_json 里挑出「最值得摆在首页头条」的一条类别。
+ *
+ * ★ 为什么要挑而不是取第一条：
+ *   一条响应常同时命中多个检测项，而 detail_json 的顺序由检测器
+ *   内部顺序决定，与「哪个重要」无关。若直接取 [0]，
+ *   一次「长度突变 + 中转站调用未授权工具」会被显示成
+ *   「这次回答的长度和平时不太一样」—— 把最严重的问题藏起来了。
+ *   所以优先挑**指向中转站责任**的那条，观测类只在没有别的项时兜底。
+ */
+export function primaryFindingCategory(
+  detailJson: string | undefined,
+): string | undefined {
+  try {
+    const arr = JSON.parse(detailJson || '[]');
+    if (!Array.isArray(arr)) return undefined;
+    const cats = arr
+      .map((x) => String((x as { category?: string })?.category || ''))
+      .filter(Boolean);
+    if (cats.length === 0) return undefined;
+    return cats.find((c) => !OBSERVATION_ONLY_CATEGORIES.has(c)) ?? cats[0];
+  } catch {
+    return undefined;
+  }
 }
 
 export function formatTime(ts: number): string {

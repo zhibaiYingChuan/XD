@@ -353,6 +353,53 @@ class PersonalStorage:
             "top_domains": domains,
         }
 
+    def iter_log_facts(self) -> List[Dict[str, Any]]:
+        """列出每条响应侧日志的 (域名, 处置, 命中类别)，供信誉重算使用。
+
+        ★ 为什么需要它（2026-10-04）
+        ────────────────────────────────────────────────────────────
+        relay_reputation 的计数是**累加**的：删日志（清空 / 按筛选删 /
+        删单条）都不会回退它。于是出现「首页已归零，中转站卡片
+        还写着 3 次调用」—— 两个数字各自都"对"，只是口径不同，
+        用户只能认为软件坏了。
+
+        要想让两者长期一致，唯一可行的是**以 logs 为唯一事实源重算**，
+        而重算需要把每条日志还原成「记了谁一笔、算谁的账」。
+
+        ★ 只取 response_verify 类型：
+          只有这条路径会调 track.record_call（见 app.py 的
+          _record_reputation 三个调用点）。若把 relay（直通）日志
+          或 request_sanitize（请求侧阻断）也算进来，
+          total_calls 会凭空变大 —— 重算反而制造新的不一致。
+
+        ★ categories 从 detail_json 解析：那里存的是
+          ``[f.to_dict() for f in findings]``。解析失败当空列表 ——
+          「宁可少扣也不在无依据时指控中转站」与 tracker._classify
+          的取向一致。
+        """
+        rows = self._conn.execute(
+            "SELECT relay_domain, action, detail_json FROM logs "
+            "WHERE log_type = ?",
+            (LogType.RESPONSE_VERIFY.value,),
+        ).fetchall()
+        facts: List[Dict[str, Any]] = []
+        for r in rows:
+            cats: List[str] = []
+            try:
+                raw = json.loads(r["detail_json"] or "[]")
+                if isinstance(raw, list):
+                    for item in raw:
+                        if isinstance(item, dict) and item.get("category"):
+                            cats.append(str(item["category"]))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            facts.append({
+                "domain": str(r["relay_domain"] or ""),
+                "action": str(r["action"] or ""),
+                "categories": cats,
+            })
+        return facts
+
     @staticmethod
     def _row_to_log(row: sqlite3.Row) -> LogEntry:
         return LogEntry(

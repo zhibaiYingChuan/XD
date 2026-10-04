@@ -34,12 +34,28 @@ import {
   currentProxyPort,
   formatTime,
   actionBadgeClass,
+  findingExplanation,
+  primaryFindingCategory,
   type StateResponse,
   type LogEntry,
   type RelayReputation,
 } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard } from '../lib/tauriShim';
+
+/**
+ * 首页卡片的标题文案：优先说人话，说不出来才用引擎的原话。
+ *
+ * ★ 为什么不能直接显示 summary（2026-10-04）
+ *   summary 存的是检测器的 detail（如「[企业版护栏] 输出内容命中
+ *   高危违规模式，已拦截」）。日志页已经把它翻译成人话，
+ *   首页却直接把引擎原话摆出来 —— 同一个事件两套说法，
+ *   而用户在首页看到的那套是他看不懂的。
+ */
+function entryHeadline(entry: LogEntry): string {
+  const ex = findingExplanation(primaryFindingCategory(entry.detail_json));
+  return ex ? ex.title : entry.summary;
+}
 
 // ══════════════════════════════════════════════════════════════
 // 英雄区图标（按状态）
@@ -313,8 +329,14 @@ export default function Dashboard() {
   const matchedRelay = currentDomain
     ? relays.find((r) => r.domain === currentDomain)
     : undefined;
-  const primaryRelay =
-    matchedRelay ?? (currentDomain === '' ? relays[relays.length - 1] : undefined);
+  // ★ 2026-10-04：删掉了「未配置时取 relays[last] 顶替」那条回退。
+  //   它会在「配置已被清空、但信誉库还留着历史记录」时，
+  //   把一家**已经不再使用**的中转站显示成「当前中转站」——
+  //   用户会以为配置没删干净，或以为软件认错了服务商。
+  //   这与上面那条注释说的是同一件事：宁可空着也不能指错对象。
+  //   匹配不到时自然落到下面的「尚未配置 / 已配置但无记录」两个分支，
+  //   那两个分支本来就能把话说清楚。
+  const primaryRelay = matchedRelay;
   // ★ 「配了但还没有调用记录」是独立于有无信誉记录的状态，
   //   把它与「压根没配」分成两种文案 —— 后者会让已配置的用户
   //   以为自己的配置丢了，进而重复配置或以为软件坏了。
@@ -513,8 +535,8 @@ export default function Dashboard() {
                   )}
                 </span>
                 <span className="list-time">{formatTime(entry.timestamp)}</span>
-                <span className="list-text" title={entry.summary}>
-                  {entry.summary}
+                <span className="list-text" title={entryHeadline(entry)}>
+                  {entryHeadline(entry)}
                 </span>
               </div>
             ))}

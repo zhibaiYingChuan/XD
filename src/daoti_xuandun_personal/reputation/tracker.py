@@ -248,6 +248,81 @@ class ReputationTracker:
         rep.score = self._compute_score(rep)
         return rep
 
+    def rebuild_from_facts(self, facts: List[Dict[str, Any]]) -> None:
+        """按日志明细重算各中转站的计数与分数。**就地修改内存态**。
+
+        ★★ 为什么必须有（2026-10-04）
+        ────────────────────────────────────────────────────────────
+        relay_reputation 的计数是**累加**的，删日志（清空 / 按筛选删 /
+        删单条）都不会回退。实测：
+
+            清空日志后   首页今日调用 3 → 0 ✓
+                         中转站卡片总调用 3 → 3 ✗
+
+        两个数字各自都"对"，只是口径不同 —— 用户看到的是软件坏了。
+        要长期一致，只能以 logs 为唯一事实源重算。
+
+        ★ 只重算「从日志可推导」的字段：
+          total_calls / relay_* / self_* / danger_count /
+          suspect_count / score。
+
+          first_seen / last_seen / latency_* / known_malicious /
+          watermark_detected / notes **原样保留** ——
+          它们记的是服务商的历史属性（这家什么时候开始用、
+          有没有自述保留数据），不随你删日志而消失，
+          也无法从日志重建（日志里没有这些信息）。
+
+        ★ 计数清零而不是删除记录：
+          用户清掉日志后，「这家我用过」这件事仍然成立，
+          界面显示 0 次调用是诚实的；把记录整条删掉会让它退回
+          「查无此人」，反而更像数据丢了。
+
+        ★ 未知域名的日志将被忽略（不凭空创建信誉条目）——
+          信誉条目由 record_call 在真实请求时建立，
+          重算只负责把已有条目的计数对齐事实。
+        """
+        for rep in self._reputations.values():
+            rep.total_calls = 0
+            rep.relay_danger_count = 0
+            rep.self_danger_count = 0
+            rep.relay_suspect_count = 0
+            rep.self_suspect_count = 0
+            rep.danger_count = 0
+            rep.suspect_count = 0
+
+        for f in facts:
+            domain = str(f.get("domain") or "")
+            if not domain:
+                continue
+            rep = self._reputations.get(domain)
+            if rep is None:
+                continue
+
+            action = str(f.get("action") or "")
+            relay_risk, _ = self._classify(f.get("categories") or [])
+            rep.total_calls += 1
+            if action == Action.BLOCK.value:
+                if relay_risk:
+                    rep.relay_danger_count += 1
+                else:
+                    rep.self_danger_count += 1
+            elif action == Action.ALERT.value:
+                if relay_risk:
+                    rep.relay_suspect_count += 1
+                else:
+                    rep.self_suspect_count += 1
+            # 兼容旧字段（供展示沿用）；评分不读它们
+            rep.danger_count = rep.relay_danger_count + rep.self_danger_count
+            rep.suspect_count = rep.relay_suspect_count + rep.self_suspect_count
+
+        for rep in self._reputations.values():
+            rep.score = self._compute_score(rep)
+
+        logger.info(
+            "中转站计数已按日志重算：%d 家，共 %d 条事实",
+            len(self._reputations), len(facts),
+        )
+
     # ── 评分 ──
 
     @staticmethod

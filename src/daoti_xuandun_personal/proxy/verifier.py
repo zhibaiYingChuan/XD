@@ -475,6 +475,38 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 })
 
 
+#: 只作记录、**永不阻断**的类别全集（2026-10-04 扩展）。
+#:
+#: ★ content_policy 为什么必须在这里
+#: ────────────────────────────────────────────────────────────
+#: 企业版护栏的「违规语义方向 / 高危违规模式」判的是
+#: **模型自己说了什么**（输出里有没有敏感词），
+#: 而玄盾要管的是**中转站做了什么**（有没有篡改请求/响应）。
+#: 两者毫无关系：模型在讨论安全话题时必然出现「绕过/漏洞/攻击」，
+#: 把这算成中转站的罪证，唯一后果是让用户弃用一个没问题的服务商 ——
+#: 而那恰恰是本模块一直在避免的事（见 tracker._RELAY_ATTRIBUTABLE
+#: 里对「长度突变不算中转站责任」的同类处理）。
+#:
+#: 实测（2026-10-04）：一段纯正常的会话总结（内容是
+#: 「用户希望理解系统提示词被拦截的原因」）被判为
+#: block + system_prompt_inject，前端翻译成
+#: 「中转站可能在偷偷改写 AI 的行为」—— 张冠李戴，
+#: 而展示的「证据」片段正是模型自己生成的正常输出。
+OBSERVATION_ONLY_SIGNALS: frozenset = STATISTICAL_SIGNALS | {
+    "content_policy",
+}
+
+
+#: 内容合规类的护栏 reason 特征（用于把「模型说了敏感词」
+#: 与「中转站动了手脚」分开）。命中即归 content_policy。
+_CONTENT_POLICY_REASON_MARKS: tuple = (
+    "违规语义",
+    "高危违规模式",
+    "违规原型",
+    "疑似违规",
+)
+
+
 # ══════════════════════════════════════════════════════════════
 # 第 3 类：响应模式异常（长度/结构突变 3σ）
 # ══════════════════════════════════════════════════════════════
@@ -649,8 +681,9 @@ def decide_response_action(
     ────────────────────────────────────────────────────────────
     规则一：整体严重程度取所有 findings 的最大值
     规则二：**只有统计类信号时，永不阻断**
+    规则三：**只有内容合规类信号时，永不阻断**（2026-10-04 新增）
 
-    规则二为什么放在这里而不是各检测点：
+    规则二/三为什么放在这里而不是各检测点：
       · 放在各检测点（把 severity 固定为 low）不够 ——
         整体严重程度取的是最大值，将来任何人给统计类标 high，
         阻断就会复活，而所有单点测试照样绿。
@@ -673,9 +706,9 @@ def decide_response_action(
     action = _threshold_for_level(level, max_sev)
 
     categories = {getattr(f, "category", "") for f in findings}
-    if action == Action.BLOCK.value and categories <= STATISTICAL_SIGNALS:
+    if action == Action.BLOCK.value and categories <= OBSERVATION_ONLY_SIGNALS:
         logger.info(
-            "仅有统计类信号（%s），不阻断：%s",
+            "仅有观测类信号（%s），不阻断：%s",
             "/".join(sorted(categories)),
             getattr(findings[0], "detail", ""),
         )
@@ -844,17 +877,37 @@ class ResponseVerifier:
         #   （打码）分支，与本处进入条件 risk in (high, medium) 几乎不重合
         #   → 导致 sensitive_leak 在整个代码库永远不会被产生。
         #   改用「结构化判定 + 本地正则兜底」双通道，不依赖 reason 文案。
+        #
+        # ★★ 2026-10-04：判定顺序改为「护栏 reason 优先」，
+        #   并把「判不出来」从「归类为 system_prompt_inject」改成
+        #   「不产生 finding」。详见 _classify_guardrail_hit。
         category = self._classify_guardrail_hit(content, risk, action, reason)
 
         if category is None:
             return findings
 
-        severity = "high" if risk == "high" else "medium"
+        if category == "content_policy":
+            # 内容合规类（模型自己说了敏感词）与中转站是否篡改无关。
+            # 标 medium 而非 high：均衡档显示为「提示」，严格档即使
+            # 判到阻断也会被 decide_response_action 降级为提示。
+            severity = "medium"
+            detail = (
+                f"内容合规检查：{reason}（只作记录，与中转站是否篡改无关）"
+                if reason
+                else "内容合规检查命中（只作记录，与中转站是否篡改无关）"
+            )
+        else:
+            severity = "high" if risk == "high" else "medium"
+            detail = (
+                f"[企业版护栏] {reason}" if reason
+                else "[企业版护栏] 检测到风险内容"
+            )
+
         findings.append(
             VerificationFinding(
                 category=category,
                 severity=severity,
-                detail=f"[企业版护栏] {reason}" if reason else "[企业版护栏] 检测到风险内容",
+                detail=detail,
                 evidence=_mask_evidence(content, 0, window=50),
             )
         )
@@ -884,28 +937,59 @@ class ResponseVerifier:
     ) -> Optional[str]:
         """判定企业版护栏命中的类别。
 
-        返回 'system_prompt_inject' / 'sensitive_leak' / None。
-        判定顺序：本地内容特征优先（最可靠），reason 关键词作为次要信号。
+        返回 'content_policy' / 'system_prompt_inject' / 'sensitive_leak' / None。
+
+        ★★ 判定顺序在 2026-10-04 做了根本性调整
+        ────────────────────────────────────────────────────────────
+        原顺序是「先扫 content 正则，最后用 risk==high 兜底归为
+        system_prompt_inject」。两个后果，实测都能复现：
+
+          ① 兜底等于「判不出来就当中转站篡改」。
+             护栏说「违规语义方向」（模型说了敏感词），
+             落到兜底变成 system_prompt_inject（中转站改了内容），
+             前端接着翻译成「中转站可能在偷偷改写 AI 的行为」。
+             模型说了什么 ≠ 中转站做了什么，这两件事被焊在了一起。
+
+          ② 先扫 content 让「模型正常提到『系统提示词』这个词」
+             直接命中 _PROMPT_INJECT_RE —— 于是护栏判的
+             「违规语义」被 content 里的无关词改写成「提示词注入」。
+
+        新顺序把**护栏自己的 reason 当权威**：它说这是内容合规，
+        就归 content_policy，不再让 content 词表去覆盖它。
+
+        ★ 为什么不再有 risk==high 兜底：
+          兜底会把「未知类别」当成「最严重的已知类别」。
+          未知就是未知 —— 返回 None（不产生 finding）比
+          编造一个罪名诚实，也避免用户按错误结论去换中转站。
         """
-        # ① 本地正则（最可靠，不依赖 reason 文案）
+        reason_text = reason or ""
+
+        # ① 真实凭证形态 → sensitive_leak。
+        #    ★ 必须排在 reason 之前：护栏对含密钥的文本也可能报
+        #      「高危违规模式」，若让 reason 优先，真实密钥泄露会被
+        #      降级成「内容合规」而不再阻断 —— 那是把误报修成了漏报。
+        #      实测：`sk-proj-...` 文本曾因此从 block 掉到 alert。
         if cls._SENSITIVE_LEAK_RE.search(content):
             return "sensitive_leak"
+
+        # ② 护栏明确判的是「内容合规」→ 与中转站无关。
+        #    放在提示词正则之前：模型在正常对话里提到
+        #    「系统提示词」这几个字，不该被解读成中转站篡改。
+        if any(k in reason_text for k in _CONTENT_POLICY_REASON_MARKS):
+            return "content_policy"
+
+        # ③ 内容里出现系统提示词痕迹
         if cls._PROMPT_INJECT_RE.search(content):
             return "system_prompt_inject"
 
-        # ② action 语义：redact 说明护栏认定内容含敏感信息
+        # ④ action 语义：redact 说明护栏认定内容含敏感信息
         if action == "redact":
             return "sensitive_leak"
 
-        # ③ reason 关键词兜底（多语言）
-        lowered = reason or ""
-        if any(k in lowered for k in ("敏感", "打码", "sensitive", "redact")):
+        # ⑤ reason 关键词（多语言）兜底，但**不做 risk==high 的无差别归类**
+        if any(k in reason_text for k in ("敏感", "打码", "sensitive", "redact")):
             return "sensitive_leak"
-        if any(k in lowered for k in ("系统", "指令", "提示词", "泄露方向", "prompt")):
-            return "system_prompt_inject"
-
-        # ④ 无法判定 → 按拦截语义归为提示词注入（护栏高危拦截主要针对系统信息/违规）
-        if risk == "high":
+        if any(k in reason_text for k in ("系统", "指令", "提示词", "泄露方向", "prompt")):
             return "system_prompt_inject"
         return None
 

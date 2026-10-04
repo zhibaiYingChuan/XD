@@ -1106,6 +1106,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="存储未就绪")
         if not _storage.delete_log(log_id):
             raise HTTPException(status_code=404, detail="日志不存在")
+        _sync_reputation_after_log_delete()
         return {"ok": True, "log_id": log_id}
 
     @app.post("/api/logs/clear")
@@ -1115,6 +1116,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="存储未就绪")
         before_ts = time.time() - before_days * 86400 if before_days > 0 else None
         count = _storage.clear_logs(before_ts)
+        _sync_reputation_after_log_delete()
         return {"ok": True, "deleted": count}
 
     @app.post("/api/logs/delete-filtered")
@@ -1163,6 +1165,7 @@ def create_app() -> FastAPI:
             log_type=log_type, action=action, search=search,
             start_ts=start_ts, marked_safe=marked_safe,
         )
+        _sync_reputation_after_log_delete()
         logger.info("按筛选条件删除日志 %d 条", deleted)
         return {"ok": True, "deleted": deleted, "dry_run": False}
 
@@ -2530,6 +2533,38 @@ def _record_reputation(
 def _finding_categories(findings) -> List[str]:
     """从 findings 里取出检测项类别，供信誉归因使用。"""
     return [f.category for f in findings if getattr(f, "category", "")]
+
+
+def _sync_reputation_after_log_delete() -> None:
+    """删日志后把中转站计数按剩余日志重算（2026-10-04）。
+
+    ★ 为什么必须有
+    ────────────────────────────────────────────────────────────
+    relay_reputation 的计数是**累加**值，而首页 KPI 是从 logs 实时算的。
+    删日志只影响后者，于是「清空日志后首页归零、中转站卡片
+    还写着 3 次调用」—— 两个数字都"对"，口径不同，用户只看到矛盾。
+    实测（2026-10-04）：
+
+        清空日志后   首页今日调用 3 → 0 ✓
+                     中转站卡片总调用 3 → 3 ✗
+
+    ★ 为什么放在路由层而不是 storage 层：
+      重算需要 _classify（谁的责任）与 _compute_score（扣多少分），
+      两者都在 reputation/tracker.py。让 storage 反向依赖 tracker
+      会把分层倒过来；由路由层编排 pump 一次即可。
+
+    ★ 失败只告警不抛错：
+      「删日志」已经成功落库了，同步失败不该让用户看到删除报错 ——
+      那会让他以为没删掉，然后反复删。下次删除或重启会再对齐一次。
+    """
+    if _reputation is None or _storage is None:
+        return
+    try:
+        _reputation.rebuild_from_facts(_storage.iter_log_facts())
+        for rep in _reputation.list_all():
+            _storage.upsert_reputation(rep)
+    except Exception as e:  # noqa: BLE001 — 同步失败不影响删除结果
+        logger.warning("中转站计数同步失败（不影响本次删除）: %s", e)
 
 
 def _proxy_error(domain, model, session_id, message, t0, log_type):

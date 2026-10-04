@@ -298,9 +298,12 @@ jobs:
           #   top_domains          ← 日志概览统计
           #   _recompute_daily_stats ← 删日志后首页统计同步（曾清空了数字还在）
           #   wal_checkpoint        ← 原始敏感值真正离开磁盘
+          #   OBSERVATION_ONLY_SIGNALS ← 内容合规不再当作中转站篡改
+          #   rebuild_from_facts    ← 中转站计数随日志重算
           MISSING=0
           for MARK in 'marked_safe = ?' 'top_domains' \
-                      '_recompute_daily_stats' 'wal_checkpoint'; do
+                      '_recompute_daily_stats' 'wal_checkpoint' \
+                      'OBSERVATION_ONLY_SIGNALS' 'rebuild_from_facts'; do
             if grep -qa -- "$MARK" "$ENGINE"; then
               echo "  ✓ $MARK"
             else

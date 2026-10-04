@@ -202,12 +202,16 @@ tests/*
 #   test_delete_e2e —— 同一条契约的真实 HTTP 端到端版。
 #     上一份只调存储方法，而历史失效形态恰恰是
 #     「底层方法对、路由没走它」，所以判据必须落在端点上。
+#   test_content_policy_and_relay_sync —— 内容合规不得当作中转站篡改
+#     （曾把「模型说了敏感词」翻成「中转站偷偷改写 AI 行为」），
+#     以及中转站计数须随删日志重算（曾首页归零、卡片不动）。
 !tests/test_dev_isolation.py
 !tests/test_statistical_never_blocks.py
 !tests/test_log_filters.py
 !tests/test_route_order.py
 !tests/test_log_deletion_consistency.py
 !tests/test_delete_e2e.py
+!tests/test_content_policy_and_relay_sync.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py
