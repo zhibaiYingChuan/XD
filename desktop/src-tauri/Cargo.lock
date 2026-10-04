@@ -5199,7 +5199,7 @@ dependencies = [
 
 [[package]]
 name = "xuandun-personal"
-version = "0.1.4-alpha"
+version = "0.1.5-alpha"
 dependencies = [
  "parking_lot",
  "reqwest 0.12.28",

@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daoti-xuandun-personal"
-version = "0.1.4a0"
+version = "0.1.5a0"
 description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据与执行安全"
 readme = "README.md"
 requires-python = ">=3.11"
