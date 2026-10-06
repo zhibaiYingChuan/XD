@@ -31,11 +31,13 @@ standalone 是一堆 dll + 主 exe，无自解压，干净得多。
     python build_engine.py --allow-missing-pubkey
 """
 
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import time
 
 # ★★ Windows 终端默认 GBK 编码，遇到「→」「★」这类字符会抛
 #   UnicodeEncodeError 直接把构建打断。GitHub 的 windows-latest
@@ -97,6 +99,26 @@ def _triple() -> str:
         target = f"{machine}-unknown-linux-gnu"
         ext = ""
     return f"xuandun-engine-{target}{ext}"
+
+
+def _git(*args: str) -> str:
+    """取仓库事实（失败返回 "unknown"，不抛异常）。
+
+    ★ 构建指纹必须**绝不阻断构建**：拿不到 commit 信息只是指纹残缺，
+    而 CI 会因为 sha 不等于本次提交而拦下发布 —— 那才是该报错的地方。
+    本地在非 git 目录里构建时不该因此失败。
+    """
+    try:
+        out = subprocess.run(
+            ["git", *args], cwd=PERSONAL_ROOT,
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if out.returncode == 0:
+            return out.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
 
 
 def main() -> int:
@@ -414,6 +436,42 @@ def main() -> int:
                 print(f"AppImage 兼容：已平铺 {_n} 个 numpy .so 到引擎目录根部")
                 print("  注意：这不足以让 AppImage 通过（见上方说明），"
                       "Linux 主力交付格式是 deb。")
+
+    # ══════════════════════════════════════════════════════════
+    # 构建指纹：把「这次编译用的是哪个 commit」落成**数据**
+    # ══════════════════════════════════════════════════════════
+    #
+    # ★ 为什么必须换掉「在二进制里 grep 关键字」的做法（2026-10-07）
+    #   发布门禁原先是 grep 一串标记字符串，用来防「改完源码没重新
+    #   编译」。它在 mac-arm64 上**连续两次误报**，且每次标记都不同：
+    #     ① 模块级函数名 `_derive_session_id` 被 Nuitka 内联优化，
+    #        名字不再作为字符串存在于二进制；
+    #     ② 改用字面量后，短前缀 `sess-` 又被常量折叠/合并吃掉 ——
+    #        而同一次构建里 `.corrupt-`、`配置文件解析失败`、
+    #        `dangerous_content` **都在位**，即代码确实已编入，
+    #        门禁却报「编译的是旧源码」，白跑 30 分钟。
+    #
+    #   根因不是标记选得不好，而是**判据选错了**：关键字在不在完全由
+    #   编译器优化策略支配，随平台与 Nuitka 版本漂移。拿它当门禁，
+    #   只能一次次换标记，是打地鼠。
+    #
+    # ★ 指纹比「关键字存在」更强，且与编译器行为彻底解耦：
+    #   它直接回答「产物对应哪个 commit」，而非「大概像新代码」。
+    #   没重新编译时，这里留着的是上一次的 SHA → CI 比对必然不一致
+    #   → 恰好拦下它本来要拦的那件事，且不会因优化差异误报。
+    info = {
+        "git_sha": _git("rev-parse", "HEAD"),
+        "git_ref": _git("describe", "--tags", "--always", "--dirty"),
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "engine": final_engine_name,
+        "has_guardrail": bool(has_guardrail),
+        "python": platform.python_version(),
+        "platform": platform.system(),
+    }
+    with open(os.path.join(RESOURCE_ENGINE_DIR, "BUILD_INFO.json"), "w",
+              encoding="utf-8") as _f:
+        json.dump(info, _f, ensure_ascii=False, indent=2)
+    print(f"构建指纹: git_sha={info['git_sha'][:12]} ref={info['git_ref']}")
 
     count = len(os.listdir(RESOURCE_ENGINE_DIR))
     size_mb = sum(

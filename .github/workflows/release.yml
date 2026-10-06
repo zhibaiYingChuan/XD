@@ -280,10 +280,10 @@ jobs:
       #   只有「新加的那个接口」报 422 或404，
       #   而报错信息与「引擎是旧的」毫无关系。
       #
-      #   判据：引擎二进制里必须含本轮新增功能的独有标识。
-      #   选标识的原则是「只在修复后才出现」——
-      #   用修复前就存在的字符串做判据，等于没检查。
-      - name: Assert engine contains this build's code
+      #   判据：引擎产物的**构建指纹**必须指向本次构建的 commit。
+      #   见下方 2026-10-07 说明 —— 换成指纹是因为
+      #   「在二进制里 grep 关键字」这个判据本身不可靠。
+      - name: Assert engine matches this build's commit
         shell: bash
         run: |
           set -euo pipefail
@@ -293,46 +293,53 @@ jobs:
             exit 1
           fi
           echo "引擎：$ENGINE"
-          # 每条标识都对应一个「装出来才发现功能不对」的历史缺陷：
-          #   marked_safe = ?      ← 日志筛选条件（曾「共 128 条却筛不出来」）
-          #   top_domains          ← 日志概览统计
-          #   _recompute_daily_stats ← 删日志后首页统计同步（曾清空了数字还在）
-          #   wal_checkpoint        ← 原始敏感值真正离开磁盘
-          #   OBSERVATION_ONLY_SIGNALS ← 内容合规不再当作中转站篡改
-          #   rebuild_from_facts    ← 中转站计数随日志重算
-          #   _PKG_DAILY_WORDS      ← 日常词不再被判成 typosquat（曾拦下编码对话）
-          #   reputation_key        ← 信誉按「主机#Key指纹」区分账号
-          #   _TOOL_NAME_RE         ← 工具名形态校验（曾把命令行文本当工具名）
-          #   _align_derived_state  ← 启动时对齐派生数据（曾日志空了还扣着分）
-          #   dangerous_content     ← 正文危险命令不再阻断（曾拦下编程助手正常输出）
-          #   （下列 4 条用**字符串字面量**而非标识符，原因见下）
+
+          # ★★ 2026-10-07：判据从「在二进制里 grep 关键字」换成
+          #   「比对构建指纹里的 git SHA」。
           #
-          # ★★ 2026-10-04：标识必须选**字符串字面量**，不能用函数/类名。
-          #   实测：v0.1.8-alpha 的 mac-arm64 作业里，模块级小函数
-          #   `_derive_session_id` 被 Nuitka 内联优化掉，名字不再作为字符串
-          #   存在于二进制中 → 门禁误报「编译的是旧源码」，白跑 30 分钟。
-          #   而同批的 win/linux 因 Nuitka 版本差异未做该优化，全部通过。
-          #   字面量（日志文案、分类名、正则模式）不可能被优化掉，才是可靠判据。
-          MISSING=0
-          for MARK in 'marked_safe = ?' 'top_domains' \
-                      '_recompute_daily_stats' 'wal_checkpoint' \
-                      'OBSERVATION_ONLY_SIGNALS' 'rebuild_from_facts' \
-                      '_PKG_DAILY_WORDS' 'reputation_key' \
-                      '_TOOL_NAME_RE' '_align_derived_state' \
-                      'dangerous_content' '中转站返回 HTTP ' \
-                      'sess-' '.corrupt-' '配置文件解析失败'; do
-            if grep -qa -- "$MARK" "$ENGINE"; then
-              echo "  ✓ $MARK"
-            else
-              # ★ 必须用 ${MARK} 花括号界定变量名：$MARK 紧跟多字节字符
-              #   （如「」）时，macOS 的 bash 会把该字符的首字节当成变量名的
-              #   一部分 → 报 unbound variable，把「缺标识」变成「脚本崩溃」。
-              echo "::error::引擎缺少标识「${MARK}」—— 编译的是旧源码，请重新运行 build_engine.py"
-              MISSING=$((MISSING + 1))
-            fi
-          done
-          test "$MISSING" -eq 0 || exit 1
-          echo "PASS：引擎已编入本次构建的代码"
+          #   旧判据在 mac-arm64 上**连续两次误报**，且每次标记都不同：
+          #     ① 模块级函数名 `_derive_session_id` 被 Nuitka 内联优化，
+          #        名字不再作为字符串存在于二进制；
+          #     ② 改用字符串字面量后，短前缀 `sess-` 又被常量折叠吃掉 ——
+          #        而同一次构建里 `.corrupt-`、`配置文件解析失败`、
+          #        `dangerous_content` 全部在位，即代码确实已编入，
+          #        门禁却报「编译的是旧源码」，白跑 30 分钟。
+          #
+          #   根因不是标记选得不好，而是**判据选错了**：某个关键字在不在
+          #   完全由编译器优化策略支配，随平台与 Nuitka 版本漂移。
+          #   拿它当门禁，只能一次次换标记，是打地鼠。
+          #
+          #   构建指纹（build_engine.py 产出）与编译器行为彻底解耦，
+          #   且比关键字**更强** —— 它回答的是「产物对应哪个 commit」，
+          #   而不是「大概像新代码」。没重新编译时，指纹里留着的是上一次
+          #   的 SHA，比对必然不一致，恰好拦下它本来要拦的那件事，
+          #   且不会因优化差异误报。
+          STAMP=desktop/src-tauri/resources/engine/BUILD_INFO.json
+          if [ ! -f "$STAMP" ]; then
+            echo "::error::缺少构建指纹 BUILD_INFO.json —— 引擎未经 build_engine.py 构建"
+            exit 1
+          fi
+          _read_stamp() {
+            python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))[sys.argv[2]])" "$STAMP" "$1"
+          }
+          BUILT_SHA=$(_read_stamp git_sha)
+          echo "指纹 commit: $BUILT_SHA"
+          echo "本次 commit: $GITHUB_SHA"
+          if [ "$BUILT_SHA" = "unknown" ]; then
+            echo "::error::构建指纹里没有 commit（构建时取不到 git 信息）"
+            exit 1
+          fi
+          if [ "$BUILT_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::引擎产物的 commit（$BUILT_SHA）与本次构建（$GITHUB_SHA）不一致 —— 编译的是旧源码，请重新运行 build_engine.py"
+            exit 1
+          fi
+          # 指纹还须证明护栏层被编入：缺护栏 = 提示词注入与敏感泄露
+          # 两层检测静默失效，而界面照常显示「防护中」。
+          if [ "$(_read_stamp has_guardrail)" != "True" ]; then
+            echo "::error::构建指纹显示护栏层未编入 —— 产物缺少提示词注入与敏感泄露检测"
+            exit 1
+          fi
+          echo "PASS：引擎产物的 commit 与本次构建一致，且护栏层已编入"
 
       # ★★★ 产物级断言：本 workflow 存在的核心理由
       #
