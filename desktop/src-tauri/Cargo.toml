@@ -1,6 +1,6 @@
 [package]
 name = "xuandun-personal"
-version = "0.1.8-alpha"
+version = "0.1.9-alpha"
 description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据安全"
 authors = ["Daoti Team"]
 edition = "2021"

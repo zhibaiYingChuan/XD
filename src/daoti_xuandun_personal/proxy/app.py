@@ -252,7 +252,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="道体·玄盾 个人版",
         description="保护个人用户在使用 AI 中转站时的数据安全",
-        version="0.1.8-alpha",
+        version="0.1.9-alpha",
         lifespan=lifespan,
         docs_url="/docs",
     )
