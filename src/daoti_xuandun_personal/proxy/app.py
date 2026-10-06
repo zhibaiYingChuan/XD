@@ -1062,8 +1062,25 @@ def create_app() -> FastAPI:
             state = "suspect"
             message = f"今日发现 {today['suspect_count']} 次可疑响应"
         elif today["total_calls"] == 0:
-            state = "learning"
-            message = "等待第一次请求..."
+            # ★★ 「今日 0 次」不等于「从未有过请求」（2026-10-07 修复）
+            #
+            #   daily_stats 按自然日一行，跨零点后当天还没有行，
+            #   首页 KPI 与状态栏会**同时归零**。这本身是正常的日切，
+            #   但原来的文案无条件说「等待第一次请求...」——
+            #   对一个已经用了几百次、卡片上明明写着「已使用 7 天 ·
+            #   914 次调用」的用户，这话等于在说「你的数据没了」或
+            #   「防护一直没生效」。用户来问「为什么统计全是 0」，
+            #   根源就是这句把「日切」讲成了「从未使用」。
+            #
+            #   判据用全量日志数，而不是 relay_reputation 的累计调用：
+            #   日志是事实层（SSOT），信誉表是派生层 —— 派生层损坏或
+            #   被重建时不该让状态栏改口。
+            if _storage.count_logs() > 0:
+                state = "protecting"
+                message = "今日暂无请求，防护待命中"
+            else:
+                state = "learning"
+                message = "等待第一次请求..."
         else:
             state = "protecting"
             message = f"今日已检查 {today['total_calls']} 次请求"
