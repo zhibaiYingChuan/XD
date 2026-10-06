@@ -304,25 +304,30 @@ jobs:
           #   reputation_key        ← 信誉按「主机#Key指纹」区分账号
           #   _TOOL_NAME_RE         ← 工具名形态校验（曾把命令行文本当工具名）
           #   _align_derived_state  ← 启动时对齐派生数据（曾日志空了还扣着分）
-          #   _handle_upstream_error ← 上游 4xx/5xx 不再记成「检测通过」
-          #   _derive_session_id     ← 多客户端会话隔离（曾共用 default 串号）
-          #   _LockedConn            ← 数据库跨线程串行化
-          #   _quarantine_db         ← 数据库损坏自动隔离重建（曾整体起不来）
-          #   dangerous_content      ← 正文危险命令不再阻断（曾拦下编程助手正常输出）
-          #   _PROMPT_INJECT_REASON_MARKS ← 提示词注入只看护栏 reason（曾误判中转站篡改）
+          #   dangerous_content     ← 正文危险命令不再阻断（曾拦下编程助手正常输出）
+          #   （下列 4 条用**字符串字面量**而非标识符，原因见下）
+          #
+          # ★★ 2026-10-04：标识必须选**字符串字面量**，不能用函数/类名。
+          #   实测：v0.1.8-alpha 的 mac-arm64 作业里，模块级小函数
+          #   `_derive_session_id` 被 Nuitka 内联优化掉，名字不再作为字符串
+          #   存在于二进制中 → 门禁误报「编译的是旧源码」，白跑 30 分钟。
+          #   而同批的 win/linux 因 Nuitka 版本差异未做该优化，全部通过。
+          #   字面量（日志文案、分类名、正则模式）不可能被优化掉，才是可靠判据。
           MISSING=0
           for MARK in 'marked_safe = ?' 'top_domains' \
                       '_recompute_daily_stats' 'wal_checkpoint' \
                       'OBSERVATION_ONLY_SIGNALS' 'rebuild_from_facts' \
                       '_PKG_DAILY_WORDS' 'reputation_key' \
                       '_TOOL_NAME_RE' '_align_derived_state' \
-                      '_handle_upstream_error' '_derive_session_id' \
-                      '_LockedConn' '_quarantine_db' \
-                      'dangerous_content' '_PROMPT_INJECT_REASON_MARKS'; do
+                      'dangerous_content' '中转站返回 HTTP ' \
+                      'sess-' '.corrupt-' '配置文件解析失败'; do
             if grep -qa -- "$MARK" "$ENGINE"; then
               echo "  ✓ $MARK"
             else
-              echo "::error::引擎缺少标识「$MARK」—— 编译的是旧源码，请重新运行 build_engine.py"
+              # ★ 必须用 ${MARK} 花括号界定变量名：$MARK 紧跟多字节字符
+              #   （如「」）时，macOS 的 bash 会把该字符的首字节当成变量名的
+              #   一部分 → 报 unbound variable，把「缺标识」变成「脚本崩溃」。
+              echo "::error::引擎缺少标识「${MARK}」—— 编译的是旧源码，请重新运行 build_engine.py"
               MISSING=$((MISSING + 1))
             fi
           done
