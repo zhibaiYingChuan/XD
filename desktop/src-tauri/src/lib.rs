@@ -190,26 +190,49 @@ fn proxy_base() -> String {
 // 具体的机器码采集、状态存储、时钟回拨逻辑都在 license.rs，
 // 这里只做「调引擎验签 + 编排 + 暴露 Tauri 命令」。
 
-/// 调引擎的 /api/license/verify（真实验签在引擎侧）。
+/// 调引擎的验签相关端点（真实验签在引擎侧）。
 ///
 /// ★ 不再传 machine_code —— 引擎自己采集。
 ///   旧契约是「Rust 采集 → 传给引擎」，那份采集既不稳定
 ///   （取磁盘卷标，插拔硬盘就变）又与签发工具算法漂移，
 ///   线上表现为「按界面机器码申请的码激活失败」。
-async fn engine_verify(app: &tauri::AppHandle, code: &str) -> Result<license::VerifyOutcome, String> {
+///
+/// ★ 抽成带 path 的形式，是为了让「只读校验」与「激活落锚」
+///   走两个不同端点（见下方 engine_verify / engine_activate 的说明）。
+async fn engine_verify_at(
+    app: &tauri::AppHandle,
+    code: &str,
+    path: &str,
+) -> Result<license::VerifyOutcome, String> {
     ensure_engine_running(app).await?;
     let body = serde_json::json!({
         "code": code,
         "now": license::now_unix(),
     });
-    let v = proxy_call(
-        reqwest::Method::POST,
-        "/api/license/verify",
-        Some(body),
-        REQ_NORMAL,
-    )
-    .await?;
+    let v = proxy_call(reqwest::Method::POST, path, Some(body), REQ_NORMAL).await?;
     serde_json::from_value(v).map_err(|e| format!("验签结果解析失败: {e}"))
+}
+
+/// 常规校验（**只读**，不写激活锚点）。
+///
+/// ★ 启动、切页等任何状态查询都走这里：verify 端点不落锚点，
+///   否则每次查询都会刷新「激活时刻」，有效期被无限续。
+async fn engine_verify(
+    app: &tauri::AppHandle,
+    code: &str,
+) -> Result<license::VerifyOutcome, String> {
+    engine_verify_at(app, code, "/api/license/verify").await
+}
+
+/// 用户主动激活 —— 走落锚端点，首次激活成功会记录激活时刻。
+///
+/// ★ 只有「用户点击激活」这一条路径该走它；常规状态查询必须走
+///   engine_verify（只读），否则锚点会被反复刷新。
+async fn engine_activate(
+    app: &tauri::AppHandle,
+    code: &str,
+) -> Result<license::VerifyOutcome, String> {
+    engine_verify_at(app, code, "/api/license/activate").await
 }
 
 /// 向引擎索取本机机器码（哈希形式）。
@@ -331,7 +354,10 @@ async fn activate_license(app: tauri::AppHandle, code: String) -> Result<License
         return Err("请输入激活码".into());
     }
 
-    let outcome = engine_verify(&app, &trimmed).await?;
+    // ★ 走**激活**端点而非只读验签：首次激活成功时引擎会落「激活锚点」，
+    //   后续有效期从这一刻起算。状态查询路径（build_license_status）
+    //   仍走只读的 engine_verify，不会刷新锚点。
+    let outcome = engine_activate(&app, &trimmed).await?;
     if !outcome.ok {
         // 验签组件不可用 ≠ 码无效，必须分开说，
         // 否则用户会反复换码却永远激活不了。

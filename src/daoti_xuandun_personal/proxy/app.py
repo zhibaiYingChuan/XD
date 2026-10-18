@@ -252,7 +252,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="道体·玄盾 个人版",
         description="保护个人用户在使用 AI 中转站时的数据安全",
-        version="0.1.9-alpha",
+        version="0.1.10-alpha",
         lifespan=lifespan,
         docs_url="/docs",
     )
@@ -1880,6 +1880,37 @@ def create_app() -> FastAPI:
 
         # 校验通过才推进时钟水位 —— 失败的尝试不该影响基线，
         # 否则用户输错一次码后修正系统时间反而会被判定回拨。
+        if result.ok:
+            lic.write_last_seen(lic.now_unix())
+
+        return result.to_dict()
+
+    @app.post("/api/license/activate")
+    async def license_activate(payload: Dict[str, Any] = Body(...)):
+        """用户**主动激活**：验签通过后落一次「激活锚点」。
+
+        ★ 为什么与 /api/license/verify 分开而不是复用：
+          verify 会被**每次状态查询**调用（Rust 侧 build_license_status
+          在启动、切页时都会走它）。激活锚点必须只在「首次激活」落一次，
+          若混在同一端点，常规查询会不断把 activatedAt 刷新成当前时刻，
+          「从激活日起算」就永远算不出过期。
+          所以：读路径走 verify（无副作用），写路径走本端点。
+
+        ★ 其余语义（机器码由本引擎采集、只回传结论、失败不推进水位）
+          与 verify 完全一致。
+        """
+        from .. import license as lic
+
+        code = str(payload.get("code") or "")
+        now = payload.get("now")
+
+        result = lic.activate(
+            code,
+            lic.machine_code_hash(lic.machine_code()),
+            now=now,
+        )
+
+        # 与 verify 端点一致：成功才推进时钟水位
         if result.ok:
             lic.write_last_seen(lic.now_unix())
 

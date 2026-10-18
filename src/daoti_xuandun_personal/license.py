@@ -66,6 +66,12 @@ _CLOCK_DRIFT_TOLERANCE = 300
 # 持久化「上次校验通过时刻」的文件名
 _STATE_FILE = "license_seen.json"
 
+# 持久化「首次激活时刻」（激活锚点）的文件名。
+# ★ 与时钟水位放进**同一个数据目录**（paths.data_file）：两者都是
+#   「本机状态」，隔离口径（XUANDUN_DATA_DIR）必须一致 ——
+#   否则开发/测试会去改稳定版用户的激活锚点。
+_ANCHOR_FILE = "license_anchor.json"
+
 
 def machine_code_hash(machine_code: str) -> str:
     """机器码 → 激活码内使用的哈希。
@@ -445,6 +451,9 @@ class VerifyResult:
     exp: Optional[int] = None
     features: List[str] = field(default_factory=list)
     verifier_available: bool = True
+    # 换绑代次。本字段是**新增的记录用途**：activate() 需要把它写进
+    # 激活锚点备查，故由 verify() 一并带出。默认 0，旧调用方不受影响。
+    gen: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -457,6 +466,7 @@ class VerifyResult:
             "exp": self.exp,
             "features": self.features,
             "verifierAvailable": self.verifier_available,
+            "gen": self.gen,
         }
 
 
@@ -578,6 +588,99 @@ def check_clock_rollback(now: int, last_seen: Optional[int]) -> Optional[str]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 激活锚点（有效期「从激活日起算」的落点）
+# ══════════════════════════════════════════════════════════════
+#
+# ★ 为什么要有它
+#   激活码的 ``exp`` 语义现在降级为「这张码的**最终失效时间**」，
+#   而真正的天数从**用户首次激活那一刻**起算 —— 用户领了码隔几天
+#   才激活，不该白白损失那几天。
+#
+# ★ 它存的是什么
+#   ``{"jti": 码的唯一 ID, "activatedAt": 首次激活的 Unix 秒,
+#     "gen": 换绑代次（仅记录备查，**不参与判定**）}``
+#
+# ★ 容错口径与时钟水位保持一致：读失败一律当「没有锚点」返回 None，
+#   绝不抛异常 —— verify() 的契约是「永远返回结论」，一个损坏的
+#   本地文件不该让整条验签链路抛错。
+
+
+def _anchor_path() -> str:
+    return str(paths.data_file(_ANCHOR_FILE))
+
+
+def read_activation_anchor() -> Optional[dict]:
+    """读取激活锚点；文件缺失 / 损坏 / 非 JSON / 字段不全一律返回 None。
+
+    ★ 返回 None 表示「本机尚无有效锚点」，语义上等同于「尚未激活」。
+      调用方（verify）据此**跳过** days 判定，把最终失效交给 exp 兜底 ——
+      所以这里的容错方向是安全的：读不到锚点只会让判定更宽松，
+      而宽松的后果是「码活到 exp」，不会误杀已付费用户。
+    """
+    import json
+
+    try:
+        with open(_anchor_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+
+    if not isinstance(data, dict):
+        # 内容不是对象 = 文件被改坏，按「无锚点」处理
+        return None
+    try:
+        jti = str(data.get("jti", ""))
+        activated_at = int(data.get("activatedAt", 0))
+        gen = int(data.get("gen", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if not jti or activated_at <= 0:
+        # 关键字段缺失/非法 = 锚点不可信，当没有
+        return None
+    return {"jti": jti, "activatedAt": activated_at, "gen": gen}
+
+
+def write_activation_anchor(jti: str, activated_at: int, gen: int = 0) -> None:
+    """写入激活锚点（原子写）。失败静默，与 write_last_seen 一致。
+
+    ★ 原子写（临时文件 + os.replace）：进程若在写一半时被杀，
+      半截 JSON 会让锚点整体不可读。原子替换保证读到的是
+      「上一份完整内容」或「这一份完整内容」，不会是中间态。
+
+    ★ 静默失败：锚点写不进去（磁盘只读、权限不足）时，
+      verify 退化成「只按 exp 判过期」—— 是能力降级，
+      而不是让用户激活流程整个报错。
+    """
+    import json
+    import tempfile
+
+    p = _anchor_path()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "jti": str(jti),
+                        "activatedAt": int(activated_at),
+                        "gen": int(gen),
+                    },
+                    f,
+                )
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        # 写锚点失败不影响激活结论本身，静默降级
+        pass
+
+
+# ══════════════════════════════════════════════════════════════
 # 验签
 # ══════════════════════════════════════════════════════════════
 
@@ -683,6 +786,47 @@ def verify(
         #   从错误文案推断出「这里是验签点」。
         return VerifyResult(False, "bad_signature", "激活码无效，请确认是玄盾官方发出的码")
 
+    # 签名已通过 → payload 可信，可安全取出 jti（供下方过期判定与吊销检查共用）。
+    jti = str(claims.get("jti", ""))
+
+    # ★★ 以「首次激活日」起算的有效期（days claim）
+    #
+    # 背景：exp 已降级为「这张码的最终失效时间」，用户领码后隔几天才激活，
+    # 有效天数应从**首次激活那一刻**起算，而不是签发时刻。
+    #
+    # ★ 兼容性铁律：本阶段客户端先行支持 days，而服务端尚未签发该 claim。
+    #   因此只要 claims **不含** days（存量码全是这种），本段完全跳过，
+    #   过期判定仍**仅由 exp 决定**，行为与改动前逐字节一致。
+    #   违反这条会让全部存量用户激活失败。
+    #
+    # ★ 为什么无锚点（尚未激活）时不判过期：
+    #   锚点由 activate() 在首次激活成功时写入；若此处就按 days 判过期，
+    #   一张刚签发、带 days 的码在首次激活前就会因「锚点缺失」被误杀。
+    #   此阶段码的最终失效由 exp 兜底（PyJWT 已在上方校验）。
+    #
+    # ★ 为什么只比 jti、不比 gen：
+    #   rebind 换绑保持 jti 不变、只递增 gen。若把 gen 也纳入比对，
+    #   换机换绑（gen 变了）后旧锚点会被判为「不属于这张码」而丢弃，
+    #   等于让换机用户**重新计时** —— 那是我们要避免的。故这里认码不认代次，
+    #   gen 仅作为记录字段存进锚点备查。
+    _days_raw = claims.get("days")
+    if _days_raw is not None:
+        try:
+            _days_int = int(_days_raw)
+        except (TypeError, ValueError):
+            # days 不是合法整数 → 视为未提供，退回纯 exp 判定
+            _days_int = 0
+        if _days_int > 0:
+            _anchor = read_activation_anchor()
+            if _anchor and _anchor.get("jti") == jti:
+                if now > int(_anchor["activatedAt"]) + _days_int * 86400:
+                    return VerifyResult(
+                        False,
+                        "expired",
+                        "激活码已过期，请联系售后来延长",
+                        jti=jti,
+                    )
+
     got_mch = str(claims.get("mch", ""))
     # ★ 只要**任一侧**没有机器码，就不比对。
     #   引擎侧传空串（独立进程拿不到 Rust 采集的机器码）。
@@ -700,8 +844,7 @@ def verify(
     #
     # ★ 必须放在**验签之后**：jti 来自未经验证的 payload 时，
     #   任何人都能构造 {"jti": "<别人的 jti>"} 把别人的码吊销掉。
-    #   只有签名通过的 jti 才是可信的。
-    jti = str(claims.get("jti", ""))
+    #   只有签名通过的 jti 才是可信的（已于上方取出并复用）。
     # gen 是换绑代次：同一 jti 换绑后 jti 不变，只有 gen 递增。
     # 缺失时按 0 处理（首版签发的码都没有这个字段）。
     try:
@@ -738,7 +881,47 @@ def verify(
         jti=jti,
         exp=int(claims.get("exp", 0)),
         features=list(claims.get("features", []) or []),
+        gen=gen,
     )
+
+
+def activate(
+    code: str,
+    mch: str,
+    now: Optional[int] = None,
+) -> VerifyResult:
+    """用户**主动激活**时调用：验签成功则落一次激活锚点。
+
+    ★ 与 verify() 的分工（这个分离是刻意设计，不是重复）：
+      - ``verify()`` 是**只读**判定，每次启动 / 每次状态查询都会走它，
+        绝不写盘 —— 契约是「永远返回结论且无副作用」。
+      - ``activate()`` 在此基础上多一个副作用：把「首次激活时刻」落盘，
+        供后续 ``verify()`` 依 days 判定过期。它只在用户点击激活的
+        路径上被调用，避免常规校验把锚点反复刷新。
+
+    ★ 为什么失败时不落锚：一张验不过的码若也占了锚点，
+      用户改正后重新激活时锚点已被写坏，反而要被重新计时。
+      所以只有 ``ok=True`` 才写。
+
+    ★ 为什么重复激活不覆盖已有锚点：若每次点击都重写 activatedAt，
+      用户多点几次「激活」就能把有效期往后推，与「从首次激活日
+      起算」的目的相悖。同一 jti 已有锚点即保留其原始时刻。
+
+    ``now`` 与 ``verify()`` 语义一致：既是时钟回拨判据输入，
+      也用作本机记录的激活时刻（不传则取真实系统时间）。
+    """
+    result = verify(code, mch, now=now)
+    if not result.ok:
+        return result
+
+    existing = read_activation_anchor()
+    if existing and existing.get("jti") == result.jti:
+        # 同一张码（jti 相同）已有锚点 → 保留首次激活时刻，不刷新
+        return result
+
+    ts = int(now if now is not None else now_unix())
+    write_activation_anchor(result.jti or "", ts, result.gen)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
