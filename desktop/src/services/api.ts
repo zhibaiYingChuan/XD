@@ -274,6 +274,29 @@ export interface Diagnostics {
 }
 
 /**
+ * 引擎（本地守护进程）的运行状态。
+ *
+ * ★ 字段名是 **snake_case**，与上面的 LicenseStatus 正好相反 ——
+ *   Rust 侧 `EngineStatus`（src-tauri/src/lib.rs）**没有**标
+ *   `#[serde(rename_all = "camelCase")]`，序列化后原样输出下划线命名。
+ *   若写成 camelCase，TypeScript 不会报错（那只是本地 interface），
+ *   但运行时字段全是 undefined —— 而 `startup_error` 恰恰是
+ *   「引擎为什么起不来」的唯一线索，显示成空白等于把排障入口焊死。
+ */
+export interface EngineStatus {
+  /** 引擎进程是否在运行 */
+  running: boolean;
+  /** 健康检查是否通过（running 但 healthy=false = 起了还没就绪） */
+  healthy: boolean;
+  /** 最近一次启动失败的原因（正常时为 null） */
+  startup_error: string | null;
+  /** 启动时间（Unix 秒；未启动为 null） */
+  started_at: number | null;
+  /** 最近一次健康检查时间（Unix 秒） */
+  last_check: number | null;
+}
+
+/**
  * 激活状态。
  *
  * ★ 字段名是 **camelCase**，不是 snake_case。
@@ -476,6 +499,35 @@ export const api = {
     call<StatsResponse>('get_stats', 'GET', `/api/stats?days=${days}`, { days }, TIMEOUT.NORMAL),
   getDiagnostics: () =>
     call<Diagnostics>('get_diagnostics', 'GET', '/api/diagnostics', undefined, TIMEOUT.NORMAL),
+
+  // ── 引擎运行状态（Rust 侧命令，非代理 HTTP 接口）──
+  //
+  // ★ 这两个命令由 Rust 侧直接维护「本机引擎进程」的状态与重启，
+  //   并不存在对应的 Python HTTP 端点。所以这里不能用通用的 call()——
+  //   它会退化成对 /api/engine/... 发请求，那个路由根本不存在。
+  /**
+   * 读取引擎运行状态。
+   *
+   * ★ 浏览器预览模式没有 Tauri IPC，也就没有本地引擎进程可查：
+   *   返回 null 让调用方按「不可用」降级展示，
+   *   而不是抛错把设置页整个打崩（参考同文件 getActivePort 的降级写法）。
+   */
+  getEngineStatus: async (): Promise<EngineStatus | null> => {
+    if (!isTauri()) return null;
+    return invoke<EngineStatus>('get_engine_status');
+  },
+  /**
+   * 重启引擎（Rust 侧「先停后起」，全程持锁保证原子性）。
+   *
+   * ★ 只有桌面版能做：浏览器预览模式没有该命令，
+   *   抛一个可识别的错误让界面给出明确提示，而不是静默无反应。
+   */
+  restartEngine: async (): Promise<void> => {
+    if (!isTauri()) {
+      throw new Error('重启引擎仅在桌面版可用');
+    }
+    await invoke<void>('restart_engine');
+  },
 
   // ── 日志 ──
   getLogs: (params: {

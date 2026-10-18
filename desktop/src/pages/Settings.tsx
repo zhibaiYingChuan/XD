@@ -24,6 +24,7 @@ import {
   Loader2,
   CheckCircle2,
   Info,
+  RefreshCw,
 } from 'lucide-react';
 import {
   api,
@@ -37,9 +38,10 @@ import {
   type RelayPrecheck,
   type RelayTestResult,
   type ConfiguredRelay,
+  type EngineStatus,
 } from '../services/api';
 import { useToast } from '../components/Toast';
-import { copyToClipboard, openExternal } from '../lib/tauriShim';
+import { copyToClipboard, openExternal, isTauri } from '../lib/tauriShim';
 
 // ══════════════════════════════════════════════════════════════
 // 常量
@@ -91,6 +93,23 @@ function describeRelayStatus(status: number): string {
   if (status === 429) return `${status}（请求太频繁）`;
   if (status >= 500) return `${status}（对方服务器出错）`;
   return String(status);
+}
+
+/**
+ * 取报错文本的首行作为「一句话原因」。
+ *
+ * ★ 引擎启动错误可能带着多行堆栈一起抛上来，直接铺开会把用户吓退，
+ *   且他要的只是「为什么起不来」这一句。首行通常就是那句话，
+ *   完整内容折叠起来给愿意核对/报障的人看即可。
+ */
+function firstLine(text: string): string {
+  const line = text.split('\n')[0].trim();
+  return line || text.trim();
+}
+
+/** 报错文本是否需要折叠（多行或过长时）——只显示首行、余下收进 details。 */
+function isLongError(text: string): boolean {
+  return text.includes('\n') || text.length > 100;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -145,6 +164,13 @@ export default function Settings() {
     name: '', base_url: '', api_key: '',
   });
 
+  // ★ 引擎运行状态 + 版本 + 重启中标志。
+  //   engine 为 null 表示这一刻拿不到（浏览器预览模式没有本地引擎，
+  //   或命令异常）—— 区块据此降级为不可用提示，而不是崩掉整个设置页。
+  const [engine, setEngine] = useState<EngineStatus | null>(null);
+  const [engineVersion, setEngineVersion] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState(false);
+
   // 已配置列表的加载刻意**不并入**上面的 load()：
   // 那是配置页的主数据，一旦它失败（引擎未起），
   // 切换列表也会跟着空掉，而两者本不该互相拖累。
@@ -191,6 +217,93 @@ export default function Settings() {
     load();
     loadConfigured();
   }, [load, loadConfigured]);
+
+  // ── E. 引擎运行状态 ──
+  /**
+   * 拉取引擎运行状态。
+   *
+   * ★ fetchVersion：引擎版本要连本机引擎的诊断接口才拿得到，
+   *   只在「进入页面 / 重启完成」时取一次；轮询只刷状态，
+   *   免得每 12 秒多发一次诊断请求。
+   */
+  const loadEngine = useCallback(async (fetchVersion: boolean) => {
+    let s: EngineStatus | null = null;
+    try {
+      s = await api.getEngineStatus();
+    } catch {
+      // 命令异常（非浏览器降级）时同样按「不可用」展示 ——
+      // 不能因为引擎状态取不到就让整个设置页报错。
+      s = null;
+    }
+    if (!mountedRef.current) return;
+    setEngine(s);
+    if (!fetchVersion) return;
+    if (s?.running) {
+      try {
+        const d = await api.getDiagnostics();
+        if (mountedRef.current) setEngineVersion(d?.version ?? null);
+      } catch {
+        if (mountedRef.current) setEngineVersion(null);
+      }
+    } else if (mountedRef.current) {
+      setEngineVersion(null);
+    }
+  }, []);
+
+  // 进入设置页拉一次；之后每 12 秒轮询一次。
+  // ★ 用递归 setTimeout 而非 setInterval：卸载时能确保清除掉「下一次」的
+  //   定时器（参考 Layout.tsx StatusBar 的写法），页面切走后不再轮询。
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (cancelled) return;
+      void loadEngine(false);
+      timer = setTimeout(tick, 12000);
+    };
+    void loadEngine(true);
+    timer = setTimeout(tick, 12000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [loadEngine]);
+
+  /**
+   * 重启引擎。
+   *
+   * ★ 必须二次确认：重启要先停进程、再拉起并等就绪（最长 60 秒），
+   *   期间正在进行的对话会中断。改成「点了就走」的话，用户在对话途中
+   *   手滑点到就会莫名断线，还以为是玄盾坏了。
+   */
+  const handleRestartEngine = async () => {
+    if (restarting) return;
+    if (
+      !window.confirm(
+        '确定重启引擎吗？\n\n'
+          + '重启期间正在进行的对话会短暂中断，请稍候片刻。',
+      )
+    ) {
+      return;
+    }
+    setRestarting(true);
+    try {
+      await api.restartEngine();
+      // 重启完成后立刻刷新：状态与版本都可能已变。
+      await loadEngine(true);
+      if (mountedRef.current) toast.success('引擎已重启');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // ★ 失败后同样刷新一次：Rust 侧会把失败原因写进 startup_error，
+      //   刷新后区块里能长期看到它，而不是只剩一句转瞬即逝的 toast。
+      await loadEngine(true);
+      if (mountedRef.current) {
+        toast.error(`重启失败：${msg}。可尝试重新打开玄盾。`);
+      }
+    } finally {
+      if (mountedRef.current) setRestarting(false);
+    }
+  };
 
   // ★ v0.1.0：切换启用中的中转站。
   //   声明刻意放在 load 之后 —— 它要 await load()，
@@ -569,6 +682,18 @@ export default function Settings() {
   //   改端口后配置已落盘但引擎未重启，两者会不一致 ——
   //   若显示配置值，用户照着填进 AI 工具就会连不上（填了个还没生效的地址）。
   const proxyUrl = `http://127.0.0.1:${currentProxyPort()}/v1`;
+
+  // ★ 引擎状态的展示映射：绿=运行中 / 灰=已停止 / 红=启动失败。
+  //   判据优先级刻意是「先看 startup_error」—— 一次失败的重启会让
+  //   running 与 startup_error 同时为真，此时用户真正要知道的是「它失败了」，
+  //   而不是被显示成「运行中」。
+  const engineView: { label: string; badge: string } = !engine
+    ? { label: '读取中…', badge: 'neutral' }
+    : engine.startup_error
+      ? { label: '启动失败', badge: 'danger' }
+      : engine.running
+        ? { label: '运行中', badge: 'safe' }
+        : { label: '已停止', badge: 'neutral' };
 
   // ══════════════════════════════════════════════════════════
   // 渲染
@@ -1158,6 +1283,86 @@ export default function Settings() {
           <div className="faint mt-16" style={{ fontSize: 12 }}>
             尚未添加自定义关键词
           </div>
+        )}
+      </div>
+
+      {/* ═══ E. 运行状态 ═══ */}
+      {/* ★ 后端早已注册 get_engine_status / restart_engine，但此前界面
+          没有任何入口能看到引擎状态、更无法重启 —— 引擎一崩，用户只能
+          重开桌面端甚至重装。这块补上「看得见原因 + 能自助重启」两步。 */}
+      <div className="card">
+        <div className="card-title">
+          <span>运行状态</span>
+          {isTauri() && (
+            <span className={`badge ${engineView.badge}`}>{engineView.label}</span>
+          )}
+        </div>
+
+        {!isTauri() ? (
+          // 浏览器预览模式没有本地引擎进程，命令无从执行：
+          // 只给一句说明，不渲染状态与重启按钮，避免出现按不动的死控件。
+          <div className="field-hint" style={{ marginTop: 0 }}>
+            运行状态仅在桌面版可查看 —— 浏览器预览模式没有本地引擎进程。
+          </div>
+        ) : (
+          <>
+            <div className="detail-row">
+              <div className="detail-key">引擎状态</div>
+              <div className="detail-val">
+                {engineView.label}
+                {engineVersion && (
+                  <span className="faint" style={{ fontSize: 12 }}>
+                    {' '}· 版本 {engineVersion}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* 启动失败原因：只给一句可读的话，长文本/堆栈折叠备查。 */}
+            {engine?.startup_error && (
+              <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
+                <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <b>引擎启动失败</b>
+                  <div className="mt-8">{firstLine(engine.startup_error)}</div>
+                  {isLongError(engine.startup_error) && (
+                    <details className="mt-8">
+                      <summary
+                        className="faint"
+                        style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
+                      >
+                        查看完整错误
+                      </summary>
+                      <div
+                        className="mono faint"
+                        style={{ fontSize: 12, marginTop: 4, wordBreak: 'break-all' }}
+                      >
+                        {engine.startup_error}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="btn-row mt-16" style={{ marginBottom: 0 }}>
+              <button
+                className="btn secondary"
+                onClick={() => void handleRestartEngine()}
+                disabled={restarting}
+              >
+                {restarting ? (
+                  <Loader2 size={14} strokeWidth={1.5} className="spin-icon" />
+                ) : (
+                  <RefreshCw size={14} strokeWidth={1.5} />
+                )}
+                {restarting ? '重启中…' : '重启引擎'}
+              </button>
+              <span className="faint" style={{ fontSize: 12 }}>
+                引擎无响应或启动失败时，可在这里重启
+              </span>
+            </div>
+          </>
         )}
       </div>
     </div>
