@@ -202,7 +202,7 @@ function StatusBar() {
 
 export default function Layout() {
   const location = useLocation();
-  const [version, setVersion] = useState('0.1.12-alpha');
+  const [version, setVersion] = useState('0.1.13-alpha');
   const [license, setLicense] = useState<LicenseStatus | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
 
