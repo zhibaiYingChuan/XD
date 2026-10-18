@@ -1104,6 +1104,21 @@ textarea {
   white-space: nowrap;
 }
 
+/* ★ 横向滚动容器（2026-10-19）。
+   窗口窄于表格自然宽度时，此前内容会被挤压成一条缝或被截断。
+   这里允许横向滚动，并给**真实**表格一个最小宽度：
+   低于它才出现滚动条，而不是把内容压扁。
+   ★ 只作用于 table.table（元素选择器）——
+     仪表盘的评分明细也复用了 .table 类名，但那是 div 网格，
+     不该被赋予最小宽度。 */
+.table-scroll {
+  overflow-x: auto;
+}
+
+table.table {
+  min-width: 600px;
+}
+
 /* ══════════════════════════════════════════════════════════════
    工具栏（搜索 + 筛选）
    ══════════════════════════════════════════════════════════════ */
@@ -1757,4 +1772,84 @@ textarea {
 }
 .mb-24 {
   margin-bottom: 24px;
+}
+
+/* 读屏专用：视觉上不可见，但仍会被辅助技术读取。
+   用于状态栏的「状态变化」播报区域（见 Layout.tsx 的 StatusBar）。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   响应式 —— 窄窗口（2026-10-19）
+   ══════════════════════════════════════════════════════════════
+   此前全文没有媒体查询：侧边栏固定 220px，窗口窄于约 1000px 时
+   主内容被挤压、日志表被截断。这里只做克制收敛，
+   不改动色板 / 字体 / 圆角等设计语言。 */
+
+/* ≤1100px：先收窄侧边栏与页面内边距，给内容让出宽度 */
+@media (max-width: 1100px) {
+  :root {
+    --xd-sidebar-w: 176px;
+  }
+  .page-content {
+    padding: 24px 20px 36px;
+  }
+}
+
+/* ≤900px：侧边栏折叠为图标栏。
+   选「图标栏」而非「顶部横条」是因为它改动最小 ——
+   导航入口全部保留、激活态样式不变，只是隐藏文字标签；
+   图标靠 title 提示含义，导航仍然完整可用。 */
+@media (max-width: 900px) {
+  :root {
+    --xd-sidebar-w: 64px;
+  }
+  .sidebar-brand {
+    justify-content: center;
+    padding: 0 0 20px;
+  }
+  /* 隐藏所有文字标签，只留图标 */
+  .sidebar-brand-text,
+  .nav-item-label {
+    display: none;
+  }
+  .sidebar-nav {
+    padding: 0 10px;
+  }
+  .nav-item {
+    justify-content: center;
+    padding: 10px 0;
+  }
+  /* 激活态左侧色条改到图标栏左缘，避免被裁掉 */
+  .nav-item.active::before {
+    left: -10px;
+  }
+  /* 图标栏放不下「未激活」角标，隐藏之（激活入口本身保留） */
+  .nav-item .badge {
+    display: none;
+  }
+  .sidebar-footer {
+    justify-content: center;
+    padding: 12px 4px 0;
+  }
+  .sidebar-footer .faint {
+    display: none;
+  }
+  /* 页面头部（标题 + 操作按钮）允许换行，保证窄窗口下按钮仍可点到 */
+  .page-header {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .page-content {
+    padding: 20px 16px 32px;
+  }
 }

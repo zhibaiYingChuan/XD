@@ -174,7 +174,13 @@ export default function Dashboard() {
     try {
       const [s, logs, r] = await Promise.all([
         api.getState(),
-        api.getLogs({ limit: 5, action: 'block' }).catch(() => null),
+        // ★ 只发**一次**请求取 8 条，再本地过滤出需要的部分。
+        //   早先这里是「limit5 探路 + limit8 重取」两次请求 ——
+        //   3 秒一轮的轮询下请求量凭空翻倍，而两次拿的是同一批数据。
+        //   取较大 limit（8）一次拿到，语义完全等价：
+        //   失败时 logs 为 null → 跳过下面的分支 → 保留上次数据，
+        //   成功时按「非安全」过滤再截前 5 条。
+        api.getLogs({ limit: 8 }).catch(() => null),
         api.getRelays().catch(() => null),
       ]);
       if (!mountedRef.current) return false;
@@ -189,11 +195,8 @@ export default function Dashboard() {
       setLastLoadedAt(Date.now() / 1000);
       if (logs) {
         // 首页只展示非"安全"事件：阻断 + 告警
-        const all = await api
-          .getLogs({ limit: 8 })
-          .then((x) => x.entries.filter((e) => e.action !== 'pass'))
-          .catch(() => logs.entries);
-        if (mountedRef.current) setRecent(all.slice(0, 5));
+        const all = logs.entries.filter((e) => e.action !== 'pass');
+        setRecent(all.slice(0, 5));
       }
       if (r && mountedRef.current) setRelays(r.relays);
       return true;
@@ -256,6 +259,17 @@ export default function Dashboard() {
   // ── 操作：暂停防护（P1-6：5 / 30 / 永久 三档）──
   const handlePause = async (durationMin: number) => {
     if (busy) return;
+    // ★ 永久暂停是**危险操作**：一点之后所有对话都不再受保护，
+    //   而用户此前只会看到一条 Toast —— 手滑点中就要手动恢复，且中途
+    //   没有任何拦截兜底。这里加二次确认，文案必须讲清后果，不能只说
+    //   「确定暂停吗」。项目内既有约定用 window.confirm（见 Logs.tsx / Settings.tsx）。
+    //   取消则不做任何改动，连 busy 都不置位。
+    if (durationMin === 0) {
+      const ok = window.confirm(
+        '确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。',
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await api.pause(durationMin);

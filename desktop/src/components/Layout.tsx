@@ -143,7 +143,16 @@ function StatusBar() {
   const today = state?.today;
 
   return (
-    <div className="status-bar" role="status" aria-live="polite">
+    <div className="status-bar">
+      {/* ★ 只播报「状态」变化（2026-10-19）。
+          此前整个状态栏是 role="status" aria-live="polite"，
+          而它每 2 秒轮询一次、里面的「今日检查 N 次」等数字不断变化，
+          读屏会被这些数字持续打断，真正要传达的状态反而听不清。
+          改为一个读屏专用的 live 区域，只承载**状态文案**：
+          它的文本仅在 state 真正切换时才变化，故只在状态变化时播报。 */}
+      <span className="sr-only" aria-live="polite">
+        {STATE_LABELS[s]}
+      </span>
       <span className={`status-dot ${s}`} />
       <span className="status-label">{STATE_LABELS[s]}</span>
       {state?.message && <span className="status-meta">{state.message}</span>}
@@ -248,19 +257,24 @@ export default function Layout() {
                 key={item.to}
                 to={item.to}
                 end={item.end}
+                // title：窄窗口折叠成图标栏后靠它提示每个图标是什么，导航仍然可辨识。
+                title={item.label}
                 className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
               >
                 <Icon size={17} strokeWidth={1.5} />
-                {item.label}
+                {/* 标签单独包一层：窄窗口（≤900px）折叠为图标栏时由 CSS 隐藏文字，
+                    避免图标栏被挤爆。见 styles.css 的响应式断点。 */}
+                <span className="nav-item-label">{item.label}</span>
               </NavLink>
             );
           })}
           <NavLink
             to="/activate"
+            title="激活"
             className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
           >
             <KeyRound size={17} strokeWidth={1.5} />
-            激活
+            <span className="nav-item-label">激活</span>
             {license && !license.activated && (
               <span className="badge suspect" style={{ marginLeft: 'auto' }}>
                 未激活

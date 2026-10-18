@@ -109,6 +109,10 @@ export default function Settings() {
   const [portError, setPortError] = useState<string | null>(null);
   // ★ Phase 7：预检风险提示。非 null 时接管保存按钮，必须显式选择才能继续。
   const [relayRisk, setRelayRisk] = useState<RelayPrecheck | null>(null);
+  // ★ 预检期间的忙碌标志。预检是**一次真实网络请求**，早先它发生在
+  //   saving 置位之前，按钮既未禁用也无文案变化 —— 用户以为没点到，
+  //   连点就会触发多次预检。这里把它独立出来，与 saving 一起锁住按钮。
+  const [prechecking, setPrechecking] = useState(false);
   // ★ API Key 草稿：服务端返回的是掩码，绝不能让它进入可提交的状态。
   //   旧实现把掩码留在 config.relay.api_key 里，用户点一次「保存中转站配置」
   //   就会把 ``xxxx****yyyy`` 写回磁盘，真实 Key 被替换 —— 之后所有请求
@@ -356,8 +360,11 @@ export default function Settings() {
       return;
     }
     if (port === config.server.port) {
+      // ★ 输入框一清空、又没有任何提示，用户会以为「没点到」而反复重试。
+      //   这里明确回一句「无需修改」，把「静默无反应」变成一次可确认的反馈。
       setPortError(null);
       setPortInput('');
+      toast.info('端口未变，无需修改');
       return;
     }
     const oldPort = config.server.port;
@@ -400,20 +407,28 @@ export default function Settings() {
    */
   const saveRelay = async () => {
     if (!config) return;
+    // ★ 预检在飞时不能再点：否则同一份地址会被预检多次。
+    //   与 save() 里 saving 的判据保持一致，只是范围扩到预检阶段。
+    if (saving || prechecking) return;
     const baseUrl = config.relay.base_url.trim();
     // 先预检再保存：地址非法或高危时直接拦下，
     // 避免「已保存成功」的提示盖过风险，用户顺势点完就走。
     if (baseUrl) {
+      // ★ 预检一开始就置 busy：按钮禁用 + 文案「检测中…」。
+      //   结束（成功或失败）后在 finally 里复位，不能有遗留的假忙碌态。
+      setPrechecking(true);
       try {
         const pc = await api.precheckRelay(baseUrl);
         if (pc.level === 'malicious' || pc.level === 'risky') {
           setRelayRisk(pc);
-          return;
+          return; // finally 仍会复位 prechecking
         }
         setRelayRisk(null);
       } catch {
         // 预检失败不阻断保存：这是附加提示，不能挡住正常配置流程
         setRelayRisk(null);
+      } finally {
+        if (mountedRef.current) setPrechecking(false);
       }
     }
 
@@ -874,9 +889,10 @@ export default function Settings() {
         <button
           className="btn mb-24"
           onClick={relayRisk ? forceSaveRelay : saveRelay}
-          disabled={saving}
+          // ★ 预检期间也要禁用：否则用户连点会触发多次预检。
+          disabled={saving || prechecking}
         >
-          {saving ? '保存中...' : '保存中转站配置'}
+          {saving ? '保存中...' : prechecking ? '检测中…' : '保存中转站配置'}
         </button>
 
         {/* ═══ 多中转站 ═══ */}

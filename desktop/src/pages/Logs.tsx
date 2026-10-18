@@ -105,6 +105,13 @@ function DetailDrawer({
   const [marking, setMarking] = useState(false);
   // 删除在飞标志：删除不可恢复，期间必须锁住按钮防重复触发
   const [deleting, setDeleting] = useState(false);
+  // ★ 抽屉标题引用：打开时把焦点移入，让读屏用户立刻知道
+  //   「弹出了一个对话框、它是什么」，而不是把焦点留在触发的表格行上。
+  const titleRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -217,9 +224,13 @@ function DetailDrawer({
   return (
     <>
       <div className="drawer-overlay" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-label="日志详情">
+      <aside className="drawer" role="dialog" aria-modal="true" aria-label="日志详情">
         <div className="drawer-header">
-          <span className="drawer-title">日志详情</span>
+          {/* tabIndex=-1：仅为可编程聚焦用，不进入 Tab 顺序；
+              配合上面的 mount 效果让焦点落在标题上。 */}
+          <span className="drawer-title" ref={titleRef} tabIndex={-1}>
+            日志详情
+          </span>
           <button className="btn ghost" onClick={onClose} aria-label="关闭">
             <X size={16} strokeWidth={1.5} />
           </button>
@@ -478,20 +489,22 @@ export default function Logs() {
   }), [logType, action, debouncedSearch, days, markedFilter]);
 
   // 概览统计：与筛选无关，回答「我这些日志都是些什么」
+  // ★ 抽成独立回调（2026-10-19）：标记/撤销误报**不改变 total**，
+  //   而这里原本只依赖 [total] —— 于是标记成功后概览里
+  //   「已标记误报」的数字永远停在旧值，用户以为操作没生效。
+  //   现在标记成功后显式再调一次它（见 handleMarkedSafe）。
+  const loadStats = useCallback(async () => {
+    try {
+      const s = await api.getLogStats();
+      if (mountedRef.current) setStats(s);
+    } catch {
+      // 概览是辅助信息，取不到不该影响主功能
+    }
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const s = await api.getLogStats();
-        if (!cancelled) setStats(s);
-      } catch {
-        // 概览是辅助信息，取不到不该影响主功能
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [total]);
+    loadStats();
+  }, [loadStats, total]);
 
   // 搜索防抖
   useEffect(() => {
@@ -534,6 +547,14 @@ export default function Logs() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // ★ 标记/撤销误报成功后：列表与概览**都要**刷新。
+  //   列表刷新负责行状态与误报筛选；概览刷新负责「已标记误报」数字 ——
+  //   标记不改变 total，不显式刷新就会一直显示旧值。
+  const handleMarkedSafe = useCallback(() => {
+    load();
+    loadStats();
+  }, [load, loadStats]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -702,12 +723,16 @@ export default function Logs() {
             className="input"
             style={{ paddingLeft: 34 }}
             placeholder="搜索摘要或内容片段..."
+            // ★ 搜索框有图标、无可见 label，必须补 aria-label，
+            //   否则读屏用户只会听到「编辑框」，不知道搜的是什么。
+            aria-label="搜索日志"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
         <select
           className="select"
+          aria-label="按类型筛选"
           value={logType}
           onChange={(e) => {
             setLogType(e.target.value);
@@ -722,6 +747,7 @@ export default function Logs() {
         </select>
         <select
           className="select"
+          aria-label="按结果筛选"
           value={action}
           onChange={(e) => {
             setAction(e.target.value);
@@ -736,6 +762,7 @@ export default function Logs() {
         </select>
         <select
           className="select"
+          aria-label="按时间范围筛选"
           value={days}
           onChange={(e) => {
             setDays(e.target.value);
@@ -750,6 +777,7 @@ export default function Logs() {
         </select>
         <select
           className="select"
+          aria-label="按误报标记筛选"
           value={markedFilter}
           onChange={(e) => {
             setMarkedFilter(e.target.value);
@@ -812,72 +840,76 @@ export default function Logs() {
         </div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <table className="table">
-            <thead>
-              <tr>
-                <th style={{ width: 78 }}>时间</th>
-                <th style={{ width: 92 }}>类型</th>
-                <th>内容</th>
-                <th style={{ width: 150 }}>中转站</th>
-                <th style={{ width: 78 }}>结果</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => (
-                <tr
-                  key={e.id}
-                  className={selectedId === e.id ? 'selected' : ''}
-                  // ★ 键盘可达（2026-10-19）：此前只有 onClick，纯键盘用户
-                  //   根本无法打开详情。tabIndex + role + Enter/Space 让
-                  //   「打开详情」不再只依赖鼠标；焦点轮廓由 styles.css 的
-                  //   .table tbody tr:focus-visible 负责勾出来。
-                  tabIndex={0}
-                  role="button"
-                  aria-label={`查看日志详情：${e.summary}`}
-                  onClick={() => setSelectedId(e.id)}
-                  onKeyDown={(ev) => {
-                    if (ev.key === 'Enter' || ev.key === ' ') {
-                      ev.preventDefault(); // 空格默认会滚动页面，需拦掉
-                      setSelectedId(e.id);
-                    }
-                  }}
-                >
-                  <td className="mono faint">{formatDateTime(e.timestamp).slice(-8)}</td>
-                  <td>
-                    <span className="faint" style={{ fontSize: 12 }}>
-                      {LOG_TYPE_LABELS[e.log_type]}
-                    </span>
-                  </td>
-                  <td>
-                    <div className="flex items-center gap-8">
-                      <span className={`list-icon ${actionBadgeClass(e)}`} style={{ width: 20, height: 20 }}>
-                        {e.action === 'block' ? (
-                          <ShieldX size={11} strokeWidth={1.5} />
-                        ) : e.action === 'alert' || e.severity === 'medium' ? (
-                          <AlertTriangle size={11} strokeWidth={1.5} />
-                        ) : e.action === 'redact' ? (
-                          <Eye size={11} strokeWidth={1.5} />
-                        ) : (
-                          <Info size={11} strokeWidth={1.5} />
-                        )}
-                      </span>
-                      <span className="truncate" title={e.summary}>
-                        {e.summary}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="mono faint truncate" style={{ maxWidth: 150 }}>
-                    {displayDomain(e.relay_domain) || '—'}
-                  </td>
-                  <td>
-                    <span className={`badge ${actionBadgeClass(e)}`}>
-                      {ACTION_LABELS[e.action]}
-                    </span>
-                  </td>
+          {/* 横向滚动容器：窗口变窄时表格不再被挤压截断，而是出现横向滚动条。
+              外层 card 的 overflow:hidden 只负责裁圆角，滚动交给这一层。 */}
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ width: 78 }}>时间</th>
+                  <th style={{ width: 92 }}>类型</th>
+                  <th>内容</th>
+                  <th style={{ width: 150 }}>中转站</th>
+                  <th style={{ width: 78 }}>结果</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {entries.map((e) => (
+                  <tr
+                    key={e.id}
+                    className={selectedId === e.id ? 'selected' : ''}
+                    // ★ 键盘可达（2026-10-19）：此前只有 onClick，纯键盘用户
+                    //   根本无法打开详情。tabIndex + role + Enter/Space 让
+                    //   「打开详情」不再只依赖鼠标；焦点轮廓由 styles.css 的
+                    //   .table tbody tr:focus-visible 负责勾出来。
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`查看日志详情：${e.summary}`}
+                    onClick={() => setSelectedId(e.id)}
+                    onKeyDown={(ev) => {
+                      if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault(); // 空格默认会滚动页面，需拦掉
+                        setSelectedId(e.id);
+                      }
+                    }}
+                  >
+                    <td className="mono faint">{formatDateTime(e.timestamp).slice(-8)}</td>
+                    <td>
+                      <span className="faint" style={{ fontSize: 12 }}>
+                        {LOG_TYPE_LABELS[e.log_type]}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="flex items-center gap-8">
+                        <span className={`list-icon ${actionBadgeClass(e)}`} style={{ width: 20, height: 20 }}>
+                          {e.action === 'block' ? (
+                            <ShieldX size={11} strokeWidth={1.5} />
+                          ) : e.action === 'alert' || e.severity === 'medium' ? (
+                            <AlertTriangle size={11} strokeWidth={1.5} />
+                          ) : e.action === 'redact' ? (
+                            <Eye size={11} strokeWidth={1.5} />
+                          ) : (
+                            <Info size={11} strokeWidth={1.5} />
+                          )}
+                        </span>
+                        <span className="truncate" title={e.summary}>
+                          {e.summary}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="mono faint truncate" style={{ maxWidth: 150 }}>
+                      {displayDomain(e.relay_domain) || '—'}
+                    </td>
+                    <td>
+                      <span className={`badge ${actionBadgeClass(e)}`}>
+                        {ACTION_LABELS[e.action]}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -909,7 +941,7 @@ export default function Logs() {
           logId={selectedId}
           onClose={() => setSelectedId(null)}
           onDeleted={load}
-          onMarkedSafe={load}
+          onMarkedSafe={handleMarkedSafe}
         />
       )}
     </div>
