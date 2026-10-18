@@ -107,6 +107,16 @@ def _issue(private_key, mch, days=30, claim_days=None, **extra):
 # ══════════════════════════════════════════════════════════════
 
 
+# ★ 签发工具是**签发方私有资产**，不随客户端仓库发布：
+#   仓库里没有 tools/activation/gen_activation_keys.py，CI 里自然也没有。
+#   （这个测试此前从未在 CI 跑过 —— 整个文件一直被 .gitignore 漏掉，
+#    纳入仓库后才第一次暴露出来。）
+#   工具在位时做严格比对；不在位时**跳过而非判失败** ——
+#   「没有工具可比」不等于「两边不一致」，把它判成失败会让 CI 恒红。
+@pytest.mark.skipif(
+    not (_TOOLS / "gen_activation_keys.py").is_file(),
+    reason="签发工具属签发方私有资产，不在客户端仓库（CI 中跳过一致性比对）",
+)
 def test_hash_matches_signing_tool():
     """Python 侧哈希必须与签发工具一致。
 
