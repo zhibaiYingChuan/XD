@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
@@ -3225,6 +3226,12 @@ def _sync_reputation_after_log_delete() -> None:
 
 def _proxy_error(domain, model, session_id, message, t0, log_type):
     """代理层错误响应。"""
+    # ★ 空消息兜底（2026-10-19 实测）：首页出现过「无法连接中转站：」——
+    #   冒号后面是空的（调用方传入了空的原因）。半句话比「失败了」更让人困惑，
+    #   所以这里补一句可行动的话，而不是把空白原样写进日志。
+    _msg = (message or "").strip()
+    if not _msg or _msg.rstrip().endswith(("：", ":")):
+        _msg = (_msg + "请检查网络，以及设置里的中转站地址与 Key").lstrip("：:")
     if _storage is not None:
         entry = LogEntry(
             log_type=log_type,
@@ -3236,12 +3243,12 @@ def _proxy_error(domain, model, session_id, message, t0, log_type):
             #   这里区分：代理自身错误 = low（本地链路），内容阻断 = high。
             severity="low",
             model=model,
-            summary=message,
+            summary=_msg,
         )
         _storage.insert_log(entry)
     return JSONResponse(
         status_code=502,
-        content={"error": {"type": "proxy_error", "message": message}},
+        content={"error": {"type": "proxy_error", "message": _msg}},
     )
 
 
@@ -3261,6 +3268,30 @@ async def _aiter_and_close(upstream) -> AsyncGenerator[bytes, None]:
             await upstream.aclose()
         except Exception:  # noqa: BLE001 — 关闭失败不影响已转发的数据
             pass
+
+
+def _describe_upstream_status(code: int) -> str:
+    """把上游 HTTP 状态码翻译成一句用户能懂、可行动的话。
+
+    ★ 2026-10-19 实测：首页「近期安全记录」出现过整段英文 JSON ——
+      HTTP 403 时把上游响应体直接拼进了 summary，既看不懂又被截断：
+      「中转站返回 HTTP 403：{"error":{"message":"Space Bunny Alpha is no longer available...」
+      这里只保留「发生了什么 + 大概率为什么 + 能做什么」；
+      原始错误体仍完整保存在 text_preview 里，详情页可查。
+    """
+    if code == 401:
+        return "中转站拒绝认证（401）：API Key 可能填错或已失效，请到设置里检查"
+    if code == 403:
+        return "中转站拒绝访问（403）：Key 无此模型权限，或该模型已下线"
+    if code == 404:
+        return "中转站找不到这个模型（404）：模型名可能写错或已下架"
+    if code == 429:
+        return "中转站限流（429）：请求太频繁或额度用完，请稍后再试"
+    if 500 <= code < 600:
+        return f"中转站自身故障（{code}）：对方服务异常，请稍后重试或换一家"
+    if 400 <= code < 500:
+        return f"中转站拒绝了请求（{code}）：请检查模型名与请求参数"
+    return f"中转站返回异常状态（{code}）"
 
 
 def _log_upstream_error(
@@ -3284,10 +3315,8 @@ def _log_upstream_error(
     if _storage is None:
         return
     try:
-        snippet = _make_preview(body_bytes.decode("utf-8", errors="ignore"), 200)
-        summary = f"中转站返回 HTTP {status_code}"
-        if snippet:
-            summary = f"{summary}：{snippet}"
+        # ★ 不再把上游原始报错拼进 summary（理由见 _describe_upstream_status）
+        summary = _describe_upstream_status(status_code)
         _storage.insert_log(LogEntry(
             log_type=LogType.PROXY_ERROR.value,
             relay_domain=domain,
@@ -3306,6 +3335,87 @@ def _log_upstream_error(
 # ══════════════════════════════════════════════════════════════
 # 启动入口
 # ══════════════════════════════════════════════════════════════
+
+
+def _start_parent_watchdog(parent_pid: int) -> None:
+    """启动守护线程：父进程（桌面端）退出后，本引擎自行强制退出。
+
+    为什么要这么做
+    --------------
+    桌面端被强杀（任务管理器结束进程 / 崩溃）时，引擎收不到任何退出
+    信号，会变成孤儿进程继续运行。它仍占用自身的
+    ``xuandun-engine-*.exe``，于是升级安装时 NSIS 无法覆盖该文件：
+    用户装完新版，引擎依旧是旧版 —— 版本静默不一致（已实测复现）。
+    引擎主动感知父进程消失并退出，即可让升级覆盖正常完成。
+
+    实现要点
+    --------
+    - 仅用标准库（threading / ctypes / os），不引入新依赖。
+    - 守护线程（daemon=True）：主线程结束时它随之终止，不阻塞退出。
+    - 父进程不存在时用 ``os._exit(0)`` 强制退出：uvicorn 的优雅关闭
+      在引擎卡死时可能长时间不返回，这里需要“立即死”。
+
+    已知边界（PID 复用）
+    --------------------
+    本实现只判断「该 PID 当前是否仍有进程存活」，不校验进程身份。
+    理论上父进程退出后系统可能把同一 PID 复用给新进程，导致误判为
+    「父进程仍在」而漏杀。Windows 上要校验进程身份需比对创建时间或
+    进程名，需额外遍历进程、成本较高；而正常场景（父进程被强杀、
+    复查窗口仅数秒）触发概率极低，故此处不做校验，仅作说明。
+    """
+    import threading
+
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        # SYNCHRONIZE：以最小权限打开进程句柄，仅用于等待其退出；
+        # 不申请 PROCESS_QUERY_INFORMATION 等更高权限，避免被拒。
+        SYNCHRONIZE = 0x0010_0000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # ★ 必须显式声明 HANDLE 返回类型：默认 c_int 会在 64 位下
+        #   截断句柄值，导致后续 WaitForSingleObject 拿到错误句柄。
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        def _parent_alive() -> bool:
+            # 打开句柄失败 ⇒ 该 PID 已无进程（父进程已退出）
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+            if not handle:
+                return False
+            try:
+                # WaitForSingleObject(0)：WAIT_TIMEOUT(258) ⇒ 仍在运行；
+                # WAIT_OBJECT_0(0) ⇒ 进程对象已置为有信号，即已退出
+                return kernel32.WaitForSingleObject(handle, 0) != 0
+            finally:
+                kernel32.CloseHandle(handle)
+    else:
+        def _parent_alive() -> bool:
+            # POSIX：向 PID 发 0 号信号探测存活，不实际传递任何信号
+            try:
+                os.kill(parent_pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                # 进程存在但当前用户无权发信号 ⇒ 仍视为存活
+                return True
+            return True
+
+    def _watch() -> None:
+        while True:
+            time.sleep(3)
+            if not _parent_alive():
+                print(
+                    f"[引擎守护] 父进程 pid={parent_pid} 已退出，引擎自行关闭",
+                    flush=True,
+                )
+                # 直接 _exit：绕过 uvicorn 的优雅关闭，避免其长时间不返回
+                os._exit(0)
+
+    threading.Thread(target=_watch, name="parent-watchdog", daemon=True).start()
 
 
 def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
@@ -3334,7 +3444,16 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
         choices=["critical", "error", "warning", "info", "debug"],
         help="日志级别",
     )
+    parser.add_argument(
+        "--parent-pid", type=int, default=None,
+        help="父进程（桌面端）PID；传入后启用守护线程，父进程退出时引擎自行退出",
+    )
     args = parser.parse_args()
+
+    # ★ 缺省（不传 --parent-pid）时不启用守护，行为与历史版本完全一致，
+    #   便于本地单独调试引擎。
+    if args.parent_pid is not None:
+        _start_parent_watchdog(args.parent_pid)
 
     actual_host = args.host or host or config.server.host
     actual_port = args.port or port or config.server.port

@@ -858,6 +858,13 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
         // ★ P1-10：必须传本进程锁定的端口，与 proxy_base() 保持一致，
         //   否则会出现「引擎听 A 端口、桌面端连 B 端口」的双向失联
         &port.to_string(),
+        // ★ 传入本进程 PID，供引擎的守护线程监测父进程存活：
+        //   桌面端被强杀（任务管理器结束进程 / 崩溃）时，引擎收不到任何
+        //   退出信号，会变成孤儿进程长期占用 xuandun-engine-*.exe，
+        //   升级安装时 NSIS 便无法覆盖该文件 —— 用户装完新版，引擎仍是
+        //   旧版（版本静默不一致）。引擎侧凭此感知父进程消失后自行退出。
+        "--parent-pid",
+        &std::process::id().to_string(),
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
