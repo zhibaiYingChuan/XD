@@ -2010,6 +2010,10 @@ def launch_desktop():
         return None
     env = os.environ.copy()
     env["XUANDUN_ENABLE_CDP_DEBUG"] = "1"
+    # ★ 2026-10-19：引擎默认已关闭 /docs 与 /openapi.json（安全加固）。
+    #   本回归靠 /openapi.json 核对界面版本号（见 test_app_shell），
+    #   故显式开启文档端点，否则会「读不到版本就不报」而假通过。
+    env["XUANDUN_ENABLE_DOCS"] = "1"
     env[ENV_DATA_DIR] = str(data_dir())
     env[ENV_PROXY_PORT] = str(DEFAULT_PROXY_PORT)
     env[ENV_CDP_PORT] = str(CDP_PORT)

@@ -544,12 +544,15 @@ export const api = {
       TIMEOUT.NORMAL,
       { id },
     ),
-  exportLogs: (format: 'csv' | 'json' = 'csv') =>
+  // ★ 2026-10-19：导出必须带上当前筛选条件。
+  //   原实现只传 format，后端又忽略筛选参数 —— 用户按筛选导出
+  //   拿到的却是全量数据。现把筛选条件一并下传（后端已接线）。
+  exportLogs: (format: 'csv' | 'json' = 'csv', filters: LogFilterParams = {}) =>
     call<{ ok: boolean; filename: string; content: string }>(
       'export_logs',
       'POST',
       '/api/logs/export',
-      { format },
+      { format, ...filters },
     ),
   clearLogs: (beforeDays = 0) =>
     call<{ ok: boolean; deleted: number }>('clear_logs', 'POST', '/api/logs/clear', {

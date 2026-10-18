@@ -455,20 +455,27 @@ class PersonalStorage:
             marked_safe=marked_safe,
         )
         with self._conn:
+            # ★★ 2026-10-19：用**子查询**按同一过滤条件删除脱敏记录，
+            #   不再把命中的 log_id 展开成 IN (?,?,...)。
+            #   旧实现 `",".join("?" * len(victims))` 在日志量大时（>3 万条）
+            #   会撞上 SQLite 变量上限抛 OperationalError，
+            #   导致「按筛选清空」整单失败并返回 500。
+            #
+            #   顺序也必须是「先删脱敏记录、再删日志」：
+            #   子查询引用 logs 表，若先删日志，子查询将命中空集，
+            #   脱敏记录（含原始敏感值）永远删不掉。
             if where:
-                victims = self._conn.execute(
-                    f"SELECT id FROM logs {where}", params
-                ).fetchall()
-            else:
-                victims = self._conn.execute("SELECT id FROM logs").fetchall()
-            cur = self._conn.execute(f"DELETE FROM logs {where}", params)
-            deleted = int(cur.rowcount or 0)
-            if victims:
-                marks = ",".join("?" * len(victims))
                 self._conn.execute(
-                    f"DELETE FROM redaction_records WHERE log_id IN ({marks})",
-                    [int(v["id"]) for v in victims],
+                    f"DELETE FROM redaction_records WHERE log_id IN "
+                    f"(SELECT id FROM logs {where})",
+                    params,
                 )
+                cur = self._conn.execute(f"DELETE FROM logs {where}", params)
+            else:
+                # 无过滤 = 全清：整表删除，天然无需参数列表
+                self._conn.execute("DELETE FROM redaction_records")
+                cur = self._conn.execute("DELETE FROM logs")
+            deleted = int(cur.rowcount or 0)
             self._recompute_daily_stats()
         if deleted:
             self._scrub_wal()
@@ -707,18 +714,39 @@ class PersonalStorage:
         limit: int = 10_000,
         log_type: Optional[str] = None,
         action: Optional[str] = None,
+        search: Optional[str] = None,
+        marked_safe: Optional[bool] = None,
+        start_ts: Optional[float] = None,
     ) -> List[LogEntry]:
-        """导出日志（★ P1-9：文档 4.1 要求的「导出」按钮）。"""
-        return self.query_logs(
-            limit=limit, log_type=log_type, action=action
+        """导出日志（★ P1-9：文档 4.1 要求的「导出」按钮）。
+
+        ★ 2026-10-19 修复：导出必须**尊重用户的筛选条件**。
+          旧实现只在导出端点里按 limit 取全量，忽略 log_type/action/search，
+          用户按筛选点「导出」拿到的是**全量数据** ——
+          导出范围与界面所见不一致，属于「静默忽略用户输入」。
+          这里把筛选条件下推到查询，复用 _log_filters，
+          与 query_logs / count_logs / delete_logs 同源，杜绝口径漂移。
+
+        ★ 排序用 **ASC（时间升序）**：
+          导出成品（CSV/JSON）是给人按时间线顺序阅读的，升序更自然；
+          而列表页是「最新在前」（DESC），两者取向不同，故此处独立指定。
+        """
+        where, params = _log_filters(
+            log_type=log_type, action=action, search=search,
+            marked_safe=marked_safe, start_ts=start_ts,
         )
+        sql = f"SELECT * FROM logs {where} ORDER BY timestamp ASC LIMIT ?"
+        rows = self._conn.execute(sql, list(params) + [limit]).fetchall()
+        return [self._row_to_log(r) for r in rows]
 
     def get_all_for_export(self, limit: int = 10_000) -> List[LogEntry]:
-        """导出全部日志（升序，便于阅读）。"""
-        rows = self._conn.execute(
-            "SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [self._row_to_log(r) for r in rows]
+        """导出全部日志（时间升序，便于按时间线阅读）。
+
+        ★ 2026-10-19：委托给 export_logs，避免两套导出逻辑各自漂移。
+          旧实现注释写「升序」、实际却 `ORDER BY timestamp DESC` ——
+          注释与行为不符，导出结果与界面预期相反。
+        """
+        return self.export_logs(limit=limit)
 
     def clear_logs(self, before_ts: Optional[float] = None) -> int:
         """清空日志（可指定仅清某时间之前）。
@@ -837,9 +865,16 @@ class PersonalStorage:
 
             dates = list(per_day.keys())
             if dates:
-                marks = ",".join("?" * len(dates))
+                # ★ 2026-10-19：改用子查询表达「不在这些日期里」，
+                #   避免把日期展开成 NOT IN (?,?,...) ——
+                #   一旦日志跨度极大（海量天）同样会撞变量上限。
+                #   WHERE ... IS NOT NULL 不可省：SQL 的 NOT IN 列表里
+                #   只要含 NULL 就整体判为未知，会导致一条也删不掉。
                 self._conn.execute(
-                    f"DELETE FROM daily_stats WHERE date NOT IN ({marks})", dates
+                    "DELETE FROM daily_stats WHERE date NOT IN "
+                    "(SELECT DISTINCT date(timestamp, 'unixepoch', 'localtime') "
+                    "FROM logs "
+                    "WHERE date(timestamp, 'unixepoch', 'localtime') IS NOT NULL)"
                 )
                 for d in dates:
                     redactions = self._conn.execute(

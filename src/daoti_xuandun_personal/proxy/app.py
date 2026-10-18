@@ -26,6 +26,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
@@ -250,12 +251,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     """创建 FastAPI 应用。"""
+    # ★ 默认关闭 /docs 与 OpenAPI（2026-10-19 安全加固）。
+    #   个人版是**本地服务**，对任意本机进程暴露 /docs 与 /openapi.json
+    #   等于把完整的接口清单与字段结构白白摊开，降低攻击者的探测成本。
+    #   仅在显式设置 XUANDUN_ENABLE_DOCS=1 / true（本地调试需要）时放开。
+    _docs_enabled = os.environ.get(
+        "XUANDUN_ENABLE_DOCS", ""
+    ).strip().lower() in ("1", "true")
     app = FastAPI(
         title="道体·玄盾 个人版",
         description="保护个人用户在使用 AI 中转站时的数据安全",
         version="0.1.11-alpha",
         lifespan=lifespan,
-        docs_url="/docs",
+        docs_url="/docs" if _docs_enabled else None,
+        openapi_url="/openapi.json" if _docs_enabled else None,
     )
 
     # CORS：仅允许本地桌面端（tauri://localhost / http://localhost:1420）
@@ -1256,14 +1265,39 @@ def create_app() -> FastAPI:
 
     @app.post("/api/logs/export")
     async def export_logs(payload: Dict[str, Any] = Body(default={})):
-        """导出日志为 CSV / JSON（文档 4.1「导出」按钮）。"""
+        """导出日志为 CSV / JSON（文档 4.1「导出」按钮）。
+
+        ★ 2026-10-19 修复：导出必须**接线筛选参数**。
+          旧实现只读 format/limit，忽略 log_type/action/search（以及 days、
+          marked_safe）—— 用户按筛选点「导出」拿到的却是**全量数据**，
+          导出范围与界面所见不一致。现把与应用内一致的筛选条件下推到存储层。
+        """
         if _storage is None:
             raise HTTPException(status_code=503, detail="存储未就绪")
-        fmt = str((payload or {}).get("format", "csv")).lower()
-        limit = int((payload or {}).get("limit", 10_000))
+        payload = payload or {}
+        fmt = str(payload.get("format", "csv")).lower()
+        limit = int(payload.get("limit", 10_000))
         limit = max(1, min(limit, 50_000))
 
-        entries = _storage.get_all_for_export(limit=limit)
+        # days → 起始时间戳，口径与列表 / 删除筛选保持一致
+        start_ts = None
+        days = payload.get("days")
+        if days:
+            try:
+                d = int(days)
+            except (TypeError, ValueError):
+                d = 0
+            if d > 0:
+                start_ts = time.time() - d * 86400
+
+        entries = _storage.export_logs(
+            limit=limit,
+            log_type=payload.get("log_type"),
+            action=payload.get("action"),
+            search=payload.get("search"),
+            marked_safe=payload.get("marked_safe"),
+            start_ts=start_ts,
+        )
         stamp = time.strftime("%Y%m%d-%H%M%S")
 
         if fmt == "json":

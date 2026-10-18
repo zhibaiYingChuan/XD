@@ -563,7 +563,10 @@ export default function Logs() {
     if (exporting) return;
     setExporting(true);
     try {
-      const r = await api.exportLogs('csv');
+      // ★ 2026-10-19：导出当前筛选结果，而非全量。
+      //   用户先筛出「今天 / 告警」再点导出，得到的就该是这批，
+      //   与他在列表里看到的范围一致。
+      const r = await api.exportLogs('csv', currentFilters);
       const ok = downloadText(
         r.filename,
         r.content,

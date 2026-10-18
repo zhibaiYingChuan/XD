@@ -718,7 +718,13 @@ async fn proxy_call(
         .map_err(|e| format!("无法连接本地代理: {e}"))?;
 
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    // ★ 读体失败必须回报成 Err，不能吞成空串：
+    //   旧实现 unwrap_or_default() 让「响应体读取失败」在 HTTP 状态为成功时
+    //   返回 Ok(Null) —— 前端拿到的是「成功但空」，错误被静默掩盖。
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取本地代理响应失败: {e}"))?;
 
     if !status.is_success() {
         // 尽量提取后端 detail
@@ -2034,12 +2040,51 @@ async fn resume_protection(
     Ok(r)
 }
 
-/// 校验路径只能是 `/api/logs` 前缀（防路径穿越）
+/// 校验路径只能是 `/api/` 前缀（防路径穿越）。
+///
+/// ★ 关键修正（2026-10-19）：旧实现用 `path.contains("..")` 作为穿越判据，
+///   但搜索词里天然可能含 `..`（如 `1..10`、路径片段），
+///   一旦命中就把**整条路径**回退成 `/api/logs`，
+///   于是用户的筛选/搜索被**静默丢弃**（界面表现为「筛不出来」）。
+///
+///   现在改为「路径与查询串分离校验」：
+///     · 路径部分（`?` 之前）：必须以 `/api/` 开头，不含协议（`://`）、
+///       不以 `//` 开头（防协议相对主机）、不含控制字符，
+///       且按 `/` 切分后不得出现 `..` 段；
+///     · 查询串部分（`?` 之后）：由调用方逐字符百分号编码，
+///       本就不参与路径穿越判定，故**不再**对它做 `..` 检查。
+///   如此既彻底杜绝穿越到 /api 之外，又不误伤含 `..` 的搜索词。
 fn sanitize_local_path(path: &str) -> String {
-    if path.starts_with("/api/logs") && !path.contains("..") {
-        path.to_string()
-    } else {
-        "/api/logs".to_string()
+    // 以第一个 '?' 为界拆分「路径」与「查询串」
+    let (path_part, query_part) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
+    };
+
+    let path_ok = path_part.starts_with("/api/")
+        // 防协议注入（如 http://evil）
+        && !path_part.contains("://")
+        // 防协议相对地址（如 //evil/api/...）
+        && !path_part.starts_with("//")
+        // 不得含 `..` 路径段，杜绝 ../ 穿越
+        && !path_part.split('/').any(|seg| seg == "..")
+        // 不得含控制字符（NUL、换行等）
+        && !path_part.chars().any(|c| c.is_control());
+
+    if !path_ok {
+        return "/api/logs".to_string();
+    }
+
+    match query_part {
+        Some(q) => {
+            // 查询串不参与穿越判定，但仍须挡掉控制字符注入
+            if q.chars().any(|c| c.is_control()) {
+                "/api/logs".to_string()
+            } else {
+                format!("{path_part}?{q}")
+            }
+        }
+        None => path_part.to_string(),
     }
 }
 
@@ -2063,8 +2108,18 @@ fn sanitize_local_path(path: &str) -> String {
 //
 // 环境变量：XUANDUN_ENABLE_CDP_DEBUG=1
 fn enable_cdp_debug_port() -> bool {
-    let enable = cfg!(debug_assertions)
-        || std::env::var("XUANDUN_ENABLE_CDP_DEBUG").is_ok();
+    // ★ 仅当环境变量被**显式**取值为 1 / true（忽略大小写与首尾空白）才算开启。
+    //   旧实现用 is_ok() 判定 —— 只要变量存在就开启，于是
+    //   XUANDUN_ENABLE_CDP_DEBUG=0 / false 这种「明确想关闭」的取值
+    //   反而把 CDP 打开，并附带 --remote-allow-origins=*，
+    //   等于给本地任意进程留了注入 JS 篡改界面的后门。
+    let env_enabled = std::env::var("XUANDUN_ENABLE_CDP_DEBUG")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false);
+    let enable = cfg!(debug_assertions) || env_enabled;
     if enable {
         let port = cdp_port();
         // ★ --remote-allow-origins=* 不可省略：
@@ -2194,4 +2249,69 @@ pub fn run() {
         .run(|_app, _event| {
             // run 回调在应用退出时触发，此时托盘与引擎随之清理
         });
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试
+// ══════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_local_path;
+
+    /// ★ A3 回归：查询串里的 `..` 不能被误判成路径穿越。
+    ///
+    /// 旧实现用 `path.contains("..")` 作判据，搜索词里出现 `1..10`
+    /// 就会把**整条路径**回退成 `/api/logs` —— 用户的筛选被静默丢弃，
+    /// 界面表现为「筛不出来」且没有任何报错。
+    #[test]
+    fn search_term_with_dotdot_is_preserved() {
+        let p = "/api/logs?search=1..10&action=block";
+        assert_eq!(
+            sanitize_local_path(p),
+            p,
+            "含 .. 的搜索词被判成穿越，筛选被静默丢弃"
+        );
+        // 编码后的路径片段同样不该触发回退
+        let p2 = "/api/logs/delete-filtered?search=..%2Fetc";
+        assert_eq!(sanitize_local_path(p2), p2);
+    }
+
+    /// 合法路径必须原样保留（不改写、不丢 query）。
+    #[test]
+    fn legit_paths_pass_through() {
+        for p in [
+            "/api/logs",
+            "/api/logs?limit=50&offset=0",
+            "/api/logs/stats",
+            "/api/logs/delete-filtered/confirm?days=7&marked_safe=false",
+        ] {
+            assert_eq!(sanitize_local_path(p), p, "合法路径被改写: {p}");
+        }
+    }
+
+    /// ★ 收紧不得放宽：路径部分的穿越与协议注入仍必须被拒绝。
+    #[test]
+    fn traversal_and_injection_are_rejected() {
+        for bad in [
+            "/api/../etc/passwd",
+            "/api/logs/../../secret",
+            "http://evil/api/logs",
+            "//evil/api/logs",
+            "/other/route",
+        ] {
+            assert_eq!(
+                sanitize_local_path(bad),
+                "/api/logs",
+                "非法路径未被拒绝: {bad}"
+            );
+        }
+    }
+
+    /// 控制字符（NUL / 换行）在路径与查询串里都必须被挡掉。
+    #[test]
+    fn control_characters_are_rejected() {
+        assert_eq!(sanitize_local_path("/api/logs\u{0}"), "/api/logs");
+        assert_eq!(sanitize_local_path("/api/logs?q=a\nb"), "/api/logs");
+    }
 }
