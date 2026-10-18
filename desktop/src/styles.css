@@ -86,6 +86,23 @@ body {
   user-select: none;
 }
 
+/* ══════════════════════════════════════════════════════════════
+   文本可选中区（覆盖上面的全局 user-select:none）
+   ★ 全局禁用选中是为了避免拖拽误选、干扰点击操作；但错误信息、
+     域名、日志摘要、脱敏片段、FAQ 正文这些**用户要复制去报障**的
+     文本也被一并禁掉了，等于让他没法把问题贴给别人看。这里只对
+     确属「读 / 复制」的文本区域恢复选中，按钮等操作控件仍不可选。
+   ══════════════════════════════════════════════════════════════ */
+.alert,
+.detail-val,
+.code-block,
+.code-box,
+.empty-text,
+.error-screen,
+.faq-answer {
+  user-select: text;
+}
+
 button,
 input,
 select,
@@ -1066,6 +1083,14 @@ textarea {
   background: var(--xd-primary-dim);
 }
 
+/* ★ 键盘聚焦轮廓（2026-10-19）。
+   表格行现在可被 Tab 聚焦（tabIndex + role="button"），
+   必须有清晰的焦点指示，否则键盘用户不知道当前焦点在哪一行。 */
+.table tbody tr:focus-visible {
+  outline: 2px solid var(--xd-primary);
+  outline-offset: -2px;
+}
+
 .table .mono {
   font-family: ui-monospace, 'SF Mono', Consolas, monospace;
   font-size: 12.5px;
@@ -1536,14 +1561,24 @@ textarea {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* ★ 去掉 justify-content: center（2026-10-19）：
+     flex 居中 + 内容高于窗口时，顶部会被推到可视区之外且**滚不上去**，
+     用户在「激活」等长内容步骤上直接卡死。
+     改用子项的 auto 外边距（见 .wizard-card）：有富余空间时照样居中，
+     内容过高时从顶部开始、可完整滚动。 */
   padding: 40px;
   background: var(--xd-bg);
+  /* 窗口较矮时允许滚动，不再把内容裁掉 */
+  overflow-y: auto;
 }
 
 .wizard-card {
   width: 560px;
   max-width: 100%;
+  /* ★ auto 外边距：垂直居中的同时保证内容溢出时可滚动（配合 shell 的 overflow）。
+     flex-shrink:0 保证卡片保持自然高度而不是被压扁。 */
+  margin: auto;
+  flex-shrink: 0;
   background: var(--xd-card);
   border: 1px solid var(--xd-border);
   border-radius: var(--xd-radius);
@@ -1639,6 +1674,23 @@ textarea {
   gap: 14px;
   padding: 40px;
   text-align: center;
+  /* 窗口较矮时允许滚动，避免内容被裁且滚不出来 */
+  overflow-y: auto;
+}
+
+/* ★ 用可收缩的弹性留白代替「纯 flex 居中」（2026-10-19）：
+   内容放得下时上下留白相等 → 视觉居中；放不下时留白收缩为 0，
+   从顶部开始、可完整滚动，不会像纯居中那样把顶部推出可视区且滚不上去。 */
+.error-screen::before,
+.error-screen::after {
+  content: '';
+  margin: auto 0;
+  flex-shrink: 0;
+}
+
+/* 内容保持自然高度，溢出时交给容器滚动而不是被压扁 */
+.error-screen > * {
+  flex-shrink: 0;
 }
 
 .error-title {

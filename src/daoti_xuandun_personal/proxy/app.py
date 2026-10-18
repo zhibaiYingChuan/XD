@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import codecs
 import copy
 import hashlib
 import json
@@ -42,7 +43,7 @@ from ..config import (
     normalize_relay_base,
 )
 from ..reputation.tracker import ReputationTracker
-from ..storage.db import PersonalStorage
+from ..storage.db import PersonalStorage, kpi_contribution
 from ..types import Action, LogEntry, LogType, RedactionRecord, SecurityLevel
 from .baseline import build_baseline
 from .restorer import ContentRestorer
@@ -493,7 +494,15 @@ def create_app() -> FastAPI:
                 #     而阻断根本没有打码 —— 请求被拒绝发送，
                 #     没有任何内容离开本机。把它记进打码数，
                 #     状态栏就会对用户谎报「已替你遮住 N 处敏感信息」。
-                _storage.update_daily_stats(total_calls=1, danger=1)
+                #
+                #   ★ 档位同样走 kpi_contribution，
+                #     与录入 / 重算 / 标记三处保持同一口径。
+                _t, _d, _sp, _sf = kpi_contribution(
+                    LogType.REQUEST_SANITIZE.value, Action.BLOCK.value
+                )
+                _storage.update_daily_stats(
+                    total_calls=_t, danger=_d, suspect=_sp, safe=_sf
+                )
                 logger.info(
                     "会话 %s 请求被阻断：%s", session_id, blocked.reason
                 )
@@ -845,7 +854,8 @@ def create_app() -> FastAPI:
         - **不逐 chunk 验证**（会破坏流式体验且难以在首字节前判定）
         - 采用**累计缓冲 + 阈值触发**：缓冲到 8KB 时做一次中期验证
         - **流结束时对全文再验证一次**（覆盖短响应，修复「<8KB 零验证」缺陷）
-        - **第三层脱敏恢复在流结束时对累积内容执行**（修复占位符原样透传）
+        - **第三层脱敏恢复按 SSE 帧执行**：每个完整帧转发前先还原占位符
+          （修复占位符原样透传给客户端；跨 chunk 被切断的占位符靠残留缓冲拼回）
         - 验证到高危 → 发送 SSE error event 后关闭流
         """
         findings: List[Any] = []
@@ -857,21 +867,50 @@ def create_app() -> FastAPI:
 
         async def _generator() -> AsyncGenerator[bytes, None]:
             nonlocal total_len, mid_verified, last_verified_len
+            # 跨 chunk 的 SSE 文本缓冲：只转发**完整帧**，
+            # 被 chunk 边界切断的占位符会在残留缓冲里拼回完整后再还原。
+            pending = ""
+            # 增量解码器：多字节 UTF-8 字符被 chunk 切断时也能正确拼回。
+            # 逐 chunk `decode(errors="ignore")` 会把半截汉字直接丢掉，
+            # 而占位符 `⟦XD_n⟧` 全由多字节字符组成，正是高发场景。
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+
+            def _restore_out(seg: str) -> str:
+                """还原一段即将转发的 SSE 文本里的脱敏占位符。
+
+                ★ 兼容两种形态：占位符字面量（⟦XD_n⟧）与 JSON 转义形态
+                  （`\\u27e6XD_n\\u27e7`）。后者在中转站以
+                  ensure_ascii=True 序列化时出现；不做归一化则正则匹配不到，
+                  占位符仍会原样透传给客户端。
+                """
+                if _restorer is None or not seg:
+                    return seg
+                normalized = seg.replace("\\u27e6", "⟦").replace("\\u27e7", "⟧")
+                if "⟦XD_" not in normalized:
+                    return seg
+                return _restorer.restore(restore_session, normalized)[0]
+
             try:
                 async for chunk in upstream.aiter_bytes():
                     if state["blocked"]:
                         break
 
                     # 累积文本用于验证与恢复
-                    try:
-                        text = chunk.decode("utf-8", errors="ignore")
-                    except Exception:  # noqa: BLE001
-                        text = ""
+                    text = decoder.decode(chunk)
                     if text:
                         collected.append(text)
                         total_len += len(text)
 
-                    yield chunk
+                    # ★★ 2026-10-19 修复：原实现直接 `yield chunk`，
+                    #   占位符以原样发出；`restore()` 只改了服务端 full 变量，
+                    #   对已发给客户端的字节无效 —— 注释却写「流结束时恢复」，
+                    #   与实现相反。用户（Claude Code / Cursor 全走流式）
+                    #   因此看到 ⟦XD_n⟧，工具调用参数也带着占位符被执行。
+                    #   现在先按完整 SSE 帧切分，还原后再转发。
+                    pending += text
+                    frames, pending = _split_sse_frames(pending)
+                    for frame in frames:
+                        yield _restore_out(frame).encode("utf-8")
 
                     # 累计到 8KB 后做一次中期验证
                     if (
@@ -904,6 +943,11 @@ def create_app() -> FastAPI:
                             break
                         mid_verified = True
 
+                # ★ 正常结束：把残留缓冲（末尾没有空行收尾的部分）还原后发出。
+                #   被阻断时 pending 不再发出 —— 阻断后不该再吐内容。
+                if not state["blocked"] and pending:
+                    yield _restore_out(pending).encode("utf-8")
+
                 # ★ 流结束：对全文做最终验证 + 第三层脱敏恢复
                 if not state["blocked"]:
                     full = "".join(collected)
@@ -916,6 +960,9 @@ def create_app() -> FastAPI:
                         except Exception:  # noqa: BLE001
                             pass
 
+                    # ★ 这里的 restore 只用于**产出异常发现**（中转站伪造/篡改
+                    #   占位符）与「恢复后复检」；转发出去的内容已在上面
+                    #   逐帧还原，故此处的 restored 不回灌到输出。
                     if _restorer is not None and _restorer.has_placeholders(full):
                         restored, anomalies = _restorer.restore(restore_session, full)
                         if anomalies:
@@ -1633,6 +1680,13 @@ def create_app() -> FastAPI:
             _sanitizer.set_level(_config.guard.security_level)
             for cat, enabled in _config.guard.enabled_categories.items():
                 _sanitizer.set_category_enabled(cat, enabled)
+            # ★ P1-4 修复：以整份 custom_keywords 为准做**全量替换**。
+            #   原实现只调 add_custom_keywords，从不移除 ——
+            #   用户在设置页删掉某个关键词后，运行中的脱敏器里那份仍在，
+            #   于是「界面里已经没有了」的关键词继续命中、继续打码/告警。
+            #   先清空当前全部可移除项，再写入本次配置里的这一份，
+            #   保证「界面里删掉的」就真的不再生效。
+            _sanitizer.remove_custom_keywords(_sanitizer.list_custom_keywords())
             _sanitizer.add_custom_keywords(_config.guard.custom_keywords)
         if _verifier is not None:
             _verifier.set_level(_config.guard.security_level)
@@ -2004,6 +2058,49 @@ def create_app() -> FastAPI:
             ),
         }
 
+    # ══════════════════════════════════════════════════════════
+    # 全局未捕获异常处理器（★ 2026-10-19 修复）
+    # ══════════════════════════════════════════════════════════
+    #
+    # ★ 为什么必须注册
+    #   任何未被局部捕获的异常都会落到 FastAPI 默认的裸 500：
+    #   `{"detail":"Internal Server Error"}` —— 既不结构化，也不落日志。
+    #   用户拿到一个无从复述的英文短语，排查者手里没有任何线索
+    #   （不知道是哪个接口、什么异常、哪一行）。防篡改产品出现
+    #   「查不到原因的 500」，比报错本身更伤信任。
+    #
+    # ★ 只处理 HTTPException 之外的一切
+    #   Starlette 按异常的 MRO 就近匹配已注册的处理器：HTTPException
+    #   有它自己的处理器，优先级高于这里的 Exception ——
+    #   所以本处理器**不会**吞掉 4xx 的既有语义（状态码、detail 结构）。
+    #
+    # ★ 绝不把 traceback 返回给客户端
+    #   栈里可能含文件路径、内部变量值，甚至是本机敏感信息片段。
+    #   对外只给一句稳定文案，完整栈只写进引擎日志（traceback 只留末尾
+    #   若干帧，足够定位又不至于刷屏）。
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        import traceback as _tb
+
+        tb_lines = _tb.format_exception(type(exc), exc, exc.__traceback__)
+        # 只保留末尾若干帧：异常抛出点与最近调用链在一起，
+        # 足以定位；完整栈会淹没日志里的其他信息。
+        condensed = "".join(tb_lines[-6:])
+        logger.error(
+            "未捕获异常：%s %s → %s: %s\n%s",
+            request.method, request.url.path,
+            type(exc).__name__, exc, condensed,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "type": "internal_error",
+                    "message": "服务内部错误，详情见引擎日志",
+                }
+            },
+        )
+
     return app
 
 
@@ -2080,6 +2177,48 @@ def _set_content(payload: Any, content: str) -> None:
             if isinstance(item, dict) and "text" in item:
                 item["text"] = content
                 return
+
+
+def _split_sse_frames(buf: str) -> Tuple[List[str], str]:
+    """把累积缓冲切成「完整的 SSE 帧」与「残留（未收尾部分）」。
+
+    ★★ 为什么流式路径要按帧缓冲（2026-10-19 修复）
+    ────────────────────────────────────────────────────────────
+    第三层脱敏恢复（把 `⟦XD_n⟧` 还原为原始值）只能对**完整**的占位符
+    生效：占位符若正好被 chunk 边界切断（前半在一个 chunk、
+    后半在下一个），逐 chunk 还原就会漏掉它，客户端收到的是
+    `⟦XD_` 原样透传 —— 而 Claude Code / Cursor 全走流式，
+    等于这些用户每次都看到占位符、工具调用参数也带着占位符被执行。
+
+    因此这里先按 SSE 的空行分隔符（`\n\n` / `\r\n\r\n`）切出完整帧，
+    只转发完整帧；被切断的部分留在残留缓冲里，等后续 chunk 补齐后
+    再连同还原一起发出。这样「跨 chunk 被切断的占位符」自然被拼回完整。
+
+    Returns:
+        (完整帧列表, 残留字符串)
+    """
+    frames: List[str] = []
+    if not buf:
+        return frames, ""
+    start = 0
+    i = 0
+    n = len(buf)
+    while i < n:
+        # 两种空行分隔符都要认：`\r\n\r\n` 以 `\r` 开头，
+        # 只在 `\n` 分支里判会永远漏掉它，于是整个流都被当作「未收尾」
+        # 一直滞留到结束才转发 —— 流式又变回整段缓冲。
+        if buf[i:i + 4] == "\r\n\r\n":
+            frames.append(buf[start:i + 4])
+            start = i + 4
+            i += 4
+            continue
+        if buf[i:i + 2] == "\n\n":
+            frames.append(buf[start:i + 2])
+            start = i + 2
+            i += 2
+            continue
+        i += 1
+    return frames, buf[start:]
 
 
 def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
@@ -2652,11 +2791,14 @@ def _record_log(
             _storage.insert_redactions(log_id, session_id, redaction_records)
 
         # 每日统计
-        danger = 1 if action == Action.BLOCK.value else 0
-        suspect = 1 if action == Action.ALERT.value else 0
-        safe = 1 if action == Action.PASS.value else 0
+        # ★★ 2026-10-19：改用与「删除后重算」「标记/取消标记」共用的
+        #   纯函数 kpi_contribution —— 三处口径从此同源。
+        #   若这里再手写一遍 action→档位的映射，删除重算时就可能
+        #   算出与录入不一致的 KPI（历史缺陷：每删一次日志，
+        #   首页「危险/可疑/已检查」就凭空变化）。
+        total, danger, suspect, safe = kpi_contribution(log_type, action)
         _storage.update_daily_stats(
-            total_calls=1, danger=danger, suspect=suspect, safe=safe,
+            total_calls=total, danger=danger, suspect=suspect, safe=safe,
             redactions=len(redaction_records),
         )
     except Exception as e:  # noqa: BLE001 — 日志失败不应阻断业务

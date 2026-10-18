@@ -31,6 +31,7 @@ import {
   currentProxyPort,
   syncProxyPort,
   displayDomain,
+  humanizeLoadError,
   type PersonalConfig,
   type SecurityLevel,
   type RelayPrecheck,
@@ -77,6 +78,20 @@ const CATEGORY_ORDER = [
   'email',
   'custom',
 ];
+
+/**
+ * 把连通性测试返回的 HTTP 状态码翻译成用户看得懂的说法。
+ *
+ * ★ 光给一个「404」用户不知道意味着什么；补一句「接口不存在」
+ *   他才知道该去核对地址，而不是怀疑自己的 Key 或网络。
+ */
+function describeRelayStatus(status: number): string {
+  if (status === 401 || status === 403) return `${status}（Key 被拒绝）`;
+  if (status === 404) return `${status}（接口不存在）`;
+  if (status === 429) return `${status}（请求太频繁）`;
+  if (status >= 500) return `${status}（对方服务器出错）`;
+  return String(status);
+}
 
 // ══════════════════════════════════════════════════════════════
 // 页面
@@ -243,6 +258,17 @@ export default function Settings() {
   const dropRelay = useCallback(
     async (id: string, name: string) => {
       if (switching) return;
+      // ★ 移除会当场删掉这一家的地址与 Key，且不可恢复 —— 必须先确认。
+      //   此前一点即删：用户只是想换个默认目标，手滑点到「移除」就永久
+      //   丢了一把 Key，而界面上再没有任何地方能找回它。
+      if (
+        !window.confirm(
+          `确定移除「${name}」吗？\n\n`
+            + '将删除该中转站的地址与 Key，此操作不可恢复。',
+        )
+      ) {
+        return;
+      }
       setSwitching(true);
       try {
         await api.removeRelay(id);
@@ -543,6 +569,8 @@ export default function Settings() {
   }
 
   if (loadError || !config) {
+    // 原始报错翻译成「怎么了 + 怎么办」，原始信息收进折叠的技术细节。
+    const err = humanizeLoadError(loadError);
     return (
       <div>
         <div className="page-header">
@@ -552,7 +580,18 @@ export default function Settings() {
           <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
           <div>
             <b>无法连接本地代理</b>
-            <div className="mt-8">{loadError ?? '配置加载失败'}</div>
+            <div className="mt-8">{err.message}</div>
+            <details className="mt-8">
+              <summary
+                className="faint"
+                style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
+              >
+                技术细节
+              </summary>
+              <div className="mono faint" style={{ fontSize: 12, marginTop: 4 }}>
+                {err.detail}
+              </div>
+            </details>
             <div className="mt-8 faint">
               请确认玄盾代理已启动（127.0.0.1:{currentProxyPort()}）。
             </div>
@@ -598,7 +637,7 @@ export default function Settings() {
           <div>
             <div className="switch-label">请求脱敏</div>
             <div className="switch-desc">
-              发送前自动遮盖 API 密钥、手机号等敏感信息，返回时自动还原
+              发送前自动遮住 API 密钥、手机号等，回答回来后自动还原成原文
             </div>
           </div>
           <label className="switch">
@@ -615,7 +654,7 @@ export default function Settings() {
         <div className="switch-row">
           <div>
             <div className="switch-label">中转站评估</div>
-            <div className="switch-desc">评估中转站可信度，检测数据保留迹象与恶意指纹</div>
+            <div className="switch-desc">评估中转站可信度，看它是否保留你的对话、是否在已知的恶意名单里</div>
           </div>
           <label className="switch">
             <input
@@ -738,7 +777,7 @@ export default function Settings() {
               {testing ? '测试中…' : '测试连接'}
             </button>
             <span className="faint" style={{ fontSize: 12 }}>
-              会发出一真实请求，确认地址与 Key 是否可用
+              会向该中转站发出一次真实请求，确认地址和 Key 是否可用
             </span>
           </div>
 
@@ -760,16 +799,31 @@ export default function Settings() {
                 <b>{relayTest.message}</b>
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
                   玄盾请求的地址：<span className="mono">{relayTest.request_url}</span>
-                  {relayTest.status !== null && `　状态码 ${relayTest.status}`}
-                  {`　耗时 ${relayTest.elapsed_ms} ms`}
                 </div>
+                {/* ★ 状态码与耗时都翻译成人话：光一个「404」用户不知道意味着什么，
+                    「1.2 秒」也比「1234 ms」更贴近体感。 */}
+                <div className="mt-8 faint" style={{ fontSize: 12 }}>
+                  {relayTest.status !== null
+                    && `对方返回 ${describeRelayStatus(relayTest.status)} · `}
+                  {`用时 ${(relayTest.elapsed_ms / 1000).toFixed(1)} 秒`}
+                </div>
+                {/* ★ 上游原始响应体：只对排障有用，不该糊在脸上。
+                    给个标题、默认折叠起来，愿意核对的人再展开。 */}
                 {!relayTest.ok && relayTest.raw && (
-                  <div
-                    className="mt-8 faint mono"
-                    style={{ fontSize: 12, wordBreak: 'break-all' }}
-                  >
-                    {relayTest.raw}
-                  </div>
+                  <details className="mt-8">
+                    <summary
+                      className="faint"
+                      style={{ fontSize: 12, cursor: 'pointer', listStyle: 'none' }}
+                    >
+                      对方返回的内容（仅用于排查）
+                    </summary>
+                    <div
+                      className="mono faint"
+                      style={{ fontSize: 12, marginTop: 4, wordBreak: 'break-all' }}
+                    >
+                      {relayTest.raw}
+                    </div>
+                  </details>
                 )}
               </div>
             </div>

@@ -755,7 +755,10 @@ export const ACTION_LABELS: Record<LogAction, string> = {
 export const LOG_TYPE_LABELS: Record<LogType, string> = {
   request_sanitize: '请求脱敏',
   response_verify: '响应验证',
-  proxy_error: '代理错误',
+  // ★ 原名「代理错误」是站在实现视角的描述，用户读到只会想「谁错了、错哪了」。
+  //   proxy_error 记录的其实是「本地代理到中转站这一段没走通」，
+  //   改说「转发中断」直指现象，用户才知道发生了什么。
+  proxy_error: '转发中断',
   relay: '正常转发',
 };
 
@@ -938,6 +941,42 @@ export function formatUptime(seconds: number): string {
   if (d > 0) return `${d} 天 ${h} 小时`;
   if (h > 0) return `${h} 小时 ${m} 分`;
   return `${m} 分钟`;
+}
+
+/**
+ * 把底层错误信息翻译成「怎么了 + 怎么办」，原始信息留作技术细节备查。
+ *
+ * ★ 为什么不能直接把原始信息摆给用户（2026-10-19）
+ *   底层抛出的形如 `GET /api/state → HTTP 500`、`Failed to fetch`，
+ *   那是开发者视角的字符串。用户既读不懂 GET，也不知道下一步该做什么 ——
+ *   而这恰恰是「连不上」时唯一需要告诉他的两件事。
+ *   原始信息不是没价值，它该收进折叠的「技术细节」里，
+ *   给愿意核对或要拿去报障的人看。
+ */
+export function humanizeLoadError(raw: string | null | undefined): {
+  /** 给用户看的一句话：说清楚发生了什么、该怎么办 */
+  message: string;
+  /** 折叠起来的技术细节（原始错误串） */
+  detail: string;
+} {
+  const text = (raw ?? '').trim();
+  const howTo = '点「重试」；若持续失败请重启玄盾。';
+  const status = /HTTP (\d{3})/.exec(text);
+  if (status) {
+    return {
+      message: `无法连接到玄盾本地服务（错误 ${status[1]}）。${howTo}`,
+      detail: text,
+    };
+  }
+  // 超时（ApiTimeoutError 的文案含「超时」）与网络不可达分开说，
+  // 两者的排查方向不同：前者是服务没响应，后者是根本没连上。
+  if (text.includes('超时')) {
+    return { message: `连接玄盾本地服务超时。${howTo}`, detail: text };
+  }
+  return {
+    message: `无法连接到玄盾本地服务。${howTo}`,
+    detail: text || '（无更多信息）',
+  };
 }
 
 /** 依据 action + severity 得出徽章样式类 */

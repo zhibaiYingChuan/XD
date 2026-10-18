@@ -90,6 +90,56 @@ def _log_filters(
     return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
 
 
+def kpi_contribution(
+    log_type: str, action: str, marked_safe: bool = False
+) -> tuple:
+    """把「一行日志」折算成它对每日 KPI 的贡献：(total, danger, suspect, safe)。
+
+    ★★ 为什么必须是一个**纯函数**（2026-10-19 修复）
+    ────────────────────────────────────────────────────────────
+    首页 KPI 有两个来源：**录入时累加**（app.py::_record_log 等）与
+    **删除后重算**（_recompute_daily_stats）。两处若各写一套归类规则，
+    就会出现「录入时不计的，重算时又计回来」——
+    用户每删一次日志，首页的「危险 / 可疑 / 已检查」就可能凭空变化。
+
+    实测分叉（本缺陷的原始形态）：
+      · 录入时 proxy_error（超时 / 上游 4xx·5xx）**刻意不计**任何档，
+        重算却按 action 全表统计 → action=block 的 proxy_error
+        被计进「危险」，action=alert 的被计进「可疑」；
+      · 用户标记为误报（marked_safe=1）的行录入时已回退，
+        重算却只看 action、完全忽略 marked_safe → 误报被重新计回。
+
+    录入 / 标记·取消标记 / 重算三处共用这一个函数，分叉从源头消失。
+    返回四元组而非直接写库，是为了让它能被单独断言其一一对应关系。
+
+    ★ 口径明细（务必与 _record_log 的实际写入逐条对齐）：
+      · proxy_error：链路 / 鉴权级失败，不计入任何档
+        （见 app.py 的 _proxy_error / _log_upstream_error）—— 连 total 也不计。
+      · 其余类型（response_verify / request_sanitize / relay）每行计 1 次
+        total，并按 action 归入 danger / suspect / safe 之一。
+      · marked_safe=1：用户已确认是误报，不再计入风险档。
+        与 _adjust_daily_stats_for_mark 的历史行为保持一致 ——
+        只有 block / alert 被标记时才连 total 一起回退；
+        pass 标记本就无意义（它不属于风险），维持原样。
+    """
+    if log_type == LogType.PROXY_ERROR.value:
+        return (0, 0, 0, 0)
+    danger = 1 if action == Action.BLOCK.value else 0
+    suspect = 1 if action == Action.ALERT.value else 0
+    safe = 1 if action == Action.PASS.value else 0
+    total = 1
+    if marked_safe:
+        # 与 _adjust_daily_stats_for_mark 同一口径：
+        # 只有 block / alert 被标记时才回退（pass 标记无意义，维持原样）。
+        if action == Action.BLOCK.value:
+            danger = 0
+            total = 0
+        elif action == Action.ALERT.value:
+            suspect = 0
+            total = 0
+    return (total, danger, suspect, safe)
+
+
 class _LockedConn:
     """把 sqlite3 连接包一层，用同一把可重入锁串行化所有访问。
 
@@ -606,16 +656,27 @@ class PersonalStorage:
         """
         if delta not in (-1, 1):
             raise ValueError("delta 只能是 -1 或 +1")
-        # 只有影响风险判定的两类才需要回退：
-        # block（危险）与 alert（可疑）。
-        # pass（安全）标记误报没有意义 —— 它本来就不算风险；
-        # 若也回退 safe_count，会让「安全」凭空变小，
-        # 同样是对用户的谎报。
-        if entry.action == Action.BLOCK.value:
-            col = "danger_count"
-        elif entry.action == Action.ALERT.value:
-            col = "suspect_count"
-        else:
+        # ★ 用与录入（_record_log）/ 重算（_recompute_daily_stats）**同一套口径**
+        #   算出「未标记」与「已标记」两种贡献，两者之差就是这次
+        #   标记 / 取消标记该回退 / 补回的份额。
+        #   原实现只判 action 而写死列名，等于把归类规则又写了一遍 ——
+        #   一旦录入侧口径变动，这里就会与重算一起漂移。
+        #
+        #   只有影响风险判定的两类才会产生非零差额：
+        #   block（危险）与 alert（可疑）；pass（安全）标记本无意义，
+        #   它的两种贡献完全相同、差额为零，天然不会改动任何计数 ——
+        #   也就不会让「安全」数凭空变小（那同样是对用户的谎报）。
+        unmarked = kpi_contribution(entry.log_type, entry.action, False)
+        marked = kpi_contribution(entry.log_type, entry.action, True)
+        if delta < 0:      # 标记：未标记 → 已标记
+            d_total, d_danger, d_suspect, d_safe = (
+                marked[i] - unmarked[i] for i in range(4)
+            )
+        else:              # 取消标记：已标记 → 未标记
+            d_total, d_danger, d_suspect, d_safe = (
+                unmarked[i] - marked[i] for i in range(4)
+            )
+        if not any((d_total, d_danger, d_suspect, d_safe)):
             return
 
         import datetime as _dt
@@ -632,11 +693,13 @@ class PersonalStorage:
 
         with self._conn:
             self._conn.execute(
-                f"""UPDATE daily_stats
-                    SET {col} = MAX(0, {col} + ?),
-                        total_calls = MAX(0, total_calls + ?)
-                    WHERE date = ?""",
-                (delta, delta, date_str),
+                """UPDATE daily_stats
+                   SET total_calls = MAX(0, total_calls + ?),
+                       danger_count = MAX(0, danger_count + ?),
+                       suspect_count = MAX(0, suspect_count + ?),
+                       safe_count = MAX(0, safe_count + ?)
+                   WHERE date = ?""",
+                (d_total, d_danger, d_suspect, d_safe, date_str),
             )
 
     def export_logs(
@@ -740,33 +803,52 @@ class PersonalStorage:
           而 redaction_records 按 log_id 存着明细行数。
           所以它取自 redaction_records 的行数 ——
           删日志时上面已连带删掉对应行，两者天然同步。
+
+        ★★ 2026-10-19 修复：重算必须与录入共用同一套归类口径。
+          原实现按 `action` 全表聚合，于是：
+            · log_type='proxy_error' 的行（录入时刻意不计 KPI）
+              因 action 恰为 block / alert 而被重新计进「危险 / 可疑」；
+            · 用户标记为误报（marked_safe=1）的行被完全忽略、
+              重新计回风险档。
+          后果：用户每删一次日志，首页的「危险 / 可疑 / 已检查」
+          就可能凭空变化。现在逐行调用 kpi_contribution() ——
+          与录入、标记是同一个函数，分叉从源头消失。
         """
         with self._conn:
             rows = self._conn.execute(
-                "SELECT DISTINCT date(timestamp, 'unixepoch', 'localtime') AS d "
-                "FROM logs"
+                "SELECT date(timestamp, 'unixepoch', 'localtime') AS d, "
+                "log_type, action, marked_safe FROM logs"
             ).fetchall()
-            dates = [str(r["d"]) for r in rows if r["d"]]
+            # 逐行折算（口径见 kpi_contribution），按天归集。
+            per_day: Dict[str, List[int]] = {}
+            for r in rows:
+                d = r["d"]
+                if not d:
+                    continue
+                acc = per_day.setdefault(str(d), [0, 0, 0, 0])
+                t, danger, suspect, safe = kpi_contribution(
+                    str(r["log_type"]), str(r["action"]),
+                    bool(r["marked_safe"]),
+                )
+                acc[0] += t
+                acc[1] += danger
+                acc[2] += suspect
+                acc[3] += safe
+
+            dates = list(per_day.keys())
             if dates:
                 marks = ",".join("?" * len(dates))
                 self._conn.execute(
                     f"DELETE FROM daily_stats WHERE date NOT IN ({marks})", dates
                 )
                 for d in dates:
-                    agg = self._conn.execute(
-                        "SELECT COUNT(*) AS total, "
-                        "SUM(action = 'block') AS danger, "
-                        "SUM(action = 'alert') AS suspect, "
-                        "SUM(action = 'pass') AS safe "
-                        "FROM logs WHERE date(timestamp, 'unixepoch', 'localtime') = ?",
-                        (d,),
-                    ).fetchone()
                     redactions = self._conn.execute(
                         "SELECT COUNT(*) AS c FROM redaction_records r "
                         "JOIN logs l ON l.id = r.log_id "
                         "WHERE date(l.timestamp, 'unixepoch', 'localtime') = ?",
                         (d,),
                     ).fetchone()
+                    total, danger, suspect, safe = per_day[d]
                     self._conn.execute(
                         """INSERT INTO daily_stats
                            (date, total_calls, danger_count, suspect_count,
@@ -780,10 +862,10 @@ class PersonalStorage:
                              redaction_count = excluded.redaction_count""",
                         (
                             d,
-                            int(agg["total"] or 0),
-                            int(agg["danger"] or 0),
-                            int(agg["suspect"] or 0),
-                            int(agg["safe"] or 0),
+                            int(total),
+                            int(danger),
+                            int(suspect),
+                            int(safe),
                             int(redactions["c"] or 0) if redactions else 0,
                         ),
                     )

@@ -414,7 +414,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                 </div>
                 <div className="field-hint">
                   在你使用的 AI 工具的「API 地址 / Base URL」设置项中填入上面的地址，
-                  并把 API Key 也改成你的中转站 Key。
+                  API Key 一栏填中转站给你的那把 Key（不是玄盾的）。
                 </div>
               </div>
             </div>

@@ -193,6 +193,10 @@ tests/*
 #   —— 它从未进过仓库，CI 也就从未跑过授权相关断言。
 #   补进放行列表：机器码算法、验签、吊销、激活锚点这些用例必须随码走。
 !tests/test_license.py
+# ★ 本轮新增（2026-10-19）：KPI 口径一致性 + 流式占位符还原的回归用例。
+#   这两个缺陷都属于「不报错的静默错误」（统计凭空变化、用户看到 ⟦XD_n⟧），
+#   没有测试守着，下次改动很容易再把它们放回来。
+!tests/test_kpi_and_stream_restore.py
 !tests/test_reputation_score.py
 !tests/test_multi_relay.py
 # ★ 本轮新增（2026-10-03）。四条都是「把踩过的坑固化成门禁」：

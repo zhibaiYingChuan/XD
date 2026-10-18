@@ -119,6 +119,118 @@ fn data_dir() -> std::path::PathBuf {
     base
 }
 
+// ══════════════════════════════════════════════════════════════
+// 落盘滚动日志
+// ══════════════════════════════════════════════════════════════
+//
+// ★ 为什么必须落盘：
+//   release 构建下 main.rs 声明了 `windows_subsystem = "windows"`，
+//   进程没有控制台，所有 eprintln! 都会被直接丢弃 —— 引擎启动失败、
+//   引擎崩溃输出、托盘异常等关键信息全部消失，用户报障时我们拿不到
+//   任何可交付证据（而想要？本函数就是那个「证据」）。
+//   故用标准库实现一个最简的滚动日志，不引入任何日志 crate。
+
+/// 单文件轮转阈值（约 5MB）
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// 保留的日志文件个数（当前文件 + 其备份，合计最多 3 个）
+const LOG_KEEP: usize = 3;
+
+/// 日志写入的全局串行锁。
+///
+/// ★ 引擎的 stdout/stderr 各由一条独立线程持续 drain，再加上主线程，
+///   多线程并发追加会撕裂日志行，故必须串行化写入。
+static LOG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 追加一行落盘日志（替代 eprintln!，release 下唯一可见的输出）。
+///
+/// 位置：%LOCALAPPDATA%\com.daoti.xuandun-personal\logs\xuandun.log
+/// 格式：`<UTC 时间戳> [级别] 消息`
+/// 轮转：单文件超过约 5MB 时滚动，最多保留 3 个文件。
+///
+/// ★ 任何失败都静默放弃、绝不 panic：日志是辅助设施，
+///   不能反过来拖垮应用（它甚至可能被 Drop / 退出路径调用）。
+fn log_line(level: &str, msg: &str) {
+    // 锁中毒也要继续写：日志不该因一次 panic 就永久停摆
+    let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = data_dir().join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("xuandun.log");
+    rotate_logs(&dir, &path);
+
+    let line = format!(
+        "{} [{}] {}\n",
+        fmt_timestamp(std::time::SystemTime::now()),
+        level,
+        msg
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// 日志超过阈值时滚动：xuandun.log → .1 → .2，丢弃最旧的。
+fn rotate_logs(dir: &std::path::Path, path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < LOG_MAX_BYTES {
+        return;
+    }
+    let _ = std::fs::remove_file(dir.join(format!("xuandun.log.{}", LOG_KEEP - 1)));
+    for i in (1..LOG_KEEP - 1).rev() {
+        let _ = std::fs::rename(
+            dir.join(format!("xuandun.log.{i}")),
+            dir.join(format!("xuandun.log.{}", i + 1)),
+        );
+    }
+    let _ = std::fs::rename(path, dir.join("xuandun.log.1"));
+}
+
+/// 生成可读时间戳（UTC）。
+///
+/// ★ 刻意输出 UTC 并带 Z 后缀：不引入时区库（零新增依赖），
+///   而带 Z 后缀的时间戳不会被误读成本地时间。
+fn fmt_timestamp(t: std::time::SystemTime) -> String {
+    let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs() as i64;
+    let millis = dur.subsec_millis();
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}Z",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60,
+        millis
+    )
+}
+
+/// 由「距 1970-01-01 的天数」求公历年月日（Howard Hinnant 经典算法）。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// 从 Python 侧配置文件读出监听端口。
 ///
 /// 为什么需要读配置（★ P1-10）：
@@ -136,7 +248,10 @@ fn proxy_port() -> u16 {
                 return p;
             }
         }
-        eprintln!("[WARN] {} 取值非法，已回退默认端口: {:?}", env_keys::PROXY_PORT, v);
+        log_line(
+            "WARN",
+            &format!("{} 取值非法，已回退默认端口: {:?}", env_keys::PROXY_PORT, v),
+        );
     }
 
     let base = data_dir().join("config.json");
@@ -479,23 +594,13 @@ pub struct EngineState {
 // Drop 时回收子进程（避免孤儿进程）
 impl Drop for EngineState {
     fn drop(&mut self) {
-        // 锁顺序与 stop_engine 保持一致（pid → child），避免潜在死锁
+        // 锁顺序与 stop_engine 保持一致（pid → child），避免潜在死锁。
+        // ★★ 绝不在此无超时 wait()：实测 Nuitka 引擎用 Child::kill() 杀不掉，
+        //   wait() 会永久阻塞 —— 而 Drop 出现在应用退出路径上，卡住 = 退出假死。
+        //   统一交给 reap_child_sync（taskkill 强杀 + try_wait 有界回收）。
         let pid = *self.pid.lock();
-        if let Some(mut child) = self.child.lock().take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        // 兜底：kill() 对 Nuitka 引擎无效（实测），必须按 pid 强杀，
-        // 否则应用崩溃/被强杀时会留下监听 18765 的孤儿引擎。
-        if let Some(p) = pid {
-            for _ in 0..10 {
-                if !process_alive(p) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            kill_cmd("/T", "/F", p);
-        }
+        let child = self.child.lock().take();
+        reap_child_sync(child, pid, Duration::from_secs(3));
     }
 }
 
@@ -775,27 +880,50 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // ★★ spawn 前先回收旧 child/pid，绝不直接覆盖：
+    //   若此处直接覆盖 state.child，旧进程句柄被丢弃 → 旧引擎失去跟踪
+    //   （可能仍在监听端口 → 新引擎抢同一端口报 Errno 10048，且 pid
+    //   指向死进程 → 退出时杀错对象，真引擎成孤儿长期占端口）。
+    //   故先取出旧值，kill + taskkill + 有界回收（绝不无超时 wait），
+    //   再清空 pid，确保换新句柄前旧进程已处理干净。
+    {
+        let state = app.state::<EngineState>();
+        let old_pid = *state.pid.lock();
+        let old_child = state.child.lock().take();
+        if old_child.is_some() || old_pid.is_some() {
+            log_line("WARN", "启动引擎前发现残留旧进程，先回收再拉起");
+        }
+        reap_child_sync(old_child, old_pid, Duration::from_secs(3));
+        *state.pid.lock() = None;
+    }
+
     {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Err(format!("启动引擎 {exe:?} 失败: {e}")),
         };
         let pid = child.id();
+        log_line("INFO", &format!("引擎进程已启动 pid={pid} port={port}"));
 
-        // ★ 必须消费 stdout/stderr，否则管道缓冲区满会导致引擎挂起
+        // ★ 必须**持续 drain** stdout/stderr，绝不能只读前 N 行：
+        //   读线程一旦到达行数上限就退出，管道读端随之关闭 —— 之后引擎每次
+        //   写 stdout/stderr 都会命中 broken pipe（Windows 下 Python print
+        //   直接抛 OSError），轻则报错、重则引擎退出，防护静默失效。
+        //   这与「必须消费 stdout 否则管道满会挂起」是同一个道理，
+        //   所以用「持续读到 EOF」而不是 take(N)。
         if let Some(stdout) = child.stdout.take() {
             std::thread::spawn(move || {
                 use std::io::{BufRead, BufReader};
-                for line in BufReader::new(stdout).lines().map_while(Result::ok).take(200) {
-                    eprintln!("[engine] {line}");
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    log_line("INFO", &format!("[engine] {line}"));
                 }
             });
         }
         if let Some(stderr) = child.stderr.take() {
             std::thread::spawn(move || {
                 use std::io::{BufRead, BufReader};
-                for line in BufReader::new(stderr).lines().map_while(Result::ok).take(200) {
-                    eprintln!("[engine:err] {line}");
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    log_line("ERROR", &format!("[engine:err] {line}"));
                 }
             });
         }
@@ -832,20 +960,20 @@ async fn stop_engine(app: &tauri::AppHandle) {
 ///   pid 归属在窗口期里可能错乱。
 ///   故 restart 走 restart_engine_locked，全程持锁。
 async fn stop_engine_locked(app: &tauri::AppHandle) {
-    // 先取 pid 再取 child：kill 失败时仍能用 pid 兜底
-    let pid = *app.state::<EngineState>().pid.lock();
+    // ★ 先把 pid / child 取出到局部变量，尽早释放 state 的内部锁，
+    //   避免后续 kill/回收（含 taskkill 轮询）期间跨 await 持有 parking_lot 守卫。
+    let (pid, child) = {
+        let state = app.state::<EngineState>();
+        let pid = *state.pid.lock();
+        let child = state.child.lock().take();
+        (pid, child)
+    };
 
-    if let Some(mut child) = app.state::<EngineState>().child.lock().take() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-
-    // ★ 必须确认引擎真的退出了。
-    //   实测：Nuitka 引擎用 Child::kill() 杀不掉（进程仍在、端口仍监听），
-    //   而 taskkill /T /F 有效。若不在此确认，会留下监听 18765 的孤儿进程。
-    if let Some(p) = pid {
-        force_kill_engine(p).await;
-    }
+    // ★ 终止 + 回收：**绝不无超时 wait()**。
+    //   本函数在 restart_engine / 健康监控里「持 lifecycle 锁」被调用，
+    //   一旦 wait() 无限阻塞，之后所有命令都会卡在 lifecycle.lock().await，
+    //   UI 永久转圈（详见 terminate_engine_child 顶部说明）。
+    terminate_engine_child(child, pid).await;
 
     {
         let state = app.state::<EngineState>();
@@ -864,16 +992,63 @@ async fn stop_engine_locked(app: &tauri::AppHandle) {
     }
 }
 
-/// 强制结束引擎进程（先常规终止，必要时强杀进程树）
-async fn force_kill_engine(pid: u32) {
-    for _ in 0..10 {
-        if !process_alive(pid) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+/// 终止并回收一个引擎子进程：全程有界，**绝不调用无超时的 wait()**。
+///
+/// ★ 为什么不能用 wait()：
+///   文件内多处实测，Nuitka 引擎用 Child::kill() 杀不掉（进程仍在、
+///   端口仍监听）。此时若调用 wait()，它会一直等下去；而本函数在
+///   stop_engine_locked 中**持 lifecycle 锁**执行 —— 一旦卡住，
+///   之后所有命令都堵在 lifecycle.lock().await，UI 永久转圈。
+///
+/// 固定三步（与 shutdown() 的「先强杀、后谈 child」理念一致）：
+///   ① 尽力 child.kill()（对本引擎通常无效，但代价极低）
+///   ② taskkill /T /F 强杀进程树（唯一有效手段）
+///   ③ try_wait() 有界轮询回收句柄（每 50ms 一次，总计不超过 3s），超时放弃
+async fn terminate_engine_child(child: Option<Child>, pid: Option<u32>) {
+    let mut child = child;
+    if let Some(c) = child.as_mut() {
+        let _ = c.kill();
     }
-    // 仍未退出 → 强杀进程树
-    kill_cmd("/T", "/F", pid);
+    if let Some(p) = pid {
+        // 先确认仍存活再强杀：kill() 对部分引擎有效，此时进程已退出，
+        // 可避免对可能被复用/已消失的 pid 误发 taskkill。
+        if process_alive(p) {
+            kill_cmd("/T", "/F", p);
+        }
+    }
+    if let Some(c) = child.as_mut() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while c.try_wait().map(|s| s.is_none()).unwrap_or(false) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// 同步版子进程回收（用于 Drop / spawn 前的旧值回收等同步上下文）。
+///
+/// ★ 语义与 terminate_engine_child 一致：先 kill + taskkill 强杀，
+///   再 try_wait() 有界轮询；绝不无超时 wait()，宁可放弃回收也不阻塞。
+fn reap_child_sync(mut child: Option<Child>, pid: Option<u32>, budget: Duration) {
+    if let Some(c) = child.as_mut() {
+        let _ = c.kill();
+    }
+    if let Some(p) = pid {
+        if process_alive(p) {
+            kill_cmd("/T", "/F", p);
+        }
+    }
+    if let Some(c) = child.as_mut() {
+        let deadline = Instant::now() + budget;
+        while c.try_wait().map(|s| s.is_none()).unwrap_or(false) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 /// 进程是否仍存活。
@@ -988,10 +1163,24 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
         st.last_check = Some(unix_now());
         Ok(())
     } else {
-        let msg = "引擎在 60 秒内未就绪".to_string();
-        state.status.lock().healthy = false;
-        state.status.lock().startup_error = Some(msg.clone());
-        Err(msg)
+        // ★★ 未就绪必须彻底清理，不能只置 healthy=false：
+        //   否则 status.running 仍为真、child 仍被跟踪，下次 ensure 会
+        //   再 spawn 一个，与这个「没就绪但还活着」的进程抢端口（Errno 10048）；
+        //   且换新句柄时旧句柄被覆盖 → 旧进程失去跟踪成孤儿、pid 指向死进程。
+        //   故这里：回收进程 + 复位 running + 清 pid（保留可重试状态）。
+        let (pid, child) = {
+            let pid = *state.pid.lock();
+            let child = state.child.lock().take();
+            *state.pid.lock() = None;
+            (pid, child)
+        };
+        terminate_engine_child(child, pid).await;
+
+        let mut st = state.status.lock();
+        st.running = false;
+        st.healthy = false;
+        st.startup_error = Some("引擎在 60 秒内未就绪".to_string());
+        Err("引擎在 60 秒内未就绪".to_string())
     }
 }
 
@@ -1078,14 +1267,17 @@ fn spawn_health_monitor(app: tauri::AppHandle) {
                 continue;
             }
 
+            // 引擎未运行且用户未主动停止（user_stopped 已在上面处理）：
+            // 说明它崩溃了，或上一次看门狗清理（连续失败分支）把它停了。
+            // ★ 必须先如实转灰：防护已失效，用户必须看得见，不能静默。
+            // ★★ 但**不能**就此 continue —— 否则看门狗等于自己躺下：
+            //    status.running 被清理分支置 false 后，这里会一直命中该分支
+            //    只刷灰、永不自动恢复（防护静默消失）。
+            //    故转灰后继续往下走，交给失败计数 + 重启逻辑恢复（前 2 次允许自愈）。
             if !running {
-                // 引擎未运行（用户可能主动关闭）→ 托盘转灰
-                // ★ 关键：不能静默。防护失效时用户必须看得见灰态，
-                //   否则「透明防火墙」会退化成「静默失效的防火墙」。
                 if let Some(ctrl) = app.try_state::<TrayController>() {
                     ctrl.force_paused(&app);
                 }
-                continue;
             }
 
             fail_streak += 1;
@@ -1123,6 +1315,17 @@ fn spawn_health_monitor(app: tauri::AppHandle) {
                     let state2 = app.state::<EngineState>();
                     let _guard = state2.lifecycle.lock().await;
                     stop_engine_locked(&app).await;
+                    // ★★ 必须复位 user_stopped（两个「停止」意图位的关键分离）：
+                    //   stop_engine_locked 内部会把 user_stopped 置 true —— 那是
+                    //   给「用户主动停止」用的。但这里是**看门狗因连续失败而停**，
+                    //   与用户意图是两回事，绝不复用同一个意图位。
+                    //   若不复位：此后 ensure_engine_running 与 resume_protection
+                    //   都会统一返回「本地代理已被手动停止」（与事实不符），
+                    //   应用整体不可用、只能重启进程；健康监控也会一直命中
+                    //   上面的 user_stopped 分支，只刷灰、永不自动恢复。
+                    state2
+                        .user_stopped
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                 }
                 // 退避 60s 再试，避免疯狂重启刷屏；不 break，监控继续。
                 fail_streak = 0;
@@ -1146,7 +1349,7 @@ fn spawn_health_monitor(app: tauri::AppHandle) {
                     .user_stopped
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 if let Err(e) = start_engine_process(&app2) {
-                    eprintln!("[XuanDun Personal] 引擎自动重启失败: {e}");
+                    log_line("ERROR", &format!("引擎自动重启失败: {e}"));
                     if let Some(ctrl) = app2.try_state::<TrayController>() {
                         ctrl.force_paused(&app2);
                     }
@@ -1871,8 +2074,14 @@ fn enable_cdp_debug_port() -> bool {
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
             format!("--remote-debugging-port={port} --remote-allow-origins=*"),
         );
-        eprintln!("[WARN] CDP 调试端口已开启: {port}（debug 构建或设置了 XUANDUN_ENABLE_CDP_DEBUG）");
-        eprintln!("[WARN] 任意本地进程可通过 CDP 注入 JS 篡改界面显示，仅限调试环境使用");
+        log_line(
+            "WARN",
+            &format!("CDP 调试端口已开启: {port}（debug 构建或设置了 XUANDUN_ENABLE_CDP_DEBUG）"),
+        );
+        log_line(
+            "WARN",
+            "任意本地进程可通过 CDP 注入 JS 篡改界面显示，仅限调试环境使用",
+        );
     }
     enable
 }
@@ -1882,6 +2091,16 @@ pub fn run() {
     enable_cdp_debug_port();
 
     tauri::Builder::default()
+        // ★ 单实例：多个实例会各自拉起引擎抢 18765，退出其一时 taskkill
+        //   还会杀掉另一实例正在使用的引擎。后启动的实例由本插件拦下并
+        //   直接退出，同时把已运行的窗口拉到前台，避免用户以为没打开。
+        //   ★ 必须注册为**第一个**插件：让第二实例在创建窗口前就被拒掉。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(EngineState {
@@ -1953,14 +2172,14 @@ pub fn run() {
             // 否则引擎启动失败时用户看不到任何提示，
             // 「静默失效」正是托盘要消灭的状态，不能自己先犯。
             if let Err(e) = tray::build(&handle) {
-                eprintln!("[XuanDun Personal] 托盘创建失败: {e}");
+                log_line("ERROR", &format!("托盘创建失败: {e}"));
             }
 
             // 启动时拉起引擎（异步，不阻塞窗口显示）
             let h = handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = ensure_engine_running(&h).await {
-                    eprintln!("[XuanDun Personal] 引擎启动失败: {e}");
+                    log_line("ERROR", &format!("引擎启动失败: {e}"));
                     if let Some(ctrl) = h.try_state::<TrayController>() {
                         ctrl.force_paused(&h);
                     }

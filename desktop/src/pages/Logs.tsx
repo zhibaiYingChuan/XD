@@ -35,6 +35,7 @@ import {
   displayDomain,
   formatDateTime,
   actionBadgeClass,
+  humanizeLoadError,
   type LogEntry,
   type LogDetail,
   type LogBreakdown,
@@ -51,7 +52,9 @@ const TYPE_OPTIONS = [
   { value: '', label: '全部类型' },
   { value: 'response_verify', label: '响应验证' },
   { value: 'request_sanitize', label: '请求脱敏' },
-  { value: 'proxy_error', label: '代理错误' },
+  // 与 LOG_TYPE_LABELS 保持同一说法，否则筛选里叫「代理错误」、
+  // 列表里却显示「转发中断」，同一类记录两套名字会让人对不上。
+  { value: 'proxy_error', label: '转发中断' },
   { value: 'relay', label: '正常转发' },
 ];
 
@@ -100,6 +103,8 @@ function DetailDrawer({
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [marking, setMarking] = useState(false);
+  // 删除在飞标志：删除不可恢复，期间必须锁住按钮防重复触发
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -191,6 +196,12 @@ function DetailDrawer({
   };
 
   const handleDelete = async () => {
+    if (deleting) return;
+    // ★ 删除不可恢复（脱敏记录会一并删除），必须先确认。
+    //   此前是单击即删 —— 用户本想点「复制详情」，手一抖就永久丢了一条记录，
+    //   而界面上没有任何挽回入口。
+    if (!window.confirm('确定删除这条日志吗？\n\n此操作不可恢复。')) return;
+    setDeleting(true);
     try {
       await api.deleteLog(logId);
       toast.success('日志已删除');
@@ -198,6 +209,8 @@ function DetailDrawer({
       onClose();
     } catch (e) {
       toast.error(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -374,8 +387,8 @@ function DetailDrawer({
                   ))}
                   {detail.entry.action === 'block' && (
                     <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
-                      片段为掩码后内容（保留首尾与长度），原文从未离开本机。
-                      若确认是误报，可点下方「标记为安全」。
+                      这里显示的是打过码的片段（只保留开头、结尾和长度），原文没有离开你的电脑。
+                      若确认是误报，点下方「标记为误报」。
                     </div>
                   )}
                 </div>
@@ -412,9 +425,9 @@ function DetailDrawer({
               {marking ? '标记中...' : '标记为误报'}
             </button>
           )}
-          <button className="btn danger" onClick={handleDelete} disabled={loading}>
+          <button className="btn danger" onClick={handleDelete} disabled={loading || deleting}>
             <Trash2 size={15} strokeWidth={1.5} />
-            删除
+            {deleting ? '删除中...' : '删除'}
           </button>
         </div>
       </aside>
@@ -596,6 +609,10 @@ export default function Logs() {
     }
   };
 
+  // 原始报错（如 `GET /api/logs → HTTP 500`）不该直接摆给用户，
+  // 先翻译成「怎么了 + 怎么办」，原始信息收进折叠的技术细节。
+  const loadErr = loadError ? humanizeLoadError(loadError) : null;
+
   return (
     <div>
       <div className="page-header flex items-center justify-between">
@@ -747,11 +764,23 @@ export default function Logs() {
         </select>
       </div>
 
-      {loadError && (
+      {loadErr && (
         <div className="alert danger">
           <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
           <div>
-            加载日志失败：{loadError}
+            <b>加载日志失败</b>
+            <div className="mt-8">{loadErr.message}</div>
+            <details className="mt-8">
+              <summary
+                className="faint"
+                style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
+              >
+                技术细节
+              </summary>
+              <div className="mono faint" style={{ fontSize: 12, marginTop: 4 }}>
+                {loadErr.detail}
+              </div>
+            </details>
             <button className="btn ghost sm mt-8" onClick={load}>
               重试
             </button>
@@ -798,7 +827,20 @@ export default function Logs() {
                 <tr
                   key={e.id}
                   className={selectedId === e.id ? 'selected' : ''}
+                  // ★ 键盘可达（2026-10-19）：此前只有 onClick，纯键盘用户
+                  //   根本无法打开详情。tabIndex + role + Enter/Space 让
+                  //   「打开详情」不再只依赖鼠标；焦点轮廓由 styles.css 的
+                  //   .table tbody tr:focus-visible 负责勾出来。
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`查看日志详情：${e.summary}`}
                   onClick={() => setSelectedId(e.id)}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                      ev.preventDefault(); // 空格默认会滚动页面，需拦掉
+                      setSelectedId(e.id);
+                    }
+                  }}
                 >
                   <td className="mono faint">{formatDateTime(e.timestamp).slice(-8)}</td>
                   <td>

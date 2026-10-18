@@ -37,6 +37,7 @@ import {
   findingExplanation,
   primaryFindingCategory,
   displayDomain,
+  humanizeLoadError,
   type StateResponse,
   type LogEntry,
   type RelayReputation,
@@ -156,15 +157,27 @@ export default function Dashboard() {
     };
   }, []);
 
+  // ★ 组件挂载标志：供 load / 各操作在异步返回后判断是否仍需写状态。
+  //   刻意与下面的轮询 effect 分离（2026-10-19）：早先两者共用同一个标志，
+  //   轮询 effect 一旦重建就会把它重新置真，让先前的异步链路误判「组件还活着」、
+  //   继续 setState 并再排一次定时器 —— 轮询循环就此叠加、重复打后端、数字乱跳。
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // ── 数据加载（保留上次成功数据，避免闪空）──
-  const load = useCallback(async () => {
+  // 返回本次是否成功：轮询据此决定下一次间隔（成功 3s，失败退避）。
+  const load = useCallback(async (): Promise<boolean> => {
     try {
       const [s, logs, r] = await Promise.all([
         api.getState(),
         api.getLogs({ limit: 5, action: 'block' }).catch(() => null),
         api.getRelays().catch(() => null),
       ]);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) return false;
       setState(s);
       setLoadError(null);
       failRef.current = 0;
@@ -183,32 +196,47 @@ export default function Dashboard() {
         if (mountedRef.current) setRecent(all.slice(0, 5));
       }
       if (r && mountedRef.current) setRelays(r.relays);
+      return true;
     } catch (e) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) return false;
       setLoadError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }, []);
 
   // ── 轮询（成功 3s，失败指数退避至 30s）──
+  // ★ 依赖只留 load（useCallback 稳定引用），**不要**放 loadError：
+  //   把 loadError 放进依赖后，失败→setLoadError→重渲染就会重建本 effect，
+  //   而重建发生时旧链路往往正卡在 await 里；旧链路不会因此终止，
+  //   于是和新链路并存、各排各的定时器 —— 请求量翻倍，界面数字互相打架。
+  //   「是否失败」不再依赖 state，而拆成三件事：
+  //     · 退避计数放 ref（failRef）
+  //     · 本次是否成功用 load 的返回值
+  //     · 本链路是否作废用 effect 局部的 cancelled
+  //   写法与 Layout.tsx 里 StatusBar 的轮询一致。
   useEffect(() => {
-    mountedRef.current = true;
+    let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
 
     const schedule = async () => {
-      await load();
-      if (!mountedRef.current) return;
-      const delay =
-        loadError === null ? 3000 : Math.min(3000 * 2 ** (failRef.current + 1), 30000);
-      if (loadError !== null) failRef.current = Math.min(failRef.current + 1, 3);
-      timer = setTimeout(schedule, delay);
+      const ok = await load();
+      if (cancelled) return;
+      if (ok) {
+        // 成功：3s 后再查（load 已把退避计数归零）
+        timer = setTimeout(schedule, 3000);
+      } else {
+        // 失败：指数退避 6→12→24→30s 上限
+        failRef.current = Math.min(failRef.current + 1, 3);
+        timer = setTimeout(schedule, Math.min(3000 * 2 ** failRef.current, 30000));
+      }
     };
 
     schedule();
     return () => {
-      mountedRef.current = false;
+      cancelled = true;
       clearTimeout(timer);
     };
-  }, [load, loadError]);
+  }, [load]);
 
   // ── 手动刷新 ──
   // ★ 必须走独立的状态机，不复用 busy：
@@ -291,6 +319,9 @@ export default function Dashboard() {
   // ══════════════════════════════════════════════════════════
 
   if (loadError && !state) {
+    // 把底层原始报错（如 `GET /api/state → HTTP 500`）翻译成「怎么了 + 怎么办」，
+    // 原始信息收进折叠的技术细节里备查。
+    const err = humanizeLoadError(loadError);
     return (
       <div>
         <div className="page-header">
@@ -300,7 +331,18 @@ export default function Dashboard() {
           <ShieldAlert size={17} strokeWidth={1.5} className="alert-icon" />
           <div>
             <b>无法连接本地代理</b>
-            <div className="mt-8">{loadError}</div>
+            <div className="mt-8">{err.message}</div>
+            <details className="mt-8">
+              <summary
+                className="faint"
+                style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
+              >
+                技术细节
+              </summary>
+              <div className="mono faint" style={{ fontSize: 12, marginTop: 4 }}>
+                {err.detail}
+              </div>
+            </details>
             <div className="mt-8 faint">
               请确认玄盾代理已启动（默认 127.0.0.1:{currentProxyPort()}）。
               若尚未配置中转站，请前往「设置」页面完成配置。
@@ -417,7 +459,7 @@ export default function Dashboard() {
         {
           key: 'pattern',
           label: '域名高风险模式',
-          detail: `免费顶级域名等滥用高发特征 · ${SCORE_WEIGHTS.suspiciousPattern} 分`,
+          detail: `这个域名是老手常用来行骗的免费域名 · 扣 ${SCORE_WEIGHTS.suspiciousPattern} 分`,
           points: primaryRelay.notes.some((n) => n.startsWith('高风险模式'))
             ? SCORE_WEIGHTS.suspiciousPattern
             : 0,
@@ -426,11 +468,14 @@ export default function Dashboard() {
         {
           key: 'behavior',
           label: '中转站侧可疑响应占比',
+          // ★ 说人话：把「危险 N 次（权重 2）+ 可疑 M 次」这种带权重的算式
+          //   翻译成用户能对上号的叙述。relayRisk 即 danger+suspect 的实际命中条数；
+          //   扣分用 Number(toFixed(1)) 抹掉无意义的尾随 .0（如 4.0 → 4）。
           detail:
-            `危险 ${primaryRelay.relay_danger_count ?? 0} 次`
-            + `（权重 2）+ 可疑 ${primaryRelay.relay_suspect_count ?? 0} 次`
-            + `，共 ${primaryRelay.total_calls} 次调用`
-            + ` → 扣 ${behaviorPenalty.toFixed(1)} 分（上限 ${SCORE_WEIGHTS.behaviorMax}）`,
+            `${primaryRelay.total_calls} 次调用里出现 ${relayRisk} 次可疑内容`
+            + `（偏危险的那类按双倍算）`
+            + `→ 扣 ${Number(behaviorPenalty.toFixed(1))} 分`
+            + `（最多扣 ${SCORE_WEIGHTS.behaviorMax}）`,
           points: Number(behaviorPenalty.toFixed(1)),
           hit: relayRisk > 0,
         },
@@ -439,6 +484,28 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* ★ 未激活（只读模式）时必须显式说清楚：当前只转发、不脱敏也不拦截。
+          这时状态点可能仍是绿色、KPI 也在涨，用户最容易误以为防护正开着 ——
+          不说就是谎报「已在保护你」。用琥珀色而非红色：这是「还没开始保护」的
+          提醒，不是「出故障」的告警，醒目但不吓人。
+          字段来源：getState 返回的 StateResponse.read_only（见 services/api.ts），
+          不额外请求、不臆造字段。 */}
+      {state?.read_only && (
+        <div className="alert suspect" style={{ marginBottom: 16 }}>
+          <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+          <div>
+            <b>未激活：当前只转发，不做防护</b>
+            <div className="mt-8">
+              玄盾现在只会把你的请求原样转给中转站 ——
+              <b>不会脱敏、也不会拦截</b>。激活后才会开始检查。
+            </div>
+            <Link to="/activate" className="btn sm mt-8">
+              去激活
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* ① 英雄区 */}
       <div className="card hero">
         <div className={`hero-state ${s}`}>{STATE_LABELS[s]}</div>
@@ -620,7 +687,7 @@ export default function Dashboard() {
                 {relayRisk === 0 && repDeductions.length === 0 ? (
                   <div className="faint" style={{ fontSize: 12, lineHeight: 1.7 }}>
                     本次使用未触发任何扣分项 —
-                    没有中转站侧的危险或可疑响应、没有检测到数据保留迹象，域名也不在风险特征库中。
+                    没有中转站侧的危险或可疑响应、没有检测到数据保留迹象，域名也不在已知风险名单里。
                     {selfRisk > 0 && (
                       <>
                         <br />

@@ -253,9 +253,22 @@ class TestFrontendMustShowEvidence:
         )
 
     def test_masked_evidence_disclaimer_shown(self):
-        """必须说明片段已掩码、原文未外发，否则用户会担心是自己泄露了。"""
+        """必须说明片段已打码、原文未外发，否则用户会担心是自己泄露了。
+
+        ★ 判据只锁**语义**，不锁具体措辞。
+          原判据写死「掩码后内容」四个字，而本轮体验打磨把文案改成了
+          「这里显示的是打过码的片段……原文没有离开你的电脑」——
+          需求没变、措辞更说人话，测试却红了。
+          绑死某一句话会让「改文案」与「过测试」互斥，
+          那不是测试在保护需求，而是在阻止改进。
+        """
         tsx = self._code_only(LOGS_TSX)
-        assert "掩码后内容" in tsx, "未说明片段已掩码，用户无法判断安全性"
+        assert ("掩码" in tsx or "打码" in tsx), (
+            "未说明片段已脱敏，用户无法判断安全性"
+        )
+        assert ("原文未" in tsx or "原文没有" in tsx), (
+            "未说明原文未外发，用户会担心是自己泄露了"
+        )
 
     def test_dashboard_has_refresh_button(self):
         tsx = self._code_only(DASH_TSX)
