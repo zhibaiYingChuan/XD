@@ -3350,10 +3350,19 @@ def _start_parent_watchdog(parent_pid: int) -> None:
 
     实现要点
     --------
-    - 仅用标准库（threading / ctypes / os），不引入新依赖。
+    - 仅用标准库（threading / ctypes / os / sys），不引入新依赖。
     - 守护线程（daemon=True）：主线程结束时它随之终止，不阻塞退出。
     - 父进程不存在时用 ``os._exit(0)`` 强制退出：uvicorn 的优雅关闭
       在引擎卡死时可能长时间不返回，这里需要“立即死”。
+
+    判据优先级（重要）
+    ------------------
+    1. **主判据 = stdin 管道断开**：桌面端以 piped stdin 拉起引擎并长期持有
+       写端，父进程（无论正常退出还是被强杀）一旦消失，OS 关闭写端，引擎
+       探测到管道断开后立即退出。不依赖 PID、不依赖父进程身份，跨平台可靠
+       （探测方式为非阻塞轮询，见 ``_watch_stdin`` 内说明）。
+    2. **兜底判据 = PID 轮询**：仅在 stdin 不可监测（非管道/无 stdin）时生效；
+       对「曾存在、随后被强杀」的进程返回值不可靠，故不能作为主判据。
 
     已知边界（PID 复用）
     --------------------
@@ -3368,6 +3377,13 @@ def _start_parent_watchdog(parent_pid: int) -> None:
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
+
+        # WaitForSingleObject 在超时为 0 时的两种**可确定**返回值：
+        #   WAIT_OBJECT_0(0x00000000)：进程对象已置为有信号 ⇒ 已退出；
+        #   WAIT_TIMEOUT (0x00000102)：等待窗口内未置信号 ⇒ 仍在运行。
+        #   其余值（尤其是 WAIT_FAILED=0xFFFFFFFF）语义不明确，一律按「存活」处理。
+        WAIT_OBJECT_0 = 0x0000_0000
+        WAIT_TIMEOUT = 0x0000_0102
 
         # SYNCHRONIZE：以最小权限打开进程句柄，仅用于等待其退出；
         # 不申请 PROCESS_QUERY_INFORMATION 等更高权限，避免被拒。
@@ -3387,9 +3403,19 @@ def _start_parent_watchdog(parent_pid: int) -> None:
             if not handle:
                 return False
             try:
-                # WaitForSingleObject(0)：WAIT_TIMEOUT(258) ⇒ 仍在运行；
-                # WAIT_OBJECT_0(0) ⇒ 进程对象已置为有信号，即已退出
-                return kernel32.WaitForSingleObject(handle, 0) != 0
+                rc = kernel32.WaitForSingleObject(handle, 0)
+                if rc == WAIT_OBJECT_0:
+                    return False  # 进程对象已置信号 ⇒ 确认已退出
+                if rc == WAIT_TIMEOUT:
+                    return True  # 等待窗口内未置信号 ⇒ 确认仍在运行
+                # ★ 其余值（含 WAIT_FAILED）⇒ 保守地视为存活：
+                #   宁可留下孤儿进程，也绝不误杀正在使用的引擎 ——
+                #   误杀会直接中断用户的防护，比留下孤儿更糟。
+                #   注意：这正是旧实现 `!= 0` 判据的隐患所在：对「曾存在、
+                #   随后被强杀」的进程，返回值可能异常，旧写法一律当成
+                #   存活，从而永远不退出 —— 故 PID 判据只作兜底，主判据
+                #   改用 stdin EOF（见函数末尾的 stdin 守护线程）。
+                return True
             finally:
                 kernel32.CloseHandle(handle)
     else:
@@ -3416,6 +3442,98 @@ def _start_parent_watchdog(parent_pid: int) -> None:
                 os._exit(0)
 
     threading.Thread(target=_watch, name="parent-watchdog", daemon=True).start()
+
+    # ★★ 主判据：stdin EOF 守护。
+    #   桌面端以 ``Stdio::piped()`` 拉起本引擎并长期持有管道写端；父进程
+    #   无论是正常退出还是被强杀（任务管理器结束进程 / 崩溃），OS 都会关闭
+    #   写端 → 引擎探测到 stdin 管道已断开 → 立刻 ``os._exit(0)``。
+    #   相比上面按 PID 轮询的兜底判据，本机制不依赖 PID、不依赖父进程身份，
+    #   跨平台可靠：旧 PID 判据对「曾存在、随后被强杀」的进程会返回异常值
+    #   而被永久当作存活，引擎遂成孤儿（实测强杀桌面端 18 秒后仍在运行）。
+    #   仅当外层传入了 ``--parent-pid`` 时才启动本线程，故不传参的本地
+    #   手动调试行为完全不变。
+    #
+    #   ★ 为什么用「非阻塞探测」而不是「阻塞 read」读 stdin（实测教训）：
+    #     在非主线程里对 fd 0（stdin）做**阻塞读**时，若主线程恰好在导入
+    #     C 扩展模块（本项目 lifespan 里 verifier → guardrail → numpy 属
+    #     懒加载），两者会互锁 —— 引擎启动即卡死（实测卡在
+    #     verifier._try_load_guardrail 的 numpy 导入，45s 亦不返回；
+    #     而同样条件下「不读 stdin」或「读取自有管道」都能正常导入）。
+    #     故这里改为**非阻塞探测管道是否已断开**：Windows 用 PeekNamedPipe，
+    #     POSIX 用 select；二者均只依赖标准库，不阻塞、不占用导入锁。
+    def _watch_stdin() -> None:
+        if sys.platform == "win32":
+            import ctypes
+            import msvcrt
+
+            # PeekNamedPipe 在写端全部关闭时失败并置 ERROR_BROKEN_PIPE；
+            # 若 stdin 并非管道（控制台/NUL/文件），则报 ERROR_INVALID_HANDLE。
+            ERROR_INVALID_HANDLE = 6      # stdin 不是管道 ⇒ 放弃本判据
+            ERROR_BROKEN_PIPE = 109       # 写端已全部关闭 ⇒ EOF
+            ERROR_NO_DATA = 232
+            ERROR_PIPE_NOT_CONNECTED = 233
+
+            # PeekNamedPipe 的 HANDLE 参数必须声明为指针宽度（c_void_p），
+            # 否则 64 位下会把句柄截断成 int，导致始终失败。
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.PeekNamedPipe.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong), ctypes.c_void_p,
+            ]
+            kernel32.PeekNamedPipe.restype = ctypes.c_int
+
+            try:
+                handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            except Exception:
+                # 无可用 stdin（如 pythonw / 手动前台调试）：放弃本判据，
+                # 交由上面的 PID 轮询兜底，绝不因此误退出。
+                return
+
+            avail = ctypes.c_ulong(0)
+            while True:
+                ctypes.set_last_error(0)
+                ok = kernel32.PeekNamedPipe(
+                    handle, None, 0, None, ctypes.byref(avail), None
+                )
+                if not ok:
+                    err = ctypes.get_last_error()
+                    if err == ERROR_INVALID_HANDLE:
+                        return  # stdin 不是管道 ⇒ 放弃，交由 PID 兜底
+                    if err in (ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED):
+                        break   # 管道写端已关闭 ⇒ 父进程已退出
+                    # 其它未知错误：保守等待，绝不误退出（宁可留孤儿，
+                    # 也不误杀正在使用的引擎 —— 误杀会中断用户防护）
+                time.sleep(0.5)
+        else:
+            # POSIX：select 轮询 stdin 可读性，读到空字节即 EOF（均不阻塞）
+            import select
+
+            while True:
+                if sys.stdin is None:
+                    return
+                try:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                except Exception:
+                    return  # stdin 无法 select（如非管道）⇒ 交由 PID 兜底
+                if not ready:
+                    continue
+                try:
+                    if not sys.stdin.buffer.read(1):  # 已可读，不会阻塞
+                        break
+                except Exception:
+                    return
+
+        # ★ 打印必须容错：父进程死时它同时关闭了本进程 stdout 管道的读端，
+        #   此处 print 可能抛 BrokenPipeError；绝不能让一次日志失败阻断退出，
+        #   否则 os._exit 不执行 → 引擎反而残留成孤儿（与守护目的背道而驰）。
+        try:
+            print("[引擎守护] 父进程管道已关闭，引擎自行关闭", flush=True)
+        except Exception:
+            pass
+        # 直接 _exit：绕过 uvicorn 的优雅关闭，避免其长时间不返回
+        os._exit(0)
+
+    threading.Thread(target=_watch_stdin, name="stdin-watchdog", daemon=True).start()
 
 
 def run(host: Optional[str] = None, port: Optional[int] = None) -> None:

@@ -858,15 +858,23 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
         // ★ P1-10：必须传本进程锁定的端口，与 proxy_base() 保持一致，
         //   否则会出现「引擎听 A 端口、桌面端连 B 端口」的双向失联
         &port.to_string(),
-        // ★ 传入本进程 PID，供引擎的守护线程监测父进程存活：
-        //   桌面端被强杀（任务管理器结束进程 / 崩溃）时，引擎收不到任何
-        //   退出信号，会变成孤儿进程长期占用 xuandun-engine-*.exe，
-        //   升级安装时 NSIS 便无法覆盖该文件 —— 用户装完新版，引擎仍是
-        //   旧版（版本静默不一致）。引擎侧凭此感知父进程消失后自行退出。
+        // ★ 传入本进程 PID，供引擎的守护线程监测父进程存活。
+        //   注意：此 PID 判据只是**兜底**，真正可靠的主判据是 stdin EOF
+        //   （见下方 .stdin(Stdio::piped()) 的说明），因为 OpenProcess 对
+        //   「曾存在、随后被强杀」的进程返回值不可靠，实测会永远当作存活。
         "--parent-pid",
         &std::process::id().to_string(),
     ])
-    .stdin(Stdio::null())
+    // ★★ 主判据：给引擎一个**管道 stdin**，并在此进程内长期持有写端。
+    //   桌面端无论是正常退出还是被强杀（任务管理器结束进程 / 崩溃），
+    //   OS 都会关闭这条管道的写端 → 引擎的 stdin 读到 EOF → 立即自行退出。
+    //   这一机制不依赖 PID、不依赖轮询，跨平台可靠（此前用 PID + 轮询的
+    //   方案对「曾存在后被强杀」的进程不生效，引擎会成孤儿长期占用
+    //   xuandun-engine-*.exe，导致升级安装时 NSIS 无法覆盖该文件 ——
+    //   用户装完新版引擎仍是旧版）。
+    //   写端即 child.stdin：只要 child 被保存在 EngineState 里就会一直持有，
+    //   故**绝不能** take() 后丢弃或置 None，否则写端提前关闭会让引擎误判。
+    .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     // 冻结后的引擎需要 DLL 搜索路径指向自身目录（standalone 模式下
