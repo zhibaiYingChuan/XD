@@ -70,6 +70,18 @@ jobs:
           python -m pytest tests/test_guardrail_in_build.py -q --no-header -p no:cacheprovider
           echo "PASS：护栏层已确认编入产物"
 
+      # ★★ 误报率必须在**发布前**这一层也验一次。
+      #   分支 CI（ci.yml）只挂在 push/PR 上，tag 触发不到它 ——
+      #   于是「分支上绿了、发版时不再验」是个真实缺口：
+      #   偏偏被发出去的那一版没跑过误报门禁。
+      #   本门禁拉起真实引擎进程 + 本地假上游，balanced/strict 两档
+      #   各验「正常内容不误拦」与「真敏感不外泄」。
+      - name: Assert no false positives (end-to-end)
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_false_positive_e2e.py -q --no-header -p no:cacheprovider
+          echo "PASS：误报率端到端门禁通过（均衡/严格两档）"
+
       # ★ 私钥绝不能出现在仓库里。
       #   一旦入库，任何人都能签发激活码，授权体系瞬间失效，
       #   且 Git 历史无法真正清除（后续删除，commit 里仍在）。
