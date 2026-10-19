@@ -529,9 +529,56 @@ jobs:
           #   缺失信息已由那一条 warning 承载，不会静默消失。
           if-no-files-found: ${{ matrix.allow_failure && 'warn' || 'error' }}
 
+  # ══════════════════════════════════════════════════════════
+  # 门禁：杀软误报扫描（在 build 与 release 之间）
+  #
+  # ★ 为什么必须有：玄盾引擎是 Python 冻结出来的 exe，
+  #   被国产杀软按启发式判毒是常态。用户看到报毒就会卸载，
+  #   功能做得再好也没用。
+  #
+  # ★ 为什么 job 本身不写 if: secrets.X != ''：
+  #   被 skip 的 need 会把 release 一起 skip 掉（GitHub 语义），
+  #   「没配密钥」于是变成「发不出版」。所以 job 照常跑，
+  #   由脚本内部判断——没密钥就打印跳过并退出 0。
+  # ══════════════════════════════════════════════════════════
+  virustotal:
+    name: VirusTotal Scan
+    needs: build
+    if: success() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Install httpx
+        run: pip install httpx
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: artifacts
+
+      # 退出码 1 = 报毒超阈值 → 阻断发布。
+      # 未配密钥 / VT 不可达时脚本自行跳过（退出 0）并打 warning。
+      - name: Scan installers on VirusTotal
+        env:
+          VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+          VT_MAX_MALICIOUS: '5'
+        run: |
+          set -euo pipefail
+          python .github/scripts/virustotal_scan.py artifacts
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, virustotal]
     if: success() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:

@@ -273,6 +273,12 @@ tests/*
 !.github/workflows/release.yml
 # ★ 脱敏版 CI 入库。完整版在 .ci-local/ci.yml，本地运行不入库。
 !.github/workflows/ci.yml
+# ★ VirusTotal 扫描脚本必须入库：
+#   release.yml 会直接调用它。不在仓库里，CI 上 git checkout 后
+#   这个文件不存在 —— 门禁等于没跑（而且是直接失败）。
+#   它只做「上报 + 数报毒家数」，不含任何检测判据或攻击样本。
+!.github/scripts/
+!.github/scripts/*.py
 # 完整版门禁配置：含门禁名称与判据，仅本地使用
 .ci-local/
 
