@@ -624,7 +624,23 @@ export default function Settings() {
       else toast.error(r.message);
     } catch (e) {
       if (mountedRef.current && seq === testSeqRef.current) {
-        toast.error(`测试失败：${e instanceof Error ? e.message : String(e)}`);
+        // ★ 失败/超时也必须给出**可见且持久**的结论，不能只弹一个转瞬即逝的
+        //   Toast，更不能让按钮一直停在「测试中…」无限转圈。探测在 Rust 侧
+        //   最长 45s（REQ_PROBE），一旦抛错就落进这里 —— 用一条合成的失败结果
+        //   复用同一个结论面板，用户才有可复述的落点去排查（地址？网络？）。
+        const detail = e instanceof Error ? e.message : String(e);
+        setRelayTest({
+          ok: false,
+          kind: 'timeout',
+          address: baseUrl,
+          request_url: '',
+          status: null,
+          model_count: null,
+          elapsed_ms: 0,
+          message: `测试未能完成：${detail}。请检查中转站地址与网络后重试`,
+          raw: '',
+        });
+        toast.error('测试未能完成，请查看下方结论');
       }
     } finally {
       if (mountedRef.current && seq === testSeqRef.current) setTesting(false);

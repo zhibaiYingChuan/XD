@@ -662,16 +662,16 @@ def test_boot(page, be: Backend):
                 return m ? m[0] : null;
             }"""
         )
-        # ★ 对照源用 /openapi.json 而不是 /api/docs：
-        #   docs_url 指的是 Swagger UI（返回 HTML），
-        #   引擎自报的版本号在 OpenAPI 规范的 info.version 里。
-        #   实测踩过：取 /api/docs 会拿到 404，
-        #   而判据若因此「读不到就不报」，就成了永远绿的假通过。
-        spec = be._get("/openapi.json", timeout=5) or {}
-        api_ver = (spec.get("info") or {}).get("version")
+        # ★ 对照源用 /health 而不是 /openapi.json（2026-10-19）。
+        #   引擎为安全加固，已默认关闭 /docs 与 /openapi.json
+        #   （仅 XUANDUN_ENABLE_DOCS=1 时开放）。版本核对原先依赖
+        #   OpenAPI 规范，引擎一关文档端点，这条就成了 404 假失败。
+        #   /health 是引擎公开、长期稳定的自报来源，无需开启任何文档端点。
+        health = be.health() or {}
+        api_ver = health.get("version")
         rec("T1 界面显示的版本号与引擎一致",
             bool(shown) and bool(api_ver) and shown.lstrip("v") == api_ver,
-            f"界面={shown!r} 引擎 openapi.info.version={api_ver!r}")
+            f"界面={shown!r} 引擎 health.version={api_ver!r}")
     except Exception as e:
         rec("T1 界面显示的版本号与引擎一致", False, f"读取失败: {e}")
 
@@ -909,7 +909,12 @@ def test_dashboard_relay_honest(page, be: Backend):
     goto(page, "首页")
     diag = be.diagnostics() or {}
     configured = bool(diag.get("relay_configured"))
-    domain = str(diag.get("relay_domain") or "")
+    # ★ 对照物要取**展示用的域名**：relay_domain 是信誉索引键
+    #   「基础域名#Key指纹」，而首页按设计只展示基础域名
+    #   （指纹是内部实现细节，见 services/api.ts 的 displayDomain）。
+    #   拿带指纹的键去比对首页，「未出现」是必然的 —— 那是判据用错了
+    #   对照物，不是产品没显示。先剥掉 '#' 及其后的指纹再比。
+    domain = str(diag.get("relay_domain") or "").split("#", 1)[0]
 
     # ★ 必须等 currentDomain 落地，不能固定 sleep。
     #   getDiagnostics 是**独立于轮询**的一次性请求（Dashboard 的
@@ -1884,9 +1889,14 @@ def test_relay_test_button(page, be: Backend):
     #   直接找 .alert 会把它们当成测试结论 —— 于是「面板出现了」这条
     #   断言在按钮根本没生效时也会通过。
     #
-    #   锚点用「会发出一真实请求」这句常驻文案，而不是按钮文案：
+    #   锚点用「会向该中转站发出一次真实请求」这句常驻文案，而不是按钮文案：
     #   测试中按钮文案变成「测试中…」，拿它当锚点会在等待期间失配。
-    result_alerts = page.locator("div.field:has-text('会发出一真实请求')").locator(".alert")
+    #   （★ 2026-10-19：旧锚点写的是「会发出一真实请求」，与产品实际文案
+    #     「会向该中转站发出一次真实请求」对不上 —— 定位不到字段，
+    #     结论面板即便已经渲染也永远被判成「没出现」。此处改用产品原文。）
+    result_alerts = page.locator(
+        "div.field:has-text('会向该中转站发出一次真实请求')"
+    ).locator(".alert")
 
     # 引擎侧最坏约 36s（connect 6s + read 12s，必要时再打一次 /models），
     # 桌面端 REQ_PROBE(45s) 与前端 PROBE(50s) 都比它宽。给 60s 上限。
@@ -2011,9 +2021,8 @@ def launch_desktop():
     env = os.environ.copy()
     env["XUANDUN_ENABLE_CDP_DEBUG"] = "1"
     # ★ 2026-10-19：引擎默认已关闭 /docs 与 /openapi.json（安全加固）。
-    #   本回归靠 /openapi.json 核对界面版本号（见 test_app_shell），
-    #   故显式开启文档端点，否则会「读不到版本就不报」而假通过。
-    env["XUANDUN_ENABLE_DOCS"] = "1"
+    #   版本核对已改走 /health（见 test_app_shell），因此这里**不再**开启
+    #   文档端点 —— 测试不该为了自己跑通而放宽产品的安全默认值。
     env[ENV_DATA_DIR] = str(data_dir())
     env[ENV_PROXY_PORT] = str(DEFAULT_PROXY_PORT)
     env[ENV_CDP_PORT] = str(CDP_PORT)
