@@ -240,6 +240,11 @@ tests/*
 #      提到「系统提示词」被当中转站篡改）。
 !tests/test_upstream_protocol_and_recovery.py
 !tests/test_false_positive_guards.py
+#   test_false_positive_e2e —— 误报率端到端门禁（2026-10-19）
+#     （函数级全绿不等于链路不误拦：真实引擎进程 + 本地假上游，
+#      balanced/strict 两档各跑请求侧与响应侧，
+#      并把「被拦内容有没有真的发到上游」作为外泄判据）。
+!tests/test_false_positive_e2e.py
 !tests/cdp_desktop_regression.py
 !tests/cdp_popup_probe.py
 !tests/mutation_check.py
