@@ -12,13 +12,14 @@
 前端显示「回答里出现了敏感信息」，而护栏的真实原因是
 「输出内容命中高危违规模式」——即内容合规，与中转站是否篡改无关。
 
-全局审查后共修 6 类误报，本文件逐一锁住：
+全局审查后共修 7 类误报，本文件逐一锁住：
   1. sensitive_leak 的 `sk-` 分支无左边界 → 命中普通英文复合词
   2. `.env` 规则命中 `process.env.X`（编程助手里最常见写法）
   3. 正文/代码块里的危险命令被当成 tool_call 而阻断
   4. emoji 组合（ZWJ）被当成隐藏指令
   5. HTML 注释被当成高危隐藏指令
   6. 「回答里出现『系统提示词』几个字」被当成中转站篡改
+  7. 模型的 4 位月日快照后缀（-1017）被当成 model_downgrade 拦截
 
 判据的设计原则
 ────────────────────────────────────────────────────────────
@@ -38,6 +39,10 @@ from daoti_xuandun_personal.proxy.verifier import (  # noqa: E402
     OBSERVATION_ONLY_SIGNALS,
     ResponseVerifier,
     _rules,
+)
+from daoti_xuandun_personal.proxy.baseline import (  # noqa: E402
+    _model_compatible,
+    _normalize_model,
 )
 
 API_TS = ROOT / "desktop" / "src" / "services" / "api.ts"
@@ -230,6 +235,72 @@ class TestPromptMentionIsNotInjection:
             reason="输出包含系统提示词泄露",
         )
         assert got == "system_prompt_inject"
+
+
+# ══════════════════════════════════════════════════════════════
+# 7. 模型的日期快照后缀 ≠ 模型降级
+# ══════════════════════════════════════════════════════════════
+
+
+class TestModelSnapshotSuffix:
+    """中转站返回带日期快照的**同一个**模型，曾被判成「明确的偷换」并拦截。
+
+    实测（2026-10-20 04:58，api.commandcode.ai）：
+        请求 deepseek/deepseek-v4.1-flash
+        返回 deepseek/deepseek-v4.1-flash-1017
+      → model_downgrade / high / 均衡档直接阻断，界面写「这是明确的偷换」。
+
+    根因是归一化只认 8 位日期、带横线日期与 3 位后缀，
+    漏掉了 4 位「月日」快照（-1017）。而 OpenAI 的
+    `gpt-3.5-turbo-0125` 是同一形态 —— 不修这一条，这类用户每轮都被拦。
+    """
+
+    def test_mmdd_suffix_is_same_model(self):
+        for req, resp in (
+            ("deepseek-v4.1-flash", "deepseek-v4.1-flash-1017"),
+            ("gpt-3.5-turbo", "gpt-3.5-turbo-0125"),
+            ("qwen-max", "qwen-max-0520"),
+        ):
+            assert _model_compatible(req, resp), (
+                f"{req} / {resp} 被判成降级 —— 4 位月日快照后缀没被识别"
+            )
+
+    def test_full_request_and_response_names(self):
+        """完整形态（含 vendor 前缀）也要走通，而不只是裸模型名。"""
+        req = _normalize_model("deepseek/deepseek-v4.1-flash")
+        resp = _normalize_model("deepseek/deepseek-v4.1-flash-1017")
+        assert _model_compatible(req, resp), (
+            f"归一化后 {req!r} / {resp!r} 仍被判降级"
+        )
+
+    def test_different_snapshot_dates_are_same_model(self):
+        """同一模型的两个不同日期快照，不该互相判降级。"""
+        assert _model_compatible(
+            "deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1018"
+        )
+
+    def test_real_downgrade_still_flagged(self):
+        """反向自证：换到更弱/更便宜的模型仍必须判降级。"""
+        for req, resp in (
+            ("gpt-4o", "gpt-4o-mini"),
+            ("deepseek-v4.1-pro", "deepseek-v4.1-flash"),
+            ("claude-3-5-sonnet", "claude-3-haiku"),
+            ("gemini-1.5-pro", "gemini-1.5-flash"),
+        ):
+            assert not _model_compatible(req, resp), (
+                f"{req} → {resp} 不再被判降级 —— 修误报修成了漏放"
+            )
+
+    def test_existing_preview_whitelist_not_broken(self):
+        """新增规则不得让既有白名单失配。"""
+        assert _model_compatible(
+            "gpt-4-turbo-preview", "gpt-4-1106-preview"
+        ), "既有白名单被新规则带崩了"
+
+    def test_four_digits_that_are_not_a_date(self):
+        """不是合法月日的 4 位后缀不享受豁免（防止变成逃逸通道）。"""
+        assert not _model_compatible("model-a", "model-a-9999")
+        assert not _model_compatible("model-a", "model-a-1377")
 
 
 # ══════════════════════════════════════════════════════════════

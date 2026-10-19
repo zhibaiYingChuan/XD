@@ -419,8 +419,35 @@ def _normalize_model(name: Optional[str]) -> str:
     while prev != s:
         prev = s
         s = _MODEL_SNAPSHOT_RE.sub("", s).strip("-_:")
-
     return s
+
+
+# ── 4 位「月日」快照后缀：-1017 / -0520 / -0125 ──────────────
+#
+# ★ 为什么单独一条、不并进 _MODEL_SNAPSHOT_RE：
+#   并进去会连带改写 `-1106-preview` 这类既有形态的归一化结果，
+#   让白名单 {gpt-4-turbo-preview, gpt-4-1106-preview} 失配 ——
+#   等于修一个误报、造一个新误报。
+#   这里作为「兼容性补充规则」，不改动任何既有归一化结果。
+#
+# ★ 实测来源（2026-10-20 04:58）：
+#     请求 deepseek/deepseek-v4.1-flash
+#     返回 deepseek/deepseek-v4.1-flash-1017
+#   被 model_downgrade / high 拦截，界面上写的是「明确的偷换」。
+#   而 `-1017` 是 10 月 17 日的构建号，与 8 位日期、
+#   `-2024-11-01` 一样属于**同一模型的日期快照**，不是强弱变化。
+#   OpenAI 的 `gpt-3.5-turbo-0125` 也是同一形态 —— 同样会被误判。
+#
+# ★ 只认**合法月日**：`-9999` 这类不是日期的 4 位后缀不享受豁免，
+#   避免把「随便加 4 位数字」当成快照逃逸通道。
+_MODEL_MMDD_SUFFIX_RE = re.compile(
+    r"-(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$"
+)
+
+
+def _strip_date_suffix(name: str) -> str:
+    """剥掉末尾 4 位月日快照后缀（-MMDD）；没有则原样返回。"""
+    return _MODEL_MMDD_SUFFIX_RE.sub("", name)
 
 
 def _model_compatible(req: str, resp: str) -> bool:
@@ -446,6 +473,11 @@ def _model_compatible(req: str, resp: str) -> bool:
         return True
     if len(req) < 4 or len(resp) < 4:
         # 信息不足，无法判定 —— 宁可放过也不误报（误报会阻断正常使用）
+        return True
+    # 带日期快照的同一模型：deepseek-v4.1-flash-1017 ↔ deepseek-v4.1-flash
+    # ★ 只看 4 位「合法月日」后缀，强弱词（mini/haiku/flash/pro）不在此列，
+    #   所以「gpt-4o → gpt-4o-mini」这类真降级仍会被判出来。
+    if _strip_date_suffix(req) == _strip_date_suffix(resp):
         return True
     # 同系列合法变体：显式枚举，每一条都要能说出「为什么这是同一个模型」
     return _model_same_family(req, resp)

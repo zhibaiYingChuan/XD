@@ -138,6 +138,14 @@ BENIGN_REPLIES = {
     "fp-emoji": "一家人 👨‍👩‍👧‍👦 和 👩‍💻 都很开心。",
     "fp-html-comment": "示例：<!-- prettier-ignore -->\nlet x = 1;",
     "fp-dangerous-prose": "生产环境请谨慎使用 rm -rf / 这类命令，先确认路径。",
+    # ★ 请求 A、响应 A-1017：同一模型的日期快照。
+    #   实测曾被判 model_downgrade / high 并阻断（界面写「明确的偷换」）。
+    "fp-model-snapshot": "这是 10 月 17 日的构建，功能与之前一致。",
+}
+
+# 假上游返回的 model 与请求不同时的映射（模拟「带日期快照」的返回）。
+RESPONSE_MODEL_OVERRIDES = {
+    "fp-model-snapshot": "fp-model-snapshot-1017",
 }
 
 # ── 响应侧：真攻击/真泄露（必须被拦）──
@@ -227,7 +235,9 @@ class _Upstream(BaseHTTPRequestHandler):
         payload = {
             "id": "chatcmpl-fp",
             "object": "chat.completion",
-            "model": model or "gpt-4o-mini",
+            "model": RESPONSE_MODEL_OVERRIDES.get(
+                model, model or "gpt-4o-mini"
+            ),
             "choices": [{"index": 0, "message": message,
                          "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1,
