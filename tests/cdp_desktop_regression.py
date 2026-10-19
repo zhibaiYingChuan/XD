@@ -816,8 +816,14 @@ def test_status_bar_honest(page, be: Backend):
         rec("T3 只读模式已如实告知", "只读" in bar,
             f"后端 read_only=True 但状态栏未提示；状态栏全文={bar!r}")
     else:
+        # ★ 说明文案必须随结论分支 —— 原来是把「失败情形」写死在这里，
+        #   于是 PASS 时日志会印出一句自相矛盾的话
+        #   （「非只读模式不误报」后面跟着「但状态栏显示了只读提示」）。
+        #   这份日志是判断界面是否诚实的证据，证据本身不能自相矛盾。
         rec("T3 非只读模式不误报", "只读模式" not in bar,
-            f"后端 read_only=False 但状态栏显示了只读提示；状态栏全文={bar!r}")
+            f"后端 read_only=False 且状态栏未出现只读提示；状态栏全文={bar!r}"
+            if "只读模式" not in bar
+            else f"后端 read_only=False 但状态栏显示了只读提示；状态栏全文={bar!r}")
 
 
 def test_unreachable_label(page, be: Backend):
@@ -1776,8 +1782,12 @@ def test_multi_relay_settings(page, be: Backend):
             else "设置页把明文 Key 渲染出来了")
 
         # ── 界面上切到第二家 ──
+        # ★ 说明文案随结论分支（原写法把「失败情形」写死，PASS 时日志自相矛盾）
         btn = page.locator("button:has-text('切到这家')").first
-        rec("T14 有「切到这家」按钮", btn.count() > 0, "列表项没有切换按钮")
+        rec("T14 有「切到这家」按钮", btn.count() > 0,
+            "列表项有切换按钮"
+            if btn.count() > 0
+            else "列表项没有切换按钮")
         if btn.count() == 0:
             return
         btn.click(timeout=6000)
