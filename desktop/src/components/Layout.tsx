@@ -68,6 +68,9 @@ function deriveTrayState(
 function StatusBar() {
   const [state, setState] = useState<StateResponse | null>(null);
   const [reachable, setReachable] = useState(true);
+  // ★ 是否**曾经**连上过：区分「冷启动还没起来」与「用着用着挂了」。
+  //   两者对用户的意义完全不同 —— 前者等两秒就好，后者是真故障。
+  const [everUp, setEverUp] = useState(false);
   const failRef = useRef(0);
 
   useEffect(() => {
@@ -80,6 +83,7 @@ function StatusBar() {
         if (cancelled) return;
         setState(s);
         setReachable(true);
+        setEverUp(true);
         failRef.current = 0;          // ★ 成功后重置退避计数
         timer = setTimeout(poll, 2000);
       } catch {
@@ -126,6 +130,18 @@ function StatusBar() {
   }, [trayKey, state, reachable]);
 
   if (!reachable) {
+    // ★ 冷启动：引擎还在拉起时**不要**报「本地代理未运行」。
+    //   每次打开应用先红一下，用户会以为防护坏了，甚至去重装。
+    //   连续失败 3 次（约 14 秒）仍没起来，才当作真的没运行。
+    if (!everUp && failRef.current < 3) {
+      return (
+        <div className="status-bar" role="status" aria-live="polite">
+          <span className="status-dot learning" />
+          <span className="status-label">正在启动本地代理…</span>
+          <span className="status-meta">首次启动需要几秒</span>
+        </div>
+      );
+    }
     return (
       <div className="status-bar" role="status" aria-live="polite">
         <span className="status-dot paused" />
@@ -139,7 +155,8 @@ function StatusBar() {
     );
   }
 
-  const s = state?.state ?? 'learning';
+  // ★ 还没读到状态时不要说「学习中」—— 那是结论，不是加载态。
+  const s = state?.state;
   const today = state?.today;
 
   return (
@@ -151,10 +168,10 @@ function StatusBar() {
           改为一个读屏专用的 live 区域，只承载**状态文案**：
           它的文本仅在 state 真正切换时才变化，故只在状态变化时播报。 */}
       <span className="sr-only" aria-live="polite">
-        {STATE_LABELS[s]}
+        {s ? STATE_LABELS[s] : '读取中'}
       </span>
-      <span className={`status-dot ${s}`} />
-      <span className="status-label">{STATE_LABELS[s]}</span>
+      <span className={`status-dot ${s ?? 'learning'}`} />
+      <span className="status-label">{s ? STATE_LABELS[s] : '读取中'}</span>
       {state?.message && <span className="status-meta">{state.message}</span>}
 
       {/* ★ 只读模式必须显式说出来。

@@ -1035,14 +1035,21 @@ export default function Settings() {
           </div>
         )}
 
-        <button
-          className="btn mb-24"
-          onClick={relayRisk ? forceSaveRelay : saveRelay}
-          // ★ 预检期间也要禁用：否则用户连点会触发多次预检。
-          disabled={saving || prechecking}
-        >
-          {saving ? '保存中...' : prechecking ? '检测中…' : '保存中转站配置'}
-        </button>
+        {/* ★ 出现风险提示时**不显示**这个按钮（2026-10-20）。
+            此前它是 `onClick={relayRisk ? forceSaveRelay : saveRelay}`：
+            面板已经弹出「高危」，下面的按钮却还写着「保存中转站配置」，
+            点下去等于**悄悄跳过警告**——两个入口做同一件事，
+            而用户以为那只是普通保存。现在只留面板里的显式选择。 */}
+        {!relayRisk && (
+          <button
+            className="btn mb-24"
+            onClick={saveRelay}
+            // ★ 预检期间也要禁用：否则用户连点会触发多次预检。
+            disabled={saving || prechecking}
+          >
+            {saving ? '保存中...' : prechecking ? '检测中…' : '保存中转站配置'}
+          </button>
+        )}
 
         {/* ═══ 多中转站 ═══ */}
         {/* ★ v0.1.0：多中转站切换

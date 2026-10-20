@@ -328,6 +328,17 @@ export default function Dashboard() {
     }
   };
 
+  // ★ 首次配置后的「还差一步」：把本地地址直接摆在首页并支持一键复制。
+  //   新用户最常见的卡点是「玄盾里配好了，但 AI 工具还在直连中转站」——
+  //   此时首页一切正常、却永远没有记录，他只会以为玄盾坏了。
+  const handleCopyProxyAddress = async () => {
+    const ok = await copyToClipboard(
+      `http://127.0.0.1:${currentProxyPort()}/v1`,
+    );
+    if (ok) toast.success('代理地址已复制，粘贴到 AI 工具的 API 地址');
+    else toast.error('复制失败，请手动选中地址');
+  };
+
   // ══════════════════════════════════════════════════════════
   // 渲染
   // ══════════════════════════════════════════════════════════
@@ -371,6 +382,9 @@ export default function Dashboard() {
   }
 
   const s = state?.state ?? 'learning';
+  // ★ 分清「还没读到」与「读到了、状态是学习中」。
+  //   启动瞬间把加载态说成状态结论，是首页最常见的谎报形态。
+  const loaded = state !== null;
   const StateIcon = STATE_ICON[s] ?? ShieldCheck;
   const today = state?.today;
   // ★ P2-11 修复：按域名匹配当前配置的中转站；匹配不到时退而取
@@ -538,8 +552,12 @@ export default function Dashboard() {
 
       {/* ① 英雄区 */}
       <div className="card hero">
-        <div className={`hero-state ${s}`}>{STATE_LABELS[s]}</div>
-        <div className="hero-message">{state?.message ?? '正在获取状态...'}</div>
+        <div className={`hero-state ${loaded ? s : 'learning'}`}>
+          {loaded ? STATE_LABELS[s] : '读取中'}
+        </div>
+        <div className="hero-message">
+          {loaded ? (state?.message ?? '') : '正在读取状态…'}
+        </div>
 
         {/* ★ 手动刷新 + 上次更新时间。
             只有 3 秒轮询时，用户既不知道数字有多新，也无法在
@@ -614,14 +632,19 @@ export default function Dashboard() {
               <CheckCircle2 size={34} strokeWidth={1.5} />
             </div>
             <div className="empty-text">
-              {today && today.total_calls > 0
-                ? (today.danger_count + today.suspect_count > 0
-                  /* ★ 不能因为「最近 8 条都是安全」就说「今天没有危险响应」——
-                     这里只取了 8 条做展示，更早的危险记录不在窗口内，
-                     而上面的 KPI 明明写着「危险 N」。两句话互相打架。 */
-                  ? `最近的对话没有新问题。今天累计：危险 ${today.danger_count} 条、提示 ${today.suspect_count} 条，点「查看全部」可逐条核对。`
-                  : '今天没有发现危险响应，你的 AI 对话很安全')
-                : '还没有检测记录 — 使用 AI 工具发起一次对话试试'}
+              {/* ★ 加载完成之前绝不能下「没有记录」的结论 ——
+                  这个用户库里有 1246 条，启动瞬间被告诉「还没有检测记录」，
+                  第一反应只会是「我的数据是不是没了」。 */}
+              {!loaded
+                ? '正在加载记录…'
+                : today && today.total_calls > 0
+                  ? (today.danger_count + today.suspect_count > 0
+                    /* ★ 不能因为「最近 8 条都是安全」就说「今天没有危险响应」——
+                       这里只取了 8 条做展示，更早的危险记录不在窗口内，
+                       而上面的 KPI 明明写着「危险 N」。两句话互相打架。 */
+                    ? `最近的对话没有新问题。今天累计：危险 ${today.danger_count} 条、提示 ${today.suspect_count} 条，点「查看全部」可逐条核对。`
+                    : '今天没有发现危险响应，你的 AI 对话很安全')
+                  : '还没有检测记录 — 使用 AI 工具发起一次对话试试'}
             </div>
           </div>
         ) : (
@@ -814,8 +837,23 @@ export default function Dashboard() {
                 <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>
                   已配置 · 尚未产生调用记录
                 </div>
-                <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>
-                  用 AI 工具发起一次对话后，这里会显示它的信誉评分与调用统计。
+                {/* ★ 新用户最容易卡在这里：玄盾配好了，但 AI 工具还在直连中转站。
+                    只写「用 AI 工具发起一次对话后…」等于让他自己去猜该改哪里。
+                    直接把地址摆出来 + 一键复制，这一步才走得下去。 */}
+                <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
+                  还差一步：把 AI 工具的 API 地址改成
+                </div>
+                <div className="code-box" style={{ fontSize: 12, marginTop: 6 }}>
+                  http://127.0.0.1:{currentProxyPort()}/v1
+                </div>
+                <div className="btn-row mt-8" style={{ justifyContent: 'center' }}>
+                  <button className="btn secondary sm" onClick={() => void handleCopyProxyAddress()}>
+                    <Copy size={13} strokeWidth={1.5} />
+                    复制地址
+                  </button>
+                </div>
+                <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
+                  改完发起一次对话，这里就会显示它的信誉评分与调用统计。
                 </div>
               </div>
             ) : (

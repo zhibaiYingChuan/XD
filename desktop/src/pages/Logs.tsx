@@ -672,6 +672,23 @@ export default function Logs() {
   // 先翻译成「怎么了 + 怎么办」，原始信息收进折叠的技术细节。
   const loadErr = loadError ? humanizeLoadError(loadError) : null;
 
+  // ★ 一键回到默认视图（2026-10-20）。
+  //   四个下拉 + 搜索框，用户调乱了之后只能逐个改回「全部 XX」——
+  //   而他往往已经忘了自己动过哪几个。没有重置入口，
+  //   「筛不出东西」就会被当成软件坏了。
+  const hasFilters = Boolean(
+    logType || action || search.trim() || days || markedFilter,
+  );
+  const resetFilters = () => {
+    setLogType('');
+    setAction('');
+    setSearch('');
+    setDebouncedSearch('');
+    setDays('');
+    setMarkedFilter('');
+    setOffset(0);
+  };
+
   return (
     <div>
       <div className="page-header flex items-center justify-between">
@@ -697,7 +714,15 @@ export default function Logs() {
             <Filter size={15} strokeWidth={1.5} />
             {deleting ? '处理中...' : '删除筛选结果'}
           </button>
-          <button className="btn secondary" onClick={handleClearAll} disabled={total === 0}>
+          {/* ★ 「清空」与「导出 / 删除筛选结果」此前是三个一模一样的灰色按钮。
+              它不可恢复且会清掉全部记录，必须与普通操作在视觉上分开 ——
+              用红色文字而不是实心红块：足够警示，又不会喧宾夺主。 */}
+          <button
+            className="btn secondary"
+            style={{ color: 'var(--xd-danger)' }}
+            onClick={handleClearAll}
+            disabled={total === 0}
+          >
             <Trash2 size={15} strokeWidth={1.5} />
             清空
           </button>
@@ -831,6 +856,12 @@ export default function Logs() {
             </option>
           ))}
         </select>
+        {/* ★ 只有动过筛选才出现：平时不占位置，动过之后一眼就能回到默认。 */}
+        {hasFilters && (
+          <button className="btn ghost sm" onClick={resetFilters}>
+            重置筛选
+          </button>
+        )}
       </div>
 
       {loadErr && (
