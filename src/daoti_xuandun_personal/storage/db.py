@@ -69,8 +69,18 @@ def _log_filters(
         clauses.append("log_type = ?")
         params.append(log_type)
     if action:
-        clauses.append("action = ?")
-        params.append(action)
+        # ★★ 2026-10-20：「已打码」不是一个 action 取值。
+        #   打码发生在**请求侧**，而一条日志只记这次请求的最终结果
+        #   （pass / alert / block）—— 库里从来没有 action='redact' 的行。
+        #   旧实现按 action='redact' 过滤，于是用户点「已打码」
+        #   永远看到 0 条，而状态栏明明写着「已打码 N 处」：
+        #   一个什么都不返回的筛选器，比没有这个筛选器更糟。
+        #   现在按「本行是否记录过打码」过滤，与状态栏计数同源。
+        if action == Action.REDACT.value:
+            clauses.append("redaction_count > 0")
+        else:
+            clauses.append("action = ?")
+            params.append(action)
     if relay_domain:
         clauses.append("relay_domain = ?")
         params.append(relay_domain)
@@ -318,7 +328,12 @@ class PersonalStorage:
              "INTEGER NOT NULL DEFAULT 0"),
             ("relay_reputation", "self_suspect_count",
              "INTEGER NOT NULL DEFAULT 0"),
+            # ★ 2026-10-20：把「本条打了几处码」落在日志行上。
+            #   脱敏明细会在响应还原后被清除，只靠明细行数会让
+            #   状态栏「已打码 N 处」与可下钻的记录对不上。
+            ("logs", "redaction_count", "INTEGER NOT NULL DEFAULT 0"),
         ]
+        added = set()
         for table, column, decl in migrations:
             cols = {
                 str(r["name"])
@@ -329,9 +344,26 @@ class PersonalStorage:
             if column not in cols:
                 try:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                    added.add((table, column))
                     logger.info("已迁移 %s 表：新增列 %s", table, column)
                 except sqlite3.OperationalError as e:
                     logger.warning("迁移 %s.%s 失败: %s", table, column, e)
+
+        # ★ 旧库回填：把「仍然留存」的脱敏明细折算到日志行。
+        #   已被隐私清除的那部分无法还原（那正是清除的目的），
+        #   只能记为 0 —— 宁可少报，也不凭空多报。
+        if ("logs", "redaction_count") in added:
+            self._conn.execute(
+                "UPDATE logs SET redaction_count = ("
+                "  SELECT COUNT(*) FROM redaction_records r "
+                "  WHERE r.log_id = logs.id"
+                ")"
+            )
+            # ★ 回填后必须**立刻重算一次**，让 daily_stats 与日志行对齐。
+            #   否则升级后状态栏仍显示旧的累计值（实测 322），
+            #   而日志里只能筛出 258 条 —— 用户会以为修完反而更错，
+            #   而且要等到「删除任意一条日志」才会自愈。
+            self._recompute_daily_stats()
 
     def close(self) -> None:
         """关闭数据库连接。"""
@@ -347,8 +379,9 @@ class PersonalStorage:
             cur = self._conn.execute(
                 """INSERT INTO logs
                    (timestamp, log_type, relay_domain, action, severity,
-                    model, finding_count, summary, detail_json, text_preview)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    model, finding_count, summary, detail_json, text_preview,
+                    redaction_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.timestamp,
                     entry.log_type,
@@ -360,6 +393,10 @@ class PersonalStorage:
                     entry.summary,
                     entry.detail_json,
                     entry.text_preview[:500],
+                    # ★ 2026-10-20：打码处数随日志行一起落库。
+                    #   脱敏明细之后可能被隐私清除，这个数是唯一能
+                    #   让「已打码 N 处」可下钻、可筛选的依据。
+                    int(getattr(entry, "redaction_count", 0) or 0),
                 ),
             )
             log_id = int(cur.lastrowid or 0)
@@ -845,15 +882,18 @@ class PersonalStorage:
         with self._conn:
             rows = self._conn.execute(
                 "SELECT date(timestamp, 'unixepoch', 'localtime') AS d, "
-                "log_type, action, marked_safe FROM logs"
+                "log_type, action, marked_safe, redaction_count FROM logs"
             ).fetchall()
             # 逐行折算（口径见 kpi_contribution），按天归集。
+            # 第 5 位是打码处数：★ 2026-10-20 改为取日志行上的计数，
+            # 不再数 redaction_records —— 明细会在响应还原后被隐私清除，
+            # 而计数不该跟着消失（否则「已打码 N 处」会随一次删除凭空变小）。
             per_day: Dict[str, List[int]] = {}
             for r in rows:
                 d = r["d"]
                 if not d:
                     continue
-                acc = per_day.setdefault(str(d), [0, 0, 0, 0])
+                acc = per_day.setdefault(str(d), [0, 0, 0, 0, 0])
                 t, danger, suspect, safe = kpi_contribution(
                     str(r["log_type"]), str(r["action"]),
                     bool(r["marked_safe"]),
@@ -862,6 +902,7 @@ class PersonalStorage:
                 acc[1] += danger
                 acc[2] += suspect
                 acc[3] += safe
+                acc[4] += int(r["redaction_count"] or 0)
 
             dates = list(per_day.keys())
             if dates:
@@ -877,13 +918,7 @@ class PersonalStorage:
                     "WHERE date(timestamp, 'unixepoch', 'localtime') IS NOT NULL)"
                 )
                 for d in dates:
-                    redactions = self._conn.execute(
-                        "SELECT COUNT(*) AS c FROM redaction_records r "
-                        "JOIN logs l ON l.id = r.log_id "
-                        "WHERE date(l.timestamp, 'unixepoch', 'localtime') = ?",
-                        (d,),
-                    ).fetchone()
-                    total, danger, suspect, safe = per_day[d]
+                    total, danger, suspect, safe, redactions = per_day[d]
                     self._conn.execute(
                         """INSERT INTO daily_stats
                            (date, total_calls, danger_count, suspect_count,
@@ -901,7 +936,7 @@ class PersonalStorage:
                             int(danger),
                             int(suspect),
                             int(safe),
-                            int(redactions["c"] or 0) if redactions else 0,
+                            int(redactions),
                         ),
                     )
             else:

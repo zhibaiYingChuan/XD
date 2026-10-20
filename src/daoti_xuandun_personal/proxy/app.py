@@ -2636,15 +2636,29 @@ def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
 
 
 def _evidence_preview(records: List[Any]) -> str:
-    """把掩码证据拼成一行可读预览，写入 text_preview。
+    """把**占位符形态**的证据拼成一行可读预览，写入 text_preview。
 
     ★ 阻断时没有任何原文可预览（内容根本没发出去），
       预览位空着会让搜索和详情页都无从下手。
-      这里填的是**掩码后**的片段，人可读、不可还原。
+
+    ★★ 2026-10-20 修复：原实现取的是 ``r.original``（**明文**），
+      而 docstring 写的是「掩码后」—— 说明与实现相反。
+      后果有两层：明文敏感值被写进 logs.text_preview
+      （能搜到、会在详情「内容片段」里整段显示），
+      也与「界面只显示打码片段」的承诺自相矛盾。
+      现在改用「类别 + 占位符」：知道是哪类、第几处，但不可还原。
     """
     if not records:
         return ""
-    return " ｜ ".join(r.original for r in records)
+    from .sanitizer import CATEGORY_LABELS
+
+    parts = []
+    for r in records:
+        cat = str(getattr(r, "category", "") or "")
+        parts.append(
+            f"{CATEGORY_LABELS.get(cat, cat)} {getattr(r, 'redacted', '')}"
+        )
+    return " ｜ ".join(parts)
 
 
 def _message_role_hint(msg: Dict[str, Any]) -> str:
@@ -2823,6 +2837,11 @@ def _record_log(
                 [f.to_dict() for f in findings], ensure_ascii=False
             ),
             text_preview=_make_preview(text_preview),
+            # ★ 2026-10-20：打码处数落在日志行上。
+            #   脱敏明细会在响应还原后被隐私清除（clear_redactions_for_session），
+            #   若只靠明细行数，状态栏的「已打码 N 处」就永远无法下钻 ——
+            #   用户点「已打码」筛选会看到 0 条。
+            redaction_count=len(redaction_records or []),
         )
         log_id = _storage.insert_log(entry)
         if redaction_records:

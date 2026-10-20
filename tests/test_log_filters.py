@@ -298,6 +298,81 @@ class TestRustHandlesBooleanFilter:
         )
 
 
+class TestRedactionFilterIsReal:
+    """⑥「已打码」筛选必须真的能筛出东西（2026-10-20）。
+
+    用户实测：状态栏写着「已打码 322 处」，日志页把结果切到「已打码」，
+    一条都没有。根因是过滤按 ``action='redact'``，而库里**从来不存在**
+    这种行 —— 打码发生在请求侧，而一条日志只记这次请求的最终结果
+    （pass / alert / block）。一个永远返回空集的筛选器，
+    比没有这个筛选器更糟：它让用户怀疑所有数字都是假的。
+
+    现在按日志行上的 ``redaction_count > 0`` 过滤，与状态栏计数同源。
+    """
+
+    def _add(self, store, count, summary, ts=None):
+        import time as _t
+
+        return store.insert_log(
+            LogEntry(
+                timestamp=ts if ts is not None else _t.time(),
+                log_type=LogType.RESPONSE_VERIFY.value,
+                relay_domain="c.example.invalid",
+                action=Action.PASS.value,
+                severity="low",
+                model="m",
+                finding_count=0,
+                summary=summary,
+                detail_json="[]",
+                text_preview="",
+                redaction_count=count,
+            )
+        )
+
+    def test_redact_filter_matches_rows_with_redactions(self, store):
+        hit = self._add(store, 3, "有打码的请求")
+        self._add(store, 0, "没有打码的请求")
+
+        ids = {e.id for e in store.query_logs(action="redact", limit=500)}
+        assert ids == {hit}, f"「已打码」筛出了 {ids}，应当只有 {hit}"
+        assert store.count_logs(action="redact") == 1, (
+            "列表与 total 口径不一致 —— 分页器会按 total 算页数"
+        )
+
+    def test_filter_survives_detail_clear(self, store):
+        """脱敏明细被隐私清除后，筛选与计数都不能跟着消失。"""
+        from daoti_xuandun_personal.types import RedactionRecord
+
+        log_id = self._add(store, 2, "打码后被清除明细")
+        store.insert_redactions(log_id, "sess-clear", [
+            RedactionRecord(index=1, category="phone",
+                            original="13800138000", redacted="⟦XD_1⟧"),
+            RedactionRecord(index=2, category="phone",
+                            original="13900139000", redacted="⟦XD_2⟧"),
+        ])
+        store.clear_redactions_for_session("sess-clear")
+        assert store.get_redactions(log_id) == [], "前置条件：明细应已清除"
+        assert store.count_logs(action="redact") == 1, (
+            "明细清除后「已打码」筛选变空 —— "
+            "用户会以为状态栏那个数是在骗人"
+        )
+
+    def test_recompute_keeps_redaction_count_after_detail_clear(self, store):
+        """删除触发重算时，打码数不得随明细消失而掉。"""
+        self._add(store, 4, "今天打码过一次")
+        other = self._add(store, 0, "另一条用来触发重算")
+        store.update_daily_stats(total_calls=2, safe=2, redactions=4)
+
+        assert store.get_today_stats()["redaction_count"] == 4
+        store.delete_logs(search="另一条用来触发重算")
+
+        after = store.get_today_stats()["redaction_count"]
+        assert after == 4, (
+            f"重算后打码数从 4 变成 {after} —— "
+            f"明细已被隐私清除，计数不该跟着消失（另一条 id={other}）"
+        )
+
+
 class TestBackendEndpointExists:
     """⑥ 新端点必须真的存在（否则界面按钮点了报 404）。"""
 

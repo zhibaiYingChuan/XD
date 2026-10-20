@@ -213,6 +213,10 @@ class LogEntry:
     detail_json: str = ""                     # 详细发现（JSON 字符串）
     text_preview: str = ""                    # 内容预览（脱敏后）
     marked_safe: bool = False                 # 用户手动标记为误报
+    # ★ 2026-10-20：本条日志打了几处码。
+    #   脱敏明细会在响应还原后被隐私清除，这个计数必须留在日志行上，
+    #   否则界面的「已打码 N 处」无法下钻、筛选也筛不到。
+    redaction_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

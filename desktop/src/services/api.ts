@@ -73,6 +73,8 @@ export interface LogEntry {
   detail_json: string;
   text_preview: string;
   marked_safe: boolean;
+  /** 本条日志记录了几处打码（明细可能已被隐私清除，计数仍在） */
+  redaction_count?: number;
 }
 
 export interface LogsResponse {

@@ -71,7 +71,12 @@ def _write(store, action, domain="a.example.invalid", redactions=(),
       真实路径（proxy/app.py::_record_log）就是这么写的，
       只插日志会让「统计是缓存」这个前提在测试里不成立，
       于是测试通过而线上仍然错。
+
+    ★ 2026-10-20：打码处数必须一起写进日志行。
+      重算已改为从 logs.redaction_count 汇总（明细会被隐私清除，
+      数不清地数就不再可靠），生产路径由 _record_log 负责传这个值。
     """
+    recs = list(redactions)
     entry = LogEntry(
         timestamp=time.time() if ts is None else ts,
         log_type=LogType.RESPONSE_VERIFY.value,
@@ -81,9 +86,9 @@ def _write(store, action, domain="a.example.invalid", redactions=(),
         model="m",
         finding_count=1,
         summary=summary,
+        redaction_count=len(recs),
     )
     log_id = store.insert_log(entry)
-    recs = list(redactions)
     if recs:
         store.insert_redactions(log_id, "sess", recs)
     store.update_daily_stats(

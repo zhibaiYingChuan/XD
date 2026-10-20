@@ -22,7 +22,12 @@ CREATE TABLE IF NOT EXISTS logs (
     summary       TEXT    NOT NULL DEFAULT '',   -- 人类可读摘要
     detail_json   TEXT    NOT NULL DEFAULT '{}', -- 发现项详情（JSON）
     text_preview  TEXT    NOT NULL DEFAULT '',   -- 内容预览（已脱敏）
-    marked_safe   INTEGER NOT NULL DEFAULT 0      -- ★ P1-9：用户手动标记为误报
+    marked_safe   INTEGER NOT NULL DEFAULT 0,     -- ★ P1-9：用户手动标记为误报
+    -- ★ 2026-10-20：本条日志打了几处码。
+    --   脱敏明细会在响应还原后被隐私清除（clear_redactions_for_session），
+    --   所以「打码数」必须落在日志行上，否则状态栏的「已打码 N 处」
+    --   在日志里没有任何可下钻的记录 —— 筛选「已打码」永远 0 条。
+    redaction_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp DESC);

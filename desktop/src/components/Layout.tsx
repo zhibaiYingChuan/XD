@@ -188,7 +188,12 @@ function StatusBar() {
             </span>
           )}
           {today.redaction_count > 0 && (
-            <span className="status-stat">已打码 <b className="mono">{today.redaction_count}</b> 处</span>
+            <span
+              className="status-stat"
+              title="在「日志」页把结果筛选切到「已打码」即可逐条核对"
+            >
+              已打码 <b className="mono">{today.redaction_count}</b> 处
+            </span>
           )}
         </>
       )}

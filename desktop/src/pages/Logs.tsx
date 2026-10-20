@@ -422,6 +422,23 @@ function DetailDrawer({
                   </div>
                 </div>
               )}
+
+              {/* ★ 明细已被隐私清除时，也要把「打了几处」如实说出来。
+                  否则用户看到状态栏写着「已打码 322 处」，
+                  点开一条日志却什么都没有 —— 只能认为数字是假的。 */}
+              {detail.redactions.length === 0
+                && (detail.entry.redaction_count ?? 0) > 0 && (
+                <div className="mt-24">
+                  <div className="field-label">
+                    脱敏记录（{detail.entry.redaction_count} 处）
+                  </div>
+                  <div className="faint" style={{ fontSize: 11, lineHeight: 1.7 }}>
+                    本次请求有 {detail.entry.redaction_count} 处内容被打码。
+                    原始值在响应还原后已按隐私策略清除，本地不再保留明文；
+                    这条日志上只保留「打了几处」这个计数。
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -694,12 +711,15 @@ export default function Logs() {
         <div className="log-overview">
           <div className="log-overview-item">
             <span className="log-overview-num mono">{stats.total}</span>
-            <span className="log-overview-label">条记录</span>
+            {/* ★ 「全部记录」：这个数是**全部时间**的，而状态栏的
+                「今日检查 N 次」只算今天。两者放在同一屏却不标范围，
+                用户自然会拿它们对账，然后发现「对不上」。 */}
+            <span className="log-overview-label">全部记录</span>
           </div>
           {stats.marked_safe > 0 && (
             <div className="log-overview-item">
               <span className="log-overview-num mono">{stats.marked_safe}</span>
-              <span className="log-overview-label">已标记误报</span>
+              <span className="log-overview-label">已标记误报（不计入今日统计）</span>
             </div>
           )}
           <div className="log-overview-item">
@@ -925,6 +945,14 @@ export default function Logs() {
                       <span className={`badge ${actionBadgeClass(e)}`}>
                         {ACTION_LABELS[e.action]}
                       </span>
+                      {/* ★ 打码与「结果」是两个维度：一条正常转发的请求
+                          也可能有 3 处被遮盖。此前只有状态栏说「已打码 N 处」，
+                          列表里却完全看不出来 —— 点「已打码」筛选还筛不到东西。 */}
+                      {(e.redaction_count ?? 0) > 0 && (
+                        <div className="faint" style={{ fontSize: 10, marginTop: 2 }}>
+                          打码 {e.redaction_count} 处
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
