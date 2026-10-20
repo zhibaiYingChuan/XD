@@ -75,6 +75,8 @@ export interface LogEntry {
   marked_safe: boolean;
   /** 本条日志记录了几处打码（明细可能已被隐私清除，计数仍在） */
   redaction_count?: number;
+  /** 中转站实际返回的模型（响应侧日志才有） */
+  response_model?: string;
 }
 
 export interface LogsResponse {
@@ -261,10 +263,17 @@ export interface ServerConfig {
   request_timeout_s: number;
 }
 
+export interface StorageConfig {
+  /** 日志保留天数。0 = 永久保留 */
+  log_retention_days: number;
+}
+
 export interface PersonalConfig {
   relay: RelayConfig;
   guard: GuardConfig;
   server: ServerConfig;
+  /** ★ 2026-10-20：旧配置可能没有这一节，读取时按 0（永久）降级 */
+  storage?: StorageConfig;
 }
 
 export interface Diagnostics {
@@ -272,7 +281,8 @@ export interface Diagnostics {
   verifier: { level: string; guardrail_available: boolean };
   storage: { db_path: string; db_size_bytes: number; total_logs: number };
   reputation: Record<string, number>;
-  server?: { host: string; port: number };
+  /** port 为**实际监听端口**；configured_port 是配置文件里的值（可能尚未生效） */
+  server?: { host: string; port: number; configured_port?: number };
   relay_configured: boolean;
   relay_domain: string;
 }

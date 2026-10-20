@@ -57,6 +57,10 @@ jobs:
           pip install pytest
           pip install -e .
 
+      # ★ 发版前的版本一致性门禁（唯一真实来源：Cargo.toml）
+      - name: Assert version consistency
+        run: python .github/scripts/sync_version.py --check
+
       # ★★ 护栏必须在构建期就在位。
       #   护栏的 import 是延迟 import，Nuitka 静态分析看不到；
       #   而判定护栏在不在场的路径曾指向仓库外的企业版目录 ——

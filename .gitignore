@@ -197,6 +197,10 @@ tests/*
 #   这两个缺陷都属于「不报错的静默错误」（统计凭空变化、用户看到 ⟦XD_n⟧），
 #   没有测试守着，下次改动很容易再把它们放回来。
 !tests/test_kpi_and_stream_restore.py
+# ★ 本轮新增（2026-10-20）：隐私与本地安全加固的契约测试
+#   —— CSV 公式注入、脱敏原文落库掩码、管理接口令牌门禁、
+#   日志保留策略、版本一致性门禁。每一条都对应一句对用户的承诺。
+!tests/test_privacy_hardening.py
 !tests/test_reputation_score.py
 !tests/test_multi_relay.py
 # ★ 本轮新增（2026-10-03）。四条都是「把踩过的坑固化成门禁」：

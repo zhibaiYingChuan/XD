@@ -27,6 +27,7 @@ from ..types import (
     LogType,
     RedactionRecord,
     RelayReputation,
+    mask_secret,
 )
 
 logger = logging.getLogger("xuandun-personal.storage")
@@ -100,8 +101,17 @@ def _log_filters(
         clauses.append("timestamp <= ?")
         params.append(end_ts)
     if search:
-        clauses.append("(summary LIKE ? OR text_preview LIKE ?)")
-        pattern = f"%{search}%"
+        # ★ 2026-10-20：转义 LIKE 通配符。
+        #   此前直接拼 `%{search}%`，用户输入 `%` 或 `_` 会被当成通配符 ——
+        #   搜「%」命中全部记录、搜「_」匹配任意单字符，
+        #   搜索结果与关键词毫无关系，用户只会以为搜索坏了。
+        clauses.append(
+            "(summary LIKE ? ESCAPE '\\' OR text_preview LIKE ? ESCAPE '\\')"
+        )
+        escaped = (
+            search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
         params.extend([pattern, pattern])
     if marked_safe is not None:
         clauses.append("marked_safe = ?")
@@ -323,6 +333,8 @@ class PersonalStorage:
         """
         migrations = [
             ("logs", "marked_safe", "INTEGER NOT NULL DEFAULT 0"),
+            # ★ 2026-10-20：中转站实际返回的模型（与请求模型并列展示）
+            ("logs", "response_model", "TEXT NOT NULL DEFAULT ''"),
             # ★ v0.1.0：评分口径变更 —— 责任分列。
             #   老库里 danger_count/suspect_count 是混在一起的，
             #   无法区分是长度突变（用户提问导致）还是恶意 tool_call。
@@ -374,6 +386,41 @@ class PersonalStorage:
             #   而且要等到「删除任意一条日志」才会自愈。
             self._recompute_daily_stats()
 
+        # ★ 2026-10-20：旧库里仍以**明文**保存的脱敏原文就地掩码。
+        self._mask_legacy_redactions()
+
+    def _mask_legacy_redactions(self) -> None:
+        """把历史脱敏记录里的明文原文就地替换为掩码。
+
+        ★ 2026-10-20：打码路径此前把 ``r.original`` 原样落库，
+          数据库文件里因此留着完整的 API Key / 手机号。
+          界面虽然只显示头尾，但「删库才能删掉」与
+          「删掉那条日志就没了」是两回事。
+          现在写入侧已改为落掩码，这里补一次历史数据；
+          掩码函数幂等（已含 ⟪ 的视为已掩码）。
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT id, original FROM redaction_records"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        updates = [
+            (mask_secret(str(r["original"])), int(r["id"]))
+            for r in rows
+            if "⟪" not in str(r["original"])
+        ]
+        if not updates:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE redaction_records SET original = ? WHERE id = ?",
+                updates,
+            )
+        # 掩码是「原地覆写」，但 WAL 里仍留着旧帧，必须落盘并截断
+        self._scrub_wal()
+        logger.info("已把 %d 条历史脱敏原文就地掩码", len(updates))
+
     def close(self) -> None:
         """关闭数据库连接。"""
         self._conn.close()
@@ -388,9 +435,9 @@ class PersonalStorage:
             cur = self._conn.execute(
                 """INSERT INTO logs
                    (timestamp, log_type, relay_domain, action, severity,
-                    model, finding_count, summary, detail_json, text_preview,
-                    redaction_count)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    model, response_model, finding_count, summary, detail_json,
+                    text_preview, redaction_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.timestamp,
                     entry.log_type,
@@ -398,6 +445,7 @@ class PersonalStorage:
                     entry.action,
                     entry.severity,
                     entry.model,
+                    entry.response_model,
                     entry.finding_count,
                     entry.summary,
                     entry.detail_json,
@@ -637,11 +685,22 @@ class PersonalStorage:
             action=str(row["action"]),
             severity=str(row["severity"]),
             model=str(row["model"]),
+            # ★ 老库可能还没有这两列（迁移前），用 keys() 兜底
+            response_model=(
+                str(row["response_model"])
+                if "response_model" in row.keys() else ""
+            ),
             finding_count=int(row["finding_count"]),
             summary=str(row["summary"]),
             detail_json=str(row["detail_json"]),
             text_preview=str(row["text_preview"]),
             marked_safe=bool(row["marked_safe"]) if "marked_safe" in row.keys() else False,
+            # ★ 2026-10-20：此前漏了它 —— 列表里的「打码 N 处」永远显示 0，
+            #   而 SQL 级筛选却能筛出来，两边对不上。
+            redaction_count=(
+                int(row["redaction_count"])
+                if "redaction_count" in row.keys() else 0
+            ),
         )
 
     def get_log(self, log_id: int) -> Optional[LogEntry]:
@@ -815,13 +874,24 @@ class PersonalStorage:
         """
         with self._conn:
             if before_ts is None:
+                # 全清：脱敏明细一并清空
+                self._conn.execute("DELETE FROM redaction_records")
                 cur = self._conn.execute("DELETE FROM logs")
             else:
+                # ★ 2026-10-20 修复：原实现无论 before_ts 为何，
+                #   都执行 `DELETE FROM redaction_records`（整表清空）——
+                #   于是「清理 90 天前的日志」会把**保留日志**的脱敏证据
+                #   一起删光：日志还在，点开却什么都没有。
+                #   现在只删与将被删除的日志关联的那部分。
+                self._conn.execute(
+                    "DELETE FROM redaction_records WHERE log_id IN "
+                    "(SELECT id FROM logs WHERE timestamp < ?)",
+                    (before_ts,),
+                )
                 cur = self._conn.execute(
                     "DELETE FROM logs WHERE timestamp < ?", (before_ts,)
                 )
             deleted = int(cur.rowcount or 0)
-            self._conn.execute("DELETE FROM redaction_records")
             self._recompute_daily_stats()
         self._scrub_wal()
         return deleted
@@ -963,7 +1033,14 @@ class PersonalStorage:
     def insert_redactions(
         self, log_id: int, session_id: str, records: List[RedactionRecord]
     ) -> int:
-        """插入脱敏记录（保存原始敏感值，仅存本地）。"""
+        """插入脱敏记录（**只保存掩码后的原文**）。
+
+        ★ 2026-10-20：此前直接写 ``r.original``（明文）。
+          内存里需要明文是为了「响应还原」，但落库只是为了给用户核对
+          「是不是我自己的那条」—— 掩码后的头尾 + 长度足够判断，
+          而完整密钥留在磁盘上没有任何收益，只有泄露面。
+          还原用的是 restorer 的内存映射，与本表无关，故这里掩码不影响功能。
+        """
         if not records:
             return 0
         now = time.time()
@@ -975,7 +1052,7 @@ class PersonalStorage:
                    VALUES (?,?,?,?,?,?,?,?,?)""",
                 [
                     (session_id, log_id, r.index, r.category,
-                     r.original, r.redacted, r.start, r.end, now)
+                     mask_secret(r.original), r.redacted, r.start, r.end, now)
                     for r in records
                 ],
             )

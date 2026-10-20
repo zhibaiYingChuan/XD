@@ -356,18 +356,38 @@ class ServerConfig:
 
 
 @dataclass
+class StorageConfig:
+    """本地存储配置。
+
+    ★ 2026-10-20：此前日志只增不减，一天一千条约 0.5–1 MB，
+      一年就是几百 MB，而界面没有任何清理入口或提示。
+      默认 0 = 永久保留（不替用户做删除决定），
+      用户可显式选择保留天数，超期记录在保存时与启动时清理。
+    """
+
+    log_retention_days: int = 0     # 0 = 永久保留
+
+    def validate(self) -> List[str]:
+        if not (0 <= int(self.log_retention_days) <= 3650):
+            return ["日志保留天数必须在 0（永久）到 3650 之间"]
+        return []
+
+
+@dataclass
 class PersonalConfig:
     """个人版完整配置。"""
 
     relay: RelayConfig = field(default_factory=RelayConfig)
     guard: GuardConfig = field(default_factory=GuardConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
 
     def validate(self) -> List[str]:
         """全量校验，返回所有错误。"""
         errors: List[str] = []
         errors.extend(self.server.validate())
         errors.extend(self.guard.validate())
+        errors.extend(self.storage.validate())
         if self.relay.enabled:
             errors.extend(self.relay.validate())
         return errors
@@ -412,6 +432,9 @@ class PersonalConfig:
                 relay=RelayConfig(**_known_fields(RelayConfig, raw.get("relay", {}))),
                 guard=GuardConfig(**_known_fields(GuardConfig, raw.get("guard", {}))),
                 server=ServerConfig(**_known_fields(ServerConfig, raw.get("server", {}))),
+                storage=StorageConfig(
+                    **_known_fields(StorageConfig, raw.get("storage", {}))
+                ),
             )
         except TypeError as e:
             logger.warning("配置字段不匹配（%s），使用默认配置", e)
@@ -424,6 +447,7 @@ class PersonalConfig:
             "relay": asdict(self.relay),
             "guard": asdict(self.guard),
             "server": asdict(self.server),
+            "storage": asdict(self.storage),
         }
         # ★ 磁盘上必须留**明文** Key（含 others 里的每一条）——
         #   否则重启后无法按 Key 识别中转站，转发会 401。
@@ -479,4 +503,5 @@ class PersonalConfig:
             "relay": relay,
             "guard": asdict(self.guard),
             "server": asdict(self.server),
+            "storage": asdict(self.storage),
         }

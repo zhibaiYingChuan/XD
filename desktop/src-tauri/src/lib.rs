@@ -24,6 +24,7 @@
 //   3. 引擎崩溃时前端显示"代理未运行"，而非静默放行
 
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,57 @@ use tray::TrayController;
 
 /// 本地代理默认端口（仅本机监听，★ 安全底线：绝不监听 0.0.0.0）
 const DEFAULT_PROXY_PORT: u16 = 18765;
+
+/// 管理接口令牌（桌面端与引擎共用）。
+///
+/// ★ 2026-10-20：引擎的 /api/* 原先对本机任何进程开放 ——
+///   可以读走全部日志、把中转站改成攻击者的服务器、清空日志。
+///   CORS 只约束浏览器，约束不了本机程序。
+///   桌面端启动引擎时注入此令牌，之后每个 /api/* 请求都带 X-Admin-Token。
+///   引擎未收到该环境变量时（手动启动 / 开发调试）保持放行。
+///
+/// ★ 为什么落盘而不是每次进程随机生成：
+///   随机令牌在「桌面端崩溃 → 引擎尚未退出 → 用户立刻重开」的窗口里
+///   会让新桌面端与旧引擎令牌不一致，所有 /api 请求 401，
+///   界面看起来像引擎坏了。落盘后重启沿用同一令牌，窗口消失。
+///   文件权限 0600、位于用户数据目录（Windows 默认仅当前用户可读）。
+fn admin_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let path = data_dir().join("engine_token");
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let s = raw.trim().to_string();
+            if s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                return s;
+            }
+        }
+
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(std::process::id().to_le_bytes());
+        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            h.update(d.as_nanos().to_le_bytes());
+        }
+        // 额外混入一次堆地址，降低「同一秒启动、PID 复用」时撞出同值的可能
+        let probe = Box::new(0u8);
+        h.update((&*probe as *const u8 as usize).to_le_bytes());
+        let token = format!("{:x}", h.finalize());
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &token);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &path,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
+        token
+    })
+}
 
 /// 开发/测试隔离用的环境变量名。
 ///
@@ -707,6 +759,8 @@ async fn proxy_call(
     let url = format!("{}{path}", proxy_base());
 
     let mut req = client.request(method, &url);
+    // 管理接口鉴权：引擎由本进程启动时收到同一令牌（见 admin_token）
+    req = req.header("X-Admin-Token", admin_token());
     if let Some(b) = body {
         req = req.json(&b);
     }
@@ -885,7 +939,9 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
             .unwrap_or_else(|| std::path::PathBuf::from(".")),
     )
     .env("PYTHONUNBUFFERED", "1")
-    .env("PYTHONIOENCODING", "utf-8");
+    .env("PYTHONIOENCODING", "utf-8")
+    // ★ 管理接口令牌：与 proxy_call 里发送的是同一个值
+    .env("XUANDUN_ADMIN_TOKEN", admin_token());
 
     // ★ 必须把数据目录透传给引擎，否则隔离是假的：
     //   引擎会按自己的默认路径去读**稳定版**的 config.json，

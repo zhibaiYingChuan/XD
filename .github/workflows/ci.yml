@@ -51,6 +51,12 @@ jobs:
           pip install pytest
           pip install -e .
 
+      # ★ 版本号唯一真实来源是 desktop/src-tauri/Cargo.toml。
+      #   漏同步会让侧边栏 / 诊断报告 / 引擎 version 各说各话，
+      #   而这类不一致不会被任何功能测试发现。
+      - name: Assert version consistency
+        run: python .github/scripts/sync_version.py --check
+
       # ★ 门禁 1-4 仍在本地 CI（.github/workflows/ci.yml 完整版，未公开）运行。
       #   这里只跑「不依赖未公开资源」的那部分，
       #   避免公开仓库 clone 后因缺文件而恒红 ——

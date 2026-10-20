@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS logs (
     text_preview  TEXT    NOT NULL DEFAULT '',   -- 内容预览（已脱敏）
     marked_safe   INTEGER NOT NULL DEFAULT 0,     -- ★ P1-9：用户手动标记为误报
     -- ★ 2026-10-20：本条日志打了几处码。
-    --   脱敏明细会在响应还原后被隐私清除（clear_redactions_for_session），
+    --   脱敏明细会在同会话的下一次响应时被清除（clear_redactions_for_session），
     --   所以「打码数」必须落在日志行上，否则状态栏的「已打码 N 处」
     --   在日志里没有任何可下钻的记录 —— 筛选「已打码」永远 0 条。
     redaction_count INTEGER NOT NULL DEFAULT 0
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_action    ON logs(action);
 --     PRAGMA table_info 检测后按需 ALTER，避免老库缺列 / 新库重复报错。
 
 -- ══════════════════════════════════════════════════════════════
--- 脱敏记录表（保存原始敏感值，仅存本地）
+-- 脱敏记录表（只保存**掩码后**的原文，不存明文）
 -- ══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS redaction_records (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS redaction_records (
     log_id        INTEGER,                       -- 关联 logs.id
     redaction_idx INTEGER NOT NULL,               -- 占位符编号
     category      TEXT    NOT NULL,              -- api_key/phone/email/...
-    original      TEXT    NOT NULL,              -- ★ 原始敏感值（仅本地）
+    original      TEXT    NOT NULL,              -- ★ 掩码值（前 4 + 长度 + 尾 2），不是明文
     redacted      TEXT    NOT NULL,              -- 占位符
     start_pos     INTEGER NOT NULL DEFAULT 0,
     end_pos       INTEGER NOT NULL DEFAULT 0,

@@ -177,16 +177,13 @@ BUILTIN_RULES: List[_Rule] = [
 def _mask_value(value: str, keep: int = 4) -> str:
     """把敏感值压成「前 4 + 长度 + 尾 2」。
 
-    为什么不能只留首尾：单看 `sk-a…9f` 用户无法确认这是不是
-    自己那把 Key；而整段原文落库又等于把密钥抄进日志。
-    长度是关键信息 —— 一段七百多字符的激活码与一个几十字符的
-    JWT，靠长度就能一眼区分，误报判断不需要看到原文。
+    ★ 2026-10-20：实现收敛到 ``types.mask_secret`` ——
+      存储层（落库掩码、历史数据迁移）也需要同一套规则，
+      两处各写一份必然漂移（一边含 ⟪、一边不含，幂等就失效）。
     """
-    n = len(value)
-    if n <= keep * 2 + 3:
-        # 太短，保留头尾会几乎等于原文，直接只报长度
-        return f"⟪{n} 字符⟫"
-    return f"{value[:keep]}…{value[-2:]}⟪{n} 字符⟫"
+    from ..types import mask_secret
+
+    return mask_secret(value, keep)
 
 
 def _masked_evidence(

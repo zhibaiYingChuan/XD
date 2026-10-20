@@ -504,6 +504,31 @@ export default function Settings() {
     }
   };
 
+  /**
+   * 修改日志保留策略。
+   *
+   * ★ 删除不可恢复，且默认策略是「永久保留」——
+   *   只有用户显式选择天数时才执行清理，并在删除前明确告知范围。
+   */
+  const handleRetentionChange = async (days: number) => {
+    if (!config) return;
+    if (days === (config.storage?.log_retention_days ?? 0)) return;
+    if (days > 0) {
+      const ok = window.confirm(
+        `将只保留最近 ${days} 天的日志，更早的记录会立即删除且不可恢复。\n\n`
+        + '脱敏明细会随日志一起删除。确定继续吗？',
+      );
+      if (!ok) return;
+    }
+    const saved = await save(
+      { storage: { log_retention_days: days } },
+      days > 0 ? `已设置：只保留最近 ${days} 天的日志` : '已设置：日志永久保留',
+    );
+    if (saved && days > 0) {
+      toast.info('超出保留期的记录已清理，且不可恢复');
+    }
+  };
+
   // ── C. 中转站配置 ──
   /**
    * 组装要提交的中转站配置。
@@ -780,7 +805,7 @@ export default function Settings() {
       </div>
 
       {/* ★ 页内导航（2026-10-20）。
-          这一页有 5 个区块、总高约 1200px，而视口只有 720 ——
+          这一页有 6 个区块、总高约 1400px，而视口只有 720 ——
           想改端口或看引擎状态要盲滚很久，且不知道下面还有什么。
           锚点常驻在顶部，滚到哪都能一键跳。 */}
       <div className="settings-anchors">
@@ -790,6 +815,7 @@ export default function Settings() {
           ['sec-proxy', '代理配置'],
           ['sec-redact', '敏感信息'],
           ['sec-engine', '运行状态'],
+          ['sec-storage', '日志与存储'],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -1263,7 +1289,7 @@ export default function Settings() {
           </button>
         </div>
         <div className="field-hint">
-          支持自定义 API 地址的工具：Cursor / VS Code 插件 / 自建脚本 / Cherry Studio 等。
+          凡是支持自定义 API 地址的工具都能接入（编辑器插件、桌面客户端、自建脚本等）。
           <button
             className="btn ghost sm"
             style={{ padding: '0 4px' }}
@@ -1437,6 +1463,33 @@ export default function Settings() {
             </div>
           </>
         )}
+      </div>
+
+      {/* ═══ F. 日志与存储 ═══ */}
+      <div className="card" id="sec-storage">
+        <div className="card-title">日志与存储</div>
+        <div className="field">
+          <label className="field-label" htmlFor="log-retention">
+            日志保留
+          </label>
+          <select
+            id="log-retention"
+            className="select"
+            value={config?.storage?.log_retention_days ?? 0}
+            disabled={saving}
+            onChange={(e) => void handleRetentionChange(Number(e.target.value))}
+          >
+            <option value={0}>永久保留（默认）</option>
+            <option value={30}>最近 30 天</option>
+            <option value={90}>最近 90 天</option>
+            <option value={180}>最近 180 天</option>
+            <option value={365}>最近 365 天</option>
+          </select>
+          <div className="field-hint">
+            超出保留期的日志与脱敏明细会被删除，<b>不可恢复</b>。
+            默认「永久保留」，不会主动删除任何记录。
+          </div>
+        </div>
       </div>
     </div>
   );

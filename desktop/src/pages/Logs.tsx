@@ -94,12 +94,35 @@ const MARKED_OPTIONS = [
  *   说明与实现相反：实测截图里用户的手机号是完整可见的。
  *   只存本机不等于可以整屏展示：一旦截图、录屏或投屏，
  *   这句「已打码」就成了谎报。现在让显示与说明一致。
+ *
+ * ★ 现在后端落库时已掩码（`abcd…yz⟪27 字符⟫`），这里幂等处理：
+ *   带 ⟪ 的直接原样展示，避免二次压缩成「前 4 + 尾 2 of 掩码」。
  */
 function maskOriginal(value: string): string {
   const s = (value || '').trim();
   if (!s) return '';
+  if (s.includes('⟪')) return s;
   if (s.length <= 6) return `${s.slice(0, 1)}…（共 ${s.length} 位）`;
   return `${s.slice(0, 3)}…${s.slice(-3)}（共 ${s.length} 位）`;
+}
+
+/**
+ * 列表里的时间：今天只显示时分秒，非今天必须带日期。
+ *
+ * ★ 2026-10-20：原实现固定 `formatDateTime(...).slice(-8)`，
+ *   只剩 HH:MM:SS —— 切到「近 7 天 / 全部时间」后，
+ *   不同日期的记录长得一模一样，用户无法判断是哪天发生的。
+ */
+function formatListTime(ts: number): string {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  const hms = formatDateTime(ts).slice(-8);
+  if (sameDay) return hms;
+  return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${hms}`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -368,8 +391,28 @@ function DetailDrawer({
               </div>
               {detail.entry.model && (
                 <div className="detail-row">
-                  <span className="detail-key">模型</span>
+                  <span className="detail-key">请求模型</span>
                   <span className="detail-val mono">{detail.entry.model}</span>
+                </div>
+              )}
+              {/* ★ 返回模型必须与请求模型并列（2026-10-20）。
+                  此前只显示请求模型，而「模型降级」正是本产品最核心的检测项 ——
+                  用户看到「返回的模型与请求的不一致」，却看不到到底返回了什么，
+                  只能凭感觉判断是不是误报。 */}
+              {detail.entry.response_model && (
+                <div className="detail-row">
+                  <span className="detail-key">返回模型</span>
+                  <span
+                    className="detail-val mono"
+                    style={{
+                      color: detail.entry.response_model !== detail.entry.model
+                        && detail.entry.model
+                        ? 'var(--xd-danger)'
+                        : undefined,
+                    }}
+                  >
+                    {detail.entry.response_model}
+                  </span>
                 </div>
               )}
 
@@ -548,14 +591,19 @@ function DetailDrawer({
               {marking ? '撤销中...' : '撤销标记'}
             </button>
           ) : (
-            <button
-              className="btn secondary"
-              onClick={handleMarkSafe}
-              disabled={loading || marking}
-            >
-              <ShieldOff size={15} strokeWidth={1.5} />
-              {marking ? '标记中...' : '标记为误报'}
-            </button>
+            /* ★ 只对「已拦截 / 已告警」显示标记按钮（2026-10-20）。
+               正常通过的记录本来就不计入风险档，标了也不会有任何变化 ——
+               按钮却提示「今日计数已减去这一条」，等于让用户以为生效了。 */
+            (detail?.entry.action === 'block' || detail?.entry.action === 'alert') && (
+              <button
+                className="btn secondary"
+                onClick={handleMarkSafe}
+                disabled={loading || marking}
+              >
+                <ShieldOff size={15} strokeWidth={1.5} />
+                {marking ? '标记中...' : '标记为误报'}
+              </button>
+            )
           )}
           <button className="btn danger" onClick={handleDelete} disabled={loading || deleting}>
             <Trash2 size={15} strokeWidth={1.5} />
@@ -1109,7 +1157,7 @@ export default function Logs() {
             <table className="table">
               <thead>
                 <tr>
-                  <th style={{ width: 78 }}>时间</th>
+                  <th style={{ width: 96 }}>时间</th>
                   <th style={{ width: 92 }}>类型</th>
                   <th>内容</th>
                   <th style={{ width: 150 }}>中转站</th>
@@ -1136,7 +1184,7 @@ export default function Logs() {
                       }
                     }}
                   >
-                    <td className="mono faint">{formatDateTime(e.timestamp).slice(-8)}</td>
+                    <td className="mono faint">{formatListTime(e.timestamp)}</td>
                     <td>
                       <span className="faint" style={{ fontSize: 12 }}>
                         {LOG_TYPE_LABELS[e.log_type]}

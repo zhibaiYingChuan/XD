@@ -184,9 +184,29 @@ class Backend:
         # 记录最近一次读取失败的原因，供断言给出可诊断的说明
         self.last_error = ""
 
+    def auth_headers(self, extra=None):
+        """管理接口令牌。
+
+        ★ 2026-10-20：引擎 /api/* 增加了管理令牌门禁（防同机任意进程
+          读写日志与配置）。桌面端启动引擎时从数据目录读取/生成
+          ``engine_token`` 并注入环境变量；本测试直连 HTTP，必须带上
+          同一个令牌，否则全部 /api 请求 401，测试会误报成「引擎坏了」。
+          令牌文件不存在（旧版引擎）时留空，保持向后兼容。
+        """
+        headers = dict(extra or {})
+        try:
+            token = (data_dir() / "engine_token").read_text(
+                encoding="utf-8").strip()
+        except OSError:
+            token = ""
+        if token:
+            headers["X-Admin-Token"] = token
+        return headers
+
     def _get(self, path, timeout=5):
         url = f"http://127.0.0.1:{self.port}{path}"
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        req = urllib.request.Request(url, headers=self.auth_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
     def _post(self, path, payload, timeout=8):
@@ -194,7 +214,7 @@ class Backend:
         req = urllib.request.Request(
             url,
             data=json.dumps(payload or {}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self.auth_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1992,7 +2012,7 @@ def restore_protection(be: Backend):
             req = urllib.request.Request(
                 f"http://127.0.0.1:{be.port}/api/resume",
                 data=b"{}",
-                headers={"Content-Type": "application/json"},
+                headers=be.auth_headers({"Content-Type": "application/json"}),
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=6):

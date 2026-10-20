@@ -28,16 +28,23 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
   return mod.invoke<T>(cmd, args);
 }
 
-/** 应用版本（仅 Tauri 环境可用）。 */
+/** 应用版本（仅 Tauri 环境可用）。
+ *
+ * ★ 2026-10-20：不再硬编码回退版本号。
+ *   版本号的唯一来源是 Tauri 的 Cargo.toml / tauri.conf.json；
+ *   写死一个字符串意味着每次发版都要记得改这里，
+ *   漏改就会在界面上显示上一个版本 —— 一个纯靠记忆维持的一致性。
+ *   取不到时返回空串，由调用方隐藏版本，而不是显示错的。
+ */
 export async function getAppVersion(): Promise<string> {
   if (!isTauri()) {
-    return import.meta.env.VITE_APP_VERSION ?? '0.1.17-alpha';
+    return import.meta.env.VITE_APP_VERSION ?? '';
   }
   try {
     const mod = await import('@tauri-apps/api/app');
     return await mod.getVersion();
   } catch {
-    return import.meta.env.VITE_APP_VERSION ?? '0.1.17-alpha';
+    return import.meta.env.VITE_APP_VERSION ?? '';
   }
 }
 

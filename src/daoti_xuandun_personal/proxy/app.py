@@ -25,6 +25,7 @@ import codecs
 import copy
 import datetime as _dt
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .. import paths
+from .. import __version__ as _PKG_VERSION
 from ..config import (
     PersonalConfig,
     is_masked_key,
@@ -47,7 +49,9 @@ from ..config import (
 )
 from ..reputation.tracker import ReputationTracker
 from ..storage.db import PersonalStorage, kpi_contribution
-from ..types import Action, LogEntry, LogType, RedactionRecord, SecurityLevel
+from ..types import (
+    Action, LogEntry, LogType, RedactionRecord, SecurityLevel, mask_secret,
+)
 from .baseline import build_baseline
 from .restorer import ContentRestorer
 from .sanitizer import RequestSanitizer
@@ -102,6 +106,34 @@ def _days_to_start_ts(days: Optional[int]) -> Optional[float]:
         return None
     start_date = _dt.date.today() - _dt.timedelta(days=int(days) - 1)
     return _dt.datetime.combine(start_date, _dt.time.min).timestamp()
+
+
+def _purge_logs_by_retention() -> int:
+    """按用户设定的保留天数清理旧日志；返回删除条数。
+
+    ★ 只在 ``log_retention_days > 0`` 时执行。默认 0 = 永久保留，
+      绝不替用户做删除决定。
+    ★ 复用 ``clear_logs(before_ts)``：它会在同一事务里删掉关联的
+      脱敏明细、重算当日统计并清理 WAL，不会出现「日志删了、
+      证据还在」或「统计没跟着降」。
+    """
+    if _storage is None or _config is None:
+        return 0
+    try:
+        days = int(getattr(_config.storage, "log_retention_days", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    if days <= 0:
+        return 0
+    cutoff = time.time() - days * 86400
+    try:
+        n = _storage.clear_logs(cutoff)
+        if n:
+            logger.info("按保留策略（%d 天）清理日志 %d 条", days, n)
+        return n
+    except Exception as e:  # noqa: BLE001 — 清理失败不该阻断启动/保存
+        logger.warning("按保留策略清理日志失败: %s", e)
+        return 0
 
 
 def _license_file_path() -> str:
@@ -188,6 +220,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ② 初始化组件
     _storage = PersonalStorage()
+    # ★ 2026-10-20：按用户设定的保留天数清理一次旧日志。
+    #   默认 0 = 永久保留，此时函数直接返回，不动任何数据。
+    _purge_logs_by_retention()
     _sanitizer = RequestSanitizer(
         level=_config.guard.security_level,
         custom_keywords=_config.guard.custom_keywords,
@@ -279,7 +314,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="道体·玄盾 个人版",
         description="保护个人用户在使用 AI 中转站时的数据安全",
-        version="0.1.17-alpha",
+        version=_PKG_VERSION,
         lifespan=lifespan,
         docs_url="/docs" if _docs_enabled else None,
         openapi_url="/openapi.json" if _docs_enabled else None,
@@ -296,8 +331,35 @@ def create_app() -> FastAPI:
         ],
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
     )
+
+    # ★★ 本机管理接口鉴权（2026-10-20）
+    # ────────────────────────────────────────────────────────────
+    # 引擎监听 127.0.0.1，但「本机」不等于「本应用」：任何本机进程都能
+    # 读写 /api/config（把中转站改成自己的服务器）、读走全部日志、清空日志。
+    # CORS 只约束浏览器，约束不了本机程序。
+    #
+    # 桌面端启动引擎时注入 XUANDUN_ADMIN_TOKEN，并在每个 /api/* 请求里
+    # 带 X-Admin-Token。开发时手动启动引擎（无该环境变量）保持放行，
+    # 不影响本地调试与浏览器预览。
+    #
+    # /v1/chat/completions 刻意**不**受此保护：它是给 AI 工具用的业务端点，
+    # 工具不会带管理令牌。
+    _admin_token = os.environ.get("XUANDUN_ADMIN_TOKEN", "").strip()
+
+    @app.middleware("http")
+    async def _admin_guard(request: Request, call_next):
+        if _admin_token and request.url.path.startswith("/api/"):
+            supplied = request.headers.get("x-admin-token", "")
+            if not hmac.compare_digest(supplied, _admin_token):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "管理接口鉴权失败：请从玄盾桌面端操作"
+                    },
+                )
+        return await call_next(request)
 
     # ══════════════════════════════════════════════════════════
     # 中转站代理端点
@@ -842,6 +904,7 @@ def create_app() -> FastAPI:
                 LogType.RESPONSE_VERIFY, domain, Action.BLOCK.value, "high",
                 model, findings, payload, session_id, redaction_records,
                 text_preview=content,
+                response_model=str(payload.get("model") or ""),
             )
             _record_reputation(domain, Action.BLOCK.value, latency_ms, content,
                                categories=_finding_categories(findings))
@@ -861,6 +924,7 @@ def create_app() -> FastAPI:
             LogType.RESPONSE_VERIFY, domain, action, max_sev,
             model, findings, payload, session_id, redaction_records,
             text_preview=content,
+            response_model=str(payload.get("model") or ""),
         )
         _record_reputation(domain, action, latency_ms, content,
                            categories=_finding_categories(findings))
@@ -894,6 +958,10 @@ def create_app() -> FastAPI:
 
         async def _generator() -> AsyncGenerator[bytes, None]:
             nonlocal total_len, mid_verified, last_verified_len
+            # ★ 2026-10-20：中转站返回的模型名要在 finally 里落库，
+            #   但只有在「流正常结束」分支才会被赋值 —— 提前初始化，
+            #   否则被阻断 / 客户端断开时会抛 NameError，把收尾整段跳过。
+            sse_model = ""
             # 跨 chunk 的 SSE 文本缓冲：只转发**完整帧**，
             # 被 chunk 边界切断的占位符会在残留缓冲里拼回完整后再还原。
             pending = ""
@@ -1084,6 +1152,7 @@ def create_app() -> FastAPI:
                     LogType.RESPONSE_VERIFY, domain, action, severity,
                     model, findings, None, session_id, redaction_records,
                     text_preview=readable,
+                    response_model=sse_model,
                 )
                 _record_reputation(domain, action, latency_ms, readable,
                                    categories=_finding_categories(findings))
@@ -1652,6 +1721,7 @@ def create_app() -> FastAPI:
             copy.deepcopy(_config.relay),
             copy.deepcopy(_config.guard),
             copy.deepcopy(_config.server),
+            copy.deepcopy(_config.storage),
         )
 
         if "relay" in payload:
@@ -1728,13 +1798,17 @@ def create_app() -> FastAPI:
                 for k, v in payload["server"].items():
                     if hasattr(_config.server, k) and v is not None:
                         setattr(_config.server, k, v)
+            if "storage" in payload:
+                for k, v in payload["storage"].items():
+                    if hasattr(_config.storage, k) and v is not None:
+                        setattr(_config.storage, k, v)
 
             errors = _config.validate()
             if errors:
                 raise HTTPException(status_code=400, detail={"errors": errors})
         except HTTPException:
             # 校验失败 ⇒ 运行态必须与写入前完全一致
-            (_config.relay, _config.guard, _config.server) = snapshot
+            (_config.relay, _config.guard, _config.server, _config.storage) = snapshot
             raise
 
         # 应用到运行时组件
@@ -1757,6 +1831,10 @@ def create_app() -> FastAPI:
             _verifier.set_pattern_check(_config.guard.enable_pattern_check)
 
         _config.save()
+        # ★ 2026-10-20：保存了保留策略就立刻执行一次。
+        #   否则用户设了「保留 30 天」，界面上的设置生效了，
+        #   磁盘上的旧日志却要等到下次启动才清 —— 看起来像没生效。
+        _purge_logs_by_retention()
         return {"ok": True, "config": _config.to_safe_dict()}
 
     @app.get("/api/relays/configured")
@@ -2104,7 +2182,14 @@ def create_app() -> FastAPI:
             # ★ P2-4 修复：诊断报告原先在前端硬编码 127.0.0.1:18765，
             #   用户改过端口后报告会给出错误的排查指引
             "server": (
-                {"host": _config.server.host, "port": _config.server.port}
+                # ★ 2026-10-20：必须报**实际监听端口**。
+                #   用户改过端口但还没重启时，配置值尚未生效；
+                #   诊断报告若写配置值，会把报障排查带偏。
+                {
+                    "host": _config.server.host,
+                    "port": _actual_port or _config.server.port,
+                    "configured_port": _config.server.port,
+                }
                 if _config else {}
             ),
             "relay_configured": bool(_config and _config.relay.base_url),
@@ -2172,8 +2257,19 @@ def create_app() -> FastAPI:
 
 
 def _csv_escape(value: str) -> str:
-    """CSV 字段转义（RFC 4180）。"""
+    """CSV 字段转义（RFC 4180 + 公式注入防护）。
+
+    ★ 2026-10-20：补公式注入防护。
+      CSV 里的文本来源包括**中转站返回的模型原文**（text_preview）。
+      而本产品的威胁模型就是「中转站可能恶意」——
+      恶意中转站只要让回答以 ``=HYPERLINK(...)`` / ``=cmd|...`` 开头，
+      用户导出日志用 Excel 打开时就会执行公式（DDE / 外链）。
+      所以以 = + - @ 或制表符/回车开头的字段必须前置单引号，
+      让 Excel 按文本处理。
+    """
     s = str(value or "")
+    if s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        s = "'" + s
     if any(ch in s for ch in (",", '"', "\n", "\r")):
         return '"' + s.replace('"', '""') + '"'
     return s
@@ -2612,7 +2708,10 @@ def _block_evidence(
                     f" · 第 {r.start}-{r.end} 字符"
                 ),
                 # 掩码后的片段（不是原文）
-                "evidence": r.original,
+                # ★ 2026-10-20：阻断路径的 records 已由 _masked_evidence
+                #   掩码，这里再兜一次（幂等），防止未来新增调用方
+                #   把明文带进 detail_json —— 它会被导出、会被详情页展示。
+                "evidence": mask_secret(r.original),
             }
         )
     return out
@@ -2643,11 +2742,17 @@ def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
         hit = findings[0] if findings else None
     reason = getattr(hit, "detail", "") or "响应含高危内容"
 
+    # ★ 2026-10-20：不再断言「当前中转站被判定不可信」。
+    #   命中可能来自用户自己的提问内容（例如把激活码贴进对话），
+    #   也可能是统计类信号引起的误判 —— 一句「中转站不可信」
+    #   把结论说得比证据更重。改为只陈述「这次响应被拦下」，
+    #   并把误报出口写清楚。
     advice = (
         f"玄盾拦下了这次响应（{reason}）。"
-        "当前中转站被判定不可信，它可能已经影响了回答质量。"
+        "这次返回的内容触发了危险判定，所以没有交给 AI 工具。"
         "如果任务还没完成，建议把 AI 工具的 API 地址改回模型厂商官方地址继续做，"
         "或在设置页换一家中转站后重试。这段对话在换地址前无法继续。"
+        "若你判断这是误报，可在日志里点「标记为误报」并反馈给我们。"
     )
     return {
         "message": advice,
@@ -2835,6 +2940,7 @@ def _record_log(
     log_type, domain, action, severity, model,
     findings, payload, session_id, redaction_records,
     text_preview: str = "",
+    response_model: str = "",
 ) -> None:
     """记录一条日志 + 脱敏记录 + 每日统计。
 
@@ -2842,6 +2948,9 @@ def _record_log(
         text_preview: 内容预览（★ 必须由调用方传入，P1-7 修复：
             该字段原先从未赋值，导致日志详情「原始响应片段」永不显示、
             搜索功能的一半条件永久失效）
+        response_model: 中转站实际返回的模型。★ 2026-10-20：
+            与请求模型并列展示 —— 「模型降级」是本产品最核心的检测项，
+            只说「不一致」却不给两个值，用户无法核对，也无法判断是否误报。
     """
     if _storage is None:
         return
@@ -2855,6 +2964,7 @@ def _record_log(
             action=action,
             severity=severity,
             model=model,
+            response_model=_make_preview(response_model, limit=120),
             finding_count=len(findings),
             summary=summary[:200],
             detail_json=json.dumps(
@@ -2862,7 +2972,7 @@ def _record_log(
             ),
             text_preview=_make_preview(text_preview),
             # ★ 2026-10-20：打码处数落在日志行上。
-            #   脱敏明细会在响应还原后被隐私清除（clear_redactions_for_session），
+            #   脱敏明细会在同会话的下一次响应时被清除（clear_redactions_for_session），
             #   若只靠明细行数，状态栏的「已打码 N 处」就永远无法下钻 ——
             #   用户点「已打码」筛选会看到 0 条。
             redaction_count=len(redaction_records or []),

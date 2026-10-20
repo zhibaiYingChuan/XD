@@ -246,7 +246,9 @@ function StatusBar() {
 
 export default function Layout() {
   const location = useLocation();
-  const [version, setVersion] = useState('0.1.17-alpha');
+  // ★ 初值为空而不是硬编码版本（2026-10-20）：
+  //   取到真实版本前不显示，避免发布后首帧闪一下上个版本号。
+  const [version, setVersion] = useState('');
   const [license, setLicense] = useState<LicenseStatus | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
 
@@ -334,7 +336,7 @@ export default function Layout() {
         </nav>
 
         <div className="sidebar-footer">
-          <span>v{version}</span>
+          {version && <span>v{version}</span>}
           <span className="faint">本地运行</span>
         </div>
       </aside>
