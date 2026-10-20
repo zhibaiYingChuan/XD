@@ -524,8 +524,15 @@ jobs:
           # ★ --config 只在 CI 合并「产出更新签名包」这一项：
           #   本地构建没有签名私钥，若把它写进 tauri.conf.json，
           #   `tauri build` 会因缺少 TAURI_SIGNING_PRIVATE_KEY 直接失败。
+          #
+          # ★ deb 不产出 updater 资产（Linux 自动更新走 AppImage），
+          #   不给它加这个覆盖，避免 bundler 对不支持的格式报错。
+          CONFIG_ARGS=""
+          if [ "${{ matrix.art }}" != "linux-deb" ]; then
+            CONFIG_ARGS="--config src-tauri/tauri.updater.conf.json"
+          fi
           if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }} \
-               --config src-tauri/tauri.updater.conf.json; then
+               $CONFIG_ARGS; then
             exit 0
           fi
           if [ "${{ matrix.allow_failure }}" = "true" ]; then

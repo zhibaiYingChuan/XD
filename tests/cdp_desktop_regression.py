@@ -742,6 +742,15 @@ def test_activate_page_honest(page, be: Backend):
     #    用户拿不到机器码就无从申请激活码，这是激活闭环的起点。
     mch = None
     try:
+        # ★ 机器码由引擎调 WMI 采集，首次约 1–2 秒；界面在校验期间显示
+        #   「正在读取激活状态…」。直接读一次 DOM 会撞上加载态，
+        #   把「还没渲染完」误判成「没显示机器码」——
+        #   所以这里等它出现，而不是抢跑。
+        page.wait_for_function(
+            """() => [...document.querySelectorAll('.code-box')]
+                  .some(e => /^[0-9a-f]{32}$/i.test((e.innerText || '').trim()))""",
+            timeout=20000,
+        )
         mch = page.evaluate(
             """() => {
                 const el = [...document.querySelectorAll('.code-box')]
@@ -866,6 +875,12 @@ def test_unreachable_label(page, be: Backend):
         return
 
     branch = text.split("if (!reachable)")[1] if "if (!reachable)" in text else ""
+    # ★ 只检查**代码**，不检查注释（2026-10-21）。
+    #   曾出现：注释里写着「这里不要说『学习中』」，本判据把这句
+    #   劝告本身当成谎报措辞 —— 测试读的是源码文本，注释也是文本。
+    #   去掉整行注释后再判，判据才对准真正会渲染的字面量。
+    import re as _re
+    branch = _re.sub(r"(?m)^\s*//.*$", "", branch)
     # 降级分支里不许出现「防护中」「学习中」这类"一切正常"的措辞
     lying = [w for w in ("防护中", "学习中", "今日已检查") if w in branch]
     has_honest = "本地代理未运行" in branch and ("请确认玄盾代理已启动" in branch)
@@ -2177,7 +2192,7 @@ def main():
             if not health:
                 # 返回 2 而非继续：没有引擎就没有独立事实源，
                 # 所有「界面是否诚实」的断言都会退化成自说自话。
-                print("[FATAL] 本地代理（127.0.0.1:18765）无响应，无法取得对照事实源。")
+                print(f"[FATAL] 本地代理（127.0.0.1:{be.port}）无响应，无法取得对照事实源。")
                 print("  请确认玄盾引擎已启动（应用启动后会自动拉起）。")
                 return 2
             try:

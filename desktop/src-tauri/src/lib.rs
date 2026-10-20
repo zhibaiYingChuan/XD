@@ -933,8 +933,15 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
     .stderr(Stdio::piped())
     // 冻结后的引擎需要 DLL 搜索路径指向自身目录（standalone 模式下
     // Nuitka 会把 python3xx.dll 等放在 exe 同级）
+    //
+    // ★ 2026-10-21：开发回退（resolve_engine 返回 "python"）时，
+    //   Path::new("python").parent() 是 **空路径** Some("")，
+    //   current_dir("") 会让 CreateProcess 报 os error 123
+    //   （文件名、目录名或卷标语法不正确）—— 表现为「引擎启动失败」，
+    //   而真正原因只是工作目录为空。必须把空路径过滤掉。
     .current_dir(
         exe.parent()
+            .filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from(".")),
     )

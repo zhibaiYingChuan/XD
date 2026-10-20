@@ -35,8 +35,18 @@ _VERSION_RE = re.compile(
 
 
 def read_ssot() -> str:
-    """从 Cargo.toml 的 [package] 段读取版本号（唯一真实来源）。"""
-    text = CARGO.read_text(encoding="utf-8")
+    """从 Cargo.toml 的 [package] 段读取版本号（唯一真实来源）。
+
+    ★ 2026-10-20：兼容并**顺手去掉** UTF-8 BOM。
+      用 PowerShell 的 Set-Content 改过这个文件时，会写入 BOM，
+      而正则里的 ``^`` 会因 BOM 失配，表现为「读不到版本号」——
+      排查时极易误判成文件被写坏。
+    """
+    raw = CARGO.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        CARGO.write_bytes(raw[3:])
+        raw = raw[3:]
+    text = raw.decode("utf-8")
     m = re.search(
         r"^\[package\][\s\S]*?^version\s*=\s*\"([^\"]+)\"", text, re.M
     )
@@ -136,7 +146,7 @@ def main() -> int:
         if not path.exists():
             problems.append(f"{rel}: 文件不存在")
             continue
-        old = path.read_text(encoding="utf-8")
+        old = path.read_text(encoding="utf-8-sig")
         new = transform(old, version)
         if new == old:
             continue
