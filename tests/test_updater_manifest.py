@@ -27,7 +27,8 @@ def _seed(art: Path, *, exe=True, mac=True, linux=True, sig=True) -> None:
     files = {
         "win": ("玄盾_0.1.18-alpha_x64-setup.exe", "SIG_WIN"),
         "mac": ("玄盾.app.tar.gz", "SIG_MAC"),
-        "linux": ("玄盾.AppImage.tar.gz", "SIG_LINUX"),
+        # ★ Linux 的更新包就是 AppImage 本身（Tauri 不产 .AppImage.tar.gz）
+        "linux": ("玄盾_0.1.18-alpha_amd64.AppImage", "SIG_LINUX"),
     }
     for key, (name, signature) in files.items():
         enabled = {"win": exe, "mac": mac, "linux": linux}[key]
@@ -66,6 +67,13 @@ def test_all_platforms_are_listed(tmp_path):
     assert win["signature"] == "SIG_WIN", "签名被破坏（BOM/换行）"
     # 中文文件名必须被百分号编码，否则前端下载 404
     assert "%" in win["url"] and " " not in win["url"]
+
+    # Linux 必须指向 AppImage 本体：写成 tar.gz 会 404（CI 根本不产它）
+    linux = data["platforms"]["linux-x86_64"]
+    assert linux["url"].endswith(".AppImage"), (
+        f"Linux 更新包应指向 .AppImage，实际是 {linux['url']}"
+    )
+    assert linux["signature"] == "SIG_LINUX"
 
 
 def test_missing_signature_is_fatal(tmp_path):

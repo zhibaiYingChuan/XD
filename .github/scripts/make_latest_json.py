@@ -99,8 +99,10 @@ def main() -> int:
         raise SystemExit("未找到 macOS 更新包（.app.tar.gz）")
     add("darwin-aarch64", mac[0], required=True)
 
-    # Linux：AppImage 的 .tar.gz（deb 不能用于自动更新）
-    linux = [p for p in files if p.name.endswith(".AppImage.tar.gz")]
+    # Linux：AppImage 本身 + 同名 .sig（2026-10-21 实测：Tauri 对 Linux
+    #   只产出 `.AppImage.sig`，**不会**产出 `.AppImage.tar.gz`。
+    #   之前按 tar.gz 找，Linux 的自动更新永远登记不上。）
+    linux = [p for p in files if p.name.endswith(".AppImage")]
     if linux:
         add("linux-x86_64", linux[0], required=False)
     else:
