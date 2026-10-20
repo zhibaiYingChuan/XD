@@ -734,7 +734,7 @@ export default function Dashboard() {
                 {relayRisk === 0 && repDeductions.length === 0 ? (
                   <div className="faint" style={{ fontSize: 12, lineHeight: 1.7 }}>
                     本次使用未触发任何扣分项 —
-                    没有中转站侧的危险或可疑响应、没有检测到数据保留迹象，域名也不在已知风险名单里。
+                    没有中转站侧的危险响应或提示、没有检测到数据保留迹象，域名也不在已知风险名单里。
                     {selfRisk > 0 && (
                       <>
                         <br />

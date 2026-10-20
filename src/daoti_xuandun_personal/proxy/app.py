@@ -1117,7 +1117,10 @@ def create_app() -> FastAPI:
             message = f"今日已阻断 {today['danger_count']} 次危险响应"
         elif today["suspect_count"] > 0:
             state = "suspect"
-            message = f"今日发现 {today['suspect_count']} 次可疑响应"
+            # ★ 2026-10-20：「可疑响应」改为「提示」。
+            #   前端 KPI 与状态栏早已叫「提示」（这类信号不指向问题），
+            #   后端消息若还写「可疑」，同一个数字就有两套说法。
+            message = f"今日发现 {today['suspect_count']} 次提示"
         elif today["total_calls"] == 0:
             # ★★ 「今日 0 次」不等于「从未有过请求」（2026-10-07 修复）
             #

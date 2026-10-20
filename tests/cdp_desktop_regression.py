@@ -137,7 +137,10 @@ PLACEHOLDER_KEY = "sk-cdp-regression-placeholder"
 STATE_LABELS = {
     "protecting": "防护中",
     "learning": "学习中",
-    "suspect": "可疑",
+    # ★ 2026-10-20：「可疑」统一改为「提示」，与首页 KPI 用同一个词。
+    #   本表与 desktop/src/services/api.ts 的 STATE_LABELS 必须一致 ——
+    #   文案变了这里会红，那正是要的：状态说法变了，必须有人确认新说法是否诚实。
+    "suspect": "提示",
     "danger": "危险",
     "paused": "已暂停",
 }

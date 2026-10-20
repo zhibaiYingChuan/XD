@@ -135,7 +135,11 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
           security_level: 'balanced',
         },
       });
-      toast.success('配置完成，玄盾已开始保护你的 AI 对话');
+      toast.success(
+        license?.activated
+          ? '配置完成，玄盾已开始保护你的 AI 对话'
+          : '配置完成。未激活时玄盾只转发、不防护，记得去「激活」页完成激活',
+      );
       onFinish();
     } catch (e) {
       toast.error(`保存失败：${e instanceof Error ? e.message : String(e)}`);
@@ -173,7 +177,8 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                 <li>中转站是否可信（是否保留你的对话记录）</li>
               </ul>
               <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
-                整个过程都在本机完成，你的对话内容不会上传到任何服务器。
+                检测过程都在本机完成，玄盾不会把内容上传到它自己的服务器。
+                你的对话仍会发给你配置的中转站 —— 那正是要被检查的那一跳。
               </div>
             </div>
             <div className="wizard-actions">
@@ -219,7 +224,8 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             ) : (
               <>
                 <div className="wizard-text">
-                  玄盾个人版需要激活码才能使用。
+                  激活码用于开启完整防护。未激活时玄盾只做转发，
+                  <b>不脱敏、也不拦截</b>。
                   <br />
                   先把你的机器码发给玄盾官方，拿到激活码后填在下面。
                 </div>
@@ -406,7 +412,9 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             </div>
             <h1 className="wizard-title">配置完成</h1>
             <div className="wizard-text">
-              玄盾正在运行，保护你的 AI 对话。
+              {license?.activated
+                ? '玄盾正在运行，保护你的 AI 对话。'
+                : '玄盾正在运行，但尚未激活 —— 当前只会转发请求，不脱敏也不拦截。'}
               <div className="mt-16">
                 <div className="field-label">最后一步：修改 AI 工具的 API 地址</div>
                 <div className="code-box mt-8">

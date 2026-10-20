@@ -795,7 +795,11 @@ export const api = {
 export const STATE_LABELS: Record<GuardState, string> = {
   protecting: '防护中',
   learning: '学习中',
-  suspect: '可疑',
+  // ★ 2026-10-20：「可疑」统一改为「提示」。
+  //   首页 KPI 与状态栏早已改用「提示」（统计类信号不指向问题），
+  //   但这里和后端 /api/state 的 message 仍是「可疑响应」——
+  //   同一个数字，两处两个说法，用户以为在说两件事。
+  suspect: '提示',
   danger: '危险',
   paused: '已暂停',
 };

@@ -770,7 +770,9 @@ export default function Settings() {
     <div style={{ maxWidth: 720 }}>
       <div className="page-header">
         <h1 className="page-title">设置</h1>
-        <p className="page-subtitle">所有检测都在本机完成，不上传任何数据</p>
+        <p className="page-subtitle">
+          所有检测都在本机完成；玄盾自身不上传任何数据（对话仍会发给你配置的中转站）
+        </p>
       </div>
 
       {/* ═══ A. 防护开关 ═══ */}
@@ -1011,7 +1013,7 @@ export default function Settings() {
               </b>
               <div className="mt-8">
                 你的 AI 对话会经过 <span className="mono">{displayDomain(relayRisk.domain)}</span> 转发，
-                对方能看到并保留全部内容。
+                对方能看到全部内容；是否留存、留存多久由对方决定，玄盾无法代它保证。
               </div>
               {relayRisk.notes.length > 0 && (
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
@@ -1253,7 +1255,8 @@ export default function Settings() {
 
         <div className="field-label mt-24">自定义关键词</div>
         <div className="field-hint mb-8" style={{ marginTop: 0 }}>
-          检测到这些词会在发送前自动打码（如公司内部代号、客户名）
+          均衡档：命中后打码再转发；严格档：直接拦截；宽松档：不处理，原样放行。
+          适合填公司内部代号、客户名这类你不想外发的词。
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
