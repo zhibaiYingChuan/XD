@@ -628,6 +628,11 @@ jobs:
           egress-policy: audit
           disable-sudo: true
 
+      # ★ 2026-10-21：release job 里要跑 .github/scripts/make_latest_json.py，
+      #   这个 job 之前**没有 checkout**，脚本根本不在工作目录里 ——
+      #   四个平台全部构建成功、VirusTotal 也过了，却卡在最后一步。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           path: artifacts
