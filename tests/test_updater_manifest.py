@@ -156,8 +156,18 @@ def test_release_workflow_signs_and_publishes_manifest():
         "make_latest_json.py",           # 生成更新清单
         "latest.json",                   # 作为 Release 资产
         "*.sig",                         # 上传签名文件
+        "Stage release assets with ASCII names",  # ASCII 资产名
+        "make_latest_json.py dist",      # 清单与实际上传名同源
     ):
         assert needle in text, f"release.yml 缺少 {needle}"
+
+    # ★ 2026-10-21 线上真实事故：GitHub 会把资产名里的中文剥掉，
+    #   而清单写的是原名 → 更新 URL 404。不能再让 tar.gz 通配把
+    #   deb 打包临时文件也带进发布。
+    assert "artifacts/**/*.tar.gz" not in text, (
+        "发布资产用了 tar.gz 通配 —— 会把 deb 的 control/data.tar.gz 也发出去"
+    )
+    assert "**/*.app.tar.gz" in text, "macOS 更新包应只收 *.app.tar.gz"
 
 
 def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):

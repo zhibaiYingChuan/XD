@@ -551,12 +551,17 @@ jobs:
           #   毫无关联，不容易联想到是命名撞了。
           name: xuandun-personal-${{ matrix.art }}
           # ★ 2026-10-20：除安装包外，还要带上 updater 资产：
-          #   .exe.sig / .app.tar.gz(.sig) / .AppImage.tar.gz(.sig)。
+          #   .exe.sig / .app.tar.gz(.sig)。
           #   少了 .sig，latest.json 就生成不出来，自动更新形同虚设。
+          #
+          # ★ 2026-10-21：tar.gz 必须限定成 `*.app.tar.gz`。
+          #   原先写的是 `**/*.tar.gz`，把 deb 打包过程中的临时文件
+          #   `bundle/deb/<包名>/control.tar.gz` 与 `data.tar.gz` 也收了进去，
+          #   于是它们被当成发布资产传了上去（线上真的出现了这两坨）。
           path: |
             desktop/src-tauri/target/release/bundle/**/${{ matrix.bundle_glob }}
             desktop/src-tauri/target/release/bundle/**/*.sig
-            desktop/src-tauri/target/release/bundle/**/*.tar.gz
+            desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
           # ★ 非 AppImage 的矩阵项：没产出文件就是失败。
           #   包少一个而没人知道，比构建失败更糟。
           #
@@ -637,20 +642,53 @@ jobs:
         with:
           path: artifacts
 
+      # ★ 2026-10-21：发布前统一改成 ASCII 文件名。
+      #   GitHub 会**静默剥掉**资产名里的非 ASCII 字符：
+      #   `道体·玄盾 个人版_0.1.18-alpha_x64-setup.exe`
+      #   → `_0.1.18-alpha_x64-setup.exe`。
+      #   而 latest.json 里写的是原始名（百分号编码），
+      #   于是更新 URL 直接 404 —— 这是最坏的一种错：
+      #   发版全绿、更新清单也在，只有客户端悄悄永远升不了级。
+      #   与其去猜 GitHub 的裁剪规则，不如自己先定成 ASCII 名。
+      - name: Stage release assets with ASCII names
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          rm -rf dist && mkdir -p dist
+          while IFS= read -r -d '' f; do
+            b="${f##*/}"
+            case "$b" in
+              *setup.exe.sig)    n="xuandun-personal_${VER}_x64-setup.exe.sig" ;;
+              *setup.exe)        n="xuandun-personal_${VER}_x64-setup.exe" ;;
+              *.app.tar.gz.sig)  n="xuandun-personal_${VER}_aarch64.app.tar.gz.sig" ;;
+              *.app.tar.gz)      n="xuandun-personal_${VER}_aarch64.app.tar.gz" ;;
+              *.dmg)             n="xuandun-personal_${VER}_aarch64.dmg" ;;
+              *.AppImage.sig)    n="xuandun-personal_${VER}_amd64.AppImage.sig" ;;
+              *.AppImage)        n="xuandun-personal_${VER}_amd64.AppImage" ;;
+              *.deb)             n="xuandun-personal_${VER}_amd64.deb" ;;
+              *) continue ;;
+            esac
+            cp "$f" "dist/$n"
+          done < <(find artifacts -type f -print0)
+          # 一个文件都没落到 dist 就是失败：空发布会误导所有人
+          test -n "$(ls -A dist)" || { echo "::error::没有可发布的产物"; exit 1; }
+          ls -l dist
+
       - name: Generate SHA256 checksums
         shell: bash
         run: |
           set -euo pipefail
-          cd artifacts
+          cd dist
           # ★ 四种格式都要算。只认 *.exe 的话，macOS/Linux 用户
           #   拿不到任何校验值 —— 而校验值恰恰是他们最需要的
           #   （从第三方下载时无法确认文件未被篡改）。
           #   *.deb 同样必须算：它是 Linux 的**主力**安装格式。
           find . -type f \( -name "*.exe" -o -name "*.dmg" \
                          -o -name "*.AppImage" -o -name "*.deb" \
-                         -o -name "*.tar.gz" \) \
+                         -o -name "*.app.tar.gz" \) \
             -exec sha256sum {} \; \
-            | sed 's|  \./[^ ]*/|  |' > checksums-sha256.txt
+            | sed 's|  \./|  |' > checksums-sha256.txt
           cat checksums-sha256.txt
           # 一个都没算出来就是失败：静默产出空校验文件比报错更糟，
           # 用户会以为「没校验值也能装」。
@@ -665,18 +703,13 @@ jobs:
       - name: Generate updater manifest
         # ★ 用 python3：release job 没有 setup-python，
         #   ubuntu-22.04 不保证存在 `python` 别名。
-        run: python3 .github/scripts/make_latest_json.py artifacts
+        # ★ 读 dist 而不是 artifacts：清单里的文件名必须与实际上传的
+        #   ASCII 资产名逐字一致，否则客户端下载 404。
+        run: python3 .github/scripts/make_latest_json.py dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true
           files: |
-            artifacts/**/*.exe
-            artifacts/**/*.dmg
-            artifacts/**/*.AppImage
-            artifacts/**/*.deb
-            artifacts/**/*.tar.gz
-            artifacts/**/*.sig
-            artifacts/**/latest.json
-            artifacts/**/checksums-sha256.txt
+            dist/*
