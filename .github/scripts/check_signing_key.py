@@ -37,21 +37,39 @@ def _key_id(blob: bytes) -> bytes:
     return blob[2:10]
 
 
+def _looks_like_text(blob: bytes) -> bool:
+    """判断解码结果是不是「又一层文本」，而不是真正的签名二进制。"""
+    if b"untrusted comment" in blob or b"trusted comment" in blob:
+        return True
+    # minisign 签名二进制里几乎不会有换行；有换行基本就是被 base64 套了一层的文本
+    return b"\n" in blob or b"\r" in blob
+
+
 def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
     """从 `.sig` 文件或命令输出里取出签名二进制。
 
     ★ 2026-10-21：CI 实测发现不同版本的 CLI 输出形态不同 ——
-      有的把完整 minisign 块写到 `<file>.sig`（4 行），
-      有的只写一行 base64，有的把签名打到 stdout。
-      原实现硬取 `.sig` 的第 2 行，遇到单行格式就报「格式异常」，
-      于是发版被一个**探测脚本自身的假设**卡住。
-      现在按「候选行 → base64 解码 → 长度足够」筛选，三种形态都覆盖。
+      A. `<file>.sig` 里是完整 minisign 块（4 行，第 2 行才是签名）
+      B. `<file>.sig` 里只有一行 base64
+      C. stdout 里把**整个 .sig 文件内容再 base64 一次**打出来
+
+      形态 C 是最坑的：它解码后是一段文本 `untrusted comment: ...`，
+      长度也 > 74，于是「按长度筛选」会把它当成签名 ——
+      取出的 key id 就成了 ASCII 的 `trusted `（7472757374656420），
+      报出一个看起来像「公私钥不匹配」的假故障。
+      （2026-10-21 发版第二次失败正是这个原因。）
+
+      现在的策略：
+        1. 收集所有可 base64 解码的候选；
+        2. 排除「解码后仍是文本」的候选；
+        3. 优先取长度恰好 74 的（2 算法 + 8 key id + 64 签名）。
     """
     lines: list[str] = []
     if sig_path.is_file():
         lines.extend(sig_path.read_text(encoding="utf-8-sig").splitlines())
     lines.extend((stdout or "").splitlines())
 
+    candidates: list[bytes] = []
     for line in lines:
         s = line.strip()
         if not s or s.startswith("untrusted comment") or s.startswith("trusted comment"):
@@ -60,9 +78,16 @@ def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
             blob = base64.b64decode(s, validate=True)
         except (ValueError, TypeError):
             continue
-        # 2 字节算法 + 8 字节 key id + 64 字节签名
-        if len(blob) >= 74:
-            return blob
+        if len(blob) < 10 or _looks_like_text(blob):
+            continue
+        candidates.append(blob)
+
+    exact = [b for b in candidates if len(b) == 74]
+    if exact:
+        return exact[0]
+    coarse = [b for b in candidates if len(b) >= 74]
+    if coarse:
+        return coarse[0]
     raise SystemExit(
         "无法从签名输出解析出签名（CLI 输出格式可能变了）；"
         f"stdout 前 120 字：{(stdout or '')[:120]!r}"

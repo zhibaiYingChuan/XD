@@ -191,3 +191,13 @@ def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):
     assert mod._extract_signature_blob(
         "untrusted comment: x\n" + b64 + "\n", tmp_path / "none.sig"
     ) == blob
+
+    # ④ stdout 里把整个 .sig 内容又 base64 了一层（2026-10-21 真实踩到）
+    #    —— 这层"套娃"解码后是一段文本，长度也 >74，
+    #    绝不能被当成签名，否则 key id 会被读成 ASCII 的 "trusted "
+    nested = base64.b64encode(
+        ("untrusted comment: signature from tauri secret key\n" + b64 + "\n").encode()
+    ).decode()
+    assert mod._extract_signature_blob(
+        nested + "\n" + b64 + "\n", tmp_path / "none2.sig"
+    ) == blob
