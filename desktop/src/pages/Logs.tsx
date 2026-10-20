@@ -83,6 +83,22 @@ const MARKED_OPTIONS = [
   { value: 'exclude', label: '排除误报' },
 ];
 
+/**
+ * 把脱敏记录里的**原文**打码后再显示。
+ *
+ * ★ 2026-10-20：此前这里把 r.original 原样渲染（只加了一条删除线），
+ *   而紧挨着的说明写的是「只保留开头、结尾和长度」——
+ *   说明与实现相反：实测截图里用户的手机号是完整可见的。
+ *   只存本机不等于可以整屏展示：一旦截图、录屏或投屏，
+ *   这句「已打码」就成了谎报。现在让显示与说明一致。
+ */
+function maskOriginal(value: string): string {
+  const s = (value || '').trim();
+  if (!s) return '';
+  if (s.length <= 6) return `${s.slice(0, 1)}…（共 ${s.length} 位）`;
+  return `${s.slice(0, 3)}…${s.slice(-3)}（共 ${s.length} 位）`;
+}
+
 // ══════════════════════════════════════════════════════════════
 // 详情抽屉
 // ══════════════════════════════════════════════════════════════
@@ -177,7 +193,7 @@ function DetailDrawer({
     setMarking(true);
     try {
       await api.markLogSafe(logId);
-      toast.success('已标记为误报，今日「危险/可疑」计数已减去这一条');
+      toast.success('已标记为误报，今日「危险/提示」计数已减去这一条');
       onMarkedSafe();
       onClose();
     } catch (e) {
@@ -274,7 +290,7 @@ function DetailDrawer({
               {detail.entry.marked_safe && (
                 <div className="alert safe mt-16" style={{ marginBottom: 0 }}>
                   <CheckCircle2 size={17} strokeWidth={1.5} className="alert-icon" />
-                  <div>你已将此条标记为<b>误报</b>，今日「危险/可疑」计数已减去这一条。</div>
+                  <div>你已将此条标记为<b>误报</b>，今日「危险/提示」计数已减去这一条。</div>
                 </div>
               )}
 
@@ -366,8 +382,14 @@ function DetailDrawer({
 
               {detail.redactions.length > 0 && (
                 <div className="mt-24">
+                  {/* ★ 标题必须区分「这两件事是不是一回事」（2026-10-20）。
+                      脱敏记录来自**请求侧**；响应侧被拦时（比如模型不一致），
+                      它只是这次请求顺带做的处理，跟拦截原因毫无关系。
+                      此前一律写成「拦截依据」——用户看到一条「模型不一致」的
+                      拦截，依据里却列着「手机号」，完全对不上。 */}
                   <div className="field-label">
-                    {detail.entry.action === 'block'
+                    {detail.entry.log_type === 'request_sanitize'
+                      && detail.entry.action === 'block'
                       ? `拦截依据（${detail.redactions.length} 处）`
                       : `脱敏记录（${detail.redactions.length} 处）`}
                   </div>
@@ -380,28 +402,24 @@ function DetailDrawer({
                         <div className="mono" style={{ color: 'var(--xd-safe)' }}>
                           {r.redacted}
                         </div>
-                        {/* ★ 不再截断。
-                            _mask_value 的输出形如
-                            `sk-a…9f⟪118 字符⟫`，长度标记⟪n 字符⟫
-                            是用户判断「这是不是我的Key」的关键信息。
-                            此处按 40 字截断会把 ⟪118 字符⟫ 切成
-                            「…⟪11」—— 用户看到的是个坏掉的数字，
-                            反而更容易误判成误报。 */}
+                        {/* ★ 只显示打码后的原文（头 3 + 尾 3 + 长度）。
+                            完整原文仍在本地库里，但不该整屏铺开 —— 
+                            截图/录屏/投屏时它就是一次泄露。 */}
                         <div
                           className="mono faint"
                           style={{ fontSize: 11, textDecoration: 'line-through' }}
                         >
-                          {r.original}
+                          {maskOriginal(r.original)}
                         </div>
                       </span>
                     </div>
                   ))}
-                  {detail.entry.action === 'block' && (
-                    <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
-                      这里显示的是打过码的片段（只保留开头、结尾和长度），原文没有离开你的电脑。
-                      若确认是误报，点下方「标记为误报」。
-                    </div>
-                  )}
+                  <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
+                    {detail.entry.log_type === 'request_sanitize'
+                      && detail.entry.action === 'block'
+                      ? '这里显示的是打过码的片段（只保留开头、结尾和长度），原文没有离开你的电脑。若确认是误报，点下方「标记为误报」。'
+                      : '这些是本次请求里被替换掉的内容，与上面判定的原因无关。只保留开头、结尾和长度，原文没有离开你的电脑。'}
+                  </div>
                 </div>
               )}
             </>
