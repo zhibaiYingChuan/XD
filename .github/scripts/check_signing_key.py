@@ -37,39 +37,40 @@ def _key_id(blob: bytes) -> bytes:
     return blob[2:10]
 
 
-def _looks_like_text(blob: bytes) -> bool:
-    """判断解码结果是不是「又一层文本」，而不是真正的签名二进制。"""
-    if b"untrusted comment" in blob or b"trusted comment" in blob:
-        return True
-    # minisign 签名二进制里几乎不会有换行；有换行基本就是被 base64 套了一层的文本
-    return b"\n" in blob or b"\r" in blob
+def _nested_lines(blob: bytes) -> list[str] | None:
+    """如果解码结果还是一层 minisign 文本，返回它的行；否则返回 None。
 
-
-def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
-    """从 `.sig` 文件或命令输出里取出签名二进制。
-
-    ★ 2026-10-21：CI 实测发现不同版本的 CLI 输出形态不同 ——
-      A. `<file>.sig` 里是完整 minisign 块（4 行，第 2 行才是签名）
-      B. `<file>.sig` 里只有一行 base64
-      C. stdout 里把**整个 .sig 文件内容再 base64 一次**打出来
-
-      形态 C 是最坑的：它解码后是一段文本 `untrusted comment: ...`，
-      长度也 > 74，于是「按长度筛选」会把它当成签名 ——
-      取出的 key id 就成了 ASCII 的 `trusted `（7472757374656420），
-      报出一个看起来像「公私钥不匹配」的假故障。
-      （2026-10-21 发版第二次失败正是这个原因。）
-
-      现在的策略：
-        1. 收集所有可 base64 解码的候选；
-        2. 排除「解码后仍是文本」的候选；
-        3. 优先取长度恰好 74 的（2 算法 + 8 key id + 64 签名）。
+    ★ 不能用「含换行就算文本」来判断：签名是 64 字节随机串，
+      约四分之一的概率会碰巧出现 0x0A，用换行判断会把真签名误判成文本。
+      （2026-10-21 本地复现时正是踩了这个坑，导致一个也解不出来。）
+      只认 minisign 的固定首行标记。
     """
-    lines: list[str] = []
-    if sig_path.is_file():
-        lines.extend(sig_path.read_text(encoding="utf-8-sig").splitlines())
-    lines.extend((stdout or "").splitlines())
+    if b"untrusted comment: " not in blob:
+        return None
+    try:
+        return blob.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return None
 
-    candidates: list[bytes] = []
+
+def _decode_candidates(lines: list[str], depth: int = 0) -> list[bytes]:
+    """把文本行里所有可 base64 解出的二进制收集起来，遇到嵌套再解一层。
+
+    ★ 2026-10-21 实测（本地复现 tauri-cli 2.11.5）：
+      `tauri signer sign` 写出的 `<file>.sig` **只有一行**，
+      内容是「整个 minisign 签名文件」的 base64。解一层得到：
+
+          untrusted comment: signature from tauri secret key
+          RUTrNQ8YHy9Zslyz...        ← 真正的签名（74 字节）
+          trusted comment: timestamp:1792525926	file:probe.txt
+          9bvFdoZBazpBpjQ9n9rG...     ← 对 trusted comment 的签名（64 字节）
+
+      所以必须先解外层、再解第 2 行，才能拿到带 key id 的签名。
+      旧实现只解一层，把外层那段文本当成了签名，
+      key id 读成 ASCII 的 `trusted `（7472757374656420），
+      报出一个「公私钥不匹配」的假故障。发版因此连着挂了两轮。
+    """
+    blobs: list[bytes] = []
     for line in lines:
         s = line.strip()
         if not s or s.startswith("untrusted comment") or s.startswith("trusted comment"):
@@ -78,19 +79,40 @@ def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
             blob = base64.b64decode(s, validate=True)
         except (ValueError, TypeError):
             continue
-        if len(blob) < 10 or _looks_like_text(blob):
+        if not blob:
             continue
-        candidates.append(blob)
+        # 解出来是一层 minisign 文本 → 说明又被套了一层，递归进去找真签名
+        inner = _nested_lines(blob) if depth < 2 else None
+        if inner is not None:
+            blobs.extend(_decode_candidates(inner, depth + 1))
+            continue
+        if len(blob) >= 10:
+            blobs.append(blob)
+    return blobs
 
-    exact = [b for b in candidates if len(b) == 74]
+
+def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
+    """从 `.sig` 文件或命令输出里取出签名二进制。
+
+    CLI 版本不同，输出形态不同（见 `_decode_candidates` 的说明）。
+    统一策略：把所有候选都解出来，优先取长度恰好 74 的
+    （2 字节算法 + 8 字节 key id + 64 字节签名）。
+    """
+    lines: list[str] = []
+    if sig_path.is_file():
+        lines.extend(sig_path.read_text(encoding="utf-8-sig").splitlines())
+    lines.extend((stdout or "").splitlines())
+
+    blobs = _decode_candidates(lines)
+    exact = [b for b in blobs if len(b) == 74]
     if exact:
         return exact[0]
-    coarse = [b for b in candidates if len(b) >= 74]
+    coarse = [b for b in blobs if len(b) >= 74]
     if coarse:
         return coarse[0]
     raise SystemExit(
         "无法从签名输出解析出签名（CLI 输出格式可能变了）；"
-        f"stdout 前 120 字：{(stdout or '')[:120]!r}"
+        f"stdout 前 200 字：{(stdout or '')[:200]!r}"
     )
 
 

@@ -201,3 +201,27 @@ def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):
     assert mod._extract_signature_blob(
         nested + "\n" + b64 + "\n", tmp_path / "none2.sig"
     ) == blob
+
+    # ⑤ tauri-cli 2.11.5 的真实形态：`.sig` 只有一行，
+    #    是「整个 minisign 签名文件」的 base64（外层解开还有 4 行）
+    real = tmp_path / "real.sig"
+    real.write_text(
+        base64.b64encode(
+            (
+                "untrusted comment: signature from tauri secret key\n"
+                + b64 + "\n"
+                + "trusted comment: timestamp:1\tfile:x\n"
+                + base64.b64encode(b"\x02" * 64).decode() + "\n"
+            ).encode()
+        ).decode()
+        + "\n",
+        encoding="utf-8",
+    )
+    assert mod._extract_signature_blob("", real) == blob
+
+    # ⑥ 签名二进制里恰好含 0x0A 也必须认（约 1/4 概率），
+    #    曾经用「含换行就当文本」判断，把真签名整条丢掉
+    lucky = b"Ed" + b"KEYID123" + b"\x0a" + b"\x00" * 63
+    lucky_sig = tmp_path / "lucky.sig"
+    lucky_sig.write_text(base64.b64encode(lucky).decode() + "\n", encoding="utf-8")
+    assert mod._extract_signature_blob("", lucky_sig) == lucky
