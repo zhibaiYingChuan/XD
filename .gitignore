@@ -201,6 +201,8 @@ tests/*
 #   —— CSV 公式注入、脱敏原文落库掩码、管理接口令牌门禁、
 #   日志保留策略、版本一致性门禁。每一条都对应一句对用户的承诺。
 !tests/test_privacy_hardening.py
+# ★ 2026-10-20：自动更新清单生成的门禁（缺签名 / 缺平台必须失败）
+!tests/test_updater_manifest.py
 !tests/test_reputation_score.py
 !tests/test_multi_relay.py
 # ★ 本轮新增（2026-10-03）。四条都是「把踩过的坑固化成门禁」：

@@ -1739,6 +1739,16 @@ fn filter_query(p: Option<&serde_json::Value>) -> String {
     qs.join("&")
 }
 
+/// 重启应用（自动更新安装完成后调用）。
+///
+/// ★ 用 Tauri 自带的 `AppHandle::restart`，不引入 `tauri-plugin-process`：
+///   后者需要从 crates.io 拉新依赖，而本机网络无法完成证书吊销检查，
+///   `cargo` 会直接失败。重启只需要这一个能力，没必要为此加依赖。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// 日志概览统计。
 #[tauri::command]
 async fn get_logs_stats(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
@@ -2229,6 +2239,12 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // ★ 自动更新（2026-10-20）：签名公钥在 tauri.conf.json，
+        //   更新包由 CI 用 TAURI_SIGNING_PRIVATE_KEY 签名。
+        //   前端只做「检查 / 下载 / 安装」的显式动作，不在后台静默下载。
+        //   重启用下面自己的 restart_app 命令（Tauri 自带 AppHandle::restart），
+        //   不再引入 tauri-plugin-process —— 本机网络无法拉取新 crate。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineState {
             status: parking_lot::Mutex::new(EngineStatus::default()),
             child: parking_lot::Mutex::new(None),
@@ -2273,6 +2289,8 @@ pub fn run() {
             update_config,
             pause_protection,
             resume_protection,
+            // ── 自动更新 ──
+            restart_app,
             // ── 托盘 ──
             tray::set_tray_state,
             tray::pulse_tray,

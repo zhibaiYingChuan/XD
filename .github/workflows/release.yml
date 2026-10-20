@@ -138,7 +138,8 @@ jobs:
             name: macOS arm64
             art: mac-arm64
             target: aarch64-apple-darwin
-            bundle: dmg
+            # ★ 显式带上 app：updater 的 mac 更新包是 .app.tar.gz（不是 dmg）
+            bundle: app,dmg
             bundle_glob: '*.dmg'
           - os: ubuntu-22.04
             name: Linux x64
@@ -396,6 +397,17 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      # ★ 私钥与公钥错配时，构建与发布都照常成功，但所有客户端
+      #   下载更新后验签失败 —— 错误只在用户端出现。
+      #   这里用一次真实签名比对 key id，发版前就能发现。
+      #   只在 Windows job 跑一次（CLI 的密钥处理与平台无关）。
+      - name: Assert updater signing key matches pubkey
+        if: matrix.art == 'win-x64'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python .github/scripts/check_signing_key.py
+
       # ★★ Linux AppImage 专用：把 numpy 自带的科学计算库链注册进系统库路径。
       #
       #   2026-09-29 从 v0.1.0-alpha16 的 --verbose 日志读出的**真实机制**：
@@ -463,6 +475,11 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop
+        env:
+          # 只在 CI 提供签名私钥；本地构建走 tauri.conf.json（不含
+          # createUpdaterArtifacts），因此不需要私钥也能正常打包。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         # ★ 必须显式指定 --bundles，且传的是**格式名**（nsis/dmg/deb/appimage）
         #   而不是通配符 —— 命令行不接受 glob。
         #   各平台只能构建自己支持的格式，传 all 会让 macOS runner
@@ -504,7 +521,11 @@ jobs:
         #     真实原因是 shell 选错了，与平台、代码都无关。
         shell: bash
         run: |
-          if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }}; then
+          # ★ --config 只在 CI 合并「产出更新签名包」这一项：
+          #   本地构建没有签名私钥，若把它写进 tauri.conf.json，
+          #   `tauri build` 会因缺少 TAURI_SIGNING_PRIVATE_KEY 直接失败。
+          if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }} \
+               --config src-tauri/tauri.updater.conf.json; then
             exit 0
           fi
           if [ "${{ matrix.allow_failure }}" = "true" ]; then
@@ -522,7 +543,13 @@ jobs:
           #   upload-artifact 会直接失败 —— 而且报错与真实原因
           #   毫无关联，不容易联想到是命名撞了。
           name: xuandun-personal-${{ matrix.art }}
-          path: desktop/src-tauri/target/release/bundle/**/${{ matrix.bundle_glob }}
+          # ★ 2026-10-20：除安装包外，还要带上 updater 资产：
+          #   .exe.sig / .app.tar.gz(.sig) / .AppImage.tar.gz(.sig)。
+          #   少了 .sig，latest.json 就生成不出来，自动更新形同虚设。
+          path: |
+            desktop/src-tauri/target/release/bundle/**/${{ matrix.bundle_glob }}
+            desktop/src-tauri/target/release/bundle/**/*.sig
+            desktop/src-tauri/target/release/bundle/**/*.tar.gz
           # ★ 非 AppImage 的矩阵项：没产出文件就是失败。
           #   包少一个而没人知道，比构建失败更糟。
           #
@@ -608,7 +635,8 @@ jobs:
           #   （从第三方下载时无法确认文件未被篡改）。
           #   *.deb 同样必须算：它是 Linux 的**主力**安装格式。
           find . -type f \( -name "*.exe" -o -name "*.dmg" \
-                         -o -name "*.AppImage" -o -name "*.deb" \) \
+                         -o -name "*.AppImage" -o -name "*.deb" \
+                         -o -name "*.tar.gz" \) \
             -exec sha256sum {} \; \
             | sed 's|  \./[^ ]*/|  |' > checksums-sha256.txt
           cat checksums-sha256.txt
@@ -616,6 +644,16 @@ jobs:
           # 用户会以为「没校验值也能装」。
           test -s checksums-sha256.txt \
             || { echo "::error::未找到任何安装包，校验文件为空"; exit 1; }
+
+      # ★ 2026-10-20：生成自动更新清单。
+      #   它必须作为 Release 资产，前端 updater 从
+      #   releases/latest/download/latest.json 读取。
+      #   缺 .sig 或找不到更新包时直接失败——静默跳过的后果是
+      #   「新版本发了，但所有旧版本都检查不到更新」。
+      - name: Generate updater manifest
+        # ★ 用 python3：release job 没有 setup-python，
+        #   ubuntu-22.04 不保证存在 `python` 别名。
+        run: python3 .github/scripts/make_latest_json.py artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -626,4 +664,7 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.AppImage
             artifacts/**/*.deb
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sig
+            artifacts/**/latest.json
             artifacts/**/checksums-sha256.txt

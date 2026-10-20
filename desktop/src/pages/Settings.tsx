@@ -25,6 +25,7 @@ import {
   CheckCircle2,
   Info,
   RefreshCw,
+  Download,
 } from 'lucide-react';
 import {
   api,
@@ -41,7 +42,8 @@ import {
   type EngineStatus,
 } from '../services/api';
 import { useToast } from '../components/Toast';
-import { copyToClipboard, openExternal, isTauri } from '../lib/tauriShim';
+import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/tauriShim';
+import { checkForUpdate, type UpdateCheck } from '../lib/updater';
 
 // ══════════════════════════════════════════════════════════════
 // 常量
@@ -177,6 +179,12 @@ export default function Settings() {
   const [engineVersion, setEngineVersion] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
 
+  // ★ 软件更新（2026-10-20）：只在用户点击时联网；不做后台轮询。
+  const [appVersion, setAppVersion] = useState('');
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updatePct, setUpdatePct] = useState(0);
+
   // 已配置列表的加载刻意**不并入**上面的 load()：
   // 那是配置页的主数据，一旦它失败（引擎未起），
   // 切换列表也会跟着空掉，而两者本不该互相拖累。
@@ -223,6 +231,10 @@ export default function Settings() {
     load();
     loadConfigured();
   }, [load, loadConfigured]);
+
+  useEffect(() => {
+    getAppVersion().then(setAppVersion).catch(() => undefined);
+  }, []);
 
   // ── E. 引擎运行状态 ──
   /**
@@ -529,6 +541,32 @@ export default function Settings() {
     }
   };
 
+  // ── F. 软件更新 ──
+  /** 检查更新：只读远端 latest.json，不下载、不上报任何标识。 */
+  const handleCheckUpdate = async () => {
+    if (updateBusy) return;
+    setUpdateBusy(true);
+    setUpdatePct(0);
+    try {
+      setUpdateCheck(await checkForUpdate());
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  /** 下载并安装；成功后会由 updater 封装重启应用。 */
+  const handleInstallUpdate = async () => {
+    if (updateBusy || updateCheck?.kind !== 'available') return;
+    setUpdateBusy(true);
+    setUpdatePct(0);
+    try {
+      await updateCheck.install(setUpdatePct);
+    } catch (e) {
+      toast.error(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+      setUpdateBusy(false);
+    }
+  };
+
   // ── C. 中转站配置 ──
   /**
    * 组装要提交的中转站配置。
@@ -805,7 +843,7 @@ export default function Settings() {
       </div>
 
       {/* ★ 页内导航（2026-10-20）。
-          这一页有 6 个区块、总高约 1400px，而视口只有 720 ——
+          这一页有 7 个区块、总高约 1500px，而视口只有 720 ——
           想改端口或看引擎状态要盲滚很久，且不知道下面还有什么。
           锚点常驻在顶部，滚到哪都能一键跳。 */}
       <div className="settings-anchors">
@@ -815,6 +853,7 @@ export default function Settings() {
           ['sec-proxy', '代理配置'],
           ['sec-redact', '敏感信息'],
           ['sec-engine', '运行状态'],
+          ['sec-update', '软件更新'],
           ['sec-storage', '日志与存储'],
         ].map(([id, label]) => (
           <button
@@ -1465,7 +1504,68 @@ export default function Settings() {
         )}
       </div>
 
-      {/* ═══ F. 日志与存储 ═══ */}
+      {/* ═══ F. 软件更新 ═══ */}
+      <div className="card" id="sec-update">
+        <div className="card-title">软件更新</div>
+        <div className="field">
+          <div className="field-label">当前版本</div>
+          <div className="mono">{appVersion || '—'}</div>
+        </div>
+        <div className="btn-row mt-8">
+          <button
+            className="btn secondary"
+            onClick={() => void handleCheckUpdate()}
+            disabled={updateBusy || !isTauri()}
+          >
+            <RefreshCw
+              size={14}
+              strokeWidth={1.5}
+              className={updateBusy && updateCheck?.kind !== 'available' ? 'spin-icon' : undefined}
+            />
+            {updateBusy && updateCheck?.kind !== 'available' ? '检查中…' : '检查更新'}
+          </button>
+          {updateCheck?.kind === 'available' && (
+            <button
+              className="btn"
+              onClick={() => void handleInstallUpdate()}
+              disabled={updateBusy}
+            >
+              <Download size={14} strokeWidth={1.5} />
+              {updateBusy
+                ? `下载安装中 ${updatePct}%`
+                : `下载并安装 v${updateCheck.version}`}
+            </button>
+          )}
+        </div>
+
+        {updateCheck?.kind === 'latest' && (
+          <div className="field-hint">
+            已是最新版本（v{updateCheck.current}）。
+          </div>
+        )}
+        {updateCheck?.kind === 'unavailable' && (
+          <div className="field-hint">{updateCheck.reason}</div>
+        )}
+        {updateCheck?.kind === 'available' && (
+          <div className="field-hint">
+            发现新版本 <b>v{updateCheck.version}</b>（当前 v{updateCheck.current}）。
+            更新包会用内置公钥验签，验不过不会安装；安装完成后应用会自动重启。
+            {updateCheck.notes && (
+              <div
+                className="mt-8"
+                style={{ whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}
+              >
+                {updateCheck.notes.slice(0, 800)}
+              </div>
+            )}
+          </div>
+        )}
+        {!isTauri() && (
+          <div className="field-hint">浏览器预览模式不支持自动更新。</div>
+        )}
+      </div>
+
+      {/* ═══ G. 日志与存储 ═══ */}
       <div className="card" id="sec-storage">
         <div className="card-title">日志与存储</div>
         <div className="field">
