@@ -37,6 +37,38 @@ def _key_id(blob: bytes) -> bytes:
     return blob[2:10]
 
 
+def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
+    """从 `.sig` 文件或命令输出里取出签名二进制。
+
+    ★ 2026-10-21：CI 实测发现不同版本的 CLI 输出形态不同 ——
+      有的把完整 minisign 块写到 `<file>.sig`（4 行），
+      有的只写一行 base64，有的把签名打到 stdout。
+      原实现硬取 `.sig` 的第 2 行，遇到单行格式就报「格式异常」，
+      于是发版被一个**探测脚本自身的假设**卡住。
+      现在按「候选行 → base64 解码 → 长度足够」筛选，三种形态都覆盖。
+    """
+    lines: list[str] = []
+    if sig_path.is_file():
+        lines.extend(sig_path.read_text(encoding="utf-8-sig").splitlines())
+    lines.extend((stdout or "").splitlines())
+
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("untrusted comment") or s.startswith("trusted comment"):
+            continue
+        try:
+            blob = base64.b64decode(s, validate=True)
+        except (ValueError, TypeError):
+            continue
+        # 2 字节算法 + 8 字节 key id + 64 字节签名
+        if len(blob) >= 74:
+            return blob
+    raise SystemExit(
+        "无法从签名输出解析出签名（CLI 输出格式可能变了）；"
+        f"stdout 前 120 字：{(stdout or '')[:120]!r}"
+    )
+
+
 def main() -> int:
     key = os.environ.get("TAURI_SIGNING_PRIVATE_KEY", "").strip()
     password = os.environ.get("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
@@ -80,12 +112,7 @@ def main() -> int:
             )
 
         sig_path = Path(str(probe) + ".sig")
-        if not sig_path.is_file():
-            raise SystemExit("签名命令成功但没有产出 .sig 文件")
-        sig_lines = sig_path.read_text(encoding="utf-8-sig").splitlines()
-        if len(sig_lines) < 2:
-            raise SystemExit("签名文件格式异常")
-        sig_blob = base64.b64decode(sig_lines[1])
+        sig_blob = _extract_signature_blob(result.stdout, sig_path)
 
     pub_lines = base64.b64decode(pub_text).decode("utf-8").splitlines()
     if len(pub_lines) < 2:

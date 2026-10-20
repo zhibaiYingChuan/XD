@@ -150,3 +150,44 @@ def test_release_workflow_signs_and_publishes_manifest():
         "*.sig",                         # 上传签名文件
     ):
         assert needle in text, f"release.yml 缺少 {needle}"
+
+
+def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):
+    """发版门禁的解析器必须兼容 CLI 的三种输出形态。
+
+    ★ 2026-10-21 实测：CI 上 `tauri signer sign` 产出的 `.sig`
+      只有一个 base64 行，而原解析器硬取第 2 行 → 报「格式异常」，
+      把一个探测脚本的假设变成了发版阻断。
+    """
+    import base64
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "check_signing_key", REPO / ".github" / "scripts" / "check_signing_key.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    blob = b"Ed" + b"KEYID123" + b"\x00" * 64
+    b64 = base64.b64encode(blob).decode()
+
+    # ① 完整 minisign 块（4 行）
+    full = tmp_path / "full.sig"
+    full.write_text(
+        "untrusted comment: signature from tauri secret key\n"
+        + b64 + "\n"
+        + "trusted comment: timestamp:1\tfile:x\n"
+        + base64.b64encode(b"\x01" * 64).decode() + "\n",
+        encoding="utf-8",
+    )
+    assert mod._extract_signature_blob("", full) == blob
+
+    # ② 单行 base64
+    single = tmp_path / "single.sig"
+    single.write_text(b64 + "\n", encoding="utf-8")
+    assert mod._extract_signature_blob("", single) == blob
+
+    # ③ 只打到 stdout
+    assert mod._extract_signature_blob(
+        "untrusted comment: x\n" + b64 + "\n", tmp_path / "none.sig"
+    ) == blob
