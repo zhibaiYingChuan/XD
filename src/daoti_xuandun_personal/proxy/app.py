@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import codecs
 import copy
+import datetime as _dt
 import hashlib
 import json
 import logging
@@ -85,6 +86,22 @@ _actual_port: Optional[int] = None
 #   用户刚激活完仍会被降级最多 5 秒。mtime 一变即刻失效。
 _PROTECTION_TTL = 5.0
 _protection_cache: Dict[str, Any] = {}
+
+
+def _days_to_start_ts(days: Optional[int]) -> Optional[float]:
+    """把界面的「今天 / 近 7 天」换算成起始时间戳，按**本地自然日**切分。
+
+    ★ 2026-10-20：原实现是 ``now - days * 86400``（滚动 24 小时窗口），
+      而界面把它标成「今天」、首页 KPI 又按自然日累计 ——
+      两者必然对不上：上午打开玄盾，「今日检查 26 次」点进去，
+      列表里还会带出昨天下午的记录。用户核对后只能认为数字是假的。
+      按自然日切分后，「今天」真的从今天 00:00 起算，
+      与 daily_stats / 首页 KPI 同一口径。
+    """
+    if not days or days <= 0:
+        return None
+    start_date = _dt.date.today() - _dt.timedelta(days=int(days) - 1)
+    return _dt.datetime.combine(start_date, _dt.time.min).timestamp()
 
 
 def _license_file_path() -> str:
@@ -1177,15 +1194,17 @@ def create_app() -> FastAPI:
         search: Optional[str] = None,
         days: Optional[int] = Query(None, ge=1, le=365),
         marked_safe: Optional[bool] = None,
+        exclude_log_type: Optional[str] = None,
     ):
         """日志列表。`days` 用于文档 4.1 要求的「今天」筛选。"""
         if _storage is None:
             return {"entries": [], "total": 0}
-        start_ts = time.time() - days * 86400 if days else None
+        # ★ 口径：自然日（与首页 KPI 一致），不是滚动 24 小时。
+        start_ts = _days_to_start_ts(days)
         entries = _storage.query_logs(
             limit=limit, offset=offset, log_type=log_type,
             action=action, search=search, start_ts=start_ts,
-            marked_safe=marked_safe,
+            marked_safe=marked_safe, log_type_not=exclude_log_type,
         )
         # ★★ total 与 entries 必须用**同一组**过滤条件（2026-10-03 修复）
         #   原实现漏传 search，于是搜索时列表被过滤而计数没被过滤：
@@ -1198,6 +1217,7 @@ def create_app() -> FastAPI:
             "total": _storage.count_logs(
                 log_type=log_type, action=action, start_ts=start_ts,
                 search=search, marked_safe=marked_safe,
+                log_type_not=exclude_log_type,
             ),
         }
 
@@ -1292,7 +1312,7 @@ def create_app() -> FastAPI:
             except (TypeError, ValueError):
                 d = 0
             if d > 0:
-                start_ts = time.time() - d * 86400
+                start_ts = _days_to_start_ts(d)
 
         entries = _storage.export_logs(
             limit=limit,
@@ -1301,6 +1321,7 @@ def create_app() -> FastAPI:
             search=payload.get("search"),
             marked_safe=payload.get("marked_safe"),
             start_ts=start_ts,
+            log_type_not=payload.get("exclude_log_type"),
         )
         stamp = time.strftime("%Y%m%d-%H%M%S")
 
@@ -1363,6 +1384,7 @@ def create_app() -> FastAPI:
         search: Optional[str] = None,
         days: Optional[int] = Query(None, ge=1, le=365),
         marked_safe: Optional[bool] = None,
+        exclude_log_type: Optional[str] = None,
     ):
         """★ 按当前筛选条件删除日志（2026-10-03 新增）。
 
@@ -1377,11 +1399,11 @@ def create_app() -> FastAPI:
         """
         if _storage is None:
             raise HTTPException(status_code=503, detail="存储未就绪")
-        start_ts = time.time() - days * 86400 if days else None
+        start_ts = _days_to_start_ts(days)
         filters: Dict[str, Any] = {
             "log_type": log_type, "action": action,
             "search": search, "start_ts": start_ts,
-            "marked_safe": marked_safe,
+            "marked_safe": marked_safe, "log_type_not": exclude_log_type,
         }
         matched = _storage.count_logs(**filters)
         return {"ok": True, "matched": matched, "deleted": 0, "dry_run": True}
@@ -1393,14 +1415,16 @@ def create_app() -> FastAPI:
         search: Optional[str] = None,
         days: Optional[int] = Query(None, ge=1, le=365),
         marked_safe: Optional[bool] = None,
+        exclude_log_type: Optional[str] = None,
     ):
         """确认执行按筛选条件删除（真正动数据的那一步）。"""
         if _storage is None:
             raise HTTPException(status_code=503, detail="存储未就绪")
-        start_ts = time.time() - days * 86400 if days else None
+        start_ts = _days_to_start_ts(days)
         deleted = _storage.delete_logs(
             log_type=log_type, action=action, search=search,
             start_ts=start_ts, marked_safe=marked_safe,
+            log_type_not=exclude_log_type,
         )
         _sync_reputation_after_log_delete()
         logger.info("按筛选条件删除日志 %d 条", deleted)

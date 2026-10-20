@@ -401,6 +401,15 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                 <ArrowRight size={15} strokeWidth={1.5} />
               </button>
             </div>
+
+            {/* ★ 出口（2026-10-20）：此前必须填完地址与 Key 才能离开向导 ——
+                手里暂时没有 Key 的用户会被关在向导里，连主界面都看不了。
+                给一条明确的退路，配置可以之后在「设置」里补。 */}
+            <div className="btn-row" style={{ justifyContent: 'flex-end', marginTop: 8 }}>
+              <button className="btn ghost" onClick={onFinish}>
+                先跳过，进主界面看看
+              </button>
+            </div>
           </>
         )}
 

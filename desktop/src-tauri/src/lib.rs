@@ -1611,7 +1611,7 @@ async fn get_logs(
     push("limit", p.and_then(|x| x.get("limit")));
     push("offset", p.and_then(|x| x.get("offset")));
     push("days", p.and_then(|x| x.get("days")));
-    for key in ["log_type", "action", "search"] {
+    for key in ["log_type", "action", "search", "exclude_log_type"] {
         if let Some(s) = p.and_then(|x| x.get(key)).and_then(|x| x.as_str()) {
             if !s.is_empty() {
                 // 简单 URL 编码（仅需处理空格与特殊符号）
@@ -1656,7 +1656,7 @@ fn filter_query(p: Option<&serde_json::Value>) -> String {
         return String::new();
     };
     let mut qs: Vec<String> = Vec::new();
-    for key in ["log_type", "action", "search"] {
+    for key in ["log_type", "action", "search", "exclude_log_type"] {
         if let Some(s) = p.get(key).and_then(|x| x.as_str()) {
             if !s.is_empty() {
                 let enc: String = s

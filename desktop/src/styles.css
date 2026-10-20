@@ -610,6 +610,16 @@ textarea {
   text-align: center;
 }
 
+/* KPI 数字可点进对应日志（2026-10-20）：给一点悬停反馈，
+   否则用户不会知道这块数字是能点的。 */
+a.kpi {
+  transition: border-color var(--xd-fade-in), background var(--xd-fade-in);
+}
+a.kpi:hover {
+  border-color: var(--xd-border-light);
+  background: var(--xd-card-hover);
+}
+
 .kpi-value {
   font-size: 26px;
   font-weight: 700;
@@ -1852,4 +1862,53 @@ table.table {
   .page-content {
     padding: 20px 16px 32px;
   }
+}
+
+/* ── 设置页页内导航（2026-10-20）────────────────────────────
+   这一页 5 个区块、总高约 1200px，视口只有 720。
+   导航吸顶常驻，滚到哪都能一键跳；被跳转的区块留出上边距，
+   避免标题被吸顶条盖住。 */
+.settings-anchors {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 0;
+  margin-bottom: 12px;
+  background: var(--xd-bg);
+  border-bottom: 1px solid var(--xd-border);
+}
+#sec-guard,
+#sec-level,
+#sec-proxy,
+#sec-redact,
+#sec-engine {
+  scroll-margin-top: 64px;
+}
+
+/* ── 帮助页 FAQ 分组标题（2026-10-20）────────────────────── */
+.faq-group {
+  margin: 18px 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--xd-text-faint);
+}
+
+/* ── 日志页「当前筛选」摘要条（2026-10-20）───────────────── */
+/* 从状态栏点数字进来时，用一行字说清「这些数字是哪个范围」。
+   没有它，列表的「共 N 条」与刚点的数字一旦不同，用户只能认为有假。 */
+.filter-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--xd-text-dim);
+  background: var(--xd-card);
+  border: 1px solid var(--xd-border);
+  border-radius: 6px;
 }

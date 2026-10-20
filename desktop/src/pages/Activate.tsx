@@ -114,6 +114,8 @@ export default function Activate() {
       setStatus(s);
       setCode('');
       toast.success('激活成功');
+      // 通知侧边栏刷新激活角标（见 Layout.tsx 的同名事件监听）
+      window.dispatchEvent(new Event('xuandun:license-changed'));
     } catch (e) {
       // 失败原因由后端给出，照原样呈现 —— 不做二次包装，
       // 免得把「验签组件不可用」说成「码无效」。

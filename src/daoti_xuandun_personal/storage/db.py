@@ -50,6 +50,7 @@ def _log_filters(
     end_ts: Optional[float] = None,
     search: Optional[str] = None,
     marked_safe: Optional[bool] = None,
+    log_type_not: Optional[str] = None,
 ) -> tuple:
     """把过滤条件编译成 (WHERE 子句, 参数列表)。
 
@@ -68,6 +69,14 @@ def _log_filters(
     if log_type:
         clauses.append("log_type = ?")
         params.append(log_type)
+    # ★ 2026-10-20：排除某一类日志。
+    #   首页 KPI 刻意不计「转发中断」（proxy_error）—— 那是链路失败，
+    #   不是内容风险。而状态栏的数字点进来若把这类也列出来，
+    #   用户核对时就会看到「危险 26，列表 33 条」，再次认为数字造假。
+    #   有了它，首页每个数字点进来的条数与数字本身一致。
+    if log_type_not:
+        clauses.append("log_type != ?")
+        params.append(log_type_not)
     if action:
         # ★★ 2026-10-20：「已打码」不是一个 action 取值。
         #   打码发生在**请求侧**，而一条日志只记这次请求的最终结果
@@ -414,6 +423,7 @@ class PersonalStorage:
         end_ts: Optional[float] = None,
         search: Optional[str] = None,
         marked_safe: Optional[bool] = None,
+        log_type_not: Optional[str] = None,
     ) -> List[LogEntry]:
         """查询日志（多条件过滤 + 客户端搜索）。
 
@@ -424,7 +434,7 @@ class PersonalStorage:
         where, params = _log_filters(
             log_type=log_type, action=action, relay_domain=relay_domain,
             start_ts=start_ts, end_ts=end_ts, search=search,
-            marked_safe=marked_safe,
+            marked_safe=marked_safe, log_type_not=log_type_not,
         )
         sql = (
             f"SELECT * FROM logs {where} "
@@ -444,6 +454,7 @@ class PersonalStorage:
         end_ts: Optional[float] = None,
         search: Optional[str] = None,
         marked_safe: Optional[bool] = None,
+        log_type_not: Optional[str] = None,
     ) -> int:
         """统计日志数量。
 
@@ -458,7 +469,7 @@ class PersonalStorage:
         where, params = _log_filters(
             log_type=log_type, action=action, relay_domain=relay_domain,
             start_ts=start_ts, end_ts=end_ts, search=search,
-            marked_safe=marked_safe,
+            marked_safe=marked_safe, log_type_not=log_type_not,
         )
         row = self._conn.execute(
             f"SELECT COUNT(*) AS c FROM logs {where}", params
@@ -474,6 +485,7 @@ class PersonalStorage:
         end_ts: Optional[float] = None,
         search: Optional[str] = None,
         marked_safe: Optional[bool] = None,
+        log_type_not: Optional[str] = None,
     ) -> int:
         """按条件删除日志，返回删除条数。
 
@@ -489,7 +501,7 @@ class PersonalStorage:
         where, params = _log_filters(
             log_type=log_type, action=action, relay_domain=relay_domain,
             start_ts=start_ts, end_ts=end_ts, search=search,
-            marked_safe=marked_safe,
+            marked_safe=marked_safe, log_type_not=log_type_not,
         )
         with self._conn:
             # ★★ 2026-10-19：用**子查询**按同一过滤条件删除脱敏记录，
@@ -754,6 +766,7 @@ class PersonalStorage:
         search: Optional[str] = None,
         marked_safe: Optional[bool] = None,
         start_ts: Optional[float] = None,
+        log_type_not: Optional[str] = None,
     ) -> List[LogEntry]:
         """导出日志（★ P1-9：文档 4.1 要求的「导出」按钮）。
 
@@ -771,6 +784,7 @@ class PersonalStorage:
         where, params = _log_filters(
             log_type=log_type, action=action, search=search,
             marked_safe=marked_safe, start_ts=start_ts,
+            log_type_not=log_type_not,
         )
         sql = f"SELECT * FROM logs {where} ORDER BY timestamp ASC LIMIT ?"
         rows = self._conn.execute(sql, list(params) + [limit]).fetchall()

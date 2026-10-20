@@ -496,7 +496,10 @@ export default function Settings() {
       setPortInput('');
       // 必须告知「当前仍在用旧端口」——否则用户会直接去改 AI 工具配置，
       // 填了新地址却连不上，误以为玄盾坏了。
-      toast.info(`当前玄盾仍运行在 ${oldPort}，重启玄盾后新端口才生效`);
+      toast.info(
+        `当前仍运行在 ${oldPort}：请完全退出玄盾再重新打开，新端口才会生效`
+        + '（「重启引擎」不会改变端口）',
+      );
     }
   };
 
@@ -775,8 +778,34 @@ export default function Settings() {
         </p>
       </div>
 
+      {/* ★ 页内导航（2026-10-20）。
+          这一页有 5 个区块、总高约 1200px，而视口只有 720 ——
+          想改端口或看引擎状态要盲滚很久，且不知道下面还有什么。
+          锚点常驻在顶部，滚到哪都能一键跳。 */}
+      <div className="settings-anchors">
+        {[
+          ['sec-guard', '防护开关'],
+          ['sec-level', '安全级别'],
+          ['sec-proxy', '代理配置'],
+          ['sec-redact', '敏感信息'],
+          ['sec-engine', '运行状态'],
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            className="btn ghost sm"
+            onClick={() =>
+              document
+                .getElementById(id)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* ═══ A. 防护开关 ═══ */}
-      <div className="card">
+      <div className="card" id="sec-guard">
         <div className="card-title">防护开关</div>
 
         <div className="switch-row">
@@ -833,7 +862,7 @@ export default function Settings() {
       </div>
 
       {/* ═══ B. 安全级别 ═══ */}
-      <div className="card">
+      <div className="card" id="sec-level">
         <div className="card-title">安全级别</div>
         <div className="radio-cards">
           {SECURITY_LEVELS.map((lv) => (
@@ -858,7 +887,7 @@ export default function Settings() {
       </div>
 
       {/* ═══ C. 代理配置 ═══ */}
-      <div className="card">
+      <div className="card" id="sec-proxy">
         <div className="card-title">代理配置</div>
 
         <div className="field">
@@ -1218,7 +1247,9 @@ export default function Settings() {
           </div>
           <div className="field-hint" style={portError ? { color: 'var(--xd-danger)' } : undefined}>
             {portError ??
-              `玄盾当前运行在 ${currentProxyPort()}。端口被占用时可改成 1024–65535 的其他端口，改完需重启玄盾。`}
+              `玄盾当前运行在 ${currentProxyPort()}。端口被占用时可改成 1024–65535 的其他端口。`
+              + '端口在应用启动时锁定，改完必须完全退出玄盾再重新打开 ——'
+              + '「重启引擎」不会改变它。'}
           </div>
         </div>
 
@@ -1244,7 +1275,7 @@ export default function Settings() {
       </div>
 
       {/* ═══ D. 敏感信息脱敏 ═══ */}
-      <div className="card">
+      <div className="card" id="sec-redact">
         <div className="card-title">敏感信息脱敏</div>
         <div className="check-grid mb-16">
           {CATEGORY_ORDER.map((cat) => (
@@ -1258,6 +1289,15 @@ export default function Settings() {
               <span>{CATEGORY_LABELS[cat] ?? cat}</span>
             </label>
           ))}
+        </div>
+
+        {/* ★ 为什么这两个默认不勾（2026-10-20）：
+            界面上只是一排复选框，用户很容易全勾上 ——
+            而银行卡（16–19 位数字）与自定义词的误报率明显更高，
+            全勾之后正常对话被拦，用户反过来会认为产品不可用。 */}
+        <div className="field-hint" style={{ marginTop: 0 }}>
+          银行卡与自定义关键词默认不勾选：前者容易被 16–19 位数字误命中，
+          后者取决于你填的词是否够独特。需要时再勾上。
         </div>
 
         <div className="field-label mt-24">自定义关键词</div>
@@ -1322,7 +1362,7 @@ export default function Settings() {
       {/* ★ 后端早已注册 get_engine_status / restart_engine，但此前界面
           没有任何入口能看到引擎状态、更无法重启 —— 引擎一崩，用户只能
           重开桌面端甚至重装。这块补上「看得见原因 + 能自助重启」两步。 */}
-      <div className="card">
+      <div className="card" id="sec-engine">
         <div className="card-title">
           <span>运行状态</span>
           {isTauri() && (
@@ -1391,7 +1431,7 @@ export default function Settings() {
                 {restarting ? '重启中…' : '重启引擎'}
               </button>
               <span className="faint" style={{ fontSize: 12 }}>
-                引擎无响应或启动失败时，可在这里重启
+                引擎无响应或启动失败时，可在这里重启（不会改变监听端口）
               </span>
             </div>
           </>

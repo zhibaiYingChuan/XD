@@ -5,7 +5,7 @@
 */
 
 import { useEffect, useRef, useState } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
   Shield,
   LayoutDashboard,
@@ -187,30 +187,52 @@ function StatusBar() {
 
       {today && today.total_calls > 0 && (
         <>
-          <span className="status-stat">
+          {/* ★ 数字必须能点进去（2026-10-20）。
+              此前状态栏的「危险 26」「已打码 322 处」只是死文字：
+              用户看到数字、想核对，唯一的路径是自己去日志页手动调四个下拉。
+              这就是「数字对不上 / 点开啥都没有」的一半来源。
+              现在每个数字都是一个带筛选条件的链接。 */}
+          <Link
+            to="/logs?days=1&marked=exclude"
+            className="status-stat"
+            style={{ textDecoration: 'none', color: 'inherit' }}
+            title="查看今天参与统计的记录（不含已标记误报与转发中断）"
+          >
             今日检查 <b className="mono">{today.total_calls}</b> 次
-          </span>
+          </Link>
           {today.danger_count > 0 && (
-            <span className="status-stat" style={{ color: 'var(--xd-danger)' }}>
+            <Link
+              to="/logs?days=1&action=block&marked=exclude"
+              className="status-stat"
+              style={{ textDecoration: 'none', color: 'var(--xd-danger)' }}
+              title="查看今天被拦截的记录（已排除标记为误报的）"
+            >
               危险 <b className="mono">{today.danger_count}</b>
-            </span>
+            </Link>
           )}
           {today.suspect_count > 0 && (
             /* ★ 「可疑」改成「提示」。
                「可疑」暗示「出问题了」，而统计类信号（回答长度与平时不同）
                根本不指向任何问题 —— 用户看到它只会莫名紧张。
                改为中性的「提示」，与「危险」形成清晰的轻重区分。 */
-            <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
+            <Link
+              to="/logs?days=1&action=alert&marked=exclude"
+              className="status-stat"
+              style={{ textDecoration: 'none', color: 'var(--xd-suspect)' }}
+              title="查看今天的提示记录（已排除标记为误报的）"
+            >
               提示 <b className="mono">{today.suspect_count}</b>
-            </span>
+            </Link>
           )}
           {today.redaction_count > 0 && (
-            <span
+            <Link
+              to="/logs?days=1&action=redact"
               className="status-stat"
-              title="在「日志」页把结果筛选切到「已打码」即可逐条核对"
+              style={{ textDecoration: 'none', color: 'inherit' }}
+              title="查看今天打过码的记录"
             >
               已打码 <b className="mono">{today.redaction_count}</b> 处
-            </span>
+            </Link>
           )}
         </>
       )}
@@ -247,9 +269,15 @@ export default function Layout() {
         .catch(() => undefined);
     };
     load();
+    // ★ 激活成功后侧边栏的「未激活」角标必须立刻消失（2026-10-20）。
+    //   此前只在路由切换时重读，用户在激活页看到「激活成功」，
+    //   左侧却还挂着「未激活」—— 同一屏两个相反结论。
+    const onLicenseChanged = () => load();
+    window.addEventListener('xuandun:license-changed', onLicenseChanged);
     // 激活成功后会切页，回来时自然重新读取
     return () => {
       cancelled = true;
+      window.removeEventListener('xuandun:license-changed', onLicenseChanged);
     };
   }, [location.pathname]);
 

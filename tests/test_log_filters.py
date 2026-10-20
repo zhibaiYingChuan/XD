@@ -169,7 +169,7 @@ class TestFiltersSharedNotDuplicated:
         """构造器必须覆盖全部筛选维度（含布尔与搜索）。"""
         where, params = db_mod._log_filters(
             log_type="t", action="a", search="s", marked_safe=False,
-            start_ts=1.0,
+            start_ts=1.0, log_type_not="proxy_error",
         )
         assert "log_type = ?" in where
         assert "action = ?" in where
@@ -177,6 +177,9 @@ class TestFiltersSharedNotDuplicated:
         # ★ 布尔必须落进 WHERE：漏了它「排除误报」会退化成「不筛选」
         assert "marked_safe = ?" in where
         assert 0 in params, "marked_safe=False 被丢掉了 —— 该档位是「不看误报」"
+        # ★ 2026-10-20：排除某一类日志（首页数字点进来时对齐条数）
+        assert "log_type != ?" in where
+        assert "proxy_error" in params
 
     def test_empty_filters_mean_no_clause(self):
         where, params = db_mod._log_filters()
@@ -400,3 +403,79 @@ class TestBackendEndpointExists:
             "「看清范围再确认」就变成了「点一下直接删」"
         )
         assert '"deleted": 0' in block, "预演必须回报 deleted=0"
+
+
+class TestExcludeProxyErrors:
+    """⑦ 首页数字点进来时，条数必须与数字对得上（2026-10-20）。
+
+    首页 KPI（kpi_contribution）**刻意不计**「转发中断」（proxy_error）：
+    那是链路级失败，不是内容风险。而 proxy_error 落库时 action=block
+    （超时 / 不可达），于是状态栏「危险 26」点进日志页会列出 33 条
+    （26 + 7 条转发中断）—— 用户核对后只能认为数字造假。
+
+    现在状态栏链接带上 ``exclude=proxy_error``，把这类排除掉。
+    """
+
+    def _add_proxy_error(self, store, n=2):
+        import time as _t
+
+        for i in range(n):
+            store.insert_log(LogEntry(
+                timestamp=_t.time(),
+                log_type=LogType.PROXY_ERROR.value,
+                relay_domain="r.example.invalid",
+                action=Action.BLOCK.value,
+                severity="low",
+                model="m",
+                finding_count=0,
+                summary=f"中转站响应超时 {i}",
+                detail_json="[]",
+                text_preview="",
+            ))
+
+    def test_exclusion_matches_kpi_scope(self, store):
+        self._add_proxy_error(store, 2)
+        all_block = store.count_logs(action="block")
+        kpi_block = store.count_logs(
+            action="block", log_type_not=LogType.PROXY_ERROR.value)
+        assert all_block == kpi_block + 2, (
+            f"排除转发中断后 {kpi_block} 条，未排除 {all_block} 条 —— "
+            f"首页「危险」点进来会多出转发中断，数字对不上"
+        )
+        listed = len(store.query_logs(
+            action="block", log_type_not=LogType.PROXY_ERROR.value, limit=500))
+        assert listed == kpi_block, "列表与 total 口径分叉"
+
+    def test_delete_with_exclusion_keeps_proxy_errors(self, store):
+        """「删除筛选结果」不得连带删掉用户没看到的转发中断。"""
+        self._add_proxy_error(store, 2)
+        deleted = store.delete_logs(
+            action="block", log_type_not=LogType.PROXY_ERROR.value)
+        assert deleted == 30
+        assert store.count_logs(log_type=LogType.PROXY_ERROR.value) == 2, (
+            "转发中断不在筛选结果里，却被一起删了"
+        )
+
+
+def test_days_filter_uses_natural_day():
+    """「今天」必须从今天 00:00 起算，而不是滚动 24 小时。
+
+    ★ 首页 KPI 按自然日累计。若日志筛选按 now-24h，
+      每天上午打开玄盾点「今日检查 N 次」都会带出昨天下午的记录，
+      用户核对后只会认为数字是假的。
+    """
+    import datetime as dt
+
+    from daoti_xuandun_personal.proxy.app import _days_to_start_ts
+
+    ts = _days_to_start_ts(1)
+    got = dt.datetime.fromtimestamp(ts)
+    assert got.time() == dt.time.min, f"不是从 00:00 起算：{got}"
+    assert got.date() == dt.date.today()
+
+    ts7 = _days_to_start_ts(7)
+    assert (dt.date.today() - dt.datetime.fromtimestamp(ts7).date()).days == 6, (
+        "「近 7 天」应含今天在内的 7 个自然日"
+    )
+    assert _days_to_start_ts(None) is None
+    assert _days_to_start_ts(0) is None

@@ -89,6 +89,8 @@ export interface LogFilterParams {
   search?: string;
   days?: number;
   marked_safe?: boolean;
+  /** 排除某一类日志（首页 KPI 不含「转发中断」，点数字进来时用它对齐条数） */
+  exclude_log_type?: string;
 }
 
 /**

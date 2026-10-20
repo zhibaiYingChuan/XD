@@ -10,6 +10,7 @@
 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   ShieldX,
@@ -25,6 +26,8 @@ import {
   ShieldOff,
   ShieldCheck,
   Filter,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import {
   api,
@@ -108,11 +111,19 @@ function DetailDrawer({
   onClose,
   onDeleted,
   onMarkedSafe,
+  onPrev,
+  onNext,
+  position,
 }: {
   logId: number;
   onClose: () => void;
   onDeleted: () => void;
   onMarkedSafe: () => void;
+  /** 上一条 / 下一条（本页内）。undefined = 已到边界 */
+  onPrev?: () => void;
+  onNext?: () => void;
+  /** 本页第几条 / 共几条，供用户建立位置感 */
+  position?: { index: number; total: number };
 }) {
   const toast = useToast();
   const [detail, setDetail] = useState<LogDetail | null>(null);
@@ -131,6 +142,12 @@ function DetailDrawer({
 
   useEffect(() => {
     let cancelled = false;
+    // ★ 切到上一条/下一条时先清空旧详情（2026-10-20）。
+    //   否则加载新条目期间，抽屉里仍显示**上一条**的内容，
+    //   而标题的位置感已经变成「本页 3 / 20」——
+    //   用户会把上一条的判定当成这一条的。
+    setDetail(null);
+    setLoading(true);
     (async () => {
       try {
         const d = await api.getLogDetail(logId);
@@ -149,14 +166,49 @@ function DetailDrawer({
     };
   }, [logId, onClose, toast]);
 
-  // ESC 关闭
+  // ESC 关闭；←/→ 在本页内逐条翻看。
+  // ★ 逐条核对是真实场景（一次误报排查往往要连着看十几条），
+  //   旧实现只能关掉抽屉再点下一行，来回几十次。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') onPrev?.();
+      else if (e.key === 'ArrowRight') onNext?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, onPrev, onNext]);
+
+  // ★ 焦点陷阱（2026-10-20）：抽屉声明了 aria-modal，
+  //   但此前 Tab 会跑到抽屉背后的页面上 —— 键盘用户会在
+  //   一个「模态对话框」里操作到看不见的按钮。
+  const drawerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      const el = drawerRef.current;
+      if (!el) return;
+      const items = el.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]),'
+        + ' select:not([disabled]), textarea:not([disabled]),'
+        + ' [tabindex]:not([tabindex="-1"])',
+      );
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      const outside = !active || !el.contains(active);
+      if (e.shiftKey && (outside || active === first)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (outside || active === last)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const findings = useMemo(() => {
     if (!detail) return [];
@@ -240,16 +292,50 @@ function DetailDrawer({
   return (
     <>
       <div className="drawer-overlay" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label="日志详情">
+      <aside
+        className="drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="日志详情"
+        ref={drawerRef}
+      >
         <div className="drawer-header">
           {/* tabIndex=-1：仅为可编程聚焦用，不进入 Tab 顺序；
               配合上面的 mount 效果让焦点落在标题上。 */}
           <span className="drawer-title" ref={titleRef} tabIndex={-1}>
             日志详情
+            {position && (
+              <span
+                className="faint"
+                style={{ fontSize: 11, marginLeft: 8, fontWeight: 400 }}
+              >
+                本页 {position.index} / {position.total}
+              </span>
+            )}
           </span>
-          <button className="btn ghost" onClick={onClose} aria-label="关闭">
-            <X size={16} strokeWidth={1.5} />
-          </button>
+          <div className="flex items-center gap-8">
+            <button
+              className="btn ghost"
+              onClick={onPrev}
+              disabled={!onPrev}
+              aria-label="上一条"
+              title="上一条（←）"
+            >
+              <ChevronLeft size={16} strokeWidth={1.5} />
+            </button>
+            <button
+              className="btn ghost"
+              onClick={onNext}
+              disabled={!onNext}
+              aria-label="下一条"
+              title="下一条（→）"
+            >
+              <ChevronRight size={16} strokeWidth={1.5} />
+            </button>
+            <button className="btn ghost" onClick={onClose} aria-label="关闭">
+              <X size={16} strokeWidth={1.5} />
+            </button>
+          </div>
         </div>
 
         <div className="drawer-body">
@@ -492,10 +578,23 @@ export default function Logs() {
   const [offset, setOffset] = useState(0);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  // ★ 支持「从状态栏点数字进来」：/logs?action=block|alert|redact。
+  //   首次挂载直接从 URL 取；已在日志页时由下面的 effect 跟随参数变化。
+  //   days / marked / exclude 也一并接住 —— 状态栏的数字是「今天、
+  //   已排除误报、不含转发中断」的口径，只带 action 过来的话，
+  //   列表条数必然与刚点的那个数字对不上。
+  const [searchParams, setSearchParams] = useSearchParams();
   const [logType, setLogType] = useState('');
-  const [action, setAction] = useState('');
-  const [days, setDays] = useState('');
-  const [markedFilter, setMarkedFilter] = useState('');
+  const [action, setAction] = useState(
+    () => searchParams.get('action') ?? '',
+  );
+  const [days, setDays] = useState(() => searchParams.get('days') ?? '');
+  const [markedFilter, setMarkedFilter] = useState(
+    () => searchParams.get('marked') ?? '',
+  );
+  const [excludeType, setExcludeType] = useState(
+    () => searchParams.get('exclude') ?? '',
+  );
   const [stats, setStats] = useState<LogBreakdown | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -504,6 +603,50 @@ export default function Logs() {
   const [exporting, setExporting] = useState(false);
   const requestIdRef = useRef(0);
   const mountedRef = useRef(true);
+
+  // 已在日志页时，从状态栏再点另一个数字 → URL 变了，筛选跟着变。
+  // ★ 刻意不把 action 放进依赖：否则用户手动改下拉时，
+  //   effect 会把值又拉回 URL 里的旧值。
+  useEffect(() => {
+    const q = searchParams.get('action');
+    const d = searchParams.get('days');
+    const m = searchParams.get('marked');
+    const x = searchParams.get('exclude');
+    if (q && q !== action) {
+      setAction(q);
+      setOffset(0);
+    }
+    if (d && d !== days) {
+      setDays(d);
+      setOffset(0);
+    }
+    if (m && m !== markedFilter) {
+      setMarkedFilter(m);
+      setOffset(0);
+    }
+    if (x && x !== excludeType) {
+      setExcludeType(x);
+      setOffset(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  // ★ 反过来：用户手动改了下拉，也要把 URL 同步掉（2026-10-20）。
+  //   不同步的话会出现一个很具体的坏体验：从状态栏点「危险」进来，
+  //   再把结果切回「全部」，然后**再点一次**状态栏的「危险」——
+  //   URL 没变，路由不会重新渲染，筛选条件停在「全部」，
+  //   用户会以为这个链接坏了。同步之后，重复点击就真能回到该视图。
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (action) next.set('action', action);
+    if (days) next.set('days', days);
+    if (markedFilter) next.set('marked', markedFilter);
+    if (excludeType) next.set('exclude', excludeType);
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action, days, markedFilter, excludeType]);
 
   // ★★ 当前筛选条件必须是**唯一一份**（2026-10-03）
   //   列表查询与「按筛选删除」都从这里取。
@@ -521,7 +664,8 @@ export default function Logs() {
         : markedFilter === 'exclude'
           ? false
           : undefined,
-  }), [logType, action, debouncedSearch, days, markedFilter]);
+    exclude_log_type: excludeType || undefined,
+  }), [logType, action, debouncedSearch, days, markedFilter, excludeType]);
 
   // 概览统计：与筛选无关，回答「我这些日志都是些什么」
   // ★ 抽成独立回调（2026-10-19）：标记/撤销误报**不改变 total**，
@@ -590,6 +734,19 @@ export default function Logs() {
     load();
     loadStats();
   }, [load, loadStats]);
+
+  // ★ 删掉本页最后一条时回退一页（2026-10-20）。
+  //   否则 offset 仍停在原位，列表变空、分页器还显示在第 N 页 ——
+  //   用户看到「暂无记录」，会以为剩下的全被删了。
+  const handleLogDeleted = useCallback(() => {
+    if (entries.length <= 1 && offset > 0) {
+      setOffset(Math.max(0, offset - PAGE_SIZE));
+      loadStats();
+      return;
+    }
+    load();
+    loadStats();
+  }, [entries.length, offset, load, loadStats]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -677,7 +834,7 @@ export default function Logs() {
   //   而他往往已经忘了自己动过哪几个。没有重置入口，
   //   「筛不出东西」就会被当成软件坏了。
   const hasFilters = Boolean(
-    logType || action || search.trim() || days || markedFilter,
+    logType || action || search.trim() || days || markedFilter || excludeType,
   );
   const resetFilters = () => {
     setLogType('');
@@ -686,8 +843,29 @@ export default function Logs() {
     setDebouncedSearch('');
     setDays('');
     setMarkedFilter('');
+    setExcludeType('');
     setOffset(0);
   };
+
+  // ★ 当前筛选的「人话」摘要（2026-10-20）。
+  //   从状态栏点数字进来时，用户心里有一个数（比如「危险 26」），
+  //   落到列表页看到的是「共 26 条」—— 若不写清这是哪个范围筛出来的，
+  //   他只能靠猜；一旦某处口径不同（比如含了转发中断），
+  //   就会再次变成「数字对不上」。
+  const scopeText = useMemo(() => {
+    const parts: string[] = [];
+    const t = TIME_OPTIONS.find((o) => o.value === days);
+    if (t) parts.push(t.label);
+    const ty = TYPE_OPTIONS.find((o) => o.value === logType);
+    if (ty) parts.push(ty.label);
+    const ac = ACTION_OPTIONS.find((o) => o.value === action);
+    if (ac) parts.push(ac.label);
+    const mk = MARKED_OPTIONS.find((o) => o.value === markedFilter);
+    if (mk) parts.push(mk.label);
+    if (excludeType) parts.push('不含转发中断');
+    if (debouncedSearch) parts.push(`搜索「${debouncedSearch}」`);
+    return parts.join(' · ') || '全部记录';
+  }, [days, logType, action, markedFilter, excludeType, debouncedSearch]);
 
   return (
     <div>
@@ -744,7 +922,7 @@ export default function Logs() {
           {stats.marked_safe > 0 && (
             <div className="log-overview-item">
               <span className="log-overview-num mono">{stats.marked_safe}</span>
-              <span className="log-overview-label">已标记误报（不计入今日统计）</span>
+              <span className="log-overview-label">已标记误报（不计入首页统计）</span>
             </div>
           )}
           <div className="log-overview-item">
@@ -771,6 +949,15 @@ export default function Logs() {
       )}
 
       {/* 工具栏 */}
+      {hasFilters && (
+        <div className="filter-scope">
+          <Filter size={13} strokeWidth={1.5} />
+          <span>
+            当前条件：{scopeText} —— 共 <b className="mono">{loading ? '…' : total}</b> 条
+            {action === 'redact' && '（「已打码」按处计数，这里按条列出）'}
+          </span>
+        </div>
+      )}
       <div className="toolbar">
         <div style={{ position: 'relative', flex: 1 }}>
           <Search
@@ -906,7 +1093,11 @@ export default function Logs() {
                 ? '加载中...'
                 : debouncedSearch
                   ? '未找到匹配的日志，试试其他关键词'
-                  : '暂无日志记录 — 使用 AI 工具发起一次对话后即可看到'}
+                  : hasFilters
+                    /* ★ 筛出 0 条时要说清是「筛选没命中」，而不是「没有日志」——
+                        两者对用户的下一步动作完全不同。 */
+                    ? '当前筛选条件下没有记录，点「重置筛选」回到全部'
+                    : '暂无日志记录 — 使用 AI 工具发起一次对话后即可看到'}
             </div>
           </div>
         </div>
@@ -1016,14 +1207,29 @@ export default function Logs() {
         </div>
       )}
 
-      {selectedId !== null && (
-        <DetailDrawer
-          logId={selectedId}
-          onClose={() => setSelectedId(null)}
-          onDeleted={load}
-          onMarkedSafe={handleMarkedSafe}
-        />
-      )}
+      {selectedId !== null && (() => {
+        const idx = entries.findIndex((e) => e.id === selectedId);
+        const nav = idx >= 0
+          ? {
+            position: { index: idx + 1, total: entries.length },
+            onPrev: idx > 0
+              ? () => setSelectedId(entries[idx - 1].id)
+              : undefined,
+            onNext: idx < entries.length - 1
+              ? () => setSelectedId(entries[idx + 1].id)
+              : undefined,
+          }
+          : {};
+        return (
+          <DetailDrawer
+            logId={selectedId}
+            onClose={() => setSelectedId(null)}
+            onDeleted={handleLogDeleted}
+            onMarkedSafe={handleMarkedSafe}
+            {...nav}
+          />
+        );
+      })()}
     </div>
   );
 }

@@ -56,7 +56,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       setToasts((prev) => {
         // 去重：同类型同文案不重复堆叠
         if (prev.some((t) => t.type === type && t.text === text)) return prev;
-        return [...prev, { id, type, text }];
+        // ★ 最多同时 4 条（2026-10-20）：引擎抖动时会连续弹出一串错误，
+        //   不封顶的话它们会盖住半个屏幕，用户连关都关不过来。
+        return [...prev, { id, type, text }].slice(-4);
       });
       setTimeout(() => remove(id), DEFAULT_DURATION);
     },
@@ -78,7 +80,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">
           {toasts.map((t) => (
-            <div key={t.id} className={`toast ${t.type}`}>
+            <div
+              key={t.id}
+              className={`toast ${t.type}`}
+              // 错误用 alert 立即播报；其余走容器的 polite，
+              // 不打断读屏用户正在听的内容。
+              role={t.type === 'error' ? 'alert' : undefined}
+            >
               <span className="toast-icon">
                 {t.type === 'success' && <CheckCircle2 size={17} strokeWidth={1.5} />}
                 {t.type === 'error' && <XCircle size={17} strokeWidth={1.5} />}

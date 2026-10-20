@@ -202,6 +202,10 @@ export default function Dashboard() {
       return true;
     } catch (e) {
       if (!mountedRef.current) return false;
+      // ★ 失败计数在这里累加（2026-10-20）：
+      //   手动「重试」也走 load()，若只在轮询里计数，
+      //   手动重试失败时计数不涨，页面会一直停在加载态。
+      failRef.current = Math.min(failRef.current + 1, 3);
       setLoadError(e instanceof Error ? e.message : String(e));
       return false;
     }
@@ -228,8 +232,8 @@ export default function Dashboard() {
         // 成功：3s 后再查（load 已把退避计数归零）
         timer = setTimeout(schedule, 3000);
       } else {
-        // 失败：指数退避 6→12→24→30s 上限
-        failRef.current = Math.min(failRef.current + 1, 3);
+        // 失败：指数退避 6→12→24→30s 上限。
+        // ★ 计数已由 load() 自己累加，这里不再重复加一次。
         timer = setTimeout(schedule, Math.min(3000 * 2 ** failRef.current, 30000));
       }
     };
@@ -343,7 +347,11 @@ export default function Dashboard() {
   // 渲染
   // ══════════════════════════════════════════════════════════
 
-  if (loadError && !state) {
+  // ★ 第一次失败不换整页（2026-10-20）。
+  //   轮询 2 秒一次，一次抖动就把首页整页替换成红色错误卡太粗暴，
+  //   而且引擎刚启动时的第一次请求本来就可能失败。
+  //   连续失败 2 次（约 6 秒）以上，才认定是真连不上。
+  if (loadError && !state && failRef.current >= 2) {
     // 把底层原始报错（如 `GET /api/state → HTTP 500`）翻译成「怎么了 + 怎么办」，
     // 原始信息收进折叠的技术细节里备查。
     const err = humanizeLoadError(loadError);
@@ -594,12 +602,28 @@ export default function Dashboard() {
         </div>
 
         {today && (
+          /* ★ 三个数字都能点进去（2026-10-20）。
+             此前它们只是统计值：用户看到「危险 26」想核对，
+             唯一的路径是自己去日志页手动调四个下拉 ——
+             而手调很容易与这里的口径不同，于是又变成「数字对不上」。
+             链接里带齐「今天 / 排除误报 / 不含转发中断」，
+             与首页统计同一口径。 */
           <div className="kpi-row" style={{ maxWidth: 460, margin: '0 auto' }}>
-            <div className="kpi">
+            <Link
+              to="/logs?days=1&action=pass&marked=exclude&exclude=proxy_error"
+              className="kpi"
+              style={{ textDecoration: 'none', color: 'inherit' }}
+              title="查看今天安全通过的记录"
+            >
               <div className="kpi-value safe">{today.safe_count}</div>
               <div className="kpi-label">安全</div>
-            </div>
-            <div className="kpi">
+            </Link>
+            <Link
+              to="/logs?days=1&action=alert&marked=exclude&exclude=proxy_error"
+              className="kpi"
+              style={{ textDecoration: 'none', color: 'inherit' }}
+              title="查看今天的提示记录"
+            >
               <div className="kpi-value suspect">{today.suspect_count}</div>
               {/* ★ 「可疑」→「提示」。
                   「可疑」暗示「出问题了」，但这一栏现在装的是
@@ -607,11 +631,16 @@ export default function Dashboard() {
                   它不指向任何问题。用户看到「可疑 42」只会莫名紧张，
                   反而看不到真正该看的「危险」。 */}
               <div className="kpi-label">提示</div>
-            </div>
-            <div className="kpi">
+            </Link>
+            <Link
+              to="/logs?days=1&action=block&marked=exclude&exclude=proxy_error"
+              className="kpi"
+              style={{ textDecoration: 'none', color: 'inherit' }}
+              title="查看今天被拦截的记录"
+            >
               <div className="kpi-value danger">{today.danger_count}</div>
               <div className="kpi-label">危险</div>
-            </div>
+            </Link>
           </div>
         )}
       </div>

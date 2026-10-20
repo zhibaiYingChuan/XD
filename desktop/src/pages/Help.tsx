@@ -102,6 +102,40 @@ const FAQ = [
   },
 ];
 
+/**
+ * FAQ 分组（2026-10-20）。
+ *
+ * ★ 为什么用「序号引用」而不是重排数组：
+ *   这 17 条答案里有大量长文案，整体重排极易抄错。
+ *   序号表只描述「哪些条目属于哪一组」，未列出的条目会落在最后的
+ *   「其他」组里 —— 新增 FAQ 时最坏情况是暂时没归类，不会凭空消失。
+ */
+const FAQ_GROUP_SPEC: Array<{ title: string; indices: number[] }> = [
+  { title: '开始使用', indices: [0, 2, 3, 4, 8, 12, 15] },
+  { title: '防护与误报', indices: [6, 7, 9, 10, 11, 13, 16] },
+  { title: '隐私与授权', indices: [1, 5, 14] },
+];
+
+function buildFaqGroups() {
+  const used = new Set<number>();
+  const groups = FAQ_GROUP_SPEC.map((spec) => ({
+    title: spec.title,
+    items: spec.indices
+      .filter((i) => i >= 0 && i < FAQ.length)
+      .map((i) => {
+        used.add(i);
+        return { item: FAQ[i], index: i };
+      }),
+  }));
+  const rest = FAQ
+    .map((item, index) => ({ item, index }))
+    .filter((x) => !used.has(x.index));
+  if (rest.length) groups.push({ title: '其他', items: rest });
+  return groups;
+}
+
+const FAQ_GROUPS = buildFaqGroups();
+
 const TOOL_GUIDES = [
   {
     icon: Monitor,
@@ -233,52 +267,57 @@ export default function Help() {
           </span>
         </div>
 
-        {FAQ.map((item, i) => {
-          const open = openIndex === i;
-          return (
-            <div key={i} style={{ borderBottom: '1px solid var(--xd-border)' }}>
-              <button
-                onClick={() => setOpenIndex(open ? null : i)}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '13px 0',
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  fontSize: 14,
-                  fontWeight: open ? 500 : 400,
-                  color: 'var(--xd-text)',
-                }}
-              >
-                {open ? (
-                  <ChevronDown size={15} strokeWidth={1.5} style={{ flexShrink: 0, color: 'var(--xd-text-faint)' }} />
-                ) : (
-                  <ChevronRight size={15} strokeWidth={1.5} style={{ flexShrink: 0, color: 'var(--xd-text-faint)' }} />
-                )}
-                {item.q}
-              </button>
-              {open && (
-                <div
-                  className="faq-answer"
-                  style={{
-                    padding: '0 0 16px 23px',
-                    fontSize: 13,
-                    color: 'var(--xd-text-dim)',
-                    lineHeight: 1.85,
-                    whiteSpace: 'pre-wrap',
-                    animation: 'page-in 200ms ease-out',
-                  }}
-                >
-                  {fill(item.a)}
+        {FAQ_GROUPS.map((group) => (
+          <div key={group.title}>
+            <div className="faq-group">{group.title}</div>
+            {group.items.map(({ item, index: i }) => {
+              const open = openIndex === i;
+              return (
+                <div key={i} style={{ borderBottom: '1px solid var(--xd-border)' }}>
+                  <button
+                    onClick={() => setOpenIndex(open ? null : i)}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '13px 0',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: 14,
+                      fontWeight: open ? 500 : 400,
+                      color: 'var(--xd-text)',
+                    }}
+                  >
+                    {open ? (
+                      <ChevronDown size={15} strokeWidth={1.5} style={{ flexShrink: 0, color: 'var(--xd-text-faint)' }} />
+                    ) : (
+                      <ChevronRight size={15} strokeWidth={1.5} style={{ flexShrink: 0, color: 'var(--xd-text-faint)' }} />
+                    )}
+                    {item.q}
+                  </button>
+                  {open && (
+                    <div
+                      className="faq-answer"
+                      style={{
+                        padding: '0 0 16px 23px',
+                        fontSize: 13,
+                        color: 'var(--xd-text-dim)',
+                        lineHeight: 1.85,
+                        whiteSpace: 'pre-wrap',
+                        animation: 'page-in 200ms ease-out',
+                      }}
+                    >
+                      {fill(item.a)}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );
