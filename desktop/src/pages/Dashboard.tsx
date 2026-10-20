@@ -494,13 +494,16 @@ export default function Dashboard() {
         },
         {
           key: 'behavior',
-          label: '中转站侧可疑响应占比',
+          label: '中转站侧问题响应占比',
           // ★ 说人话：把「危险 N 次（权重 2）+ 可疑 M 次」这种带权重的算式
           //   翻译成用户能对上号的叙述。relayRisk 即 danger+suspect 的实际命中条数；
           //   扣分用 Number(toFixed(1)) 抹掉无意义的尾随 .0（如 4.0 → 4）。
+          //
+          // ★ 2026-10-20：原名「可疑内容」把危险也算进去，
+          //   与 KPI 的「危险 / 提示」两栏对不上；改为「被判为危险或提示」。
           detail:
-            `${primaryRelay.total_calls} 次调用里出现 ${relayRisk} 次可疑内容`
-            + `（偏危险的那类按双倍算）`
+            `${primaryRelay.total_calls} 次调用里有 ${relayRisk} 次被判为危险或提示`
+            + `（危险的按双倍算）`
             + `→ 扣 ${Number(behaviorPenalty.toFixed(1))} 分`
             + `（最多扣 ${SCORE_WEIGHTS.behaviorMax}）`,
           points: Number(behaviorPenalty.toFixed(1)),
@@ -612,7 +615,12 @@ export default function Dashboard() {
             </div>
             <div className="empty-text">
               {today && today.total_calls > 0
-                ? '今天没有发现危险响应，你的 AI 对话很安全'
+                ? (today.danger_count + today.suspect_count > 0
+                  /* ★ 不能因为「最近 8 条都是安全」就说「今天没有危险响应」——
+                     这里只取了 8 条做展示，更早的危险记录不在窗口内，
+                     而上面的 KPI 明明写着「危险 N」。两句话互相打架。 */
+                  ? `最近的对话没有新问题。今天累计：危险 ${today.danger_count} 条、提示 ${today.suspect_count} 条，点「查看全部」可逐条核对。`
+                  : '今天没有发现危险响应，你的 AI 对话很安全')
                 : '还没有检测记录 — 使用 AI 工具发起一次对话试试'}
             </div>
           </div>
@@ -660,7 +668,19 @@ export default function Dashboard() {
                     <>
                       {' · '}
                       <span style={{ color: 'var(--xd-danger)' }}>
-                        {(primaryRelay.relay_danger_count ?? 0) + (primaryRelay.relay_suspect_count ?? 0)} 次可疑响应
+                        {primaryRelay.relay_danger_count} 次危险响应
+                      </span>
+                    </>
+                  )}
+                  {/* ★ 危险与提示分开报数（2026-10-20）。
+                      此前把 danger+suspect 合起来一律叫「可疑响应」，
+                      于是 1 次真的危险在界面上显示成「1 次可疑」——
+                      与顶部 KPI 的「危险 / 提示」两栏也对不上。 */}
+                  {(primaryRelay.relay_suspect_count ?? 0) > 0 && (
+                    <>
+                      {' · '}
+                      <span style={{ color: 'var(--xd-suspect)' }}>
+                        {primaryRelay.relay_suspect_count} 次提示
                       </span>
                     </>
                   )}
