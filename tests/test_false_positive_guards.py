@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from daoti_xuandun_personal.proxy.verifier import (  # noqa: E402
     OBSERVATION_ONLY_SIGNALS,
     ResponseVerifier,
+    _check_tool_calls,
     _rules,
 )
 from daoti_xuandun_personal.proxy.baseline import (  # noqa: E402
@@ -118,6 +119,119 @@ class TestEnvRulePrecision:
     def test_real_dotenv_read_still_matches(self):
         for text in ("cat /app/.env", "./.env.local", "source ~/.env"):
             assert self._matches(text), f"{text!r} 不再被识别为 .env 访问"
+
+    def test_template_files_are_not_secrets(self):
+        """`.env.example` 这类模板本来就是提交进仓库给人看的，不含真实密钥。
+
+        ★ 2026-10-22 实测：AI 写环境变量审计文档，正文提到
+          「其中 2 个未在 `.env.example` 登记」→ 被判成读取 .env → 拦截。
+        """
+        for text in (
+            "其中下列 2 个既未在 `.env.example` 登记",
+            "cat .env.example",
+            "参考 .env.sample 填写",
+            "见 .env.template",
+        ):
+            assert not self._matches(text), f"{text!r} 被当成敏感文件访问"
+
+        # 反向自证：`.env.example` 里如果出现真实的 `.env`（复制目标），仍然要拦
+        assert self._matches("cp .env.example .env"), (
+            "复制模板到 .env 时，目标 .env 也是真实敏感文件，不能一起放过"
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+# 2b. 写入类工具提到 .env：只记录，不阻断
+# ══════════════════════════════════════════════════════════════
+
+
+class TestGuardrailRedactIsNotLeak:
+    """个人版不该把企业版护栏的「打码」结论当成敏感泄露告警。
+
+    ★ 2026-10-22 实测（本地日志 3818）：一份技术总结被护栏判
+      「输出内容命中敏感模式，已打码」，个人版显示成中危
+      「回答里出现了敏感信息」。内容里并没有任何真实密钥。
+      个人版定位是出站脱敏 + 响应验真，不是内容审查。
+    """
+
+    def test_redact_only_hit_is_content_policy(self):
+        got = ResponseVerifier._classify_guardrail_hit(
+            "这是一份技术总结，提到 LOONG_TEST_GUARD_A 与 .env.example",
+            risk="medium", action="redact",
+            reason="输出内容命中敏感模式，已打码",
+        )
+        assert got == "content_policy", (
+            f"被判成 {got!r} —— 企业版护栏的合规判断不该在个人版里当泄露告警"
+        )
+
+    def test_real_key_still_sensitive_leak(self):
+        """反向自证：真密钥形态仍归 sensitive_leak。"""
+        got = ResponseVerifier._classify_guardrail_hit(
+            "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            risk="high", action="redact", reason="输出内容命中敏感模式，已打码",
+        )
+        assert got == "sensitive_leak", "真实密钥被降级成内容合规 —— 误报修成了漏报"
+
+
+class TestWriteToolEnvMention:
+    """Write 的参数是「要写进文件的内容」，不是「要读取的路径」。
+
+    ★ 线上实例（2026-10-22 03:40）：AI 用 Write 写一份环境变量审计文档，
+      内容里提到「68 个被读取的环境变量，其中 2 个未在 .env.example 登记」，
+      玄盾判成「Tool Call "Write" 试图读取环境变量文件」→ 高危 → 拦截。
+      用户的实际诉求只是让它写文档 —— 典型误报。
+    """
+
+    @staticmethod
+    def _payload(tool: str, args: dict) -> dict:
+        return {
+            "tool_calls": [
+                {"function": {"name": tool, "arguments": __import__("json").dumps(args, ensure_ascii=False)}}
+            ]
+        }
+
+    def test_write_mention_is_recorded_not_blocked(self):
+        findings = _check_tool_calls(
+            self._payload(
+                "Write",
+                {
+                    "file_path": "docs/env-audit.md",
+                    "content": "发现 68 个环境变量，其中 2 个未在 .env 登记：A、B",
+                },
+            ),
+            "",
+        )
+        assert findings, "至少要留下一条记录，不能当作没发生"
+        assert all(f.category != "tool_call_dangerous" for f in findings), (
+            "写入内容里提到 .env 被判成高危工具调用 —— 会直接掐断用户工作流"
+        )
+        assert any(
+            f.category == "dangerous_content" and f.severity == "medium"
+            for f in findings
+        ), "应降级为「仅记录」的观测项"
+
+    def test_edit_tool_same_treatment(self):
+        findings = _check_tool_calls(
+            self._payload("Edit", {"file_path": "README.md", "new_string": "复制 .env 后填写"}),
+            "",
+        )
+        assert all(f.category != "tool_call_dangerous" for f in findings)
+
+    def test_read_tool_dotenv_still_blocked(self):
+        """反向自证：真的去读 .env 时仍按高危处理。"""
+        findings = _check_tool_calls(
+            self._payload("Read", {"file_path": ".env"}), ""
+        )
+        assert any(
+            f.category == "tool_call_dangerous" and f.severity == "high"
+            for f in findings
+        ), "Read .env 不再被拦截 —— 真威胁被放行了"
+
+    def test_shell_cat_dotenv_still_blocked(self):
+        findings = _check_tool_calls(
+            self._payload("Bash", {"command": "cat .env"}), ""
+        )
+        assert any(f.category == "tool_call_dangerous" for f in findings)
 
 
 # ══════════════════════════════════════════════════════════════

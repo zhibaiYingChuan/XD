@@ -236,9 +236,14 @@ class TestFrontendMustShowEvidence:
 
     def test_drawer_renders_evidence_field(self):
         tsx = self._code_only(LOGS_TSX)
-        assert re.search(r"\{f\.evidence\s*&&", tsx), (
-            "日志详情没有渲染 evidence —— 后端给了依据，界面不显示"
+        # ★ 2026-10-22：展示从「整段 evidence 直接铺开」改成
+        #   「只给命中处一小块（focus 由 f.evidence 派生）+ 完整片段折叠」。
+        #   判据不再绑变量名，只锁两件事：evidence 被用上、且完整片段没被藏掉。
+        assert re.search(r"f\.evidence", tsx), (
+            "日志详情没有使用 evidence —— 后端给了依据，界面不显示"
         )
+        assert re.search(r"\{focus\s*&&", tsx), "evidence 没有进入渲染分支"
+        assert "完整片段" in tsx, "完整证据片段被藏掉了，用户无法核对"
 
     def test_block_records_labelled_as_evidence(self):
         """拦截时标题应写「拦截依据」而不是「脱敏记录」。
@@ -277,6 +282,7 @@ class TestFrontendMustShowEvidence:
             r"<button[^>]*onClick=\{[^}]*handleRefresh", tsx, re.S
         ), "首页没有可点击的刷新按钮"
         assert "RefreshCw" in tsx, "刷新按钮没有图标"
+
 
     def test_dashboard_shows_last_refresh_time(self):
         """必须显示上次更新时间，否则用户无法判断数字有多新。"""
@@ -630,3 +636,47 @@ class TestEvidenceSurvivesStorage:
                 assert FAKE_CODE not in rows[0]["original"]
             finally:
                 st.close()
+
+
+class TestExplanationTellsSource:
+    """解释必须说清「判断是谁下的」，以及「这个数字算的是什么」。
+
+    ★ 2026-10-22 用户实测两条日志后提出的问题：
+      1. 「回答里出现了敏感信息」其实是**中转站侧护栏**的结论，
+         玄盾只是转述；旧文案读起来像玄盾自己扫出来的。
+      2. 「脱敏几千条」其实是同一段历史在每轮请求里被重复计数。
+      判据只锁语义，不锁措辞 —— 改文案不该让测试变红。
+    """
+
+    @staticmethod
+    def _code_only(p):
+        s = _read(p)
+        s = re.sub(r"/\*.*?\*/", " ", s, flags=re.S)
+        s = re.sub(r"//[^\n]*", " ", s)
+        return s
+
+    API_TS = ROOT / "desktop" / "src" / "services" / "api.ts"
+
+    def test_upstream_guardrail_is_attributed(self):
+        # 只看代码与文案，不看注释 —— 注释里为了说明历史，会出现被否定的旧说法
+        api = self._code_only(self.API_TS)
+        assert "与企业版共用" in api, (
+            "未说明这条判断来自玄盾自己复用的企业版规则"
+        )
+        assert ("中转站那边" not in api), (
+            "把自家护栏的结论写成了「中转站那边判的」——用户能一眼看出不对"
+        )
+
+    def test_undeclared_tool_explains_both_names(self):
+        api = _read(self.API_TS)
+        assert "你没声明过的工具" in api, "未说明返回的工具名不在声明列表里"
+        assert ("read_file" in api and "readFile" in api), (
+            "未提示「只是写法不同」这种最常见的误报原因"
+        )
+
+    def test_redaction_count_is_marked_as_per_request(self):
+        tsx = self._code_only(LOGS_TSX)
+        assert "本次" in tsx, "脱敏数量未标明是「本次请求」"
+        assert ("重复" in tsx or "重新数" in tsx), (
+            "未解释累计数为何会随轮数增长，用户会把几千条当成几千个不同对象"
+        )

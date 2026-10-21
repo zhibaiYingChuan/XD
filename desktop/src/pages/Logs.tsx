@@ -34,7 +34,7 @@ import {
   ACTION_LABELS,
   LOG_TYPE_LABELS,
   CATEGORY_LABELS,
-  findingExplanation,
+  explainFinding,
   displayDomain,
   formatDateTime,
   actionBadgeClass,
@@ -50,6 +50,38 @@ import { copyToClipboard, downloadText } from '../lib/tauriShim';
 
 const PAGE_SIZE = 20;
 const SEARCH_DEBOUNCE = 300;
+
+/**
+ * 把证据片段收窄到「命中那一小块」。
+ *
+ * 引擎给的 evidence 是命中点前后约 90 字。整段铺在页面上，用户既找不到重点，
+ * 也容易把上下文误当成「被泄露的内容」。这里只留命中词前后十几个字，
+ * 命中词单独返回以便高亮；找不到命中词时（例如片段已被打码）退化成前 70 字。
+ */
+function focusEvidence(
+  evidence: string,
+  hit?: string,
+): { before: string; match: string; after: string } {
+  const text = (evidence || '').replace(/\s+/g, ' ').trim();
+  const fallback = {
+    before: text.slice(0, 70),
+    match: '',
+    after: text.length > 70 ? '…' : '',
+  };
+  const needle = (hit || '').trim();
+  if (!needle) return fallback;
+
+  const idx = text.indexOf(needle);
+  if (idx < 0) return fallback;
+
+  const start = Math.max(0, idx - 18);
+  const end = Math.min(text.length, idx + needle.length + 34);
+  return {
+    before: (start > 0 ? '…' : '') + text.slice(start, idx),
+    match: needle,
+    after: text.slice(idx + needle.length, end) + (end < text.length ? '…' : ''),
+  };
+}
 
 const TYPE_OPTIONS = [
   { value: '', label: '全部类型' },
@@ -431,9 +463,10 @@ function DetailDrawer({
                       否则用户看到红色就以为防护坏了。 */}
                   <div className="field-label">发现了什么</div>
                   {findings.map((f: { category?: string; detail?: string; severity?: string; evidence?: string }, i: number) => {
-                    const explain = findingExplanation(f.category);
+                    const explain = explainFinding(f);
                     const advisory = f.category === 'length_anomaly'
                       || f.category === 'structure_anomaly';
+                    const focus = f.evidence ? focusEvidence(f.evidence, explain?.hit) : null;
                     return (
                     <div key={i} className="detail-row" style={{ alignItems: 'flex-start' }}>
                       <span className="detail-key" style={{ paddingTop: 1 }}>
@@ -458,16 +491,22 @@ function DetailDrawer({
                         </span>
                       </span>
                       <span className="detail-val">
-                        {/* 先说人话，再给技术细节。
-                            ★ 技术 detail 收进 <details>：直接摊在页面上
-                              「偏离历史均值 1742 达 124.0σ」会让人以为在报故障，
-                              而用户判断「是不是我自己的问题」只需要第一句话。 */}
-                        <div style={{ fontWeight: explain ? 500 : undefined }}>
+                        {/* 三段：发生了什么 → 有什么风险 → 怎么办。
+                            ★ 技术原文收进折叠（2026-10-22）：
+                              「Tool Call "Write" 试图读取环境变量文件」这种句子
+                              既不是用户的语言，也容易让人误解成「AI 在读我的密钥」。
+                              先用一句人话把事说清，需要核对的人再展开看原文。 */}
+                        <div style={{ fontWeight: 500 }}>
                           {explain ? explain.title : f.detail}
                         </div>
                         {explain && (
                           <div className="faint" style={{ fontSize: 12, marginTop: 2, lineHeight: 1.7 }}>
                             {explain.meaning}
+                          </div>
+                        )}
+                        {explain?.action && (
+                          <div style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7, color: 'var(--xd-suspect)' }}>
+                            怎么办：{explain.action}
                           </div>
                         )}
                         {advisory && (
@@ -478,22 +517,42 @@ function DetailDrawer({
                             这类检查只作记录，不会拦下你的对话。
                           </div>
                         )}
-                        {/* 掩码后的命中片段：给愿意核对的人看，不给不愿看的人添堵 */}
-                        {f.evidence && (
-                          <details style={{ marginTop: 4 }}>
-                            <summary
-                              className="faint"
-                              style={{ fontSize: 11, cursor: 'pointer', listStyle: 'none' }}
-                            >
-                              查看技术细节
-                            </summary>
-                            <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
-                              {f.detail}
+                        {/* ★ 只给命中处附近那一小块（2026-10-22）：
+                            引擎给的片段约 90 字，整段铺开用户找不到重点；
+                            这里留命中词前后各十几字并用底色标出，完整片段收进折叠。 */}
+                        {focus && (
+                          <div style={{ marginTop: 6 }}>
+                            <div className="mono faint" style={{ fontSize: 11, lineHeight: 1.7 }}>
+                              命中的地方：{focus.before}
+                              {focus.match && (
+                                <mark
+                                  style={{
+                                    background: 'var(--xd-danger-dim)',
+                                    color: 'var(--xd-danger)',
+                                    padding: '0 2px',
+                                    borderRadius: 2,
+                                  }}
+                                >
+                                  {focus.match}
+                                </mark>
+                              )}
+                              {focus.after}
                             </div>
-                            <div className="mono faint" style={{ fontSize: 11 }}>
-                              片段：{f.evidence}
-                            </div>
-                          </details>
+                            <details style={{ marginTop: 2 }}>
+                              <summary
+                                className="faint"
+                                style={{ fontSize: 11, cursor: 'pointer', listStyle: 'none' }}
+                              >
+                                看完整片段和引擎原文
+                              </summary>
+                              <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
+                                引擎原文：{f.detail}
+                              </div>
+                              <div className="mono faint" style={{ fontSize: 11 }}>
+                                完整片段：{f.evidence}
+                              </div>
+                            </details>
+                          </div>
                         )}
                       </span>
                     </div>
@@ -509,7 +568,18 @@ function DetailDrawer({
                 </div>
               )}
 
-              {detail.redactions.length > 0 && (
+              {detail.redactions.length > 0 && (() => {
+                /* ★ 2026-10-22：把「处数」和「不同值的个数」分开显示。
+                   实测一条日志 18 处脱敏，其实只有 6 个不同的邮箱 ——
+                   同一个邮箱在对话历史里出现了三次，就被数了三次。
+                   直接显示 18 会让人以为有 18 个东西被动了。 */
+                const unique = new Set(
+                  detail.redactions.map((r) => `${r.category}|${r.original}`),
+                ).size;
+                const countLabel = unique === detail.redactions.length
+                  ? `本次 ${unique} 处`
+                  : `本次 ${unique} 个值 / 共 ${detail.redactions.length} 处`;
+                return (
                 <div className="mt-24">
                   {/* ★ 标题必须区分「这两件事是不是一回事」（2026-10-20）。
                       脱敏记录来自**请求侧**；响应侧被拦时（比如模型不一致），
@@ -519,8 +589,20 @@ function DetailDrawer({
                   <div className="field-label">
                     {detail.entry.log_type === 'request_sanitize'
                       && detail.entry.action === 'block'
-                      ? `拦截依据（${detail.redactions.length} 处）`
-                      : `脱敏记录（${detail.redactions.length} 处）`}
+                      ? `拦截依据（${countLabel}）`
+                      : `脱敏记录（${countLabel}）`}
+                  </div>
+                  {/* ★ 2026-10-22：用户反馈「怎么脱了几千条」。
+                      真实情况是同一段历史每轮请求都会重新过一遍，
+                      所以同 6 个邮箱能被算成 18 处、再乘上百轮。
+                      不写清楚这一点，数字看起来就像玄盾在乱标。 */}
+                  <div
+                    className="faint"
+                    style={{ fontSize: 11, marginBottom: 6, lineHeight: 1.7, color: 'var(--xd-text-dim)' }}
+                  >
+                    只算这一次请求；同一个值出现多次只算一个。
+                    同一段对话历史在后面每轮都会重新数一遍，所以累计数会随轮数涨 ——
+                    几千条通常是同一批内容被反复计算，不是几千个不同的东西。
                   </div>
                   {detail.redactions.map((r) => (
                     <div key={r.id} className="detail-row">
@@ -550,7 +632,8 @@ function DetailDrawer({
                       : '这些是本次请求里被替换掉的内容，与上面判定的原因无关。只保留开头、结尾和长度，原文没有离开你的电脑。'}
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* ★ 明细已被隐私清除时，也要把「打了几处」如实说出来。
                   否则用户看到状态栏写着「已打码 322 处」，

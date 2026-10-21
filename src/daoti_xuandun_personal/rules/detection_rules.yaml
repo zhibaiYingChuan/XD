@@ -80,7 +80,11 @@ sensitive_paths:
   # ★★ 2026-10-04（误报修复）：必须排除 `process.env.X` / `os.environ`。
   #   旧写法 '\.env(\.|$|\s)' 会把 JS/TS 最常见的 `process.env.PORT`
   #   判成「读取 .env 文件」→ 阻断，而那是编程助手回答里的正常写法。
-  - pattern: '(?<![A-Za-z0-9_])\.env\b'
+  # ★★ 2026-10-22（误报修复）：`.env.example` / `.env.sample` 这类模板
+  #   本来就是要提交进仓库、给别人看的，不含真实密钥。
+  #   实测 AI 写一份环境变量审计文档时，正文提到 `.env.example`
+  #   就被判成「读取环境变量文件」并阻断。
+  - pattern: '(?<![A-Za-z0-9_])\.env\b(?!\.(?:example|sample|template|dist))'
     label: 读取环境变量文件
   - pattern: '\.docker/config\.json\b'
     label: 读取 Docker 凭证

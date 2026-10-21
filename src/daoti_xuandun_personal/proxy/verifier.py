@@ -93,7 +93,10 @@ _BUILTIN_SENSITIVE_PATHS: List[Tuple[str, str]] = [
     #   那是编程助手回答里出现频率极高的正常写法。
     #   真实文件访问左侧是分隔符（行首 / 空格 / 引号 / 斜杠），
     #   而 `process.env` 的左侧是标识符字符 's'，加左边界即可分开。
-    (r"(?<![A-Za-z0-9_])\.env\b", "读取环境变量文件"),
+    # ★★ 2026-10-22（误报修复）：模板文件 `.env.example` / `.env.sample`
+    #   本就是提交进仓库给人看的，不含真实密钥；实测 AI 写环境变量审计文档
+    #   提到 `.env.example` 就被判成「读取环境变量文件」并阻断。
+    (r"(?<![A-Za-z0-9_])\.env\b(?!\.(?:example|sample|template|dist))", "读取环境变量文件"),
     (r"\.docker/config\.json\b", "读取 Docker 凭证"),
     (r"\.git/config\b", "读取 Git 配置"),
     (r"\.npmrc\b|\.pypirc\b", "读取包管理凭证"),
@@ -125,6 +128,22 @@ def _rules(section: str) -> List[Tuple[Any, str]]:
         "dangerous_urls": _BUILTIN_DANGEROUS_URLS,
     }.get(section, [])
     return [(re.compile(p, re.IGNORECASE), l) for p, l in src]
+
+
+_WRITE_TOOL_RE = re.compile(r"write|edit|patch|create_file|replace|insert", re.IGNORECASE)
+
+
+def _is_write_tool(name: str) -> bool:
+    """这个工具是不是「往文件里写内容」那一类（Write / Edit / apply_patch…）。
+
+    ★ 为什么要单独判断（2026-10-22 实测误报）：
+      写入类工具的参数是**要写进文件的内容**。里面出现 `.env`
+      只是在「提到这个文件名」，跟「去读这个文件」是两件事。
+      旧实现对两类工具一视同仁，于是 AI 写一份环境变量审计文档
+      （正文提到 `.env.example` 与变量名）被写成
+      「Tool Call "Write" 试图读取环境变量文件」并直接阻断。
+    """
+    return bool(_WRITE_TOOL_RE.search(name or ""))
 
 
 def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
@@ -193,6 +212,23 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and f"path:{m.group(0)}" not in seen_commands:
                 seen_commands.add(f"path:{m.group(0)}")
+                # ★★ 2026-10-22（误报修复）：写入类工具的「内容里提到 .env」
+                #   不是「读取 .env」。这类命中降为观测项（不阻断），
+                #   但仍留痕 —— 万一 AI 真把密钥写进别的文件，你依然看得见。
+                if label == "读取环境变量文件" and _is_write_tool(tool_name):
+                    findings.append(
+                        VerificationFinding(
+                            category="dangerous_content",
+                            severity="medium",
+                            detail=(
+                                f'Tool Call "{tool_name}" 写入的内容里出现了'
+                                f"「环境变量文件 {m.group(0)[:40]}」的字样"
+                                "（只是提到，没有读取你的 .env；仅作记录，不阻断）"
+                            ),
+                            evidence=_mask_evidence(args_text, m.start()),
+                        )
+                    )
+                    continue
                 findings.append(
                     VerificationFinding(
                         category="tool_call_dangerous",
@@ -952,9 +988,12 @@ class ResponseVerifier:
             )
         else:
             severity = "high" if risk == "high" else "medium"
+            # ★ 2026-10-22：不再往界面抛「[企业版护栏]」这种内部产品名。
+            #   它是我们自己的实现细节，用户看到只会疑惑「我买的是个人版，
+            #   怎么冒出企业版的东西」。换成中性的「内容检查」。
             detail = (
-                f"[企业版护栏] {reason}" if reason
-                else "[企业版护栏] 检测到风险内容"
+                f"内容检查：{reason}" if reason
+                else "内容检查命中风险内容"
             )
 
         findings.append(
@@ -1068,15 +1107,26 @@ class ResponseVerifier:
         if any(k in reason_text for k in cls._PROMPT_INJECT_REASON_MARKS):
             return "system_prompt_inject"
 
-        # ④ action 语义：redact 说明护栏认定内容含敏感信息
+        # ④ 护栏只是要求「打码」→ 归内容合规（仅记录），不指控中转站。
+        #
+        #    ★★ 2026-10-22（个人版降噪）：
+        #      这一步原来返回 sensitive_leak，于是「输出内容命中敏感模式，
+        #      已打码」会在个人版里显示成中危告警「回答里出现了敏感信息」。
+        #      实测案例：用户让 AI 整理一份技术总结，正文提到环境变量名与
+        #      示例密钥形态，护栏判了 redact —— 内容里并没有任何真实密钥。
+        #      企业版护栏偏通用合规（它服务的是"防止机密外发"），
+        #      而个人版的定位是出站脱敏 + 响应验真，不是内容审查。
+        #      真正的凭证形态由上面 ① 的本地正则先行捕获，
+        #      所以这里降级不会漏掉真实泄露，只是不再把"像"当成"是"。
         if action == "redact":
-            return "sensitive_leak"
+            return "content_policy"
 
         # ⑤ reason 关键词（多语言）兜底，但**不做 risk==high 的无差别归类**。
         #    ★ 2026-10-04：系统类改为精确特征集，不再用裸「系统」——
         #      否则 reason 里出现「系统错误」这类字样也会被判成提示词注入。
+        #    ★ 2026-10-22：与 ④ 同理，降为 content_policy。
         if any(k in reason_text for k in ("敏感", "打码", "sensitive", "redact")):
-            return "sensitive_leak"
+            return "content_policy"
         if any(k in reason_text for k in cls._PROMPT_INJECT_REASON_MARKS):
             return "system_prompt_inject"
         return None

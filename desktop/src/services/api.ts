@@ -896,8 +896,12 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     meaning: '你请求的模型和实际返回的模型不一样。可能是换成了更便宜的模型、被路由改写，也可能只是同一模型的日期快照。展开下方「查看技术细节」可以看到这两个模型名。',
   },
   tool_call_dangerous: {
-    title: 'AI 想执行一个危险操作',
-    meaning: '例如删除文件、执行破坏性命令。建议确认后再允许。',
+    title: 'AI 准备做一个有风险的操作',
+    // ★ 2026-10-22 改：原文案「AI 想执行一个危险操作 / 例如删除文件、
+    //   执行破坏性命令」默认了「一定是执行命令」，但实测最常见的命中是
+    //   「Write 工具的内容里提到 .env」——既不是删除，也不是命令。
+    //   用一句放之四海皆准的话开头，再由 explainFinding 按命中内容细分。
+    meaning: '例如读写密钥文件、执行破坏性命令、连接可疑地址。先看清它到底要做什么，再决定放不放行。',
   },
   system_prompt_inject: {
     title: '中转站可能在偷偷改写 AI 的行为',
@@ -922,8 +926,11 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     meaning: '玄盾拦下了这次请求。删掉相关内容后重试即可。',
   },
   content_policy: {
-    title: '这段回答触发了内容合规词表',
-    meaning: '只是回答里出现了敏感词，与中转站是否篡改无关，不会影响你使用。',
+    // ★ 2026-10-22：个人版把「企业版护栏要求打码」的命中归到这一类，
+    //   所以这句要同时说清「谁判的」和「会不会影响用」。
+    title: '内容检查提了一句，不影响使用',
+    meaning:
+      '玄盾内置的通用内容检查（与企业版共用同一套规则）觉得这段里有敏感内容。它偏保守，技术文档里的密钥示例、变量名都可能被点到。只作记录，不会拦你。',
   },
   dangerous_content: {
     // ★ 2026-10-04 新增：与「结构化 tool_call 危险参数」分开。
@@ -940,6 +947,151 @@ export function findingExplanation(
 ): { title: string; meaning: string } | null {
   if (!category) return null;
   return FINDING_LABELS[category] ?? null;
+}
+
+/** 一条检测结果的「人话解释」 */
+export interface FindingExplanation {
+  /** 到底发生了什么（一句话） */
+  title: string;
+  /** 有什么风险、为什么会被拦 */
+  meaning: string;
+  /** 建议怎么做（尤其在被拦时） */
+  action?: string;
+  /** 命中的那一小段原文，供界面高亮 */
+  hit?: string;
+}
+
+/** 从引擎 detail 里拆出「工具名 / 动作 / 命中物」。
+ *
+ *  引擎的三种句子（见 verifier.py 的 _check_tool_calls）：
+ *    Tool Call "Write" 参数包含{危险命令}：{命中}
+ *    Tool Call "Write" 试图{敏感文件}：{命中}
+ *    Tool Call "Write" 请求{可疑地址}：{命中}
+ */
+const TOOL_DETAIL_RE = /^Tool Call "([^"]+)"\s*(?:参数包含|试图|请求)(.+?)[：:]([\s\S]+)$/;
+
+/** 判断是不是「写入类」工具。
+ *
+ *  ★ 为什么必须区分（2026-10-22 实测误报）：
+ *    AI 用 Write 写一份审计文档，正文里提到「.env.example 里没登记的变量」，
+ *    引擎对所有 tool call 参数一律跑「敏感文件路径」规则，于是这条被写成
+ *    「Tool Call "Write" 试图读取环境变量文件」并当成高危拦下。
+ *    可它根本没读 .env —— 是把带 .env 字样的内容**写出去**。
+ *    两者风险完全不同：读是「可能被带走」，写是「可能正在带走」。
+ */
+function isWriteTool(name: string): boolean {
+  const n = (name || '').toLowerCase();
+  return /write|edit|patch|create_file|replace|insert/.test(n);
+}
+
+/**
+ * 按「命中内容」给用户一段能读懂的解释。
+ *
+ * ★ 与 findingExplanation 的分工：
+ *   那个只看类别（category），同一句「AI 准备做一个有风险的操作」
+ *   会套在删除命令、读密钥、写文档三种完全不同的情况上 ——
+ *   用户无法据此判断该不该放行。
+ *   这里额外读引擎给的 detail，把「工具 + 动作 + 命中物」翻成人话。
+ */
+export function explainFinding(f: {
+  category?: string;
+  detail?: string;
+}): FindingExplanation | null {
+  const category = f?.category;
+  if (!category) return null;
+
+  if (category === 'tool_call_dangerous') {
+    const parsed = TOOL_DETAIL_RE.exec(f.detail ?? '');
+    if (parsed) {
+      const tool = parsed[1];
+      const label = parsed[2].trim();
+      const hit = parsed[3].trim().replace(/\s+/g, ' ').slice(0, 60);
+      const writeTool = isWriteTool(tool);
+
+      // ① 环境变量文件
+      if (label.includes('环境变量')) {
+        if (writeTool) {
+          return {
+            title: `AI 正在写文件，内容里提到了 ${hit}`,
+            meaning:
+              '它不是在读你的 .env，而是准备把带这个字样的内容写进文件。玄盾按最坏情况处理：万一里面夹着真实密钥，就会跟着这次写入离开你的电脑。',
+            action:
+              '如果只是变量名、示例文件（如 .env.example）或文档说明，确认里面没有真实密钥后，点「标记为误报」即可；以后这类内容用占位符代替真实值，就不会再被拦。',
+            hit,
+          };
+        }
+        return {
+          title: `AI 要读你的环境变量文件（${hit}）`,
+          meaning:
+            '.env 里通常放着密钥和账号。读它本身不算攻击，但内容一旦被发到别处，密钥就跟着泄露了。',
+          action: '确认这是你自己要它做的；不想让它碰，就在对话里直接说明不要读取 .env。',
+          hit,
+        };
+      }
+
+      // ② 凭据类文件
+      if (/私钥|凭证|账户|配置|登录|授权/.test(label)) {
+        return {
+          title: `AI 想碰你的登录凭据（${hit}）`,
+          meaning: `这类文件里是能直接登录你账号的东西（${label}）。一旦被带出去，对方可以冒充你操作。`,
+          action: '不是你主动要求的话，建议这次拒绝执行，并检查该中转站。',
+          hit,
+        };
+      }
+
+      // ③ 危险命令
+      return {
+        title: 'AI 准备执行一条会破坏东西的命令',
+        meaning: `命中：${label}。这类命令一旦跑起来，文件或数据可能就回不来了。`,
+        action: '确认这是你要它做的；如果只是文档或示例里出现这句话，点「标记为误报」即可。',
+        hit: hit || undefined,
+      };
+    }
+  }
+
+  const base = FINDING_LABELS[category];
+  if (category === 'sensitive_leak') {
+    // ★ 2026-10-22 更正：这类命中来自**玄盾自己复用的企业版输出护栏**，
+    //   不是中转站那边的东西。上一版文案写成「中转站那边判的」，
+    //   属于把自家组件的结论甩给别人 —— 用户一眼就看出来了。
+    //   现在如实说明来源，并解释它为什么容易误判技术文档。
+    if ((f.detail ?? '').startsWith('[企业版护栏]')) {
+      return {
+        title: '玄盾的内容检查觉得这段像敏感信息',
+        meaning:
+          '这条来自玄盾内置的通用内容检查（与企业版共用同一套规则）。它偏保守：技术文档里的密钥示例、变量名、字段名都可能被判成敏感内容。',
+        action:
+          '内容已按规则打码，没有拦你。确认不是真实密钥就当噪音忽略，或点「标记为误报」。',
+      };
+    }
+  }
+
+  if (category === 'undeclared_tool') {
+    const detail = f.detail ?? '';
+    const withDeclared = /未声明的工具[：:](.+?)（你只声明了\s*(\d+)\s*个工具[：:](.+?)）/.exec(detail);
+    if (withDeclared) {
+      const used = withDeclared[1].trim();
+      return {
+        title: `回答里用了你没声明过的工具：${used}`,
+        meaning: `这次你只声明了 ${withDeclared[2]} 个工具（${withDeclared[3].trim()}），返回的却是上面那个名字。中转站凭空造调用是一种可能；但客户端改了工具名、网关加前缀，也会得到同样的结果。`,
+        action:
+          '展开技术细节对一下两个名字：只是写法不同（如 read_file 与 readFile）就点「标记为误报」；名字完全不认识，再检查中转站。',
+        hit: used,
+      };
+    }
+    const bare = /响应却返回了工具调用[：:](.+)$/.exec(detail);
+    if (bare) {
+      return {
+        title: `你没开工具，回答里却冒出了工具调用：${bare[1].trim()}`,
+        meaning:
+          '这轮请求里没有任何工具可用，返回内容却带着工具调用。可能是中转站塞进来的，也可能是客户端把工具列表漏发了。',
+        action: '先确认你的客户端这一轮确实没开工具；确认没开，再检查中转站。',
+        hit: bare[1].trim(),
+      };
+    }
+  }
+
+  return base ? { ...base } : null;
 }
 
 /**
