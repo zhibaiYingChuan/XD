@@ -825,6 +825,24 @@ export const ACTION_LABELS: Record<LogAction, string> = {
   alert: '已告警',
 };
 
+/**
+ * 「结果」这一列真正显示的文字。
+ *
+ * ★ 2026-10-22：连不上中转站（proxy_error）已从「已拦截」改成 alert，
+ *   但直接显示「已告警」仍会让人以为检测到了风险。
+ *   按日志类型再收一层：链路失败说「未送达」，既不冒充拦截，
+ *   也不让人去猜「是不是我的内容有问题」。
+ */
+export function entryActionLabel(entry: {
+  log_type?: string;
+  action: LogAction;
+}): string {
+  if (entry.log_type === 'proxy_error') {
+    return entry.action === 'alert' ? '未送达' : (ACTION_LABELS[entry.action] ?? entry.action);
+  }
+  return ACTION_LABELS[entry.action] ?? entry.action;
+}
+
 export const LOG_TYPE_LABELS: Record<LogType, string> = {
   request_sanitize: '请求脱敏',
   response_verify: '响应验证',

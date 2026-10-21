@@ -3392,7 +3392,14 @@ def _proxy_error(domain, model, session_id, message, t0, log_type):
         entry = LogEntry(
             log_type=log_type,
             relay_domain=domain,
-            action=Action.BLOCK.value,
+            # ★★ 2026-10-22：这里原来是 BLOCK，导致「连不上中转站」在界面上
+            #   显示成「已拦截」，还被「结果 = 已拦截」筛选命中。
+            #   用户实测反馈：「这是网络问题，顶多算个提示」——说得对。
+            #   拦截的含义是「我们主动挡住了一次风险」；连不上是**请求没发出去**，
+            #   既没有风险，也没有防护动作，把它算成拦截会误报安全能力。
+            #   改为 ALERT，与 _log_upstream_error（上游 4xx/5xx）同一口径：
+            #   留痕供排查，但不冒充拦截，也不进任何风险计数。
+            action=Action.ALERT.value,
             # ★ P2-18 修复：原硬编码 "medium"。中转站超时/不可达属于
             #   链路级失败，不应与「响应内容高危」同级，否则首页
             #   「危险」KPI 会被基础设施抖动刷高，稀释真实告警。

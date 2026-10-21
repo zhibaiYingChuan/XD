@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import {
   api,
-  ACTION_LABELS,
+  entryActionLabel,
   LOG_TYPE_LABELS,
   CATEGORY_LABELS,
   explainFinding,
@@ -281,7 +281,7 @@ function DetailDrawer({
       `时间: ${formatDateTime(detail.entry.timestamp)}`,
       `类型: ${LOG_TYPE_LABELS[detail.entry.log_type]}`,
       `中转站: ${displayDomain(detail.entry.relay_domain)}`,
-      `结果: ${ACTION_LABELS[detail.entry.action]}`,
+      `结果: ${entryActionLabel(detail.entry)}`,
       `摘要: ${detail.entry.summary}`,
       '',
       ...findings.map((f: { detail?: string }, i: number) => `${i + 1}. ${f.detail ?? ''}`),
@@ -417,7 +417,7 @@ function DetailDrawer({
                 <span className="detail-key">结果</span>
                 <span className="detail-val">
                   <span className={`badge ${actionBadgeClass(detail.entry)}`}>
-                    {ACTION_LABELS[detail.entry.action]}
+                    {entryActionLabel(detail.entry)}
                   </span>
                 </span>
               </div>
@@ -1296,7 +1296,7 @@ export default function Logs() {
                     </td>
                     <td>
                       <span className={`badge ${actionBadgeClass(e)}`}>
-                        {ACTION_LABELS[e.action]}
+                        {entryActionLabel(e)}
                       </span>
                       {/* ★ 打码与「结果」是两个维度：一条正常转发的请求
                           也可能有 3 处被遮盖。此前只有状态栏说「已打码 N 处」，

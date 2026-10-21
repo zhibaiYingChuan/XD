@@ -680,3 +680,25 @@ class TestExplanationTellsSource:
         assert ("重复" in tsx or "重新数" in tsx), (
             "未解释累计数为何会随轮数增长，用户会把几千条当成几千个不同对象"
         )
+
+    def test_proxy_error_is_not_labelled_as_blocked(self):
+        """「连不上中转站」不得显示成「已拦截」。
+
+        ★ 2026-10-22 用户实测：「这是网络问题，顶多算个提示」。
+          拦截的含义是主动挡住了风险；连不上是请求没发出去，
+          记成 block 会让人以为防护抓到了什么。
+        """
+        src = _read(APP_PY)
+        m = re.search(
+            r"def _proxy_error\(.*?action=(Action\.\w+\.value)",
+            src, re.S,
+        )
+        assert m, "找不到 _proxy_error 的 action 设置"
+        assert m.group(1) != "Action.BLOCK.value", (
+            "_proxy_error 仍记为 block —— 网络失败会被当成拦截"
+        )
+
+    def test_frontend_says_not_delivered_for_proxy_error(self):
+        api = _read(self.API_TS)
+        assert "entryActionLabel" in api, "结果列没有按日志类型收口语义"
+        assert "未送达" in api, "链路失败未显示为「未送达」"
