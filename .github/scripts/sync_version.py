@@ -21,6 +21,7 @@ tauriShim.ts。发版时靠人记得逐个改 —— 漏一处就会出现
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -80,6 +81,24 @@ def _replace_json_version(text: str, version: str) -> str:
     )
 
 
+def _replace_npm_lock_version(text: str, version: str) -> str:
+    """npm 的 package-lock.json 有**两处**本项目版本，必须都改。
+
+    ★ 2026-10-22：这里原来漏了 package-lock.json，于是发 0.1.19 时
+      安装包叫 0.1.19、lock 文件里还写着 0.1.18 —— 被版本一致性测试拦下。
+      不能整文件替换：依赖条目也各有 version 字段，全量替换会把
+      依赖版本改成项目版本号，直接装不上。
+      只动两处：顶层 version 与 packages[""] 里那一份。
+    """
+    data = json.loads(text)
+    if isinstance(data, dict):
+        data["version"] = version
+        root = data.get("packages", {}).get("")
+        if isinstance(root, dict) and "version" in root:
+            root["version"] = version
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
 def _replace_py_version(text: str, version: str) -> str:
     return re.sub(
         r'^__version__\s*=\s*"[^"]+"',
@@ -123,6 +142,9 @@ def build_targets(version: str):
     return [
         ("desktop/src-tauri/tauri.conf.json", _replace_json_version),
         ("desktop/package.json", _replace_json_version),
+        # ★ 2026-10-22 补：lock 文件里也有本项目版本，漏了会导致
+        #   安装包与 lock 不一致（版本一致性测试直接红）。
+        ("desktop/package-lock.json", _replace_npm_lock_version),
         ("src/daoti_xuandun_personal/__init__.py", _replace_py_version),
         ("pyproject.toml", _replace_pyproject_version),
         ("desktop/src-tauri/Cargo.lock", _replace_lock_version),
