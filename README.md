@@ -354,10 +354,18 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 
 ## 七、安装与使用
 
-### 获取
+### 下载
 
-当前处于**内测阶段，尚未发布正式安装包**。安装包会随 Release 发布，
-届时会附 SHA256 校验值。
+从 [Releases](https://github.com/zhibaiYingChuan/XD/releases/latest) 下载对应平台的安装包：
+
+| 平台 | 安装包 |
+|------|--------|
+| Windows x64 | `xuandun-personal_<版本>_x64-setup.exe` |
+| macOS（Apple Silicon） | `xuandun-personal_<版本>_aarch64.dmg` |
+| Linux x64 | `xuandun-personal_<版本>_amd64.deb` / `.AppImage` |
+
+每个 Release 附 `checksums-sha256.txt`，可用来核对下载完整性。
+当前仍是内测版本：功能与规则会随版本调整，不提供稳定版承诺。
 
 ### 使用
 
@@ -375,9 +383,10 @@ AI 工具会收到明确的错误提示 —— 这是必要的，因为发出去
 
 | 平台 | 状态 |
 |---|---|
-| Windows x64 | ✅ 支持 |
-| macOS | 🔄 构建中 |
-| Linux | 🔄 构建中 |
+| Windows x64 | ✅ 已发布（NSIS 安装包） |
+| macOS（Apple Silicon） | ✅ 已发布（dmg / app.tar.gz） |
+| Linux x64 | ✅ 已发布（deb / AppImage） |
+| macOS Intel、Windows ARM | 暂未构建 |
 
 ---
 
