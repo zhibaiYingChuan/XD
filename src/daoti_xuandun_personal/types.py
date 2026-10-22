@@ -162,6 +162,11 @@ class SanitizeResult:
     action: str = Action.PASS.value                # 整体处置
     hit_categories: List[str] = field(default_factory=list)       # 命中的敏感类型
     blocked_reason: Optional[str] = None           # 阻断原因
+    # ★ 2026-10-23：每条命中的指纹与打码片段。
+    #   台账（credential_events）靠它把同一枚凭证跨轮次对上，
+    #   从而回答「这枚 token 第一次出现在哪一侧」——
+    #   这决定了它是「你自己的工具带进来的」还是「中转站返回的」。
+    hits: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def redaction_count(self) -> int:
@@ -174,6 +179,7 @@ class SanitizeResult:
             "action": self.action,
             "hit_categories": self.hit_categories,
             "blocked_reason": self.blocked_reason,
+            "hit_count": len(self.hits),
         }
 
 
@@ -190,6 +196,9 @@ class VerificationFinding:
     severity: str         # high/medium/low
     detail: str           # 人类可读描述
     evidence: str = ""    # 证据片段（脱敏后）
+    # ★ 2026-10-23：凭证指纹（SHA-256）。只有「凭证类」发现才有值。
+    #   证据包靠它回查台账，回答「这枚凭证第一次出现在哪一侧」。
+    fingerprint: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

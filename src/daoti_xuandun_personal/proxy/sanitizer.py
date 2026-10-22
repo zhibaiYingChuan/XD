@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -186,6 +187,34 @@ def _mask_value(value: str, keep: int = 4) -> str:
     return mask_secret(value, keep)
 
 
+def credential_fingerprint(value: str) -> str:
+    """凭证指纹：SHA-256(原值)。
+
+    ★ 为什么用哈希而不是原文：
+      台账要跨轮次、跨日志判定「是不是同一枚凭证」，哈希足够；
+      而把原文留在库里只会多个泄露面。用户要拿证据去对质时，
+      对方也可以用同一串原文算出同样的哈希来核对。
+    """
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
+def _hit_infos(
+    text: str, deduped: List[Tuple[int, int, str, str]]
+) -> List[Dict[str, Any]]:
+    """把命中区间整理成台账可用的结构（含指纹，不含原文）。"""
+    return [
+        {
+            "category": cat,
+            "fingerprint": credential_fingerprint(text[start:end]),
+            "length": end - start,
+            "start": start,
+            "end": end,
+            "masked": _mask_value(text[start:end]),
+        }
+        for start, end, cat, _rule in deduped
+    ]
+
+
 def _masked_evidence(
     text: str, deduped: List[Tuple[int, int, str, str]]
 ) -> List[RedactionRecord]:
@@ -309,7 +338,7 @@ class RequestSanitizer:
 
     # ── 核心：脱敏 ──
 
-    def sanitize(self, text: str) -> SanitizeResult:
+    def sanitize(self, text: str, block_as_redact: bool = False) -> SanitizeResult:
         """对请求文本执行脱敏。
 
         流程：
@@ -321,6 +350,15 @@ class RequestSanitizer:
 
         Args:
             text: 用户原始请求文本
+            block_as_redact: 把「阻断」降级为「打码」。
+                ★ 2026-10-23：只给**工具返回**用。
+                  AI 的工具（读文件、请求接口）把登录 token 带回来时，
+                  整轮阻断会让对话直接中断，而且这段内容留在历史里，
+                  之后每轮都会被再拦一次 —— 用户看到的是「聊到一半突然
+                  一直发不出去」。打码同样能保证 token 不外发
+                  （中转站只看到 ⟦XD_n⟧），但不打断对话。
+                  用户自己打的字仍按阻断处理：那是「正要贴密钥」的时刻，
+                  必须让他停下来。
 
         Returns:
             SanitizeResult：含脱敏后文本、记录列表、整体处置
@@ -328,44 +366,23 @@ class RequestSanitizer:
         if not text:
             return SanitizeResult(sanitized_text="", action=Action.PASS.value)
 
-        # ① 收集所有命中：(start, end, category, rule_name)
-        hits: List[Tuple[int, int, str, str]] = []
-
-        for rule in BUILTIN_RULES:
-            if not self._enabled_categories.get(rule.category, True):
-                continue
-            for start, end, value in rule.find(text):
-                hits.append((start, end, rule.category, rule.name))
-
-        if self._enabled_categories.get("custom", True):
-            for kw in self._custom_keywords:
-                if not kw:
-                    continue
-                # 简单字面量匹配（转义正则特殊字符），不区分大小写
-                pattern = re.compile(re.escape(kw), re.IGNORECASE)
-                for m in pattern.finditer(text):
-                    hits.append((m.start(), m.end(), "custom", f"custom:{kw}"))
-
-        if not hits:
+        deduped = self._collect(text)
+        if not deduped:
             return SanitizeResult(sanitized_text=text, action=Action.PASS.value)
 
-        # ② 区间去重：按 start 排序，重叠时保留更长的匹配
-        hits.sort(key=lambda h: (h[0], -(h[1] - h[0])))
-        deduped: List[Tuple[int, int, str, str]] = []
-        last_end = -1
-        for start, end, category, rule_name in hits:
-            if start >= last_end:
-                deduped.append((start, end, category, rule_name))
-                last_end = end
+        # ★ 每条命中都带指纹：台账据此判定「首次出现在哪一侧」
+        hits = _hit_infos(text, deduped)
 
         # ③ 判定：BLOCK 类优先（绝不降级为打码）
+        #   ★ 例外：调用方明确要求「阻断降级为打码」（工具返回），
+        #     此时所有命中一律走下面的打码流程，token 照样不外发。
         blocked_categories = [
             (cat, rn) for s, e, cat, rn in deduped
             if self._policy_for(cat) == Action.BLOCK.value
         ]
         hit_categories = sorted({cat for _, _, cat, _ in deduped})
 
-        if blocked_categories:
+        if blocked_categories and not block_as_redact:
             labels = sorted({CATEGORY_LABELS.get(c, c) for c, _ in blocked_categories})
             return SanitizeResult(
                 sanitized_text="",           # ★ 阻断时绝不返回任何原文
@@ -379,19 +396,25 @@ class RequestSanitizer:
                 #   这里对每个命中区间做掩码：保留类型、前后少量字符
                 #   与长度，中间一律替换。足以定位，又不泄露原文。
                 records=_masked_evidence(text, deduped),
+                hits=hits,
             )
 
         # ③.5 过滤：策略为 PASS 的命中不脱敏（如宽松级的手机号/邮箱）
         #   v0.1.0 修复：宽松级应完全放行，原实现把 PASS 策略的命中也当作 REDACT 处理
+        #   ★ block_as_redact 时把 BLOCK 类也纳入打码范围。
+        allowed = {Action.REDACT.value}
+        if block_as_redact:
+            allowed.add(Action.BLOCK.value)
         redactable = [
             (s, e, cat, rn) for s, e, cat, rn in deduped
-            if self._policy_for(cat) == Action.REDACT.value
+            if self._policy_for(cat) in allowed
         ]
         if not redactable:
             return SanitizeResult(
                 sanitized_text=text,
                 action=Action.PASS.value,
                 hit_categories=hit_categories,   # 仍记录命中，便于 UI 提示
+                hits=hits,
             )
 
         # ④ 打码：倒序替换避免偏移错乱
@@ -426,7 +449,55 @@ class RequestSanitizer:
             records=records,
             action=action,
             hit_categories=hit_categories,
+            hits=hits,
         )
+
+    # ── 只扫描不改写（响应侧来源判定用）──
+
+    def scan(self, text: str) -> List[Dict[str, Any]]:
+        """找出文本里的凭证，返回指纹与打码片段，**不改写文本**。
+
+        ★ 与 sanitize 的区别：
+          响应侧只想知道「中转站返回的内容里有没有一枚没见过的凭证」，
+          不打算改写它 —— 改写会破坏对话，也掩盖了对方到底发了什么。
+          两处必须共用同一套规则与去重口径，否则「请求里有、响应里没有」
+          这种结论会因为规则差异而失真。
+        """
+        if not text:
+            return []
+        return _hit_infos(text, self._collect(text))
+
+    def _collect(self, text: str) -> List[Tuple[int, int, str, str]]:
+        """收集并去重所有命中区间（sanitize 与 scan 的唯一口径）。"""
+        hits: List[Tuple[int, int, str, str]] = []
+
+        for rule in BUILTIN_RULES:
+            if not self._enabled_categories.get(rule.category, True):
+                continue
+            for start, end, value in rule.find(text):
+                hits.append((start, end, rule.category, rule.name))
+
+        if self._enabled_categories.get("custom", True):
+            for kw in self._custom_keywords:
+                if not kw:
+                    continue
+                # 简单字面量匹配（转义正则特殊字符），不区分大小写
+                pattern = re.compile(re.escape(kw), re.IGNORECASE)
+                for m in pattern.finditer(text):
+                    hits.append((m.start(), m.end(), "custom", f"custom:{kw}"))
+
+        if not hits:
+            return []
+
+        # 区间去重：按 start 排序，重叠时保留更长的匹配
+        hits.sort(key=lambda h: (h[0], -(h[1] - h[0])))
+        deduped: List[Tuple[int, int, str, str]] = []
+        last_end = -1
+        for start, end, category, rule_name in hits:
+            if start >= last_end:
+                deduped.append((start, end, category, rule_name))
+                last_end = end
+        return deduped
 
     # ── 诊断 ──
 

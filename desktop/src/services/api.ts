@@ -129,6 +129,47 @@ export interface LogDetail {
 }
 
 /**
+ * 单条日志的可对外证据包（2026-10-23）。
+ *
+ * 回答的是「这枚凭证从哪来」，而不是「玄盾拦了什么」：
+ * 同一个指纹在台账里首次出现的方向，决定了它是
+ * 用户这边带进来的，还是中转站返回的。
+ */
+export interface EvidenceHit {
+  category: string;
+  severity: string;
+  detail: string;
+  evidence: string;
+  /** SHA-256 指纹；对方可用同一串原文复核 */
+  fingerprint: string;
+  first_seen: {
+    direction: 'request' | 'response';
+    direction_label: string;
+    role: string;
+    time: string;
+  } | null;
+}
+
+export interface EvidenceBundle {
+  schema: string;
+  generated_at: string;
+  engine_version: string;
+  scope: string;
+  log: {
+    id: number;
+    time: string;
+    log_type: string;
+    action: string;
+    severity: string;
+    relay_domain: string;
+    model: string;
+    summary: string;
+  };
+  verdict: { code: string; label: string; note: string };
+  hits: EvidenceHit[];
+}
+
+/**
  * ★ v0.1.0：已配置的中转站（配置视角，非信誉视角）。
  *
  * 与 RelayReputation 的区别：那个是「我用过哪些、它们表现如何」，
@@ -596,6 +637,16 @@ export const api = {
     call<LogDetail>('get_log_detail', 'GET', `/api/logs/${id}`, undefined, TIMEOUT.NORMAL, {
       id,
     }),
+  /**
+   * 单条日志的可对外证据包。
+   *
+   * ★ 与详情分开：详情给你自己看（含内部类别名），
+   *   证据包拿去问中转站 —— 只有可核对字段，没有凭证原文。
+   */
+  getLogEvidence: (id: number) =>
+    call<EvidenceBundle>(
+      'get_log_evidence', 'GET', `/api/logs/${id}/evidence`,
+      undefined, TIMEOUT.NORMAL, { id }),
   deleteLog: (id: number) =>
     call<void>('delete_log', 'DELETE', `/api/logs/${id}`, undefined, TIMEOUT.NORMAL, { id }),
   markLogSafe: (id: number) =>
@@ -990,6 +1041,12 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     title: '回答的正文或代码里出现了危险命令',
     meaning: '仅作记录，不会阻断。让 AI 写含 rm -rf、eval( 的脚本是正常需求；只有当它作为可执行的工具调用出现时才会被拦截。',
   },
+  credential_from_response: {
+    // ★ 2026-10-23：这一类是为「留证据」而存在的，不是拦截理由。
+    //   模型可能在示例代码里自己编一枚 JWT，所以措辞必须留余地。
+    title: '中转站返回了一枚你没发过的凭证',
+    meaning: '这枚令牌不在你这次发出去的内容里。它可能是模型自己编的示例，也可能来自中转站返回的内容 —— 先核对，再决定要不要找对方说明。',
+  },
 };
 
 /** 把引擎的 detail 换成用户能读懂的说明；无对应类别时返回 null。 */
@@ -1156,6 +1213,9 @@ export const OBSERVATION_ONLY_CATEGORIES = new Set([
   'content_policy',
   // ★ 2026-10-04 新增，与后端 verifier.OBSERVATION_ONLY_SIGNALS 对齐
   'dangerous_content',
+  // ★ 2026-10-23：响应里出现「请求从未发送过的凭证」。
+  //   它的用途是留证据给用户去核实，不是拦截理由。
+  'credential_from_response',
 ]);
 
 /**

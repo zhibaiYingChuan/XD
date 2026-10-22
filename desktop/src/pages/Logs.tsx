@@ -44,6 +44,7 @@ import {
   type LogBreakdown,
   type LogFilterParams,
   type LogType,
+  type EvidenceBundle,
 } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard, downloadText } from '../lib/tauriShim';
@@ -182,6 +183,9 @@ function DetailDrawer({
 }) {
   const toast = useToast();
   const [detail, setDetail] = useState<LogDetail | null>(null);
+  // ★ 2026-10-23：证据包（凭证指纹 + 首次出现方向）。
+  //   与详情并行拉取：证据包失败不该让整个抽屉打不开。
+  const [evidence, setEvidence] = useState<EvidenceBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [marking, setMarking] = useState(false);
@@ -202,6 +206,7 @@ function DetailDrawer({
     //   而标题的位置感已经变成「本页 3 / 20」——
     //   用户会把上一条的判定当成这一条的。
     setDetail(null);
+    setEvidence(null);
     setLoading(true);
     (async () => {
       try {
@@ -214,6 +219,13 @@ function DetailDrawer({
         }
       } finally {
         if (!cancelled) setLoading(false);
+      }
+      // 证据包单独取，失败就当作「这条没有来源记录」
+      try {
+        const e = await api.getLogEvidence(logId);
+        if (!cancelled) setEvidence(e);
+      } catch {
+        if (!cancelled) setEvidence(null);
       }
     })();
     return () => {
@@ -293,6 +305,26 @@ function DetailDrawer({
     } else {
       toast.error('复制失败');
     }
+  };
+
+  /** 复制可对外出示的证据包（JSON，不含凭证原文）。 */
+  const handleCopyEvidence = async () => {
+    if (!evidence) return;
+    const ok = await copyToClipboard(JSON.stringify(evidence, null, 2));
+    toast[ok ? 'success' : 'error'](
+      ok ? '证据已复制，可直接发给对方' : '复制失败',
+    );
+  };
+
+  /** 导出证据包为 JSON 文件。 */
+  const handleExportEvidence = () => {
+    if (!evidence) return;
+    const ok = downloadText(
+      `xuandun-evidence-${evidence.log.id}.json`,
+      JSON.stringify(evidence, null, 2),
+      'application/json',
+    );
+    toast[ok ? 'success' : 'error'](ok ? '证据已导出' : '导出失败');
   };
 
   const handleMarkSafe = async () => {
@@ -558,6 +590,64 @@ function DetailDrawer({
                     </div>
                     );
                   })}
+                </div>
+              )}
+
+              {/* ★ 2026-10-23：凭证来源。
+                  用户要的不是「你拦了什么」，而是「这枚 token 到底是谁放进来的」——
+                  响应侧先出现才是能拿去问中转站的证据；请求侧先出现说明是自己这边带进来的。 */}
+              {evidence && evidence.hits.length > 0 && (
+                <div className="mt-24">
+                  <div className="field-label">凭证来源</div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      lineHeight: 1.7,
+                      marginBottom: 8,
+                      color: evidence.verdict.code === 'response_side'
+                        ? 'var(--xd-danger)'
+                        : 'var(--xd-text-dim)',
+                    }}
+                  >
+                    <b>{evidence.verdict.label}</b>
+                    <div>{evidence.verdict.note}</div>
+                  </div>
+
+                  {evidence.hits.filter((h) => h.first_seen).slice(0, 6).map((h, i) => (
+                    <div className="detail-row" key={`${h.fingerprint}-${i}`}>
+                      <span className="detail-key" style={{ width: 68 }}>
+                        {CATEGORY_LABELS[h.category] ?? h.category}
+                      </span>
+                      <span className="detail-val">
+                        <div>
+                          首次出现：{h.first_seen!.direction_label}
+                          {h.first_seen!.role ? ` · ${h.first_seen!.role}` : ''}
+                        </div>
+                        <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
+                          {h.first_seen!.time}
+                          {h.evidence ? ` · ${h.evidence}` : ''}
+                        </div>
+                        <div className="mono faint" style={{ fontSize: 10, marginTop: 2 }}>
+                          指纹 {h.fingerprint.slice(0, 16)}…
+                        </div>
+                      </span>
+                    </div>
+                  ))}
+
+                  <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
+                    指纹是 SHA-256，对方可用原文复核；导出的证据不含凭证原文。
+                    若判定为「中转站返回内容」，这份证据可以用来说明
+                    「这枚凭证不是我这轮发出去的」。
+                  </div>
+
+                  <div className="flex items-center gap-8 mt-8">
+                    <button className="btn ghost sm" onClick={() => void handleCopyEvidence()}>
+                      复制证据
+                    </button>
+                    <button className="btn ghost sm" onClick={handleExportEvidence}>
+                      导出 JSON
+                    </button>
+                  </div>
                 </div>
               )}
 

@@ -584,6 +584,12 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 OBSERVATION_ONLY_SIGNALS: frozenset = STATISTICAL_SIGNALS | {
     "content_policy",
     "dangerous_content",
+    # ★ 2026-10-23：响应里出现「请求从未发送过的凭证」。
+    #   这一类是为「留证据给用户去核实」而存在的，不是拦截理由：
+    #   模型完全可能在示例代码里自己编一枚 eyJ 开头的 token。
+    #   只记录、只提示，绝不因为这一条把对话打断 ——
+    #   打断了用户反而拿不到证据。
+    "credential_from_response",
 }
 
 

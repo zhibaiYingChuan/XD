@@ -251,6 +251,8 @@ tests/*
 #      balanced/strict 两档各跑请求侧与响应侧，
 #      并把「被拦内容有没有真的发到上游」作为外泄判据）。
 !tests/test_false_positive_e2e.py
+# ★ 2026-10-23：凭证来源台账（谁把 token 放进来的）
+!tests/test_credential_provenance.py
 !tests/cdp_desktop_regression.py
 # ★ 2026-10-22：仓库只保留「程序 + 用户文档 + CI 会跑的门禁」。
 #   下面这些是本地排障/变异测试用的脚本，CI 从不调用，

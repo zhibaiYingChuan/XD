@@ -53,13 +53,16 @@ from ..config import (
 from ..reputation.tracker import ReputationTracker
 from ..storage.db import PersonalStorage, kpi_contribution
 from ..types import (
-    Action, LogEntry, LogType, RedactionRecord, SecurityLevel, mask_secret,
+    Action, LogEntry, LogType, RedactionRecord, SecurityLevel,
+    VerificationFinding, mask_secret,
 )
 from .baseline import build_baseline
 from .listeners import RelayPortListeners
 from .restorer import ContentRestorer
-from .sanitizer import RequestSanitizer
-from .verifier import OBSERVATION_ONLY_SIGNALS, ResponseVerifier
+from .sanitizer import CATEGORY_LABELS, RequestSanitizer
+from .verifier import (
+    OBSERVATION_ONLY_SIGNALS, ResponseVerifier, decide_response_action,
+)
 
 logger = logging.getLogger("xuandun-personal.app")
 
@@ -548,9 +551,15 @@ def create_app() -> FastAPI:
             #   逐条处理后每条的 offsets 都相对自身，彻底消除偏移问题，
             #   且只需扫描一次（BLOCK 由 _BlockRequest 异常上抛）。
             try:
+                credential_hits: List[Dict[str, Any]] = []
                 redaction_records = _sanitize_messages_inplace(
-                    body, _sanitizer
+                    body, _sanitizer, credential_hits
                 )
+                # ★ 2026-10-23：请求侧的每一条命中都记进凭证台账。
+                #   这是「这枚 token 是你这边先出现的」的唯一依据 ——
+                #   没有它，事后只能看到「它现在在请求里」，
+                #   分不清是用户手打、工具返回，还是中转站早先塞进来的。
+                _record_request_credentials(credential_hits, session_id)
             except _BlockRequest as blocked:
                 # ★ 阻断也必须留下可核对的依据。
                 #   原实现只写 hit_categories 就 return，
@@ -571,7 +580,8 @@ def create_app() -> FastAPI:
                     summary=blocked.reason,
                     detail_json=json.dumps(
                         _block_evidence(
-                            blocked.categories, blocked.records, blocked.context
+                            blocked.categories, blocked.records,
+                            blocked.context, blocked.hits,
                         ),
                         ensure_ascii=False,
                     ),
@@ -584,6 +594,14 @@ def create_app() -> FastAPI:
                     _storage.insert_redactions(
                         log_id, session_id, blocked.records
                     )
+                # ★ 2026-10-23：阻断路径同样记台账（带日志 id）。
+                #   用户事后要从日志里导出证据，台账必须能回指到这条日志。
+                _record_request_credentials(
+                    credential_hits, session_id, log_id=log_id)
+                _record_request_credentials(
+                    blocked.hits, session_id, log_id=log_id,
+                    role=blocked.context,
+                )
                 # ★ P2-13：阻断路径也记 total_calls，否则首页
                 #   「今日已检查 N 次」失真、KPI 数字对不上
                 #
@@ -609,7 +627,7 @@ def create_app() -> FastAPI:
                     content={
                         "error": {
                             "type": "sensitive_data_blocked",
-                            "message": blocked.reason,
+                            "message": _blocked_client_message(blocked),
                             "log_id": log_id,
                         }
                     },
@@ -865,6 +883,10 @@ def create_app() -> FastAPI:
 
         content = _extract_content(payload)
 
+        # ★ 2026-10-23：凭证来源判定必须在**还原占位符之前**做 ——
+        #   还原后响应里会出现用户自己的原文，那不是中转站返回的东西。
+        credential_findings = _check_response_credentials(content, session_id)
+
         # 第二层：响应验证（★ 传入请求基线做结构差分）
         verify_result = None
         if _config.guard.enable_response_verify and _verifier is not None:
@@ -896,6 +918,7 @@ def create_app() -> FastAPI:
 
         # 合并所有发现项
         findings = list(verify_result.findings) if verify_result else []
+        findings.extend(credential_findings)
         findings.extend(anomalies)
         max_sev = _max_severity(findings)
         # ★ v0.1.0 修复缺口 7：原实现 action 只取 verify_result，
@@ -1059,6 +1082,9 @@ def create_app() -> FastAPI:
                 if not state["blocked"]:
                     full = "".join(collected)
                     sse_text, sse_tools, sse_model = _extract_sse_frames(full)
+                    # ★ 2026-10-23：凭证来源判定（原始响应，未还原占位符）
+                    findings.extend(
+                        _check_response_credentials(sse_text, session_id))
 
                     # 记录中转站返回的模型（供模型降级比对）
                     if _storage is not None and sse_model:
@@ -1337,6 +1363,117 @@ def create_app() -> FastAPI:
         return {
             "entry": entry.to_dict(),
             "redactions": _storage.get_redactions(log_id),
+        }
+
+    @app.get("/api/logs/{log_id}/evidence")
+    async def get_log_evidence(log_id: int):
+        """生成一条日志的可对外证据包（JSON）。
+
+        ★★ 为什么需要它
+        ────────────────────────────────────────────────────────────
+        用户要拿证据去问中转站「这枚 token 为什么会在你的返回里」，
+        而日志详情页是给自己看的：里面有内部类别名、有界面文案。
+        证据包要的是另一套东西 —— 时间、域名、模型、命中位置、
+        指纹、首次出现方向，且**不含任何凭证原文**（否则证据本身
+        又泄露一次）。
+
+        ★ 判定口径（写进 verdict，避免用户被对方一句话顶回来）
+          · response_side：凭证首次出现在中转站返回内容里，
+            且此前的请求从未发送过它 —— 这是可以要求对方解释的证据。
+          · request_side：凭证首次出现在请求侧（用户手打 / 工具返回），
+            说明中转站没有引入它。
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        entry = _storage.get_log(log_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="日志不存在")
+
+        try:
+            detail = json.loads(entry.detail_json or "[]")
+        except json.JSONDecodeError:
+            detail = []
+        if isinstance(detail, dict):
+            detail = detail.get("findings") or []
+        if not isinstance(detail, list):
+            detail = []
+
+        hits: List[Dict[str, Any]] = []
+        response_side = False
+        for item in detail:
+            if not isinstance(item, dict):
+                continue
+            fp = str(item.get("fingerprint") or "")
+            origin = _storage.get_credential(fp) if fp else None
+            if origin and origin.get("direction") == "response":
+                response_side = True
+            hits.append({
+                "category": item.get("category") or "",
+                "severity": item.get("severity") or "",
+                "detail": item.get("detail") or "",
+                "evidence": item.get("evidence") or "",
+                "fingerprint": fp,
+                "first_seen": (
+                    {
+                        "direction": origin.get("direction"),
+                        "direction_label": (
+                            "中转站返回内容"
+                            if origin.get("direction") == "response"
+                            else "请求侧（你的输入或工具返回）"
+                        ),
+                        "role": origin.get("role") or "",
+                        "time": _dt.datetime.fromtimestamp(
+                            float(origin.get("first_seen") or 0)
+                        ).strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    if origin else None
+                ),
+            })
+
+        if response_side:
+            verdict = {
+                "code": "response_side",
+                "label": "凭证首次出现在中转站返回的内容里",
+                "note": (
+                    "本次日志涉及的凭证，在台账里首次出现于中转站返回的内容，"
+                    "此前的请求从未发送过它。可要求对方说明该凭证的来源。"
+                    "若你曾让模型生成示例凭证，请先排除这一可能。"
+                ),
+            }
+        elif any(h["first_seen"] for h in hits):
+            verdict = {
+                "code": "request_side",
+                "label": "凭证首次出现在请求侧",
+                "note": (
+                    "本次日志涉及的凭证，在台账里首次出现于你这边的输入或工具返回，"
+                    "不是中转站返回的。"
+                ),
+            }
+        else:
+            verdict = {
+                "code": "unknown",
+                "label": "无凭证来源记录",
+                "note": "这条日志没有可回查的凭证指纹（可能是老版本写入的记录）。",
+            }
+
+        return {
+            "schema": "xuandun.evidence.v1",
+            "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "engine_version": _PKG_VERSION,
+            "scope": "仅含凭证指纹与打码片段，不含凭证原文",
+            "log": {
+                "id": entry.id,
+                "time": _dt.datetime.fromtimestamp(entry.timestamp).strftime(
+                    "%Y-%m-%d %H:%M:%S"),
+                "log_type": entry.log_type,
+                "action": entry.action,
+                "severity": entry.severity,
+                "relay_domain": entry.relay_domain,
+                "model": entry.model,
+                "summary": entry.summary,
+            },
+            "verdict": verdict,
+            "hits": hits,
         }
 
     @app.post("/api/logs/{log_id}/mark-safe")
@@ -2729,7 +2866,21 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
         return Action.PASS.value if not findings_or_none else Action.ALERT.value
     if _verifier is not None:
         try:
-            return _verifier._threshold_for(max_sev)
+            action = _verifier._threshold_for(max_sev)
+            # ★ 2026-10-23：与 decide_response_action 同一道观测类闸门。
+            #   原实现只按严重度查表，于是「仅记录」类发现只要标了 high
+            #   就会阻断 —— 而这类发现的意义是留证据，不是打断对话。
+            cats = {
+                getattr(f, "category", "")
+                for f in (findings_or_none or [])
+            }
+            if (
+                action == Action.BLOCK.value
+                and cats
+                and cats <= OBSERVATION_ONLY_SIGNALS
+            ):
+                return Action.ALERT.value
+            return action
         except Exception:  # noqa: BLE001
             pass
     # verifier 不可用时的保守兜底：high 直接阻断
@@ -2758,7 +2909,7 @@ def _verify_restored_text(
 
 
 def _sanitize_messages_inplace(
-    body: Dict[str, Any], sanitizer
+    body: Dict[str, Any], sanitizer, hits_out: Optional[List[Dict[str, Any]]] = None
 ) -> List[Any]:
     """逐条消息独立脱敏，就地写回，并返回全部脱敏记录。
 
@@ -2771,6 +2922,10 @@ def _sanitize_messages_inplace(
         ③ 同一段内容被重复发送（拼接结果含全部历史 + 本轮）。
 
     逐条处理后每条的 offsets 都相对自身内容，彻底消除偏移问题。
+
+    ★ hits_out：可选的收集器。每条命中（含指纹/打码片段/所在角色）
+      会追加进去，供调用方写入凭证来源台账 —— 请求侧只在这里能看到
+      「这枚 token 是在哪条消息里出现的」。
     """
     messages = body.get("messages")
     if not isinstance(messages, list) or sanitizer is None:
@@ -2779,21 +2934,47 @@ def _sanitize_messages_inplace(
     all_records: List[Any] = []
     offset_base = 0   # 占位符编号跨消息连续递增
 
-    for m in messages:
+    # ★★ 2026-10-23：「拦截」只能发生在用户本轮输入上。
+    #
+    #   为什么必须这样（这是用户被彻底卡死的根因）：
+    #     IDE 会把整段对话历史（含工具返回）每一轮重新发一遍。
+    #     历史里那段带 token 的工具返回只要还在，每一轮都会命中阻断，
+    #     而用户**没有任何办法**从 IDE 里删掉它 —— 重试永远失败，
+    #     换 Key / 换中转站也没用（请求根本没发出去）。
+    #     目标式任务又不能新开会话，于是整台 AI 直接不可用。
+    #
+    #   规则：
+    #     · 只有「最后一条 user 消息」（= 用户此刻敲的话）允许阻断；
+    #     · 历史轮次、助手回复、工具返回一律只打码 —— 照样不外发，
+    #       但不会把当前这一轮拦住。
+    last_user_idx = -1
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and str(m.get("role") or "").lower() == "user":
+            last_user_idx = i
+
+    for i, m in enumerate(messages):
         if not isinstance(m, dict):
             continue
         content = m.get("content")
+        # 只有本轮用户输入允许「拦住」；其余内容只打码。
+        block_as_redact = (i != last_user_idx)
         # Anthropic 形态：content 是 [{type,text},...] 分块
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and isinstance(block.get("text"), str):
-                    r = sanitizer.sanitize(block["text"])
+                    r = sanitizer.sanitize(
+                        block["text"], block_as_redact=block_as_redact)
+                    role_hint = _message_role_hint(m)
+                    if hits_out is not None:
+                        hits_out.extend(
+                            {**h, "role": role_hint} for h in r.hits)
                     if r.action == Action.BLOCK.value:
                         raise _BlockRequest(
                             r.blocked_reason or "敏感信息阻断",
                             r.hit_categories,
                             r.records,
-                            context=_message_role_hint(m),
+                            context=role_hint,
+                            hits=r.hits,
                         )
                     if r.records:
                         block["text"] = _shift_placeholders(
@@ -2808,13 +2989,17 @@ def _sanitize_messages_inplace(
         if not isinstance(content, str) or not content:
             continue
 
-        r = sanitizer.sanitize(content)
+        r = sanitizer.sanitize(content, block_as_redact=block_as_redact)
+        role_hint = _message_role_hint(m)
+        if hits_out is not None:
+            hits_out.extend({**h, "role": role_hint} for h in r.hits)
         if r.action == Action.BLOCK.value:
             raise _BlockRequest(
                 r.blocked_reason or "敏感信息阻断",
                 r.hit_categories,
                 r.records,
-                context=_message_role_hint(m),
+                context=role_hint,
+                hits=r.hits,
             )
         if not r.records:
             continue
@@ -2827,8 +3012,128 @@ def _sanitize_messages_inplace(
     return all_records
 
 
+def _blocked_client_message(blocked: "_BlockRequest") -> str:
+    """给 AI 工具看的 403 文案。
+
+    ★ 2026-10-23：原来的 message 只有「检测到不可外发的敏感信息：JWT 令牌」。
+      用户在 IDE 里看到的是一句「模型请求失败」，既不知道发生了什么，
+      也不知道该做什么，只能来问「这是不是误报」。
+      现在补齐三件事：从哪来、有没有发出去、下一步怎么办。
+    """
+    where = f"「{blocked.context}」" if blocked.context else "请求内容"
+    return (
+        f"{blocked.reason}（出现在{where}里，已拦下、没有发给中转站）。"
+        "把这段内容删掉后重试即可。"
+    )
+
+
+def _record_request_credentials(
+    hits: Optional[List[Dict[str, Any]]],
+    session_id: str,
+    log_id: Optional[int] = None,
+    role: str = "",
+) -> None:
+    """把请求侧的命中写进凭证台账（只记首次出现）。
+
+    ★ 为什么不记原文：台账要长期留着给用户对质用，
+      原文留在库里只会多一个泄露面。指纹 + 打码片段足够核对。
+    """
+    if not hits or _storage is None:
+        return
+    try:
+        _storage.record_credential_events(
+            [
+                {
+                    **h,
+                    "direction": "request",
+                    "role": str(h.get("role") or role),
+                }
+                for h in hits
+            ],
+            session_id=session_id,
+            log_id=log_id,
+        )
+    except Exception as e:  # noqa: BLE001 — 台账失败不影响转发
+        logger.warning("凭证台账写入失败: %s", e)
+
+
+def _check_response_credentials(
+    text: str, session_id: str, log_id: Optional[int] = None
+) -> List[Any]:
+    """响应侧来源判定：返回「这轮请求从未发送过的新凭证」发现项。
+
+    ★★ 这是唯一能指证中转站的判据形态
+    ────────────────────────────────────────────────────────────
+    请求里的 token 只可能来自用户这边（手打 / 工具返回 / 历史）；
+    中转站想「偷偷塞东西」，只可能塞在**响应**里。
+    所以判据是：响应里出现的凭证，在台账里从未出现过。
+
+    ★ 为什么要看台账而不是只看本轮请求：
+      用户可能三轮前就发过这枚 token，模型这轮只是复述 ——
+      只看本轮会把它冤枉成「中转站新增」，反过来毁掉证据的可信度。
+
+    ★ 为什么措辞是「请核实」而不是「它偷了」：
+      模型完全可能在示例代码里自己编一枚 eyJ 开头的假 token。
+      我们能证明的只有「这枚凭证不是你这轮发出去的」；
+      结论必须留给对方解释，否则对方一句「模型自己生成的」就顶回来了。
+    """
+    if not text or _sanitizer is None or _storage is None:
+        return []
+
+    findings: List[Any] = []
+    fresh: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    # ★ 只对「凭证」做来源判定：邮箱/手机号出现在模型回复里太常见，
+    #   把它们也当成「中转站新增」只会制造噪音，反而埋掉真正的证据。
+    credential_categories = {"jwt", "api_key", "aws_key", "private_key"}
+
+    for hit in _sanitizer.scan(text):
+        if str(hit.get("category") or "") not in credential_categories:
+            continue
+        fp = str(hit.get("fingerprint") or "")
+        if not fp or fp in seen:
+            continue
+        seen.add(fp)
+        if _storage.get_credential(fp) is not None:
+            continue          # 台账里已有：不是「新增」，不指控
+        fresh.append(hit)
+        label = CATEGORY_LABELS.get(
+            str(hit.get("category") or ""), str(hit.get("category") or "凭证"))
+        findings.append(VerificationFinding(
+            category="credential_from_response",
+            severity="medium",
+            detail=(
+                f"中转站返回的内容里出现了一枚 {label}"
+                f"（{hit.get('masked') or '已打码'}，{hit.get('length')} 字符），"
+                "而此前的请求从未发送过它。"
+                "如果你没有让模型生成示例凭证，请向中转站核实来源。"
+            ),
+            evidence=(
+                f"第 {hit.get('start')}-{hit.get('end')} 字符 · "
+                f"{hit.get('masked') or ''}"
+            ),
+            fingerprint=fp,
+        ))
+
+    if fresh:
+        try:
+            _storage.record_credential_events(
+                [
+                    {**h, "direction": "response", "role": "模型回复"}
+                    for h in fresh
+                ],
+                session_id=session_id,
+                log_id=log_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("响应侧凭证台账写入失败: %s", e)
+    return findings
+
+
 def _block_evidence(
-    categories: List[str], records: List[Any], context: str
+    categories: List[str], records: List[Any], context: str,
+    hits: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """构造阻断依据（detail_json）。
 
@@ -2837,9 +3142,10 @@ def _block_evidence(
       两类事件用同一套展示逻辑，用户不必学两种格式。
       若这里改成 dict，页面会解析不出数组、依据整段消失 ——
       那正是本轮修的病，不能再犯一次。
-    """
-    from .sanitizer import CATEGORY_LABELS
 
+    ★ hits：与 records 同序的命中项，提供指纹。
+      证据包靠指纹回查台账，回答「这枚凭证第一次出现在哪一侧」。
+    """
     labels = [CATEGORY_LABELS.get(c, c) for c in categories]
     head = f"{'、'.join(labels)}（{context}）" if context else "、".join(labels)
     out: List[Dict[str, Any]] = [
@@ -2848,9 +3154,13 @@ def _block_evidence(
             "severity": "high",
             "detail": f"命中不可外发内容：{head}",
             "evidence": "",
+            "fingerprint": "",
         }
     ]
-    for r in records:
+    for idx, r in enumerate(records):
+        fp = ""
+        if hits and idx < len(hits):
+            fp = str(hits[idx].get("fingerprint") or "")
         out.append(
             {
                 "category": r.category,
@@ -2865,6 +3175,7 @@ def _block_evidence(
                 #   掩码，这里再兜一次（幂等），防止未来新增调用方
                 #   把明文带进 detail_json —— 它会被导出、会被详情页展示。
                 "evidence": mask_secret(r.original),
+                "fingerprint": fp,
             }
         )
     return out
@@ -3007,12 +3318,16 @@ class _BlockRequest(Exception):
         categories: Optional[List[str]] = None,
         records: Optional[List[Any]] = None,
         context: str = "",
+        hits: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.categories: List[str] = list(categories or [])
         self.records: List[Any] = list(records or [])
         self.context = context
+        # ★ 2026-10-23：命中项的指纹 + 打码片段（不含原文）。
+        #   台账靠它判定「这枚凭证第一次出现在哪一侧」。
+        self.hits: List[Dict[str, Any]] = list(hits or [])
 
 
 def _apply_sanitized(body: Dict[str, Any], sanitizer) -> None:

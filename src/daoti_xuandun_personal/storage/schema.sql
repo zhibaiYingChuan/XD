@@ -138,6 +138,37 @@ CREATE INDEX IF NOT EXISTS idx_request_baseline_created
     ON request_baseline(created_at);
 
 -- ══════════════════════════════════════════════════════════════
+-- 凭证来源台账（2026-10-23）
+--
+-- 为什么要有这张表
+-- ────────────────────────────────────────────────────────────
+-- 「这枚 token 是你自己的工具带进来的，还是中转站返回的？」
+-- 只靠单条日志答不了 —— 请求侧只看得见「它现在在请求里」。
+-- 台账按指纹记录**首次出现**的方向与角色：
+--   direction=request  → 用户这边先出现的（手打 / 工具返回 / 历史）
+--   direction=response → 中转站的回复里先出现的
+-- 后者且「本次请求从未发送过」时，才是可以拿去对质的证据。
+--
+-- 隐私：只存 SHA-256 指纹、打码片段与长度，**不存原文**。
+-- ══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS credential_events (
+    fingerprint TEXT PRIMARY KEY,              -- SHA-256(凭证原文)
+    session_id  TEXT NOT NULL DEFAULT '',
+    direction   TEXT NOT NULL,                 -- request / response
+    role        TEXT NOT NULL DEFAULT '',      -- 用户提问 / 工具返回 / 模型回复 …
+    category    TEXT NOT NULL,                 -- jwt / api_key / email …
+    masked      TEXT NOT NULL DEFAULT '',       -- 前 4 + 长度 + 尾 2
+    length      INTEGER NOT NULL DEFAULT 0,
+    first_seen  REAL NOT NULL,
+    log_id      INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_credential_first_seen
+    ON credential_events(first_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_credential_session
+    ON credential_events(session_id);
+
+-- ══════════════════════════════════════════════════════════════
 -- 每日统计表（首页 KPI 卡片数据源）
 -- ══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS daily_stats (

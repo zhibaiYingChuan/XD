@@ -1075,6 +1075,69 @@ class PersonalStorage:
         return int(cur.rowcount or 0)
 
     # ══════════════════════════════════════════════════════════
+    # 凭证来源台账（★ 2026-10-23）
+    #
+    # 回答「这枚 token 第一次出现在哪一侧」——
+    # 请求侧先出现 = 用户自己的手打 / 工具返回；
+    # 响应侧先出现 = 中转站的回复里带来的。
+    # 后者且本次请求从未发送过，才是可以拿去对质的证据。
+    # ══════════════════════════════════════════════════════════
+
+    def record_credential_events(
+        self,
+        events: List[Dict[str, Any]],
+        session_id: str = "",
+        log_id: Optional[int] = None,
+    ) -> int:
+        """记录凭证的**首次出现**；已存在的指纹不覆盖。
+
+        ★ 为什么是 INSERT OR IGNORE 而不是 UPSERT：
+          「首次出现方向」是定责依据，后来的出现绝不能改写它 ——
+          一枚 token 先出现在中转站回复里、之后被用户又发回请求，
+          若覆盖成 request，证据方向就反了。
+          宁可少更新，也不能改错。
+        """
+        if not events:
+            return 0
+        now = time.time()
+        rows = [
+            (
+                str(e.get("fingerprint") or ""),
+                session_id,
+                str(e.get("direction") or "request"),
+                str(e.get("role") or ""),
+                str(e.get("category") or ""),
+                str(e.get("masked") or ""),
+                int(e.get("length") or 0),
+                now,
+                log_id,
+            )
+            for e in events
+            if e.get("fingerprint")
+        ]
+        if not rows:
+            return 0
+        with self._conn:
+            self._conn.executemany(
+                """INSERT OR IGNORE INTO credential_events
+                   (fingerprint, session_id, direction, role, category,
+                    masked, length, first_seen, log_id)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+        return len(rows)
+
+    def get_credential(self, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """查一枚凭证的首次出现记录；没有则 None。"""
+        if not fingerprint:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM credential_events WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    # ══════════════════════════════════════════════════════════
     # 请求基线（★ v0.1.0 新增）
     #
     # 这是响应侧检测唯一可信的对照物来源。有了它，判据才能从

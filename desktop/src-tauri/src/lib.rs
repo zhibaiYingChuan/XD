@@ -1970,6 +1970,25 @@ async fn get_log_detail(
     .await
 }
 
+/// 单条日志的可对外证据包（凭证指纹 + 首次出现方向 + 打码片段）。
+///
+/// ★ 与日志详情分开：详情是给你自己看的（含内部类别名），
+///   证据包是拿去问中转站的 —— 只含可核对的字段，不含凭证原文。
+#[tauri::command]
+async fn get_log_evidence(
+    app: tauri::AppHandle,
+    id: u64,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::GET,
+        &format!("/api/logs/{id}/evidence"),
+        None,
+        REQ_NORMAL,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn delete_log(app: tauri::AppHandle, id: u64) -> Result<serde_json::Value, String> {
     ensure_engine_running(&app).await?;
@@ -2301,6 +2320,7 @@ pub fn run() {
             get_diagnostics,
             get_logs,
             get_log_detail,
+            get_log_evidence,
             delete_log,
             mark_log_safe,
             unmark_log_safe,

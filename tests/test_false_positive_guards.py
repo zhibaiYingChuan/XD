@@ -430,3 +430,179 @@ class TestFrontendAlignment:
             "前端 OBSERVATION_ONLY_CATEGORIES 未与后端对齐 —— "
             "首页可能把「仅记录」项显示成头条"
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# 工具返回里的凭证：打码放行，不整轮阻断（2026-10-23）
+# ══════════════════════════════════════════════════════════════
+#
+# 用户诉求
+# ────────────────────────────────────────────────────────────
+# 「模型直接就中断了对话。所以我才问一下这是不是误报？」
+#
+# 实情：AI 的工具（读文件 / 请求接口）把一枚真 JWT 带回了对话，
+# 请求侧按「JWT 一律阻断」把整轮请求拒了，IDE 只显示
+# 「模型请求失败：检测到不可外发的敏感信息：JWT 令牌」。
+# 这不是误报（token 是真的），但处置过重：
+#   · 对话被硬切断，用户不知道为什么；
+#   · 那段工具返回留在历史里，之后每轮都会被再拦一次。
+# 打码同样能保证 token 不外发（中转站只看到 ⟦XD_n⟧），且不打断对话。
+#
+# 判据锁两件事：
+#   1. 工具返回（role=tool）→ 打码放行；用户自己打的字 → 仍然阻断
+#   2. 403 文案必须说清「从哪来 / 有没有发出去 / 怎么办」
+
+JWT_SAMPLE = (
+    "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6InRlc3QifQ"
+    ".c2lnbmF0dXJlLXNpZ25hdHVyZS1zaWduYXR1cmU"
+)
+
+
+def _sz(level: str = "balanced"):
+    from daoti_xuandun_personal.proxy.sanitizer import RequestSanitizer
+
+    return RequestSanitizer(level=level)
+
+
+def _messages(role: str):
+    return {"messages": [
+        {"role": role, "content": f'工具结果：{{"access_token": "{JWT_SAMPLE}"}}'},
+    ]}
+
+
+class TestToolResultCredentialsAreRedacted:
+    def test_tool_result_is_redacted_not_blocked(self):
+        """★★ 工具返回里的 JWT 必须打码放行 —— 整轮阻断会把对话切断。"""
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        body = _messages("tool")
+        records = app_mod._sanitize_messages_inplace(body, _sz())
+
+        content = body["messages"][0]["content"]
+        assert records, "工具返回里的 JWT 完全没有被处理 —— 会原样发出去"
+        assert JWT_SAMPLE not in content, "打码后原文仍在请求体里"
+        assert "⟦XD_" in content, "没有写入占位符，中转站仍能看到原文"
+
+    def test_user_message_still_blocks(self):
+        """反向自证：用户自己贴 JWT 仍要拦，且拦得住。
+
+        ★ 这条是关键 —— 只测「工具返回放行」的话，
+          把阻断逻辑整个删掉也能通过。
+        """
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        try:
+            app_mod._sanitize_messages_inplace(_messages("user"), _sz())
+        except app_mod._BlockRequest as e:
+            assert "JWT" in e.reason
+            return
+        raise AssertionError(
+            "用户自己贴 JWT 不再被拦 —— 修可用性修成了漏放"
+        )
+
+    def test_flag_is_opt_in(self):
+        """默认行为不变：不传 block_as_redact 时 JWT 仍是阻断。"""
+        r = _sz().sanitize(JWT_SAMPLE)
+        assert r.action == "block", "默认策略被意外改成了打码"
+
+        r2 = _sz().sanitize(JWT_SAMPLE, block_as_redact=True)
+        assert r2.action == "redact", "显式降级后仍返回阻断"
+        assert JWT_SAMPLE not in r2.sanitized_text
+
+    def test_tool_result_email_also_redacted(self):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        body = {"messages": [
+            {"role": "tool", "content": "用户邮箱：r5iexxxx@example.com"},
+        ]}
+        # strict 档下邮箱为阻断策略，工具返回仍应降级为打码
+        app_mod._sanitize_messages_inplace(body, _sz("strict"))
+        content = body["messages"][0]["content"]
+        assert "r5iexxxx@example.com" not in content
+        assert "⟦XD_" in content
+
+
+class TestHistoryNeverDeadlocksTheConversation:
+    """★★ 历史里的敏感内容只打码，绝不阻断当前这一轮。
+
+    这是「用户被彻底卡死」的根因：
+      目标式任务不能新开会话，而 IDE 每轮都会重发整段历史。
+      历史里只要有一段带 token 的工具返回，每一轮都会被拦，
+      用户从 IDE 里又删不掉它 —— 除了暂停防护没有任何出路。
+
+    规则：只有**最后一条 user 消息**（用户此刻敲的话）允许阻断。
+    """
+
+    def test_old_user_message_does_not_block_the_current_turn(self):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        body = {"messages": [
+            {"role": "user", "content": f"我之前贴过：{JWT_SAMPLE}"},
+            {"role": "assistant", "content": "收到"},
+            {"role": "user", "content": "继续做下一步"},
+        ]}
+        # 不能抛 _BlockRequest —— 抛了就代表这一轮又被拦死
+        app_mod._sanitize_messages_inplace(body, _sz())
+        assert JWT_SAMPLE not in body["messages"][0]["content"], (
+            "历史里的 token 没有打码 —— 会原样发给中转站"
+        )
+        assert body["messages"][2]["content"] == "继续做下一步", (
+            "本轮用户输入被改写了"
+        )
+
+    def test_agent_history_with_tool_token_can_continue(self):
+        """真实形态：user → assistant(tool_call) → tool(带 token) → user(继续)。"""
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        body = {"messages": [
+            {"role": "user", "content": "登录一下看看"},
+            {"role": "assistant", "content": "好的"},
+            {"role": "tool", "content": f'{{"access_token": "{JWT_SAMPLE}"}}'},
+            {"role": "user", "content": "把结果整理成报告"},
+        ]}
+        app_mod._sanitize_messages_inplace(body, _sz())
+        assert JWT_SAMPLE not in body["messages"][2]["content"]
+        assert "⟦XD_" in body["messages"][2]["content"]
+
+    def test_last_user_message_still_blocks(self):
+        """★ 反向自证：本轮输入里的 token 仍然要拦。"""
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        body = {"messages": [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好"},
+            {"role": "user", "content": f"帮我看看这个 {JWT_SAMPLE}"},
+        ]}
+        try:
+            app_mod._sanitize_messages_inplace(body, _sz())
+        except app_mod._BlockRequest as e:
+            assert e.context == "用户提问"
+            return
+        raise AssertionError(
+            "本轮输入里的 JWT 不再被拦 —— 用户会在不知情下外发凭证"
+        )
+
+
+class TestBlockedMessageTellsTheUserWhatHappened:
+    def test_message_says_where_and_whether_it_left(self):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        blocked = app_mod._BlockRequest(
+            "检测到不可外发的敏感信息：JWT 令牌",
+            ["jwt"], [], context="用户提问",
+        )
+        msg = app_mod._blocked_client_message(blocked)
+        assert "用户提问" in msg, "没说明凭证出现在哪 —— 用户只能猜"
+        assert "没有发给中转站" in msg, "没告诉用户 token 到底发没发出去"
+        assert "删掉" in msg, "没告诉用户下一步怎么做"
+
+    def test_message_has_no_internal_jargon(self):
+        """不能把内部类别名（sensitive_leak 等）直接甩给用户。"""
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        blocked = app_mod._BlockRequest("检测到不可外发的敏感信息：JWT 令牌")
+        msg = app_mod._blocked_client_message(blocked)
+        for jargon in ("sensitive_leak", "request_sanitize", "blocked_reason"):
+            assert jargon not in msg
+
