@@ -252,8 +252,16 @@ tests/*
 #      并把「被拦内容有没有真的发到上游」作为外泄判据）。
 !tests/test_false_positive_e2e.py
 !tests/cdp_desktop_regression.py
-!tests/cdp_popup_probe.py
-!tests/mutation_check.py
+# ★ 2026-10-22：仓库只保留「程序 + 用户文档 + CI 会跑的门禁」。
+#   下面这些是本地排障/变异测试用的脚本，CI 从不调用，
+#   留在仓库里只会让公开源码多出一堆与用户无关的入口。
+#   文件仍保留在本地（被 tests/* 规则忽略），需要时照常跑。
+# tests/mutation_check.py
+# tests/cdp_popup_probe.py
+
+# 本地开发辅助（cargo example：离线渲染托盘图标）
+# 只用于研发核对配色，不参与构建，也不随安装包分发。
+desktop/src-tauri/examples/
 
 # ── CI 门禁细节：防护门禁的存在与判据、发布流水线的公钥断言。
 # 公开这些等于告诉破解者「我们重点防什么、怎么防的」。

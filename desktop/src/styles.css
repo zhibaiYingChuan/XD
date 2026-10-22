@@ -514,6 +514,42 @@ textarea {
   flex-shrink: 0;
 }
 
+/* 专属入口端口（2026-10-22）
+   ★ 允许换行：窄窗口下「端口 + 复制 + 改端口」挤在一行会溢出，
+     而这个区块的存在意义正是让用户看清那个地址，不能截断到看不见。 */
+.relay-port-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--xd-fs-caption);
+  color: var(--xd-text-dim);
+}
+
+.relay-port-label {
+  flex-shrink: 0;
+  color: var(--xd-text-dim);
+}
+
+.relay-port-url {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--xd-text);
+}
+
+.relay-port-hint {
+  color: var(--xd-text-dim);
+}
+
+/* 端口没起来必须显眼：这时用户照抄这个地址去配 AI 工具会连不上 */
+.relay-port-warn {
+  color: var(--xd-danger);
+  font-weight: 600;
+}
+
 /* 「添加另一家」按钮
    ★ 此前用 .btn.ghost.sm：透明背景 + --xd-text-dim 前景，
      在深色卡片上与旁边的说明文字几乎同色，用户报告「基本看不见」。

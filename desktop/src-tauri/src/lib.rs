@@ -1869,20 +1869,46 @@ async fn switch_relay(
 ///
 /// ★ 没有这条命令，多中转站就只是「看得见的界面」：
 ///   列表只能靠切换产生，而切换不会新增 —— 用户永远只有一家。
+///
+/// ★ port：这家专属的入口端口，0 表示不单独分配。
+///   有了它，同一台机器上两家地址不同，AI 工具才肯让你并存两条
+///   （多数 IDE 只按地址去重，模型 ID 相同也无所谓）。
 #[tauri::command]
 async fn add_relay(
     app: tauri::AppHandle,
     name: String,
     base_url: String,
     api_key: String,
+    port: u16,
 ) -> Result<serde_json::Value, String> {
     ensure_engine_running(&app).await?;
     proxy_call(
         reqwest::Method::POST,
         "/api/relays/configured",
         Some(serde_json::json!({
-            "name": name, "base_url": base_url, "api_key": api_key
+            "name": name, "base_url": base_url, "api_key": api_key, "port": port
         })),
+        REQ_NORMAL,
+    )
+    .await
+}
+
+/// 给某一家分配 / 修改 / 取消专属入口端口（0 = 取消）。
+///
+/// ★ 单独一条命令而不是复用配置保存：
+///   配置接口里 others 的 Key 是掩码副本，整体回传会把别的家
+///   的真实 Key 覆盖掉。改端口就只改端口。
+#[tauri::command]
+async fn set_relay_port(
+    app: tauri::AppHandle,
+    id: String,
+    port: u16,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        "/api/relays/configured/port",
+        Some(serde_json::json!({ "id": id, "port": port })),
         REQ_NORMAL,
     )
     .await
@@ -2287,6 +2313,7 @@ pub fn run() {
             get_configured_relays,
             switch_relay,
             add_relay,
+            set_relay_port,
             remove_relay,
             precheck_relay,
             test_relay,

@@ -144,6 +144,18 @@ export interface ConfiguredRelay {
   /** 掩码后的 Key，**永不下发明文**。 */
   api_key_masked: string;
   active: boolean;
+  /**
+   * 这家的专属入口端口。0 = 没有单独分配（只有主端口）。
+   *
+   * ★ 2026-10-22：AI 工具按「服务地址」区分供应商，
+   *   同一地址只让填一次。两家中转站模型 ID 一样时，
+   *   只有地址不同才能在工具里并存。
+   */
+  port: number;
+  /** 专属入口地址（可直接填进 AI 工具）；未分配时为空串。 */
+  proxy_url: string;
+  /** 这个端口此刻是否真的在监听（被占用/未启动时为 false）。 */
+  listening: boolean;
 }
 
 export interface ConfiguredRelaysResponse {
@@ -244,6 +256,8 @@ export interface RelayConfig {
   base_url: string;
   api_key: string;
   enabled: boolean;
+  /** ★ 2026-10-22：这家的专属入口端口；0 = 不单独分配（可选，老配置没有） */
+  port?: number;
 }
 
 export interface GuardConfig {
@@ -683,8 +697,8 @@ export const api = {
    *   就等于把原来那家覆盖掉 —— 多中转站在界面上看得见、
    *   在数据上永远只有一家，而用户毫无察觉。
    */
-  addRelay: (relay: { name: string; base_url: string; api_key: string }) =>
-    call<{ ok: boolean; id: string; total: number }>(
+  addRelay: (relay: { name: string; base_url: string; api_key: string; port?: number }) =>
+    call<{ ok: boolean; id: string; total: number; port: number; proxy_url: string }>(
       'add_relay', 'POST', '/api/relays/configured', relay,
       undefined,
       // ★★★ 键名必须是 **camelCase**：Tauri v2 默认把命令实参
@@ -699,7 +713,21 @@ export const api = {
         name: relay.name,
         baseUrl: relay.base_url,
         apiKey: relay.api_key,
+        port: relay.port ?? 0,
       }),
+  /**
+   * 给某一家分配 / 修改 / 取消专属入口端口（0 = 取消）。
+   *
+   * ★ 与保存配置分开：配置接口里 others 的 Key 是掩码副本，
+   *   整体回传会把别家的真实 Key 覆盖掉。改端口就只改端口。
+   */
+  setRelayPort: (id: string, port: number) =>
+    call<{ ok: boolean; id: string; port: number; proxy_url: string }>(
+      'set_relay_port', 'POST', '/api/relays/configured/port',
+      // ★ body 必须是对象：浏览器预览模式下 call() 直接发这个 body，
+      //   传 undefined 会发一个没有请求体的 POST，
+      //   后端 Body(...) 校验直接 422 —— 界面上只看到「端口没设上」。
+      { id, port }, TIMEOUT.NORMAL, { id, port }),
   /** 移除列表里的一家（不能移除当前启用项）。 */
   removeRelay: (id: string) =>
     call<{ ok: boolean; total: number }>(
@@ -760,7 +788,12 @@ export const api = {
     return _proxyPort;
   },
   updateConfig: (patch: Partial<PersonalConfig>) =>
-    call<{ ok: boolean; config: PersonalConfig }>('update_config', 'PUT', '/api/config', patch),
+    call<{
+      ok: boolean;
+      config: PersonalConfig;
+      /** 专属端口没能全部监听时的原因（{端口: 原因}）；正常时为空 */
+      port_errors?: Record<string, string>;
+    }>('update_config', 'PUT', '/api/config', patch),
 
   // ── 防护控制 ──
   pause: (durationMin: number) =>

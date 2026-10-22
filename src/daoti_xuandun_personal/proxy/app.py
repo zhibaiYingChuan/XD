@@ -32,7 +32,9 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import (
+    Any, AsyncGenerator, Dict, Iterable, List, Optional, Tuple,
+)
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -46,6 +48,7 @@ from ..config import (
     is_masked_key,
     mask_relay_key,
     normalize_relay_base,
+    parse_relay_port,
 )
 from ..reputation.tracker import ReputationTracker
 from ..storage.db import PersonalStorage, kpi_contribution
@@ -53,6 +56,7 @@ from ..types import (
     Action, LogEntry, LogType, RedactionRecord, SecurityLevel, mask_secret,
 )
 from .baseline import build_baseline
+from .listeners import RelayPortListeners
 from .restorer import ContentRestorer
 from .sanitizer import RequestSanitizer
 from .verifier import OBSERVATION_ONLY_SIGNALS, ResponseVerifier
@@ -81,6 +85,11 @@ _paused_until: float = 0.0     # 暂停截止时间戳
 #   lifespan 里的 _config 是独立 load() 的对象，带的是配置文件里的端口，
 #   与实际监听值可能不同 —— 日志必须用这个，否则会报出错的端口。
 _actual_port: Optional[int] = None
+
+# ★ 专属入口端口的监听器（2026-10-22）。只在 run() 里创建。
+#   测试/浏览器预览模式下为 None —— 端口接口据此明确提示
+#   「需要重启玄盾」，而不是假装保存成功却没人监听。
+_relay_listeners: Optional[RelayPortListeners] = None
 
 # 授权结论的短 TTL 缓存：(许可证文件 mtime, 判定时刻, 是否启用防护)。
 # 存在理由见 _protection_enabled 的 docstring —— 那里每个 AI 请求都会调用。
@@ -741,7 +750,10 @@ def create_app() -> FastAPI:
         #   多中转站下这是用户唯一能确认账单的依据 ——
         #   没有它，用户只能靠猜。
         host = _extract_host(str((target or {}).get("base_url") or ""))
-        via = "按 Key 识别" if matched_by == "key" else "当前启用"
+        via = {
+            "key": "按 Key 识别",
+            "port": "按端口识别",
+        }.get(matched_by, "当前启用")
         domain = (
             _reputation.reputation_key(
                 str((target or {}).get("base_url") or ""),
@@ -1831,11 +1843,22 @@ def create_app() -> FastAPI:
             _verifier.set_pattern_check(_config.guard.enable_pattern_check)
 
         _config.save()
+        # ★ 2026-10-22：配置里可能带着各家的专属端口（前端整体回传），
+        #   保存后要让监听集合跟着配置走 —— 否则改了端口，
+        #   界面显示已保存，实际还在老端口上等请求。
+        port_errors = await _sync_relay_ports(
+            set(_config.relay.assigned_ports()))
+        if port_errors:
+            logger.warning("专属端口未全部生效: %s", port_errors)
         # ★ 2026-10-20：保存了保留策略就立刻执行一次。
         #   否则用户设了「保留 30 天」，界面上的设置生效了，
         #   磁盘上的旧日志却要等到下次启动才清 —— 看起来像没生效。
         _purge_logs_by_retention()
-        return {"ok": True, "config": _config.to_safe_dict()}
+        return {
+            "ok": True,
+            "config": _config.to_safe_dict(),
+            "port_errors": port_errors,
+        }
 
     @app.get("/api/relays/configured")
     async def list_relays_conf():
@@ -1869,6 +1892,17 @@ def create_app() -> FastAPI:
                     "api_key_masked": mask_relay_key(
                         str(r.get("api_key") or "")),
                     "active": bool(r.get("active")),
+                    # ★ 2026-10-22：专属入口端口（0 = 未单独分配）。
+                    #   listening 告诉界面「这个端口此刻真的在监听吗」——
+                    #   端口被别的软件占着时，保存是成功的，
+                    #   但用户按这个地址去配 AI 工具会连不上，
+                    #   界面必须能说出「端口没起来」，而不是只显示端口号。
+                    "port": int(r.get("port") or 0),
+                    "proxy_url": _relay_proxy_url(int(r.get("port") or 0)),
+                    "listening": bool(
+                        _relay_listeners and
+                        _relay_listeners.listening(int(r.get("port") or 0))
+                    ),
                 }
                 for r in items
             ],
@@ -1909,6 +1943,21 @@ def create_app() -> FastAPI:
         elif is_masked_key(api_key):
             # 与 update_config 同一条守卫：掩码串绝不能落成真实 Key
             errors.append("这个 API Key 看起来是脱敏后的串（含 ****），已拒绝保存")
+        # ★ 2026-10-22：端口是选填的，但填了就必须可用 ——
+        #   静默忽略等于让用户按一个不存在的地址去配 AI 工具。
+        try:
+            port = parse_relay_port(payload.get("port"))
+        except ValueError as e:
+            errors.append(f"专属端口填得不对：{e}")
+            port = 0
+        if port:
+            taken = relay_cfg.assigned_ports()
+            if port == _config.server.port:
+                errors.append(
+                    f"端口 {port} 是玄盾主端口，请换一个（例如 18801）")
+            elif port in taken:
+                errors.append(
+                    f"端口 {port} 已经给了「{taken[port]}」，请换一个")
         if errors:
             raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -1920,13 +1969,113 @@ def create_app() -> FastAPI:
         if any(str(r.get("id") or "") == new_id for r in relay_cfg.others):
             raise HTTPException(status_code=400, detail="这家已经在列表里了")
 
+        # ★ 先起监听再落盘：端口起不来时不应留下一条「看起来已配好」的记录。
+        #   失败原因逐条回给界面（谁占用了、换哪个），不要只说「失败」。
+        if port:
+            errs = await _sync_relay_ports(
+                set(relay_cfg.assigned_ports()) | {port})
+            if errs:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"errors": [
+                        errs.get(port) or next(iter(errs.values()))
+                    ]},
+                )
+
         relay_cfg.others = list(relay_cfg.others) + [{
             "id": new_id, "name": name, "base_url": base_url,
-            "api_key": api_key, "enabled": True,
+            "api_key": api_key, "enabled": True, "port": port,
         }]
         _config.save()
-        logger.info("已新增中转站到列表: %s（未设为启用）", name)
-        return {"ok": True, "id": new_id, "total": len(relay_cfg.others) + 1}
+        logger.info(
+            "已新增中转站到列表: %s（未设为启用，专属端口=%s）", name, port or "无")
+        return {
+            "ok": True, "id": new_id, "port": port,
+            "proxy_url": _relay_proxy_url(port),
+            "total": len(relay_cfg.others) + 1,
+        }
+
+    @app.post("/api/relays/configured/port")
+    async def set_relay_port(payload: Dict[str, Any] = Body(...)):
+        """给某一家分配 / 修改 / 取消专属入口端口（0 = 取消）。
+
+        ★ 为什么单独一个接口，而不是走 PUT /api/config：
+          config 里 others 是**掩码 Key 的副本**，整体回传再写回
+          会把其余中转站的真实 Key 换成掩码（这条坑已有守卫）。
+          只改端口就不该碰 Key —— 改一个字段，就只传一个字段。
+
+        ★ 端口冲突一律拒绝：两家撞同一个端口时，后绑的那家会绑不上，
+          而界面两家都显示「已分配」，用户会以为另一家坏了。
+        """
+        if _config is None:
+            raise HTTPException(status_code=503, detail="配置未就绪")
+        relay_cfg = _config.relay
+        want = str(payload.get("id") or "").strip()
+        if not want:
+            raise HTTPException(status_code=400, detail="缺少中转站 id")
+
+        try:
+            port = parse_relay_port(payload.get("port"))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"端口填得不对：{e}")
+
+        cur_id = relay_cfg.make_relay_id(relay_cfg.base_url, relay_cfg.api_key)
+        is_active = want == cur_id or want == relay_cfg.active_id
+        target = None
+        if not is_active:
+            target = next(
+                (r for r in relay_cfg.others
+                 if str(r.get("id") or "") == want), None)
+            if target is None:
+                raise HTTPException(status_code=404, detail="中转站不存在")
+
+        if port:
+            if port == _config.server.port:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"端口 {port} 是玄盾主端口，请换一个（例如 18801）")
+            for other_id, other_port in _relay_port_map(relay_cfg).items():
+                if other_port == port and other_id != want:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"端口 {port} 已经给了另一家中转站，请换一个")
+
+        old_port = int(relay_cfg.port if is_active else target.get("port") or 0)
+        snapshot = (relay_cfg.port, [dict(r) for r in relay_cfg.others])
+        try:
+            if is_active:
+                relay_cfg.port = port
+            else:
+                target["port"] = port
+            errors = _config.validate()
+            if errors:
+                raise HTTPException(status_code=400, detail={"errors": errors})
+
+            desired = set(relay_cfg.assigned_ports())
+            if port and _relay_listeners is None:
+                # 没有监听器（引擎不是由 run() 启动）时不能假装已生效
+                raise HTTPException(
+                    status_code=503,
+                    detail="引擎还没准备好接收新端口，请重启玄盾后再试")
+            errs = await _sync_relay_ports(desired)
+            if errs:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"errors": [errs.get(port) or next(iter(errs.values()))]},
+                )
+        except HTTPException:
+            relay_cfg.port, relay_cfg.others = snapshot
+            # 回滚后把监听恢复成配置里真实的样子
+            await _sync_relay_ports(set(relay_cfg.assigned_ports()))
+            raise
+
+        _config.save()
+        logger.info(
+            "中转站 %s 的专属端口：%s → %s", want, old_port or "无", port or "无")
+        return {
+            "ok": True, "id": want, "port": port,
+            "proxy_url": _relay_proxy_url(port),
+        }
 
     @app.post("/api/relays/configured/remove")
     async def remove_relay(payload: Dict[str, Any] = Body(...)):
@@ -1955,6 +2104,10 @@ def create_app() -> FastAPI:
         if len(relay_cfg.others) == before:
             raise HTTPException(status_code=404, detail="中转站不存在")
         _config.save()
+        # ★ 连同它的专属端口一起收掉：留着监听等于留一个
+        #   「已经没有主人的门」，请求进来会退回当前启用项 ——
+        #   用户在 AI 工具里还以为在打原来那家。
+        await _sync_relay_ports(set(relay_cfg.assigned_ports()))
         logger.info("已从列表移除中转站: %s", want)
         return {"ok": True, "total": len(relay_cfg.others) + 1}
 
@@ -3070,12 +3223,19 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
       用户以为在用 A 扣费，实际扣的是 B ——
       账单打错，而且两边都不知道。
 
-    ★ 判定顺序
+    ★ 判定顺序（2026-10-22 起端口优先）
+      0) 请求进入的本地端口若属于某家中转站 → 固定发给那家，**不看 Key**；
       1) 请求带了 Authorization → 去掉 "Bearer " 前缀后按 Key 匹配；
       2) 命中已配置的中转站 → 用那家的地址与 Key；
       3) 没命中（老配置只有一家，或用户刚换了 Key）
          → 回退到当前启用项，并把实际用的那家回报给调用方，
             让日志与界面能显示「本次实际转发给了谁」。
+
+    ★ 为什么端口优先：
+      AI 工具里填的 Key 常常是占位串（很多 IDE 只校验非空），
+      按 Key 识别会全部落到「当前启用项」——
+      用户明明把 B 家的地址填进了工具，实际扣的却是 A 家的钱。
+      端口是用户在玄盾里亲手指定给某一家的事实，优先级最高。
 
     ★ 不做自动故障转移、不做轮询：
       探活是真实 HTTP 请求，本机平均延迟 13 秒，
@@ -3083,11 +3243,23 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
       而自动切换会让「这次扣了谁的钱」变得不可知 ——
       多中转站场景下最需要确定的就是这件事。
 
-    Returns: {"relay": {...}, "matched_by": "key"|"active"}；无配置时 None
+    Returns: {"relay": {...}, "matched_by": "port"|"key"|"active"}；无配置时 None
     """
     if _config is None:
         return None
     relay_cfg = _config.relay
+
+    # ① 专属端口：端口即选择，不看 Key
+    local_port = _request_local_port(request)
+    if local_port:
+        by_port = relay_cfg.relay_by_port(local_port)
+        if by_port is not None:
+            logger.info(
+                "按端口识别到中转站：%s（%s）",
+                by_port.get("name") or "-", local_port,
+            )
+            return {"relay": by_port, "matched_by": "port"}
+
     incoming = ""
     auth = request.headers.get("Authorization") or ""
     if auth.lower().startswith("bearer "):
@@ -3102,6 +3274,58 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
         return {"relay": matched, "matched_by": "key"}
 
     return {"relay": relay_cfg.all_relays()[0], "matched_by": "active"}
+
+
+def _request_local_port(request: Any) -> Optional[int]:
+    """取这次请求「进的是哪个本地端口」。
+
+    ★ 用 ASGI scope 里的 server 元组，而不是 request.url.port：
+      后者在 Host 头被工具改写时会跟着变，而我们要的是
+      **实际监听的套接字**，那才是「用户填了哪个地址」的依据。
+
+    ★ 测试里传进来的极简请求对象没有 scope，一律当作「未知端口」。
+    """
+    scope = getattr(request, "scope", None)
+    if not isinstance(scope, dict):
+        return None
+    server = scope.get("server")
+    if isinstance(server, (tuple, list)) and len(server) == 2:
+        try:
+            port = int(server[1])
+        except (TypeError, ValueError):
+            return None
+        return port if 0 < port <= 65535 else None
+    return None
+
+
+def _relay_proxy_url(port: int) -> str:
+    """这家专属端口的入口地址；未分配时返回空串。"""
+    if not port:
+        return ""
+    host = "127.0.0.1"
+    if _config is not None:
+        host = _config.server.host or host
+    return f"http://{host}:{int(port)}/v1"
+
+
+def _relay_port_map(relay_cfg) -> Dict[str, int]:
+    """{中转站 id: 端口}，0 表示未分配。用于冲突校验。"""
+    return {
+        str(r.get("id") or ""): int(r.get("port") or 0)
+        for r in relay_cfg.all_relays()
+    }
+
+
+async def _sync_relay_ports(desired: Iterable[int]) -> Dict[int, str]:
+    """把专属端口监听对齐到 desired。
+
+    ★ 没有监听器（测试 / 非 run() 启动）时直接返回空：
+      调用方据此判断「能不能真的开端口」，
+      而不是把监听当成一定成功。
+    """
+    if _relay_listeners is None:
+        return {}
+    return await _relay_listeners.sync(desired)
 
 
 def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:
@@ -3144,6 +3368,10 @@ def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:
         "base_url": str(target.get("base_url") or ""),
         "api_key": str(target.get("api_key") or ""),
         "enabled": bool(target.get("enabled", True)),
+        # ★ 端口跟着「那一家」走：切换只是换默认目标，
+        #   不能把 A 家的端口带走、也不能把端口弄丢 ——
+        #   丢了之后 AI 工具里填的那个地址会直接连不上。
+        "port": int(target.get("port") or 0),
     }
     current_backup = {
         "id": cur_id,
@@ -3151,6 +3379,7 @@ def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:
         "base_url": relay_cfg.base_url,
         "api_key": relay_cfg.api_key,
         "enabled": relay_cfg.enabled,
+        "port": int(relay_cfg.port or 0),
     }
     remaining = [
         r for r in relay_cfg.others if str(r.get("id") or "") != want
@@ -3159,6 +3388,7 @@ def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:
     relay_cfg.api_key = new_active["api_key"]
     relay_cfg.name = new_active["name"]
     relay_cfg.enabled = new_active["enabled"]
+    relay_cfg.port = new_active["port"]
     relay_cfg.active_id = new_active["id"]
     relay_cfg.others = [current_backup] + remaining
     return {"ok": True, "active_id": new_active["id"], "changed": True}
@@ -3708,7 +3938,6 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
       现补 argparse 支持。
     """
     import argparse
-    import uvicorn
 
     config = PersonalConfig.load()
     config.apply_env_overrides()
@@ -3769,9 +3998,63 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
     print()
     print("  将 AI 工具的 API 地址设置为：")
     print(f"    http://{actual_host}:{actual_port}/v1")
+    extra_ports = config.relay.assigned_ports()
+    if extra_ports:
+        # ★ 同时用几家中转站时，把这几个地址分别填进不同的 AI 工具 ——
+        #   地址不同，工具才肯让你并存两家（模型 ID 相同也不冲突）。
+        print()
+        print("  各家中转站的专属入口（填到对应的 AI 工具里）：")
+        for port, name in sorted(extra_ports.items()):
+            print(f"    {name}：http://{actual_host}:{port}/v1")
     print("=" * 64)
 
-    uvicorn.run(create_app(), host=actual_host, port=actual_port, log_level="info")
+    _serve(create_app(), actual_host, int(actual_port), sorted(extra_ports))
+
+
+def _serve(app, host: str, port: int, extra_ports: List[int]) -> None:
+    """启动主入口，再逐个开启各家中转站的专属入口。
+
+    ★ 只用**一个**进程、一个事件循环：
+      专属端口是同一个进程里的第二个 uvicorn 服务，
+      共享同一份配置、日志库与在线学习状态。
+      多开进程会让 SQLite 与学习状态互相覆盖 ——
+      那是比「端口不够用」严重得多的问题。
+
+    ★ 先起主入口再起专属端口：
+      主入口的 lifespan 负责初始化 _config / 存储 / 检测引擎，
+      抢在它之前开专属端口的话，那一瞬间进来的请求
+      会撞上「代理未就绪」。
+    """
+    import asyncio
+
+    import uvicorn
+
+    async def _main() -> None:
+        global _relay_listeners
+        main = uvicorn.Server(uvicorn.Config(
+            app, host=host, port=port, log_level="info"))
+        # ★ uvicorn 0.52 的 serve() 不再自己接管信号，run() 才做。
+        #   我们绕过了 run()（要在同一循环里再起几个端口），
+        #   所以这里得自己进 capture_signals —— 否则 Ctrl+C 关不掉。
+        with main.capture_signals():
+            main_task = asyncio.create_task(main.serve())
+            for _ in range(500):          # 最多等 10 秒
+                if main.started or main_task.done():
+                    break
+                await asyncio.sleep(0.02)
+
+            _relay_listeners = RelayPortListeners(app, host, port)
+            errors = await _relay_listeners.sync(extra_ports)
+            for p, msg in errors.items():
+                logger.warning("专属入口 %s 未能开启：%s", p, msg)
+            try:
+                await main_task
+            finally:
+                await _relay_listeners.close()
+
+    # ★ 不用 uvicorn 的 loop 工厂：0.36 起 setup_event_loop 已被移除，
+    #   而这里我们需要自己持有事件循环（额外端口要在同一个循环里起）。
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":

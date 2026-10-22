@@ -184,6 +184,9 @@ class _Cfg:
     def __init__(self, relay):
         self.relay = relay
         self.saved = 0
+        # ★ 2026-10-22：端口接口要判断「是不是主端口」，
+        #   替身也得有一个 server.port，否则测到的是 AttributeError。
+        self.server = type("S", (), {"port": 18765})()
 
     def validate(self):
         return []
@@ -1174,9 +1177,11 @@ class TestFrontendAndDesktopAreWired:
         rust_src = LIB_RS.read_text(encoding="utf-8")
 
         cases = {
-            "add_relay": ["name", "baseUrl", "apiKey"],
+            # ★ 2026-10-22：port 是后加的专属入口端口（0 表示不单独分配）
+            "add_relay": ["name", "baseUrl", "apiKey", "port"],
             "remove_relay": ["id"],
             "switch_relay": ["id"],
+            "set_relay_port": ["id", "port"],
         }
         for cmd, expected in cases.items():
             # Rust 侧：命令函数的参数（排除 app: AppHandle）
@@ -1213,3 +1218,319 @@ class TestFrontendAndDesktopAreWired:
             "直通日志未记录实际转发对象 —— "
             "多中转站下用户无法判断请求发去了哪里"
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# 7. 专属入口端口（2026-10-22）
+# ══════════════════════════════════════════════════════════════
+#
+# 用户诉求
+# ────────────────────────────────────────────────────────────
+# 「同一个中转站端口地址的话，在一些 AI 软件里面，比如说 IDE 里面
+#   是无法输入的，那就需要多个端口。」
+#
+# 根因：AI 工具按「服务地址」区分供应商，同一地址只让填一条；
+#       两家的模型 ID 又往往一样，于是第二家根本配不进去。
+# 解法：每家中转站可以有一个专属端口，地址天然不同；
+#       从哪个端口进来，就发给哪一家 —— 不看 Key。
+#
+# 本组判据只锁三件事
+# ────────────────────────────────────────────────────────────
+# 1. 端口能准确选中「那一家」，且优先级高于 Key
+# 2. 端口冲突/主端口/停用项不会被静默接受
+# 3. 没有真正监听时绝不假装成功
+
+
+def _req_with_port(auth: str, port: int):
+    """带本地端口的最小真实 Request（_resolve_upstream 读 scope + headers）。"""
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http", "method": "POST", "path": "/v1/chat/completions",
+        "headers": [(b"authorization", auth.encode())],
+        "query_string": b"",
+        "server": ("127.0.0.1", port),
+    }
+    return Request(scope)
+
+
+def _resolve_with(cfg, req):
+    from daoti_xuandun_personal.proxy import app as app_mod
+
+    old = app_mod._config
+    app_mod._config = _Cfg(cfg)
+    try:
+        return app_mod._resolve_upstream(req)
+    finally:
+        app_mod._config = old
+
+
+class TestDedicatedPortRouting:
+    """从哪个门进来，就发给哪一家。"""
+
+    def test_relay_by_port_finds_the_owner(self):
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        got = cfg.relay_by_port(18801)
+        assert got is not None, "按端口找不到那一家"
+        assert got["base_url"] == URL_B
+
+    def test_main_port_is_not_owned_by_any_relay(self):
+        """★ 主端口不能命中任何一家，否则「按 Key 识别」这条老路会被短路。"""
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        assert cfg.relay_by_port(18765) is None
+        assert cfg.relay_by_port(0) is None
+
+    def test_port_beats_key(self):
+        """★★ 从 B 的端口进来、带着 A 的 Key —— 必须发给 B。
+
+        这才是这个功能的全部意义：IDE 里填的 Key 常常是占位串，
+        真正决定账单归属的是用户在玄盾里为端口指定的那一家。
+        """
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        got = _resolve_with(cfg, _req_with_port(f"Bearer {KEY_A}", 18801))
+        assert got["matched_by"] == "port", (
+            f"从专属端口进来却按 {got['matched_by']} 识别 —— "
+            "用户配在 B 端口上的请求会被发去 A"
+        )
+        assert got["relay"]["base_url"] == URL_B
+        assert got["relay"]["api_key"] == KEY_B, (
+            "选择了 B 却没用 B 的 Key，转发会 401"
+        )
+
+    def test_main_port_still_matches_by_key(self):
+        """反向自证：主端口的行为一字未改。"""
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        got = _resolve_with(cfg, _req_with_port(f"Bearer {KEY_B}", 18765))
+        assert got["matched_by"] == "key"
+        assert got["relay"]["base_url"] == URL_B
+
+    def test_unknown_port_falls_back_to_normal_rules(self):
+        """既不是主端口、也没分配给任何一家的端口 → 不猜，按原规则走。"""
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        got = _resolve_with(cfg, _req_with_port("Bearer sk-unknown", 18999))
+        assert got["matched_by"] == "active"
+        assert got["relay"]["base_url"] == URL_A
+
+    def test_disabled_relay_port_is_ignored(self):
+        """停用的那家不该继续占着一个门。"""
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        cfg.others[0]["enabled"] = False
+        assert cfg.relay_by_port(18801) is None
+        assert 18801 not in cfg.assigned_ports()
+
+    def test_switch_keeps_the_port_with_its_owner(self):
+        """★★ 切换只换默认目标，端口必须跟着「那一家」走。
+
+        实测最容易写坏的地方：切换时重建 dict，顺手漏掉 port ——
+        用户切一下，AI 工具里填的那个端口就没了主人。
+        """
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        app_mod.apply_relay_switch(
+            cfg, RelayConfig.make_relay_id(URL_B, KEY_B))
+        assert cfg.base_url == URL_B
+        assert cfg.port == 18801, "B 家切上来后端口丢了"
+        assert cfg.relay_by_port(18801)["base_url"] == URL_B
+
+        app_mod.apply_relay_switch(
+            cfg, RelayConfig.make_relay_id(URL_A, KEY_A))
+        assert cfg.port == 0, "A 家不该凭空获得 B 的端口"
+        assert cfg.relay_by_port(18801)["base_url"] == URL_B, (
+            "切回 A 之后，B 的端口没能继续指向 B"
+        )
+
+
+class TestPortValidation:
+    def test_duplicate_ports_are_rejected(self):
+        cfg = _two_relays()
+        cfg.port = 18801
+        cfg.others[0]["port"] = 18801
+        errors = cfg.validate()
+        assert any("都用了端口 18801" in e for e in errors), (
+            f"两个家撞同一端口却没报错：{errors} —— "
+            "后绑的那家会静默失败，界面却显示两家都配好了"
+        )
+
+    def test_port_out_of_range_is_rejected(self):
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 70000
+        assert any("1024" in e for e in cfg.validate())
+
+    def test_port_cannot_equal_the_main_port(self):
+        from daoti_xuandun_personal.config import PersonalConfig
+
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18765
+        errors = PersonalConfig(relay=cfg).validate()
+        assert any("主端口" in e for e in errors), (
+            "专属端口可以等于主端口 —— 会让「从主端口进来发给谁」出现两套规则"
+        )
+
+    def test_zero_means_not_assigned(self):
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 0
+        assert cfg.validate() == []
+        assert cfg.assigned_ports() == {}
+
+    def test_parse_accepts_blank_and_rejects_junk(self):
+        from daoti_xuandun_personal.config import parse_relay_port
+
+        assert parse_relay_port("") == 0
+        assert parse_relay_port(None) == 0
+        assert parse_relay_port("18801") == 18801
+        for bad in ("abc", "80", "70000", True):
+            try:
+                parse_relay_port(bad)
+            except ValueError:
+                continue
+            raise AssertionError(f"非法端口 {bad!r} 被接受了")
+
+
+class TestPortEndpointsDoNotLieAboutSuccess:
+    """没有真正监听时，绝不能返回「已保存」。"""
+
+    def _routes(self):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        app = app_mod.create_app()
+        return {
+            (m, r.path): r.endpoint
+            for r in app.routes
+            for m in getattr(r, "methods", set()) or set()
+            if r.path.startswith("/api/relays")
+        }
+
+    def test_port_endpoint_exists(self):
+        assert ("POST", "/api/relays/configured/port") in self._routes(), (
+            "没有改端口的接口 —— 用户只能加新家时顺手填，填错了改不了"
+        )
+
+    def test_assigning_port_without_listener_is_refused(self):
+        """★ 引擎没起来/非 run() 启动时，端口不可能真的生效。
+
+        此时若返回成功，用户会照着界面上的地址去配 AI 工具，
+        然后连不上，且没有任何线索指向这次保存。
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        cfg = _two_relays()
+        b_id = RelayConfig.make_relay_id(URL_B, KEY_B)
+        old = app_mod._config
+        app_mod._config = _Cfg(cfg)
+        try:
+            endpoint = self._routes()[
+                ("POST", "/api/relays/configured/port")]
+            try:
+                asyncio.run(endpoint({"id": b_id, "port": 18801}))
+            except HTTPException as e:
+                assert e.status_code == 503, (
+                    f"应报 503（端口还没就绪），实际 {e.status_code}"
+                )
+                assert cfg.others[0].get("port") in (None, 0), (
+                    "报错后端口仍被写进了配置 —— 界面会显示一个不存在的入口"
+                )
+                return
+        finally:
+            app_mod._config = old
+        raise AssertionError("没有监听器时端口分配被当成成功了")
+
+    def test_duplicate_port_is_refused_at_the_endpoint(self):
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        cfg = _two_relays()
+        cfg.others[0]["port"] = 18801
+        a_id = RelayConfig.make_relay_id(URL_A, KEY_A)
+        old = app_mod._config
+        app_mod._config = _Cfg(cfg)
+        try:
+            endpoint = self._routes()[
+                ("POST", "/api/relays/configured/port")]
+            try:
+                asyncio.run(endpoint({"id": a_id, "port": 18801}))
+            except HTTPException as e:
+                assert e.status_code == 400
+                return
+        finally:
+            app_mod._config = old
+        raise AssertionError("两家被允许使用同一个端口")
+
+    def test_remove_unbinds_the_port(self):
+        """移除那一家后，它的端口不应继续被监听。"""
+        src = APP_PY.read_text(encoding="utf-8")
+        m = re.search(
+            r'@app\.post\("/api/relays/configured/remove"\).*?(?=\n    @app\.)',
+            src, re.S)
+        assert m, "未找到移除接口"
+        assert "_sync_relay_ports" in m.group(0), (
+            "移除中转站后没有回收它的专属端口 —— "
+            "那个门还在，请求进来会悄悄退回当前启用项"
+        )
+
+
+class TestExtraPortsAreReallyServed:
+    """真起一个额外端口，验证「/v1 放行、/api 不放行」。"""
+
+    def test_extra_port_serves_v1_only(self):
+        import asyncio
+        import json
+        import socket
+
+        import httpx
+
+        from daoti_xuandun_personal.proxy.listeners import RelayPortListeners
+
+        async def echo_app(scope, receive, send):
+            body = json.dumps({"port": scope["server"][1]}).encode()
+            await send({
+                "type": "http.response.start", "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({"type": "http.response.body", "body": body})
+
+        def free_port() -> int:
+            s = socket.socket()
+            try:
+                s.bind(("127.0.0.1", 0))
+                return int(s.getsockname()[1])
+            finally:
+                s.close()
+
+        async def scenario() -> None:
+            port = free_port()
+            mgr = RelayPortListeners(echo_app, "127.0.0.1", 18765)
+            errs = await mgr.sync({port})
+            assert not errs, f"额外端口起不来：{errs}"
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    ok = await client.get(f"http://127.0.0.1:{port}/v1/models")
+                    assert ok.status_code == 200, (
+                        f"/v1 被拦了：{ok.status_code} {ok.text}"
+                    )
+                    assert ok.json()["port"] == port, (
+                        "服务报告的端口与监听端口不一致 —— 按端口识别会全错"
+                    )
+                    denied = await client.get(
+                        f"http://127.0.0.1:{port}/api/config")
+                    assert denied.status_code == 404, (
+                        "额外端口把管理接口也暴露了（/api/config 可达）"
+                    )
+            finally:
+                await mgr.close()
+
+        asyncio.run(scenario())

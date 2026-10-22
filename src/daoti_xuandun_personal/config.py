@@ -81,6 +81,41 @@ def mask_relay_key(api_key: str) -> str:
     return f"{api_key[:4]}{_MASK_MARK}{api_key[-4:]}"
 
 
+def parse_relay_port(value: Any) -> int:
+    """把用户填的端口解析成整数；0 表示「不单独分配」。
+
+    ★ 为什么允许 0 而不是必填：
+      绝大多数用户只有一家中转站，主端口本来就够用。
+      强制填端口等于让最简单的那条路变复杂。
+
+    ★ 为什么非法值必须抛错而不是静默归零：
+      用户填了 18765（正好是主端口）或 70000，静默归零会让界面显示
+      「已保存」而端口根本没生效 —— 之后他按界面上的地址改 AI 工具，
+      请求全部连不上，却没有任何线索指向这次保存。
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        raise ValueError("端口必须是数字")
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError) as e:
+        raise ValueError("端口必须是数字") from e
+    if port == 0:
+        return 0
+    if not (1024 <= port <= 65535):
+        raise ValueError("端口需在 1024–65535 之间")
+    return port
+
+
+def _coerce_port(value: Any) -> int:
+    """展示用：非法端口按「未分配」处理（校验由 validate 负责报错）。"""
+    try:
+        return parse_relay_port(value)
+    except ValueError:
+        return 0
+
+
 def is_masked_key(value: Any) -> bool:
     """该值是否是掩码串，而不是真实的 API Key。
 
@@ -198,6 +233,21 @@ class RelayConfig:
     others: List[Dict[str, Any]] = field(default_factory=list)
     active_id: str = ""                 # 当前启用的 relay id
 
+    # ★ 2026-10-22：每家中转站可以有一个**专属入口端口**。
+    #
+    #   为什么需要：
+    #     多数 AI 工具（IDE 插件等）按「服务地址」区分供应商，
+    #     同一地址只允许配一次。用户同时用两家时，
+    #     两家的模型 ID 往往一样，工具里根本填不进第二条。
+    #     给每家一个独立端口，地址就天然不同了 ——
+    #     http://127.0.0.1:18801/v1 与 http://127.0.0.1:18802/v1。
+    #
+    #   0 = 不单独分配（只有主端口，按 Key 识别，与旧版完全一致）。
+    #   端口只决定「从哪个门进来」，不改变转发目标的选择顺序：
+    #     从专属端口进来的请求 → 固定发给这家（不看 Key）；
+    #     从主端口进来的请求 → 仍按 Key 识别，识别不到用当前启用项。
+    port: int = 0
+
     def validate(self) -> List[str]:
         """校验配置，返回错误列表（空表示通过）。"""
         errors: List[str] = []
@@ -221,7 +271,43 @@ class RelayConfig:
                 )
             if not str(r.get("api_key") or ""):
                 errors.append(f"中转站「{name}」API Key 为空")
+        errors.extend(self._port_errors())
         return errors
+
+    def _port_errors(self) -> List[str]:
+        """专属端口的合法性：范围、重复。
+
+        ★ 重复端口必须在保存前就拦下：
+          两个端口撞在一起时，后绑定的那个静默失败，
+          界面上两家都显示「已分配端口」，
+          而实际只有一家能连 —— 用户会以为另一家坏了。
+        """
+        errors: List[str] = []
+        seen: Dict[int, str] = {}
+        for name, raw in self._port_items():
+            try:
+                port = parse_relay_port(raw)
+            except ValueError as e:
+                errors.append(f"中转站「{name}」的端口不对：{e}")
+                continue
+            if port == 0:
+                continue
+            if port in seen:
+                errors.append(
+                    f"中转站「{name}」与「{seen[port]}」都用了端口 {port}，"
+                    "请给其中一家换一个"
+                )
+            else:
+                seen[port] = name
+        return errors
+
+    def _port_items(self):
+        """逐条产出 (显示名, 端口原值)，供校验与冲突检测共用一套口径。"""
+        yield self.name or "未命名", self.port
+        for i, r in enumerate(self.others):
+            if not isinstance(r, dict):
+                continue
+            yield str(r.get("name") or f"#{i + 1}"), r.get("port", 0)
 
     # ── 多中转站（v0.1.0）──
 
@@ -244,6 +330,8 @@ class RelayConfig:
         """返回全部中转站（当前启用的排在最前）。
 
         ★ 每项都含 id 与 active 标记，前端据此渲染切换列表。
+        ★ 2026-10-22：每项都含 port（0 = 未单独分配），
+          前端据此展示「这家的入口地址」。
         """
         cur = {
             "id": self.active_id or self.make_relay_id(
@@ -252,10 +340,47 @@ class RelayConfig:
             "base_url": self.base_url,
             "api_key": self.api_key,
             "enabled": self.enabled,
+            "port": _coerce_port(self.port),
             "active": True,
         }
-        rest = [dict(r, active=False) for r in self.others]
+        rest = [
+            {**r, "port": _coerce_port(r.get("port", 0)), "active": False}
+            for r in self.others if isinstance(r, dict)
+        ]
         return [cur] + rest
+
+    def relay_by_port(self, port: int) -> Optional[Dict[str, Any]]:
+        """按「请求进来的本地端口」找出该发给哪一家。
+
+        ★ 这是多端口方案的全部判据：从专属端口进来的请求，
+          固定发往拥有该端口的那家，**不看 Key**。
+          理由：AI 工具里填的 Key 常常是占位串（很多 IDE 只允许
+          任意非空值），真正决定扣谁的钱应该是用户在这个端口上
+          明确选定的那一家。
+        """
+        if not port:
+            return None
+        for r in self.all_relays():
+            if not r.get("enabled", True):
+                continue
+            if int(r.get("port") or 0) == int(port):
+                return r
+        return None
+
+    def assigned_ports(self) -> Dict[int, str]:
+        """返回 {端口: 中转站显示名}，供监听与界面展示共用。
+
+        0 不在此列（未单独分配）；已停用的那家也不监听 ——
+        停用意味着「别用它」，再占一个端口只会让用户困惑。
+        """
+        out: Dict[int, str] = {}
+        for r in self.all_relays():
+            if not r.get("enabled", True):
+                continue
+            port = int(r.get("port") or 0)
+            if port:
+                out[port] = str(r.get("name") or "未命名")
+        return out
 
     def relay_by_key(self, api_key: str) -> Optional[Dict[str, Any]]:
         """按 API Key 找出对应中转站；找不到返回 None。
@@ -390,6 +515,16 @@ class PersonalConfig:
         errors.extend(self.storage.validate())
         if self.relay.enabled:
             errors.extend(self.relay.validate())
+            # ★ 专属端口不能与主端口相同：主端口已有唯一语义
+            #   （按 Key 识别 / 未识别用当前启用项），
+            #   再把它分配给某一家会让「从主端口进来的请求到底发给谁」
+            #   变成两套规则打架。
+            for name, raw in self.relay._port_items():
+                if _coerce_port(raw) == self.server.port:
+                    errors.append(
+                        f"中转站「{name}」的端口 {self.server.port} "
+                        "与玄盾主端口相同，请换一个（例如 18801）"
+                    )
         return errors
 
     def is_valid(self) -> bool:

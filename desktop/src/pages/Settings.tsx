@@ -169,8 +169,13 @@ export default function Settings() {
   const [adding, setAdding] = useState(false);
   const [addingBusy, setAddingBusy] = useState(false);
   const [newRelay, setNewRelay] = useState({
-    name: '', base_url: '', api_key: '',
+    name: '', base_url: '', api_key: '', port: '',
   });
+  // ★ 2026-10-22：每家中转站的专属入口端口。
+  //   portEditing 只允许同时编辑一行 —— 同时开多个输入框，
+  //   用户会分不清自己改的是哪家、点保存时也容易按错行。
+  const [portEditing, setPortEditing] = useState<{ id: string; value: string } | null>(null);
+  const [portBusy, setPortBusy] = useState(false);
 
   // ★ 引擎运行状态 + 版本 + 重启中标志。
   //   engine 为 null 表示这一刻拿不到（浏览器预览模式没有本地引擎，
@@ -367,17 +372,31 @@ export default function Settings() {
       toast.error('请填写 API Key');
       return;
     }
+    // 端口选填：留空 = 不单独分配。填了就先在前端挡一道，
+    // 别让用户为「范围写错」白等一趟（后端仍会再拦一次）。
+    const portText = newRelay.port.trim();
+    const port = portText ? Number(portText) : 0;
+    if (portText && (!Number.isInteger(port) || port < 1024 || port > 65535)) {
+      toast.error('端口要填 1024–65535 之间的数字，或者留空表示不单独分配');
+      return;
+    }
     setAddingBusy(true);
     try {
       const r = await api.addRelay({
-        name: name || '未命名', base_url: baseUrl, api_key: key,
+        name: name || '未命名', base_url: baseUrl, api_key: key, port,
       });
       // ★ 刻意**不**调 load()：新增不改变当前启用项，
       //   顶部那堆输入框不该被清掉 —— 用户填到一半的地址还在。
       await loadConfigured();
-      setNewRelay({ name: '', base_url: '', api_key: '' });
+      setNewRelay({ name: '', base_url: '', api_key: '', port: '' });
       setAdding(false);
-      if (mountedRef.current) toast.success(`已添加，现在共 ${r.total} 家`);
+      if (mountedRef.current) {
+        toast.success(
+          r.port
+            ? `已添加，现在共 ${r.total} 家；这家的入口是 ${r.proxy_url}`
+            : `已添加，现在共 ${r.total} 家`,
+        );
+      }
     } catch (e) {
       if (mountedRef.current) {
         toast.error(
@@ -388,6 +407,48 @@ export default function Settings() {
       if (mountedRef.current) setAddingBusy(false);
     }
   }, [addingBusy, newRelay, toast, loadConfigured]);
+
+  /**
+   * 保存某一家专属入口端口（空 = 取消分配）。
+   *
+   * ★ 端口是给 AI 工具填的「门牌号」：两家地址不同，
+   *   工具才肯让你同时配两条（模型 ID 相同也不冲突）。
+   */
+  const saveRelayPort = useCallback(async (id: string, name: string) => {
+    if (portBusy || !portEditing || portEditing.id !== id) return;
+    const raw = portEditing.value.trim();
+    const port = raw ? Number(raw) : 0;
+    if (raw && (!Number.isInteger(port) || port < 1024 || port > 65535)) {
+      toast.error('端口要填 1024–65535 之间的数字，或者留空表示不单独分配');
+      return;
+    }
+    setPortBusy(true);
+    try {
+      const r = await api.setRelayPort(id, port);
+      setPortEditing(null);
+      await loadConfigured();
+      if (mountedRef.current) {
+        toast.success(
+          r.port
+            ? `「${name}」的专属入口已就绪：${r.proxy_url}`
+            : `已取消「${name}」的专属端口`,
+        );
+      }
+    } catch (e) {
+      if (mountedRef.current) {
+        toast.error(
+          `端口没设上：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    } finally {
+      if (mountedRef.current) setPortBusy(false);
+    }
+  }, [portBusy, portEditing, toast, loadConfigured]);
+
+  const copyRelayUrl = useCallback(async (url: string) => {
+    const ok = await copyToClipboard(url);
+    toast[ok ? 'success' : 'error'](ok ? '入口地址已复制' : '复制失败');
+  }, [toast]);
 
   /** 从列表移除一家。当前启用项不给按钮，后端也会拒。 */
   const dropRelay = useCallback(
@@ -1189,6 +1250,80 @@ export default function Settings() {
                       <div className="relay-card-url mono">
                         {r.normalized_base || r.base_url}
                       </div>
+
+                      {/* 专属入口端口：给 AI 工具填的「门牌号」。
+                          两家地址不同，工具才肯让你同时配两条。 */}
+                      <div className="relay-port-row">
+                        {portEditing?.id === r.id ? (
+                          <>
+                            <input
+                              className="input mono"
+                              style={{ maxWidth: 120 }}
+                              inputMode="numeric"
+                              placeholder="如 18801"
+                              aria-label={`${r.name} 的专属端口`}
+                              value={portEditing.value}
+                              disabled={portBusy}
+                              onChange={(e) => setPortEditing({
+                                id: r.id,
+                                value: e.target.value.replace(/[^\d]/g, ''),
+                              })}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') void saveRelayPort(r.id, r.name);
+                                if (e.key === 'Escape') setPortEditing(null);
+                              }}
+                            />
+                            <button
+                              className="btn primary sm"
+                              disabled={portBusy}
+                              onClick={() => void saveRelayPort(r.id, r.name)}
+                            >
+                              {portBusy ? '保存中…' : '保存'}
+                            </button>
+                            <button
+                              className="btn ghost sm"
+                              disabled={portBusy}
+                              onClick={() => setPortEditing(null)}
+                            >
+                              取消
+                            </button>
+                            <span className="relay-port-hint">留空 = 不单独分配</span>
+                          </>
+                        ) : (
+                          <>
+                            {r.port > 0 ? (
+                              <>
+                                <span className="relay-port-label">专属入口</span>
+                                <span className="relay-port-url mono">{r.proxy_url}</span>
+                                <button
+                                  className="btn ghost sm"
+                                  onClick={() => void copyRelayUrl(r.proxy_url)}
+                                >
+                                  复制地址
+                                </button>
+                                {!r.listening && (
+                                  <span className="relay-port-warn">
+                                    这个端口没起来，换一个再试
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="relay-port-hint">
+                                没单独分配端口（从主端口进来，按 Key 认出是哪家）
+                              </span>
+                            )}
+                            <button
+                              className="btn ghost sm"
+                              onClick={() => setPortEditing({
+                                id: r.id,
+                                value: r.port ? String(r.port) : '',
+                              })}
+                            >
+                              {r.port ? '改端口' : '分配端口'}
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {!r.active && (
@@ -1217,6 +1352,9 @@ export default function Settings() {
                 请求会按你填的 API Key 自动识别该发给哪家；
                 Key 对不上时用「当前使用中」这家。
                 切换只改默认目标，不会改动任何一家的配置。
+                <br />
+                同一个 AI 工具里要同时用两家、两家的模型 ID 又一样时，
+                给其中一家分配「专属端口」，把那个带端口的地址填进工具即可。
               </div>
             </>
           )}
@@ -1251,6 +1389,16 @@ export default function Settings() {
                   onChange={(e) => setNewRelay(
                     { ...newRelay, api_key: e.target.value })}
                 />
+                <input
+                  className="input mb-8 mono"
+                  style={{ maxWidth: 180 }}
+                  inputMode="numeric"
+                  placeholder="专属端口（可留空，如 18801）"
+                  aria-label="新增中转站的专属端口"
+                  value={newRelay.port}
+                  onChange={(e) => setNewRelay(
+                    { ...newRelay, port: e.target.value.replace(/[^\d]/g, '') })}
+                />
                 <div className="flex items-center gap-8">
                   <button
                     className="btn primary sm"
@@ -1263,7 +1411,7 @@ export default function Settings() {
                     className="btn ghost sm"
                     onClick={() => {
                       setAdding(false);
-                      setNewRelay({ name: '', base_url: '', api_key: '' });
+                      setNewRelay({ name: '', base_url: '', api_key: '', port: '' });
                     }}
                   >
                     取消
@@ -1271,6 +1419,11 @@ export default function Settings() {
                 </div>
                 <div className="field-hint">
                   添加只是存起来备着，<b>不会</b>切换当前使用中的那家。
+                  <br />
+                  如果要在同一个 AI 工具里同时用两家（模型 ID 又一样），
+                  给这家的「专属端口」填一个没被占用的数字（如 18801），
+                  然后把 <span className="mono">http://127.0.0.1:18801/v1</span>{' '}
+                  填进工具里 —— 两家地址不同，工具才肯让你并存。
                 </div>
               </div>
             ) : (
