@@ -553,7 +553,9 @@ def create_app() -> FastAPI:
             try:
                 credential_hits: List[Dict[str, Any]] = []
                 redaction_records = _sanitize_messages_inplace(
-                    body, _sanitizer, credential_hits
+                    body, _sanitizer, credential_hits,
+                    vault=_restorer.vault if _restorer is not None else None,
+                    session_id=session_id,
                 )
                 # ★ 2026-10-23：请求侧的每一条命中都记进凭证台账。
                 #   这是「这枚 token 是你这边先出现的」的唯一依据 ——
@@ -903,18 +905,29 @@ def create_app() -> FastAPI:
             except Exception:  # noqa: BLE001
                 pass
 
-        # 合并中转站篡改占位符的异常
+        # ★★ 2026-10-27 修复：还原结果必须**无条件**写回。
+        #   原实现把写回放在 `if restore_anomalies:` 里面 —— 只有当出现
+        #   「中转站伪造占位符」这类异常时才写回，而正常还原（绝大多数
+        #   情况）被直接丢弃。后果：非流式客户端拿到的永远是 ⟦XD_n⟧，
+        #   模型拿着占位符既不能执行也不能理解，整条「脱敏→还原」链路
+        #   等于断在这里。而流式路径是对的，所以这个 bug 极难复现。
+        #
+        #   ★ 同时把 content 也纳入还原：旧 `_set_content` 只认
+        #     `choices[0].message.content`，对「纯工具调用」响应
+        #     （content=null、真正的内容在 tool_calls.arguments 里）
+        #     完全无效 —— 而那正是 IDE 类客户端的主要形态。
         anomalies: List[Any] = []
+        restore_stats: Dict[str, Any] = {"count": 0, "ids": [], "anomalies": []}
         if _restorer is not None:
-            restored_content, restore_anomalies = _restorer.restore(
-                restore_session, content
+            payload, restore_stats = _restore_payload(
+                payload, _restorer, restore_session
             )
-            if restore_anomalies:
-                anomalies.extend(restore_anomalies)
-                content = restored_content
-                _set_content(payload, restored_content)
-            _restorer.clear_after_response(restore_session)
-            _storage.clear_redactions_for_session(restore_session)
+            anomalies.extend(restore_stats["anomalies"])
+            if restore_stats["count"]:
+                logger.debug(
+                    "会话 %s 非流式还原 %d 处占位符（编号 %s）",
+                    restore_session, restore_stats["count"], restore_stats["ids"],
+                )
 
         # 合并所有发现项
         findings = list(verify_result.findings) if verify_result else []
@@ -1012,13 +1025,25 @@ def create_app() -> FastAPI:
                   （`\\u27e6XD_n\\u27e7`）。后者在中转站以
                   ensure_ascii=True 序列化时出现；不做归一化则正则匹配不到，
                   占位符仍会原样透传给客户端。
+
+                ★★ 2026-10-27：转义形态还原后必须**重新转义**。
+                  归一化会把 `\\u27e6` 变成字面量 `⟦`，接着把占位符替换成
+                  原始值；如果原始值里带引号或反斜杠（密码、PEM 常见），
+                  直接塞回 JSON 字符串会把外层结构撑破 —— 客户端收到
+                  解析失败的帧，表现是「对话突然断流」。传 json_escape=True
+                  让还原出来的值按 JSON 字符串规则转义，结构始终合法。
                 """
                 if _restorer is None or not seg:
                     return seg
-                normalized = seg.replace("\\u27e6", "⟦").replace("\\u27e7", "⟧")
+                if not _restorer.has_placeholders(seg):
+                    return seg
+                escaped = _restorer.is_escaped_form(seg)
+                normalized = _restorer.normalize_escaped(seg) if escaped else seg
                 if "⟦XD_" not in normalized:
                     return seg
-                return _restorer.restore(restore_session, normalized)[0]
+                return _restorer.restore(
+                    restore_session, normalized, json_escape=escaped
+                )[0]
 
             try:
                 async for chunk in upstream.aiter_bytes():
@@ -1156,8 +1181,10 @@ def create_app() -> FastAPI:
                     await upstream.aclose()
                 except Exception:  # noqa: BLE001 — 关闭失败不该影响收尾
                     pass
-                if _restorer is not None:
-                    _restorer.clear_after_response(restore_session)
+                # ★★ 2026-10-27：这里不再清空还原映射。
+                #   映射已由 PlaceholderVault 按会话托管（24h TTL / LRU），
+                #   每轮清空会让模型「上一轮说了邮箱、这一轮才用占位符」
+                #   这种正常对话直接失效。
                 if _storage is not None:
                     _storage.clear_redactions_for_session(restore_session)
                 joined = "".join(collected)
@@ -2592,6 +2619,14 @@ def _extract_content(payload: Any) -> str:
             return "\n".join(
                 str(c.get("text", "")) for c in content if isinstance(c, dict)
             )
+        # ★ 2026-10-27：纯工具调用响应（content 为 null）也要提取出来。
+        #   原来这里直接落到最后的 `str(payload)`，把整个响应体（含 id、
+        #   usage、finish_reason）当成「内容」送去验证 —— 检测面被噪声
+        #   稀释，日志里的「原始响应片段」也变成一整行 JSON，
+        #   用户根本看不出模型到底要执行什么。
+        msg_calls = message.get("tool_calls")
+        if isinstance(msg_calls, list) and msg_calls:
+            return json.dumps(msg_calls, ensure_ascii=False)
 
     # Anthropic 顶层 content
     content = payload.get("content")
@@ -2609,22 +2644,62 @@ def _extract_content(payload: Any) -> str:
     return payload.get("raw", "") if isinstance(payload.get("raw"), str) else str(payload)
 
 
-def _set_content(payload: Any, content: str) -> None:
-    """把恢复后的内容写回响应结构。"""
-    if not isinstance(payload, dict):
-        return
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        message = choices[0].get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            message["content"] = content
-            return
-    if isinstance(payload.get("content"), list):
-        # Anthropic 格式：只替换第一个 text 块
-        for item in payload["content"]:
-            if isinstance(item, dict) and "text" in item:
-                item["text"] = content
-                return
+def _restore_payload(
+    payload: Any, restorer, session_id: str
+) -> Tuple[Any, Dict[str, Any]]:
+    """递归还原响应结构里所有位置的占位符。
+
+    ★ 为什么要递归，而不是只改 ``choices[0].message.content``
+    ────────────────────────────────────────────────────────────
+    非流式响应里可能承载文本的位置至少有六处：
+      · OpenAI：``message.content``（str 或分块数组）、
+        ``tool_calls[].function.arguments``、旧版 ``function_call.arguments``、
+        顶层 ``tool_calls``
+      · Anthropic：``content[].text``、``content[].thinking``、
+        ``tool_use.input``（结构化 dict）
+    逐个 ``if`` 写必然漏 —— 旧实现就漏了 tool_calls，
+    而「纯工具调用」响应恰好是 IDE 类客户端的常态。
+
+    占位符只可能出现在「用户原文被替换过的地方」，``id`` / ``model``
+    这类字段天然不会命中，因此无需白名单过滤。
+
+    Returns:
+        (restored_payload, stats)
+        stats: {"count": 还原处数, "ids": 涉及编号, "anomalies": 异常项}
+    """
+    stats: Dict[str, Any] = {"count": 0, "ids": [], "anomalies": []}
+    if restorer is None:
+        return payload, stats
+    seen_ids: set = set()
+    seen_anomalies: set = set()
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, str):
+            if not restorer.has_placeholders(node):
+                return node
+            # 统一转义形态后再还原（上游可能用 \u27e6 序列化）
+            normalized = restorer.normalize_escaped(node) \
+                if restorer.is_escaped_form(node) else node
+            restored, anomalies = restorer.restore(session_id, normalized)
+            for a in anomalies:
+                key = (getattr(a, "category", ""), str(getattr(a, "detail", "")))
+                if key not in seen_anomalies:
+                    seen_anomalies.add(key)
+                    stats["anomalies"].append(a)
+            if restored != normalized:
+                ids = restorer.placeholder_ids(normalized)
+                stats["count"] += len(ids)
+                seen_ids.update(ids)
+            return restored
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        return node
+
+    restored_payload = _walk(payload)
+    stats["ids"] = sorted(seen_ids)
+    return restored_payload, stats
 
 
 def _split_sse_frames(buf: str) -> Tuple[List[str], str]:
@@ -2909,7 +2984,11 @@ def _verify_restored_text(
 
 
 def _sanitize_messages_inplace(
-    body: Dict[str, Any], sanitizer, hits_out: Optional[List[Dict[str, Any]]] = None
+    body: Dict[str, Any],
+    sanitizer,
+    hits_out: Optional[List[Dict[str, Any]]] = None,
+    vault: Any = None,
+    session_id: str = "",
 ) -> List[Any]:
     """逐条消息独立脱敏，就地写回，并返回全部脱敏记录。
 
@@ -2926,13 +3005,25 @@ def _sanitize_messages_inplace(
     ★ hits_out：可选的收集器。每条命中（含指纹/打码片段/所在角色）
       会追加进去，供调用方写入凭证来源台账 —— 请求侧只在这里能看到
       「这枚 token 是在哪条消息里出现的」。
+
+    ★★ 2026-10-27：补上三块此前完全没扫过的地方
+    ────────────────────────────────────────────────────────────
+      ① ``tool_calls[].function.arguments``：assistant 消息的工具调用
+         参数。旧实现只看 ``content``，而带工具调用的 assistant 消息
+         ``content`` 通常是 null —— 于是「AI 把密钥写进工具参数」这段
+         历史**每轮都原样外发**。这正是本产品最该拦住的场景。
+      ② Anthropic 的 ``tool_use.input`` / ``tool_result.content``：同理。
+      ③ 传入 ``vault`` 时占位符编号由保险箱统一分配，不再按消息顺序
+         重排 —— 旧的重排逻辑会让同一个值在不同轮次拿到不同编号，
+         模型复述旧编号时会被顶替成另一个值。
     """
     messages = body.get("messages")
     if not isinstance(messages, list) or sanitizer is None:
         return []
 
     all_records: List[Any] = []
-    offset_base = 0   # 占位符编号跨消息连续递增
+    offset_base = 0   # 无保险箱时：占位符编号跨消息连续递增
+    use_vault = vault is not None and bool(session_id)
 
     # ★★ 2026-10-23：「拦截」只能发生在用户本轮输入上。
     #
@@ -2952,45 +3043,18 @@ def _sanitize_messages_inplace(
         if isinstance(m, dict) and str(m.get("role") or "").lower() == "user":
             last_user_idx = i
 
-    for i, m in enumerate(messages):
-        if not isinstance(m, dict):
-            continue
-        content = m.get("content")
-        # 只有本轮用户输入允许「拦住」；其余内容只打码。
-        block_as_redact = (i != last_user_idx)
-        # Anthropic 形态：content 是 [{type,text},...] 分块
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and isinstance(block.get("text"), str):
-                    r = sanitizer.sanitize(
-                        block["text"], block_as_redact=block_as_redact)
-                    role_hint = _message_role_hint(m)
-                    if hits_out is not None:
-                        hits_out.extend(
-                            {**h, "role": role_hint} for h in r.hits)
-                    if r.action == Action.BLOCK.value:
-                        raise _BlockRequest(
-                            r.blocked_reason or "敏感信息阻断",
-                            r.hit_categories,
-                            r.records,
-                            context=role_hint,
-                            hits=r.hits,
-                        )
-                    if r.records:
-                        block["text"] = _shift_placeholders(
-                            r.sanitized_text, r.records, offset_base
-                        )
-                        all_records.extend(
-                            _renumber(r.records, offset_base)
-                        )
-                        offset_base += len(r.records)
-            continue
+    def _apply(text: str, block_as_redact: bool, role_hint: str) -> Optional[str]:
+        """对一段文本脱敏并返回替换结果；无命中返回 None。
 
-        if not isinstance(content, str) or not content:
-            continue
-
-        r = sanitizer.sanitize(content, block_as_redact=block_as_redact)
-        role_hint = _message_role_hint(m)
+        阻断时抛 ``_BlockRequest``，由调用方转 403。
+        """
+        nonlocal offset_base
+        r = sanitizer.sanitize(
+            text,
+            block_as_redact=block_as_redact,
+            vault=vault,
+            session_id=session_id,
+        )
         if hits_out is not None:
             hits_out.extend({**h, "role": role_hint} for h in r.hits)
         if r.action == Action.BLOCK.value:
@@ -3002,12 +3066,70 @@ def _sanitize_messages_inplace(
                 hits=r.hits,
             )
         if not r.records:
-            continue
-        m["content"] = _shift_placeholders(
-            r.sanitized_text, r.records, offset_base
-        )
+            return None
+        if use_vault:
+            all_records.extend(r.records)
+            return r.sanitized_text
+        shifted = _shift_placeholders(r.sanitized_text, r.records, offset_base)
         all_records.extend(_renumber(r.records, offset_base))
         offset_base += len(r.records)
+        return shifted
+
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
+        role_hint = _message_role_hint(m)
+        content = m.get("content")
+        # 只有本轮用户输入允许「拦住」；其余内容只打码。
+        block_as_redact = (i != last_user_idx)
+
+        # ── Anthropic 形态：content 是 [{type,text|input|content},...] 分块 ──
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if isinstance(block.get("text"), str):
+                    new = _apply(block["text"], block_as_redact, role_hint)
+                    if new is not None:
+                        block["text"] = new
+                # 工具入参（Anthropic tool_use）：结构化 JSON，必须整体序列化后扫
+                if isinstance(block.get("input"), dict) and block.get("input"):
+                    raw = json.dumps(block["input"], ensure_ascii=False)
+                    new = _apply(raw, True, role_hint)
+                    if new is not None and new != raw:
+                        try:
+                            block["input"] = json.loads(new)
+                        except (json.JSONDecodeError, TypeError):
+                            # 理论上不会发生（占位符是合法 JSON 字符串内容）；
+                            # 真发生了也不能回退成原文 —— 放弃改写并保持原样。
+                            logger.warning("tool_use.input 脱敏后无法回解析，保持占位符文本")
+                # 工具返回（Anthropic tool_result）
+                if block.get("type") == "tool_result" and isinstance(block.get("content"), str):
+                    new = _apply(block["content"], True, role_hint)
+                    if new is not None:
+                        block["content"] = new
+        elif isinstance(content, str) and content:
+            new = _apply(content, block_as_redact, role_hint)
+            if new is not None:
+                m["content"] = new
+
+        # ── OpenAI 工具调用：content 为 null 时旧实现整条跳过 ──
+        calls = m.get("tool_calls")
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function")
+                if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                    new = _apply(fn["arguments"], True, role_hint)
+                    if new is not None:
+                        fn["arguments"] = new
+        # 旧版单函数调用形态
+        legacy = m.get("function_call")
+        if isinstance(legacy, dict) and isinstance(legacy.get("arguments"), str):
+            new = _apply(legacy["arguments"], True, role_hint)
+            if new is not None:
+                legacy["arguments"] = new
 
     return all_records
 

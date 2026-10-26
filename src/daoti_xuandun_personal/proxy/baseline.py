@@ -983,6 +983,38 @@ def _check_toolchain_injection(
     return []
 
 
+#: 「写内容」类工具：它们的参数是要落进文件/笔记的正文，不是要执行的命令。
+#:
+#: ★ 2026-10-27 实测误报：AI 在写申诉文档时，正文里列了
+#:   habo.qq.com / sample.360.cn 等网址，于是被记为
+#:   「工具调用参数中出现请求未提及的外部地址，可能是数据外传」。
+#:   而那个调用是 Write —— 网址只是**要写进文件的内容**。
+#:   同一段文字出现在 bash 参数里才是「要去访问」。
+_AUTHORING_TOOL_RE = re.compile(
+    r"write|edit|patch|create|replace|insert|apply|todo|memory|remember|note",
+    re.IGNORECASE,
+)
+
+
+def _tool_name_of(obj: Dict[str, Any]) -> str:
+    """从一个可能的 tool-call 节点里取出工具名（取不到返回空串）。"""
+    fn = obj.get("function")
+    if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+        return fn["name"]
+    if obj.get("type") in ("tool_use", "mcp_tool_use", "server_tool_use", "function_call"):
+        n = obj.get("name")
+        if isinstance(n, str):
+            return n
+    fc = obj.get("functionCall") or obj.get("function_call")
+    if isinstance(fc, dict) and isinstance(fc.get("name"), str):
+        return fc["name"]
+    return ""
+
+
+def _is_authoring_tool(name: str) -> bool:
+    return bool(_AUTHORING_TOOL_RE.search(name or ""))
+
+
 def _collect_tool_arguments(obj: Any, depth: int = 0) -> str:
     """收集所有 tool_call 的参数文本（会被客户端执行的部分）。
 
@@ -998,6 +1030,10 @@ def _collect_tool_arguments(obj: Any, depth: int = 0) -> str:
         return ""
     parts: List[str] = []
     if isinstance(obj, dict):
+        # ★ 写入类工具的参数是「内容」，不是「即将执行的命令」，
+        #   不参与「新端点 / 新依赖」判定（否则正常写文档必误报）。
+        if _is_authoring_tool(_tool_name_of(obj)):
+            return ""
         # OpenAI chat completions
         fn = obj.get("function")
         if isinstance(fn, dict):
@@ -1835,6 +1871,23 @@ def _check_typosquat(
     }]
 
 
+#: 围栏代码块 / 缩进代码块。
+#:
+#: ★ 2026-10-27：用来区分「散文里提到某个函数名」与「真的给出了可执行代码」。
+#:   实测误报：模型在解释「为什么不应该用 eval」时，正文里出现了
+#:   ``eval(`` 这个词，被判成「响应使用动态代码执行」并**直接拦截**。
+#:   而整段回答里没有任何代码块 —— 它只是在讨论这个函数。
+_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|^(?:[ \t]{4}|\t)\S.*$", re.MULTILINE)
+
+
+def _inside_code_block(content: str, pos: int) -> bool:
+    """位置 pos 是否落在代码块内。"""
+    for m in _CODE_BLOCK_RE.finditer(content):
+        if m.start() <= pos < m.end():
+            return True
+    return False
+
+
 def _check_constraint_violations(
     baseline: RequestBaseline, content: str
 ) -> List[Dict[str, str]]:
@@ -1853,9 +1906,17 @@ def _check_constraint_violations(
     hits: List[Tuple[str, str, str]] = []   # (constraint, label, severity)
     for name in declared:
         for pat, label, severity in _VIOLATION_SIGNALS.get(name, []):
-            if re.search(pat, content):
-                hits.append((name, label, severity))
-                break   # 同一约束只报一次，避免刷屏
+            m = re.search(pat, content)
+            if not m:
+                continue
+            # ★★ 2026-10-27（误报修复）：散文里出现信号词 ≠ 要求执行。
+            #   「这段代码用了 eval(，所以不安全」是正常的解释性回答；
+            #   只有信号出现在**代码块**里，才谈得上「给出一段可执行代码」。
+            #   不在代码块内的一律压到 medium —— 记下来、看得见，但不拦人。
+            if severity == "high" and not _inside_code_block(content, m.start()):
+                severity = "medium"
+            hits.append((name, label, severity))
+            break   # 同一约束只报一次，避免刷屏
 
     if not hits:
         return out

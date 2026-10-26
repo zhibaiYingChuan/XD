@@ -121,6 +121,41 @@ def _git(*args: str) -> str:
     return "unknown"
 
 
+def _pe_version_from_cargo() -> str:
+    """从 ``src-tauri/Cargo.toml`` 读版本并转成 PE 的四段数字版本。
+
+    ★ 为什么不在本文件里再写一个版本号：
+      项目约定「版本只有 Cargo.toml 一个真源」（sync_version.py 会校验
+      全项目一致）。构建脚本里另存一份，迟早与发布版本漂移，
+      而 PE 版本资源的漂移**不会报错** —— 用户看到的属性页和
+      实际版本对不上，售后排查时全靠猜。
+
+    ★ 为什么必须转数字：
+      Windows 的 VS_VERSIONINFO 四个字段都是 16 位整数，
+      而仓库里的版本形如 ``0.1.21-alpha``：带连字符会被 Nuitka 拒绝，
+      或被静默截断。这里只取数字段，不足补 0，多出的部分丢掉。
+      语义版本里的 alpha/beta 标记由 Tauri 侧的字符串版本承载。
+    """
+    import re
+
+    cargo = os.path.join(SCRIPT_DIR, "src-tauri", "Cargo.toml")
+    raw = "0.0.0"
+    try:
+        with open(cargo, "r", encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r'\s*version\s*=\s*"([^"]+)"', line)
+                if m:
+                    raw = m.group(1)
+                    break
+    except OSError:
+        pass
+    nums = re.findall(r"\d+", raw)[:4]
+    while len(nums) < 4:
+        nums.append("0")
+    # 每段夹到 0..65535，避免畸形版本号让 Nuitka 直接失败
+    return ".".join(str(min(int(n), 65535)) for n in nums)
+
+
 def main() -> int:
     # ★ 显式开关，不做「有则拷、无则静默跳过」。
     #   缺公钥的包能启动、能自检通过，唯独所有用户都激活不了 ——
@@ -234,6 +269,31 @@ def main() -> int:
             # 无 console 窗口：引擎是后台服务，不能弹黑框
             "--windows-console-mode=disable",
             f"--windows-icon-from-ico={icon}",
+        ])
+        # ★★ 2026-10-27：补齐 PE 版本资源。
+        #
+        #   为什么这件事优先级很高：
+        #     引擎是一个**常驻后台、监听端口、读取全部 API 流量**的 exe。
+        #     杀软的启发式评分里，「无厂商信息、无版本、无版权」的三无
+        #     可执行文件本身就是高危特征 —— 它和释放器/加载器的画像一致。
+        #     补上公司在先、产品名在后，能让静态判据从「行为可疑」
+        #     变成「有明确发布者的商业组件」。
+        #
+        #   版本号统一从 Cargo.toml 读取（项目约定：版本只有这一个真源），
+        #   不在这里另写一份，避免两处漂移。
+        #
+        #   ★ 选项名不带 `windows-` 前缀：Nuitka 把它们归为
+        #     跨平台元数据（Windows / macOS 共用），写成
+        #     `--windows-company-name` 会直接报 unknown option。
+        pe_version = _pe_version_from_cargo()
+        cmd.extend([
+            "--company-name=DaoTi Research",
+            "--product-name=XuanDun Personal",
+            "--file-description=XuanDun Personal Protection Engine",
+            "--copyright=Copyright (c) 2026 DaoTi Research",
+            "--trademarks=XuanDun",
+            f"--file-version={pe_version}",
+            f"--product-version={pe_version}",
         ])
     elif platform.system().lower() == "darwin":
         cmd.extend(["--macos-app-mode=background"])

@@ -107,6 +107,16 @@ def _cn_id_checksum_valid(id_no: str) -> bool:
 # ══════════════════════════════════════════════════════════════
 
 
+#: 本产品自己的激活码前缀（见 license.py：XDACT- + RS256 JWT）
+_ACTIVATION_PREFIX = "XDACT-"
+
+
+def _is_own_activation_code(text: str, start: int) -> bool:
+    """这个 JWT 命中是不是紧跟在 `XDACT-` 后面（即本产品自己的激活码）。"""
+    head = text[max(0, start - len(_ACTIVATION_PREFIX)):start]
+    return head.upper() == _ACTIVATION_PREFIX
+
+
 class _Rule:
     """单条敏感信息检测规则。"""
 
@@ -338,7 +348,13 @@ class RequestSanitizer:
 
     # ── 核心：脱敏 ──
 
-    def sanitize(self, text: str, block_as_redact: bool = False) -> SanitizeResult:
+    def sanitize(
+        self,
+        text: str,
+        block_as_redact: bool = False,
+        vault: Any = None,
+        session_id: str = "",
+    ) -> SanitizeResult:
         """对请求文本执行脱敏。
 
         流程：
@@ -359,6 +375,12 @@ class RequestSanitizer:
                   （中转站只看到 ⟦XD_n⟧），但不打断对话。
                   用户自己打的字仍按阻断处理：那是「正要贴密钥」的时刻，
                   必须让他停下来。
+            vault: 可选 ``PlaceholderVault``。传入后占位符编号由保险箱
+                按「会话 + 值」分配 —— 同一个值跨轮次、跨消息都是同一个
+                编号。★ 这是还原能跨轮次工作的前提：按位置编号时，
+                模型复述上一轮的 ⟦XD_3⟧ 会被本轮 3 号（另一个值）顶掉，
+                静默替换成错误的秘密。
+            session_id: 与 vault 配套的会话标识。
 
         Returns:
             SanitizeResult：含脱敏后文本、记录列表、整体处置
@@ -423,9 +445,15 @@ class RequestSanitizer:
         for idx, (start, end, category, rule_name) in enumerate(
             reversed(redactable), start=1
         ):
-            # 倒序遍历时编号需还原为正序语义
-            real_index = len(redactable) - idx + 1
             original_value = text[start:end]
+            if vault is not None and session_id:
+                # ★ 稳定编号：同一个值在本会话内永远同一个号。
+                #   分配失败（保险箱满）时退化为 0 号 —— 该号不会被解析，
+                #   值仍然不外发（宁可还原不了，也不能漏出去）。
+                real_index = vault.intern(session_id, original_value, category)
+            else:
+                # 倒序遍历时编号需还原为正序语义
+                real_index = len(redactable) - idx + 1
             placeholder = RedactionRecord.placeholder(real_index)
             records.append(
                 RedactionRecord(
@@ -440,8 +468,8 @@ class RequestSanitizer:
             )
             sanitized = sanitized[:start] + placeholder + sanitized[end:]
 
-        # 还原为正序（按 index 升序），便于第三层恢复
-        records.sort(key=lambda r: r.index)
+        # 按编号升序（同号按出现位置），便于第三层恢复与证据展示
+        records.sort(key=lambda r: (r.index, r.start))
 
         action = Action.REDACT.value if records else Action.PASS.value
         return SanitizeResult(
@@ -475,6 +503,18 @@ class RequestSanitizer:
             if not self._enabled_categories.get(rule.category, True):
                 continue
             for start, end, value in rule.find(text):
+                # ★★ 2026-10-27：放行玄盾自己的激活码。
+                #
+                #   激活码本身就是 RS256 JWT（`XDACT-` + 三段式），
+                #   JWT 规则必然命中，于是「用户把自家激活码贴进对话」
+                #   会被自家产品当成「不可外发的令牌」直接拦下 ——
+                #   实测已发生两次（日志 #4499 / #4500）。
+                #   用户看到的只有「请求被拦截」，不会想到是自己贴的激活码。
+                #
+                #   放行不等于不设防：激活码一码一机、绑定硬件，
+                #   泄露到中转站也换不了机器；而拦住它只会让用户没法求助。
+                if rule.category == "jwt" and _is_own_activation_code(text, start):
+                    continue
                 hits.append((start, end, rule.category, rule.name))
 
         if self._enabled_categories.get("custom", True):

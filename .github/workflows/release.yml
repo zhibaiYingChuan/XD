@@ -287,6 +287,75 @@ jobs:
         # 公钥缺失就是发布阻断，不是可选项。
         run: python build_engine.py
 
+      # ══════════════════════════════════════════════════════════
+      # 代码签名 · 引擎 sidecar（2026-10-27 新增）
+      #
+      # ★ 为什么必须在**打包之前**签：
+      #   签名是对文件字节的摘要，签完再改就失效。引擎 exe 会被塞进
+      #   安装包，所以只能先签它、再打包。反过来「打完包再签外层安装包」
+      #   的话，里面那份引擎仍然是未签名的 —— 而用户装完之后，
+      #   杀软实时监控扫到的恰恰就是那一份。
+      #
+      # ★ 未配置证书时**告警并跳过**，不阻断发布：
+      #   证书采购是外部流程，卡住它等于卡住所有发布。
+      #   但「跳过」必须在日志里说清楚，避免误以为已经签过了。
+      # ══════════════════════════════════════════════════════════
+      - name: Sign engine sidecar (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          CERT_PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_PFX_B64:-}" ]; then
+            echo "::warning title=本次产物未签名::WINDOWS_CERT_PFX_BASE64 未配置，引擎与安装包均为未签名产物。用户安装时被杀软拦截的概率显著升高。"
+            exit 0
+          fi
+          # signtool 不在 PATH 上，按 SDK 版本取最新的那个
+          SIGNTOOL=$(ls "C:/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$SIGNTOOL" ]; then
+            echo "::error::未找到 signtool.exe（Windows SDK 缺失）"
+            exit 1
+          fi
+          PFX="$RUNNER_TEMP/codesign.pfx"
+          echo "$CERT_PFX_B64" | base64 -d > "$PFX"
+          shopt -s nullglob
+          files=(desktop/src-tauri/resources/engine/*.exe)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::未找到待签名的引擎 exe"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "签名 $f"
+            "$SIGNTOOL" sign /fd sha256 /f "$PFX" /p "$CERT_PASSWORD" \
+              /tr http://timestamp.digicert.com /td sha256 "$f"
+            "$SIGNTOOL" verify /pa /v "$f"
+          done
+
+          # ★ 生成一份**仅本次构建有效**的签名配置，交给 bundler。
+          #   为什么要走 bundler 而不是打完包再补签：
+          #     安装包里的应用主程序是 bundler 从 target/release 拷进去的。
+          #     打完包再签外层安装包，里面那份主程序仍然未签名；
+          #     用户在「已安装的应用」目录里被扫到的正是那一份。
+          #   ★ 配置里含证书密码，所以只在 runner 的临时目录生成、
+          #     并不进入仓库；PFX 也留到打包结束再删。
+          python - "$PFX" "$CERT_PASSWORD" "$RUNNER_TEMP/tauri.signing.conf.json" <<'PY'
+          import json, sys
+          pfx, pwd, out = sys.argv[1], sys.argv[2], sys.argv[3]
+          cfg = {"bundle": {"windows": {"signCommand": {
+              "cmd": "signtool",
+              "args": [
+                  "sign", "/fd", "sha256",
+                  "/tr", "http://timestamp.digicert.com", "/td", "sha256",
+                  "/f", pfx, "/p", pwd, "%1",
+              ],
+          }}}}
+          with open(out, "w", encoding="utf-8") as fh:
+              json.dump(cfg, fh, ensure_ascii=False)
+          PY
+          echo "TAURI_SIGN_CONFIG=$RUNNER_TEMP/tauri.signing.conf.json" >> "$GITHUB_ENV"
+
       # ★★ 引擎必须编入**本次构建时**的源码（2026-10-03 新增）
       #
       #   本地踩过的坑：改完 Python 源码后没有重新 build_engine，
@@ -531,6 +600,12 @@ jobs:
           if [ "${{ matrix.art }}" != "linux-deb" ]; then
             CONFIG_ARGS="--config src-tauri/tauri.updater.conf.json"
           fi
+          # ★ 有证书时，把签名配置也叠加上去（bundler 会用它签主程序与安装包）。
+          #   该文件由「Sign engine sidecar」步骤在 runner 临时目录生成，
+          #   未配置证书时这个变量为空，行为与之前完全一致。
+          if [ -n "${TAURI_SIGN_CONFIG:-}" ]; then
+            CONFIG_ARGS="$CONFIG_ARGS --config $TAURI_SIGN_CONFIG"
+          fi
           if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }} \
                $CONFIG_ARGS; then
             exit 0
@@ -540,6 +615,39 @@ jobs:
             exit 0
           fi
           exit 1
+
+      # 签名收尾：确认安装包确实带上了签名，并清掉临时证书。
+      # ★ 为什么要「验证」而不是「签完就信」：
+      #   bundler 的 signCommand 失败时可能只是打印一行日志，
+      #   产出一个未签名的安装包 —— 而发布流程会照常把它传上去。
+      #   用户装那个包时才会发现自己被拦，而那时已经发出去了。
+      - name: Verify installer signature (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          CERT_PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_PFX_B64:-}" ]; then
+            echo "::warning::未配置签名证书，跳过安装包签名校验"
+            exit 0
+          fi
+          shopt -s nullglob
+          files=(desktop/src-tauri/target/release/bundle/nsis/*.exe)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::未找到安装包，无法校验签名"
+            exit 1
+          fi
+          SIGNTOOL=$(ls "C:/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$SIGNTOOL" ]; then
+            echo "::error::未找到 signtool.exe，无法校验安装包签名"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "校验 $f"
+            "$SIGNTOOL" verify /pa /v "$f"
+          done
+          rm -f "$RUNNER_TEMP/codesign.pfx" "$RUNNER_TEMP/tauri.signing.conf.json"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -614,7 +722,7 @@ jobs:
       - name: Scan installers on VirusTotal
         env:
           VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
-          VT_MAX_MALICIOUS: '5'
+          VT_MAX_MALICIOUS: '3'
         run: |
           set -euo pipefail
           python .github/scripts/virustotal_scan.py artifacts
@@ -707,9 +815,48 @@ jobs:
         #   ASCII 资产名逐字一致，否则客户端下载 404。
         run: python3 .github/scripts/make_latest_json.py dist
 
+      # ★ 2026-10-27：发布说明改为**自己生成**，不再用
+      #   generate_release_notes。原因很实在：用户点开 Release 的第一件事
+      #   应该是「怎么确认这东西没被篡改」，而自动生成的变更列表给不了。
+      #   误报申诉做得再好，用户在安装前仍需要一个自己能核对的依据。
+      - name: Compose release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          {
+            echo "## 安装前请做三步验证"
+            echo
+            echo "1. **核对哈希**：下载 \`checksums-sha256.txt\`，与本地文件算出的 SHA256 比对。不一致就不要安装 —— 那才可能是真的被篡改。"
+            echo "2. **看签名**：Windows 安装包右键 → 属性 → 数字签名，可查看签名主体。若显示「无数字签名」，说明该版本未签名，请只依据第 1、3 步判断。"
+            echo "3. **看多引擎扫描**：下表每个文件都附 VirusTotal 报告链接（按 SHA256 定位，扫描完成后即可打开）。"
+            echo
+            echo "> **被杀软拦截了？** 先完成第 1 步：哈希一致就说明文件没被换过，"
+            echo "> 属于启发式误报（本产品是本地 AI 网关 + Python 打包引擎，行为画像容易中招）。"
+            echo "> 按应用内「帮助 → 安装或运行时被杀毒软件拦截了，怎么办？」的步骤加入信任区即可。"
+            echo
+            echo "## 文件与校验"
+            echo
+            echo "| 文件 | SHA256 | VirusTotal |"
+            echo "|---|---|---|"
+            while read -r sha name; do
+              [ -n "${sha:-}" ] || continue
+              echo "| \`$name\` | \`$sha\` | [查看报告](https://www.virustotal.com/gui/file/$sha) |"
+            done < dist/checksums-sha256.txt
+            echo
+            echo "## 校验文件原文"
+            echo
+            echo '```'
+            cat dist/checksums-sha256.txt
+            echo '```'
+            echo
+            echo "版本：\`$VER\`　·　完整变更比对：https://github.com/${{ github.repository }}/compare/${GITHUB_REF_NAME}^...${GITHUB_REF_NAME}"
+          } > dist/RELEASE_NOTES.md
+          cat dist/RELEASE_NOTES.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          generate_release_notes: true
+          body_path: dist/RELEASE_NOTES.md
           files: |
             dist/*

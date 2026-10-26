@@ -189,6 +189,11 @@ tests/*
 !tests/test_relay_config.py
 !tests/test_help_claims.py
 !tests/test_block_evidence.py
+# ★ 2026-10-27：误报回归用例。
+#   本机 5173 条日志复核出的六类误报（写入类工具被当成执行、散文里的
+#   eval( 被当成给出可执行代码、激活码被自家 JWT 规则拦下……）逐条写成断言。
+#   这些判据改一处就会悄悄回潮，必须随码走，否则下次又得靠用户来报。
+!tests/test_false_positive_regressions.py
 # ★ 授权是这个系统的命门，而 test_license.py 此前一直漏在放行列表外
 #   —— 它从未进过仓库，CI 也就从未跑过授权相关断言。
 #   补进放行列表：机器码算法、验签、吊销、激活锚点这些用例必须随码走。

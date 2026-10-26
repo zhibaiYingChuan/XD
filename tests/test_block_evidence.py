@@ -58,6 +58,16 @@ FAKE_CODE = (
     ".c2lnbmF0dXJlLXBsYWNlaG9sZGVy"
 )
 
+#: 裸 JWT（**不带** XDACT- 前缀）。
+#: ★ 激活码自 2026-10-27 起被豁免，但「阻断必须留下证据」这一组用例
+#:   需要一个真会被拦的样本 —— 用裸令牌既满足前提，也顺带证明
+#:   JWT 规则本身没有被放宽。
+PLAIN_JWT = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJzdWIiOiIxMjM0NSIsIm5hbWUiOiJ0ZXN0In0"
+    ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+)
+
 
 def _read(p: Path) -> str:
     assert p.is_file(), f"源文件不存在：{p}"
@@ -82,28 +92,41 @@ def _block_branch() -> str:
 
 
 class TestJwtIsNotAFalsePositive:
-    """先自证：JWT 规则命中激活码是正确行为，不是误报。
+    """JWT 规则必须拦住真令牌；但本产品自己的激活码是例外。
 
     ★ 这条判据的作用是**防止后来者好心办坏事**。
       看到「40 条 JWT 拦截」第一反应通常是「规则太宽，放宽它」。
       放宽 JWT 规则会同时放过真正的令牌外泄 ——
       那才是这个产品存在的意义所在。
-      把这个事实固化成断言，谁想改规则都会先撞到这里。
+      所以下面既锁住「裸令牌必须拦」，也锁住「激活码例外只针对 XDACT- 前缀」。
+
+    ★ 2026-10-27 变更（基于本机 5173 条日志复核）：
+      激活码从「必须拦」改为「必须放行」。理由不是规则太严，
+      而是它拦错了对象：激活码一码一机、绑定硬件，贴进对话求助
+      是正常行为；拦住它只会让用户以为软件坏了。实测已发生两次
+      （#4499 / #4500），两次都是用户把自己的激活码贴出来问问题。
     """
 
     def test_activation_code_shape_is_a_real_jwt(self):
-        """激活码去掉前缀后必须是三段式 JWT（否则 JWT 规则本不该命中）。"""
+        """激活码去掉前缀后必须是三段式 JWT（否则「漏放」会漏放别的东西）。"""
         bare = FAKE_CODE[len("XDACT-"):]
         parts = bare.split(".")
         assert len(parts) == 3, "构造样本不是三段式"
         assert parts[0].startswith("eyJ"), "header 未以 eyJ 开头"
         assert parts[1].startswith("eyJ"), "payload 未以 eyJ 开头"
 
-    def test_jwt_rule_blocks_activation_code(self):
-        """JWT 规则必须命中激活码 —— 这是正确拦截，不是误报。"""
+    def test_activation_code_is_exempt_from_jwt_rule(self):
+        """玄盾自己的激活码不再被自家 JWT 规则拦下。
+
+        ★ 这不是「放宽 JWT 规则」：JWT 规则本身一字未改，
+          下面那条用例里的裸令牌仍然必须被拦。
+          这里只豁免紧跟在 `XDACT-` 后面的那一段。
+        """
         r = sz.RequestSanitizer(level="balanced").sanitize(FAKE_CODE)
-        assert r.action == "block", "激活码必须被拦截"
-        assert "jwt" in r.hit_categories
+        assert r.action != "block", "用户贴自家激活码被自家产品拦住了"
+        assert "jwt" not in r.hit_categories, (
+            "激活码仍被计入 JWT 命中 —— 界面会说「检测到不可外发的令牌」"
+        )
 
     def test_jwt_rule_still_blocks_a_plain_bearer_token(self):
         """顺带自证：真令牌仍然被拦 —— 证明上一条不是宽松化的产物。"""
@@ -122,7 +145,7 @@ class TestBlockedRequestsMustLeaveEvidence:
 
     def test_block_result_carries_evidence_records(self):
         """SanitizeResult 在 BLOCK 时必须带 records（原实现为空）。"""
-        r = sz.RequestSanitizer(level="balanced").sanitize(FAKE_CODE)
+        r = sz.RequestSanitizer(level="balanced").sanitize(PLAIN_JWT)
         assert r.action == "block"
         assert r.records, "阻断结果没有证据记录，界面无从核对"
         assert r.records[0].category == "jwt"
@@ -134,9 +157,9 @@ class TestBlockedRequestsMustLeaveEvidence:
           也会进 CSV 导出。存原文等于开一条泄露通道 ——
           一个「防止数据外泄」的产品自己成了泄露源。
         """
-        r = sz.RequestSanitizer(level="balanced").sanitize(FAKE_CODE)
+        r = sz.RequestSanitizer(level="balanced").sanitize(PLAIN_JWT)
         rec = r.records[0]
-        assert FAKE_CODE not in rec.original, "证据里出现了完整原文"
+        assert PLAIN_JWT not in rec.original, "证据里出现了完整原文"
         assert "…" in rec.original, "证据未做掩码"
         # 必须报长度：用户靠长度就能区分长激活码与短 JWT。
         # 长度取命中区间本身（rec.end - rec.start），
@@ -196,7 +219,7 @@ class TestBlockedRequestsMustLeaveEvidence:
         """
         from daoti_xuandun_personal.proxy.app import _block_evidence
 
-        r = sz.RequestSanitizer(level="balanced").sanitize(FAKE_CODE)
+        r = sz.RequestSanitizer(level="balanced").sanitize(PLAIN_JWT)
         ev = _block_evidence(r.hit_categories, r.records, "用户提问")
 
         assert isinstance(ev, list), "detail_json 不是数组，前端不会渲染"
@@ -204,13 +227,13 @@ class TestBlockedRequestsMustLeaveEvidence:
         # 首项是总述，末项逐条带掩码片段
         assert ev[0]["category"] == "request_blocked"
         assert ev[-1]["evidence"], "逐条依据缺少可核对的片段"
-        assert FAKE_CODE not in json.dumps(ev, ensure_ascii=False)
+        assert PLAIN_JWT not in json.dumps(ev, ensure_ascii=False)
 
     def test_evidence_states_where_it_hit(self):
         """依据必须说明命中在哪个角色 —— 决定排查方向。"""
         from daoti_xuandun_personal.proxy.app import _block_evidence
 
-        r = sz.RequestSanitizer(level="balanced").sanitize(FAKE_CODE)
+        r = sz.RequestSanitizer(level="balanced").sanitize(PLAIN_JWT)
         ev = _block_evidence(r.hit_categories, r.records, "系统提示词")
         blob = json.dumps(ev, ensure_ascii=False)
         assert "系统提示词" in blob
@@ -626,14 +649,14 @@ class TestEvidenceSurvivesStorage:
             # PersonalStorage 收的是 db 文件路径，不是目录
             st = PersonalStorage(_P(td) / "t.db")
             try:
-                r = sz.RequestSanitizer(level="balanced").sanitize(FAKE_CODE)
+                r = sz.RequestSanitizer(level="balanced").sanitize(PLAIN_JWT)
                 n = st.insert_redactions(1, "sess-1", r.records)
                 assert n == len(r.records)
 
                 rows = st.get_redactions(1)
                 assert len(rows) == len(r.records)
                 assert rows[0]["category"] == "jwt"
-                assert FAKE_CODE not in rows[0]["original"]
+                assert PLAIN_JWT not in rows[0]["original"]
             finally:
                 st.close()
 

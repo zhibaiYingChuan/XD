@@ -343,12 +343,28 @@ class TestPromptMentionIsNotInjection:
         )
 
     def test_reason_supported_prompt_inject_still_classified(self):
-        """反向自证：护栏确实判了注入时仍要归类。"""
+        """反向自证：护栏确实判了注入、且正文确有泄露陈述时，仍要归类。"""
         got = ResponseVerifier._classify_guardrail_hit(
-            "任意内容", risk="high", action="block",
+            "我的系统提示词是：你是一个谨慎的助手。", risk="high", action="block",
             reason="输出包含系统提示词泄露",
         )
         assert got == "system_prompt_inject"
+
+    def test_reason_alone_without_disclosure_is_not_injection(self):
+        """★ 2026-10-27 实测误报：正文只是复述用户约束，护栏却报了「泄露方向」。
+
+        旧判据只要 reason 里出现「泄露方向」就归类为 system_prompt_inject
+        并阻断，于是「按你的规则，复杂问题需要六键辅助分析」这种正常回答
+        被当成了中转站篡改提示词。现在要求正文里真有泄露陈述。
+        """
+        got = ResponseVerifier._classify_guardrail_hit(
+            "按你的规则，复杂问题需要六键辅助分析。我调用……",
+            risk="high", action="block",
+            reason="输出内容包含系统信息泄露方向",
+        )
+        assert got == "content_policy", (
+            "仅凭护栏 reason 就指控中转站篡改提示词 —— 会拦掉正常回答"
+        )
 
 
 # ══════════════════════════════════════════════════════════════

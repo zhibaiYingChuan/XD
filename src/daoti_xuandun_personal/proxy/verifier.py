@@ -130,20 +130,43 @@ def _rules(section: str) -> List[Tuple[Any, str]]:
     return [(re.compile(p, re.IGNORECASE), l) for p, l in src]
 
 
-_WRITE_TOOL_RE = re.compile(r"write|edit|patch|create_file|replace|insert", re.IGNORECASE)
+# ★★ 2026-10-27：只有「真正执行任意命令」的工具，参数里的危险词才构成阻断理由。
+#
+#   实测误报（本次复核）：
+#     · Tool Call "run_mcp" 参数包含动态代码执行 eval：eval(   ← 参数是记忆文本
+#     · Tool Call "Edit"    参数包含Windows 磁盘格式化：Format B:  ← 参数是文档
+#   这两条都被判 high 并**中断了对话**，而模型只是把危险字样写进了
+#   笔记或文件内容里 —— 与「让客户端去执行」是两件事。
+#
+#   判据：bash / shell / powershell / python / node 这类工具，参数就是
+#   即将被执行的命令行；其余工具（写文件、改代码、记笔记、MCP 工具）
+#   的参数是**内容**，命中只作观测。
+_EXEC_TOOL_RE = re.compile(
+    r"(?:^|[_\-\s])(bash|shell|sh|cmd|powershell|pwsh|terminal|console|"
+    r"exec|subprocess|spawn|python|node|deno|perl|ruby)(?:$|[_\-\s])",
+    re.IGNORECASE,
+)
 
 
-def _is_write_tool(name: str) -> bool:
-    """这个工具是不是「往文件里写内容」那一类（Write / Edit / apply_patch…）。
+def _is_exec_tool(name: str) -> bool:
+    """这个工具的入参是不是「即将被执行的命令」。"""
+    return bool(_EXEC_TOOL_RE.search(name or ""))
 
-    ★ 为什么要单独判断（2026-10-22 实测误报）：
-      写入类工具的参数是**要写进文件的内容**。里面出现 `.env`
-      只是在「提到这个文件名」，跟「去读这个文件」是两件事。
-      旧实现对两类工具一视同仁，于是 AI 写一份环境变量审计文档
-      （正文提到 `.env.example` 与变量名）被写成
-      「Tool Call "Write" 试图读取环境变量文件」并直接阻断。
-    """
-    return bool(_WRITE_TOOL_RE.search(name or ""))
+
+#: 「会去读文件」的工具（Read / Grep / Glob / cat…）。
+#:
+#: ★ 与 _is_exec_tool 一起构成敏感路径的判定前提：
+#:   只有会读文件或会执行命令的工具，参数里出现 `~/.ssh/id_rsa`
+#:   才意味着「真的要去读它」。写文件、记笔记、MCP 工具的参数是内容。
+_READ_TOOL_RE = re.compile(
+    r"(?:^|[_\-\s])(read|grep|glob|cat|open|view|search|find)(?:$|[_\-\s])",
+    re.IGNORECASE,
+)
+
+
+def _is_file_read_tool(name: str) -> bool:
+    return bool(_READ_TOOL_RE.search(name or ""))
+
 
 
 def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
@@ -199,6 +222,21 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and m.group(0) not in seen_commands:
                 seen_commands.add(m.group(0))
+                # ★ 非执行类工具：参数是内容，只观测不阻断（见 _EXEC_TOOL_RE）
+                if not _is_exec_tool(tool_name):
+                    findings.append(
+                        VerificationFinding(
+                            category="dangerous_content",
+                            severity="medium",
+                            detail=(
+                                f'Tool Call "{tool_name}" 的参数里出现了{label}：'
+                                f"{m.group(0)[:40]}"
+                                "（只是写到文件/笔记里的内容，不会被直接执行；仅作记录）"
+                            ),
+                            evidence=_mask_evidence(args_text, m.start()),
+                        )
+                    )
+                    continue
                 findings.append(
                     VerificationFinding(
                         category="tool_call_dangerous",
@@ -212,18 +250,22 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and f"path:{m.group(0)}" not in seen_commands:
                 seen_commands.add(f"path:{m.group(0)}")
-                # ★★ 2026-10-22（误报修复）：写入类工具的「内容里提到 .env」
-                #   不是「读取 .env」。这类命中降为观测项（不阻断），
-                #   但仍留痕 —— 万一 AI 真把密钥写进别的文件，你依然看得见。
-                if label == "读取环境变量文件" and _is_write_tool(tool_name):
+                # ★★ 2026-10-27（把 10-22 的补丁改成通用判据）：
+                #   原来只豁免「写入类工具 × .env 这一种标签」，属于打补丁：
+                #   同一个 Write 调用里出现 `~/.ssh/id_rsa` 仍然会被判
+                #   「试图读取 SSH 私钥」并阻断 —— 而那同样只是文档内容。
+                #   现在按**工具能力**判断：只有「会读文件的工具」或
+                #   「会执行命令的工具」，参数里的敏感路径才构成读取行为。
+                if not (_is_exec_tool(tool_name) or _is_file_read_tool(tool_name)):
                     findings.append(
                         VerificationFinding(
                             category="dangerous_content",
                             severity="medium",
                             detail=(
-                                f'Tool Call "{tool_name}" 写入的内容里出现了'
-                                f"「环境变量文件 {m.group(0)[:40]}」的字样"
-                                "（只是提到，没有读取你的 .env；仅作记录，不阻断）"
+                                f'Tool Call "{tool_name}" 的参数里出现了'
+                                f"「{label} {m.group(0)[:40]}」的字样"
+                                "（该工具不读文件、不执行命令，这只是要写入的内容；"
+                                "仅作记录，不阻断）"
                             ),
                             evidence=_mask_evidence(args_text, m.start()),
                         )
@@ -242,6 +284,20 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and f"url:{m.group(0)}" not in seen_commands:
                 seen_commands.add(f"url:{m.group(0)}")
+                # ★ 同上：写文件时把某个网址写进正文，不等于客户端要去下载它。
+                if not _is_exec_tool(tool_name):
+                    findings.append(
+                        VerificationFinding(
+                            category="dangerous_content",
+                            severity="medium",
+                            detail=(
+                                f'Tool Call "{tool_name}" 的参数里提到了{label}：'
+                                f"{m.group(0)[:60]}（仅作记录，不阻断）"
+                            ),
+                            evidence=_mask_evidence(args_text, m.start()),
+                        )
+                    )
+                    continue
                 findings.append(
                     VerificationFinding(
                         category="tool_call_dangerous",
@@ -1054,6 +1110,22 @@ class ResponseVerifier:
         r"eyJ[A-Za-z0-9\-_]{8,}\.eyJ)",
     )
 
+    # ★★ 2026-10-27：真正的「提示词泄露陈述」长什么样。
+    #
+    #   实测误报：模型回答里写「按你的规则，复杂问题需要六键辅助分析」，
+    #   护栏 reason 里带了「泄露方向」，于是被判成 system_prompt_inject
+    #   并**阻断**。可那句话只是在复述用户的约束，没有任何系统提示词被吐出。
+    #
+    #   现在要求正文里出现「泄露陈述」本身才归类 —— 口径从
+    #   「提到了相关词」收紧到「说出了被泄露的内容」。
+    _PROMPT_DISCLOSURE_RE = re.compile(
+        r"(?:系统提示词|系统指令|内部指令|预置指令|初始指令)"
+        r"|(?:my|the)\s+(?:system\s+)?(?:prompt|instructions?)\b"
+        r"|(?:我|本模型)(?:被|收到的)?(?:要求|指示|指令|设定)(?:是|为|如下)"
+        r"|you\s+are\s+(?:an?\s+)?(?:AI|assistant)\s+(?:programmed|instructed|told)",
+        re.IGNORECASE,
+    )
+
     @classmethod
     def _classify_guardrail_hit(
         cls, content: str, risk: str, action: str, reason: str
@@ -1110,8 +1182,12 @@ class ResponseVerifier:
 
         # ③ 护栏 reason 指向提示词/指令泄露 → system_prompt_inject。
         #    ★ 2026-10-04（误报修复）：判据只看 reason，不再扫 content。
+        #    ★ 2026-10-27：但 reason 只说「方向」，正文里必须有泄露陈述。
+        #      「按你的规则……」这类复述不算泄露，降为 content_policy。
         if any(k in reason_text for k in cls._PROMPT_INJECT_REASON_MARKS):
-            return "system_prompt_inject"
+            if cls._PROMPT_DISCLOSURE_RE.search(content):
+                return "system_prompt_inject"
+            return "content_policy"
 
         # ④ 护栏只是要求「打码」→ 归内容合规（仅记录），不指控中转站。
         #
@@ -1134,7 +1210,10 @@ class ResponseVerifier:
         if any(k in reason_text for k in ("敏感", "打码", "sensitive", "redact")):
             return "content_policy"
         if any(k in reason_text for k in cls._PROMPT_INJECT_REASON_MARKS):
-            return "system_prompt_inject"
+            # ★ 同 ③：没有泄露陈述就只是「提到了相关词」，不指控中转站。
+            if cls._PROMPT_DISCLOSURE_RE.search(content):
+                return "system_prompt_inject"
+            return "content_policy"
         return None
 
     def _check_against_baseline(
