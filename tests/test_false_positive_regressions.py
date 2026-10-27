@@ -118,6 +118,46 @@ class TestSensitivePathsFollowToolCapability:
         assert "tool_call_dangerous" not in cats
 
 
+class TestCamelCaseToolNamesAreStillActions:
+    """驼峰工具名必须被识别为执行类。
+
+    ★ 2026-10-27 本轮自查抓到的真实漏洞：
+      执行类工具的正则要求词元两侧是分隔符，于是 ``RunCommand`` /
+      ``ReadFile`` 整体匹配不上，被当成「非执行工具」——
+      `python -c "eval(x)"` 从阻断降成观测。
+      这是改造引入的漏放，不是误报，必须有用例守着。
+    """
+
+    def test_run_command_with_real_eval_is_blocked(self):
+        payload = _payload("RunCommand", {"command": 'python -c "eval(x)"'})
+        findings = vf._check_tool_calls(payload, "")
+        assert any(f.category == "tool_call_dangerous" and f.severity == "high"
+                   for f in findings), "RunCommand 里真的执行 eval( 被放过了"
+
+    def test_read_file_on_env_is_blocked(self):
+        payload = _payload("ReadFile", {"path": ".env"})
+        cats = {f.category for f in vf._check_tool_calls(payload, "")}
+        assert "tool_call_dangerous" in cats, "ReadFile 读 .env 必须仍然阻断"
+
+    def test_git_commit_message_is_content(self):
+        """提交说明里的危险词是文本，不是要执行的命令。"""
+        payload = _payload("RunCommand", {
+            "command": 'git commit -m "正文解释代码时引用 eval( 不再判给出可执行代码"'
+        })
+        cats = {f.category for f in vf._check_tool_calls(payload, "")}
+        assert "tool_call_dangerous" not in cats, (
+            "写提交说明时正文引用 eval( 被当成执行 —— 实测 #7270 就是这么误报的"
+        )
+
+    def test_git_commit_with_command_substitution_still_blocks(self):
+        """消息里带命令替换就不能再豁免 —— 否则成了绕过通道。"""
+        payload = _payload("RunCommand", {"command": 'git commit -m "$(rm -rf /)"'})
+        findings = vf._check_tool_calls(payload, "")
+        assert any(f.category == "tool_call_dangerous" for f in findings), (
+            "`git commit -m \"$(rm -rf /)\"` 会被 shell 求值，必须阻断"
+        )
+
+
 class TestConstraintViolationSeverity:
     def _baseline(self, declared):
         return SimpleNamespace(constraints=SimpleNamespace(declared=declared))

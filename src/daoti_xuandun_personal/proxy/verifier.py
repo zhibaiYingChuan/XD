@@ -142,15 +142,28 @@ def _rules(section: str) -> List[Tuple[Any, str]]:
 #   即将被执行的命令行；其余工具（写文件、改代码、记笔记、MCP 工具）
 #   的参数是**内容**，命中只作观测。
 _EXEC_TOOL_RE = re.compile(
-    r"(?:^|[_\-\s])(bash|shell|sh|cmd|powershell|pwsh|terminal|console|"
+    r"(?:^|[_\-\s])(bash|shell|sh|cmd|command|powershell|pwsh|terminal|console|"
     r"exec|subprocess|spawn|python|node|deno|perl|ruby)(?:$|[_\-\s])",
     re.IGNORECASE,
 )
 
 
+def _tool_tokens(name: str) -> str:
+    """把工具名切成小写词元串，兼容 CamelCase。
+
+    ★ 为什么必须有这一步（2026-10-27 抓到自己的漏洞）：
+      正则要求词元前后是 `_` / `-` / 空白，于是
+      ``RunCommand`` 这种驼峰名整体匹配不上 —— 它被当成「非执行类工具」，
+      `python -c "eval(x)"` 因此从「阻断」降成「观测」。
+      这是本轮改造引入的真实漏洞，不是误报。
+      ``ReadFile`` / ``PowerShell`` 同理，统一先切开再匹配。
+    """
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name or "").lower()
+
+
 def _is_exec_tool(name: str) -> bool:
     """这个工具的入参是不是「即将被执行的命令」。"""
-    return bool(_EXEC_TOOL_RE.search(name or ""))
+    return bool(_EXEC_TOOL_RE.search(_tool_tokens(name)))
 
 
 #: 「会去读文件」的工具（Read / Grep / Glob / cat…）。
@@ -165,7 +178,36 @@ _READ_TOOL_RE = re.compile(
 
 
 def _is_file_read_tool(name: str) -> bool:
-    return bool(_READ_TOOL_RE.search(name or ""))
+    return bool(_READ_TOOL_RE.search(_tool_tokens(name)))
+
+
+#: 「写消息」类命令：`git commit -m` / `git tag -m` / `gh pr create --body`。
+#:
+#: ★ 2026-10-27 实测：AI 用 `git commit -m "<一整段提交说明>"` 时，
+#:   说明里引用了 `eval(` 与 `rm -rf` 的示例，被判成执行并打断。
+#:   这些命令的参数是**文本**，不是要执行的命令。
+_MESSAGE_CMD_RE = re.compile(
+    r"\bgit\s+(?:commit|tag)\b|\bgh\s+(?:pr|release)\b", re.IGNORECASE
+)
+
+#: 命令替换：`$(...)` / 反引号。消息里一旦出现，文本就会被 shell 求值，
+#: 不能再用「这是消息」豁免 —— 否则 `git commit -m "$(rm -rf /)"` 就成了绕过通道。
+_SHELL_SUBST_RE = re.compile(r"\$\(|`")
+
+
+def _args_are_content(tool_name: str, args_text: str) -> bool:
+    """参数是「内容」而不是「动作」。
+
+    ★ 三类算内容：
+      1. 非执行、非读取的工具（写文件、记笔记、MCP 工具）；
+      2. 执行类工具里的「写消息」命令（git commit / gh pr），且没有命令替换；
+      3. 其余一律按动作处理（宁可拦，不可漏）。
+    """
+    if not (_is_exec_tool(tool_name) or _is_file_read_tool(tool_name)):
+        return True
+    if _MESSAGE_CMD_RE.search(args_text) and not _SHELL_SUBST_RE.search(args_text):
+        return True
+    return False
 
 
 
@@ -222,8 +264,8 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and m.group(0) not in seen_commands:
                 seen_commands.add(m.group(0))
-                # ★ 非执行类工具：参数是内容，只观测不阻断（见 _EXEC_TOOL_RE）
-                if not _is_exec_tool(tool_name):
+                # ★ 参数是「内容」时只观测不阻断（见 _args_are_content）
+                if _args_are_content(tool_name, args_text):
                     findings.append(
                         VerificationFinding(
                             category="dangerous_content",
@@ -231,7 +273,8 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                             detail=(
                                 f'Tool Call "{tool_name}" 的参数里出现了{label}：'
                                 f"{m.group(0)[:40]}"
-                                "（只是写到文件/笔记里的内容，不会被直接执行；仅作记录）"
+                                "（这段参数是要写入文件/消息的文本，不会被直接执行；"
+                                "仅作记录，不阻断）"
                             ),
                             evidence=_mask_evidence(args_text, m.start()),
                         )
@@ -250,13 +293,9 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and f"path:{m.group(0)}" not in seen_commands:
                 seen_commands.add(f"path:{m.group(0)}")
-                # ★★ 2026-10-27（把 10-22 的补丁改成通用判据）：
-                #   原来只豁免「写入类工具 × .env 这一种标签」，属于打补丁：
-                #   同一个 Write 调用里出现 `~/.ssh/id_rsa` 仍然会被判
-                #   「试图读取 SSH 私钥」并阻断 —— 而那同样只是文档内容。
-                #   现在按**工具能力**判断：只有「会读文件的工具」或
-                #   「会执行命令的工具」，参数里的敏感路径才构成读取行为。
-                if not (_is_exec_tool(tool_name) or _is_file_read_tool(tool_name)):
+                # ★ 见 _args_are_content：只有「会读文件 / 会执行命令」且
+                #   不是写消息命令时，参数里的敏感路径才构成读取行为。
+                if _args_are_content(tool_name, args_text):
                     findings.append(
                         VerificationFinding(
                             category="dangerous_content",
@@ -264,8 +303,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                             detail=(
                                 f'Tool Call "{tool_name}" 的参数里出现了'
                                 f"「{label} {m.group(0)[:40]}」的字样"
-                                "（该工具不读文件、不执行命令，这只是要写入的内容；"
-                                "仅作记录，不阻断）"
+                                "（这段参数是内容而非动作；仅作记录，不阻断）"
                             ),
                             evidence=_mask_evidence(args_text, m.start()),
                         )
@@ -284,8 +322,8 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and f"url:{m.group(0)}" not in seen_commands:
                 seen_commands.add(f"url:{m.group(0)}")
-                # ★ 同上：写文件时把某个网址写进正文，不等于客户端要去下载它。
-                if not _is_exec_tool(tool_name):
+                # ★ 同上：写文件/写消息时把某个网址写进正文，不等于要去下载它。
+                if _args_are_content(tool_name, args_text):
                     findings.append(
                         VerificationFinding(
                             category="dangerous_content",
