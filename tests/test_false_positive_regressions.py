@@ -158,6 +158,33 @@ class TestCamelCaseToolNamesAreStillActions:
         )
 
 
+class TestToolAliasIsNotTampering:
+    """同一工具的另一种叫法，不该被当成「中转站凭空造调用」。
+
+    ★ 2026-10-28 实测（日志 #7336）：
+      客户端声明的 21 个工具里只有 `Shell`，响应返回的调用名是 `RunCommand`。
+      这是一次**真实**的未声明调用（规则没判错），但它来自模型侧的别名，
+      不是中转站篡改 —— 界面写「中转站凭空造调用是一种可能」会误导用户。
+      现在改为 low 观测；真正没见过的名字仍然 high。
+    """
+
+    def test_shell_alias_runcommand_is_observation(self):
+        b = bl.RequestBaseline(tool_names=["Shell"])
+        findings = bl.diff_against_baseline(b, {"tool_names": ["RunCommand"]}, "")
+        hits = [(f["category"], f["severity"]) for f in findings
+                if f["category"] == "undeclared_tool"]
+        assert ("undeclared_tool", "high") not in hits, "别名被当成凭空造调用并阻断"
+        assert any(sev == "low" for _, sev in hits), "别名应留一条 low 观测记录"
+
+    def test_unknown_tool_name_still_high(self):
+        b = bl.RequestBaseline(tool_names=["Shell"])
+        findings = bl.diff_against_baseline(b, {"tool_names": ["exfiltrate_files"]}, "")
+        assert any(
+            f["category"] == "undeclared_tool" and f["severity"] == "high"
+            for f in findings
+        ), "真正陌生的工具名必须仍然判 high"
+
+
 class TestConstraintViolationSeverity:
     def _baseline(self, declared):
         return SimpleNamespace(constraints=SimpleNamespace(declared=declared))

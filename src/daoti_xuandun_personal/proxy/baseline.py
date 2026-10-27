@@ -635,6 +635,59 @@ def _tool_name_matches_any(
     return False
 
 
+#: 同一个「能力」的常见叫法（已去掉分隔符、全小写）。
+#:
+#: ★ 2026-10-28 实测（日志 #7336）：
+#:   客户端声明的 21 个工具里只有 `Shell`，而响应返回的调用名是
+#:   `RunCommand` —— 同一个能力的两个叫法（模型侧的别名）。
+#:   旧判据按「格式归一化后完全相等」比对，于是把它判成
+#:   「中转站凭空造调用」/ high / 直接阻断。
+#:
+#:   这与「格式差异」是两类问题：
+#:     格式差异（大小写、下划线、命名空间）= 同一个名字的不同写法；
+#:     别名差异（Shell ↔ RunCommand）= 同一件事的不同名字。
+#:   前者早已归一化，后者只能靠**显式枚举的能力族**来认，不能靠模糊匹配 ——
+#:   否则「gpt 式前缀匹配」的老坑会重演（放过任意新造的名字）。
+#:
+#:   认出来后只降为 low（观测），不阻断；真正没见过的名字仍然是 high。
+_TOOL_FAMILIES: tuple = (
+    # 执行命令 / 跑进程
+    frozenset({
+        "shell", "bash", "sh", "cmd", "powershell", "pwsh", "terminal",
+        "console", "runcommand", "executecommand", "executetool",
+        "deferexecutetool", "runshell", "exec", "spawn", "command",
+    }),
+    # 读文件
+    frozenset({"read", "readfile", "openfile", "cat", "view", "viewfile", "getfile"}),
+    # 写 / 改文件
+    frozenset({
+        "write", "writefile", "createfile", "edit", "editfile",
+        "applypatch", "patchfile", "insert", "replace",
+    }),
+    # 搜文件
+    frozenset({"grep", "search", "searchfiles", "find", "glob", "listfiles", "listdir"}),
+)
+
+
+def _tool_family(name: str) -> int:
+    """返回工具名所属的能力族下标；不属于任何已知族返回 -1。"""
+    key = _normalize_tool_name(name or "").replace("_", "")
+    if not key:
+        return -1
+    for idx, fam in enumerate(_TOOL_FAMILIES):
+        if key in fam:
+            return idx
+    return -1
+
+
+def _tool_family_matches_any(returned: str, declared: Iterable[str]) -> bool:
+    """返回的名字是否与某个声明项属于同一能力族（别名关系）。"""
+    fam = _tool_family(returned)
+    if fam < 0:
+        return False
+    return any(_tool_family(d) == fam for d in declared)
+
+
 def _ip_of(url: str) -> str:
     m = _IP_RE.search(url)
     return m.group(0) if m else ""
@@ -1211,10 +1264,17 @@ def diff_against_baseline(
     declared = set(baseline.tool_names)
     returned = list(response_facts.get("tool_names") or [])
     if declared:
-        undeclared = [
-            n for n in returned
-            if not _tool_name_matches_any(n, declared)
-        ]
+        undeclared: List[str] = []
+        aliased: List[str] = []
+        for n in returned:
+            if _tool_name_matches_any(n, declared):
+                continue
+            # ★ 2026-10-28：同一能力的不同叫法（Shell ↔ RunCommand）不是「凭空造调用」，
+            #   降为 low 观测，见 _TOOL_FAMILIES 的注释。
+            if _tool_family_matches_any(n, declared):
+                aliased.append(n)
+            else:
+                undeclared.append(n)
         if undeclared:
             findings.append({
                 "category": "undeclared_tool",
@@ -1226,6 +1286,17 @@ def diff_against_baseline(
                     f"{'、'.join(sorted(declared)[:4])}）"
                 ),
                 "evidence": ", ".join(sorted(set(undeclared))[:10]),
+            })
+        if aliased:
+            findings.append({
+                "category": "undeclared_tool",
+                "severity": "low",
+                "detail": (
+                    f"响应用了同一工具的另一种叫法："
+                    f"{'、'.join(sorted(set(aliased))[:5])}"
+                    "（与你声明的工具属于同一能力族，属命名差异，不阻断）"
+                ),
+                "evidence": ", ".join(sorted(set(aliased))[:10]),
             })
     elif returned:
         # 用户没声明任何工具，却返回了工具调用 —— 同样是凭空造调用
