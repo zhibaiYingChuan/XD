@@ -138,6 +138,19 @@ jobs:
         working-directory: desktop
         run: npm run build
 
+      # ★★ 2026-10-29（实测）：`tauri_build::build()` 会在**编译期**校验
+      #   `bundle.resources` 里声明的路径是否存在。本项目声明的是
+      #   `resources/engine`（Nuitka 产物目录，由 build_engine.py 生成、
+      #   不入库），干净 clone 上它不存在 —— 于是 cargo check 抛
+      #   「failed to run custom build command」而没有任何可读原因。
+      #   这里给一个空目录占位：本 job 只验证类型与依赖，不验证产物。
+      - name: Create resource placeholders for cargo check
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/resources/engine | Out-Null
+          Set-Content -Path src-tauri/resources/engine/.placeholder -Value ""
+
       # ★★ 顺序不能反：tauri 的 generate_context! 在**编译期**要求
       #   frontendDist（../dist）存在，而 dist/ 不入库。
       #   先构建前端再 cargo check，仓库里不需要提交任何构建产物。
