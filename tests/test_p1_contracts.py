@@ -463,3 +463,91 @@ class TestRepositorySurface:
         assert "企业版文档/" in _read(ROOT / ".gitignore"), (
             "企业版文档未加入忽略列表，下次很容易被重新 git add 回来"
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# P1-26 补完 / P1-30：构建出网收紧 + 本地代理不可用时的恢复指引
+# ══════════════════════════════════════════════════════════════
+
+
+class TestBuildJobEgressIsEnforced:
+    """构建 job 的出网必须**默认拒绝**。
+
+    audit 只记录不拦截：被投毒的依赖可以在构建期把载荷或数据发出去，
+    而所有门禁照样全绿。允许清单必须覆盖真实依赖，否则会以假阳性阻断发布。
+    """
+
+    def _build_steps(self) -> str:
+        src = _read(RELEASE_YML)
+        start = src.index("name: Build (${{ matrix.art }})")
+        end = src.index("Upload artifacts", start)
+        return src[start:end]
+
+    def test_egress_policy_is_block_with_allowlist(self):
+        body = self._build_steps()
+        assert "egress-policy: block" in body, (
+            "构建 job 仍在 audit —— 出网不拦截等于供应链加固空转"
+        )
+        assert "allowed-endpoints" in body, "block 却没有允许清单，构建必挂"
+
+    def test_allowlist_covers_real_dependencies(self):
+        body = self._build_steps()
+        required = (
+            "github.com:443",            # 取源码 / 工具链 / 打包工具
+            "pypi.org:443",              # 引擎依赖
+            "registry.npmjs.org:443",    # 前端依赖
+            "index.crates.io:443",       # Rust 依赖
+            "static.rust-lang.org:443",  # 工具链
+            "archive.ubuntu.com:80",     # apt（Linux 打包库）
+        )
+        for host in required:
+            assert host in body, f"允许清单缺少 {host}，发布会被假阳性阻断"
+
+
+class TestLocalProxyOfflineIsRecoverable:
+    """P1-30：引擎没起来时，用户必须能就地恢复。
+
+    此前只写「请确认玄盾代理已启动（127.0.0.1:端口）」+「重试」——
+    那是一句用户无法执行的指令：他不知道引擎是什么、怎么启动，
+    也不知道「端口被别的程序占了」「改过端口没重启」这两种常见原因。
+    """
+
+    def test_shared_guide_offers_real_actions(self):
+        src = _read(ROOT / "desktop" / "src" / "components" / "EngineOffline.tsx")
+        assert "api.restartEngine()" in src, "引导里没有真正的恢复动作"
+        assert "重启引擎" in src
+        assert "/settings#sec-engine" in src, "没有通往「运行状态」的入口"
+        # 三种最常见原因都要出现，否则用户仍然不知道从哪查
+        assert "改过端口" in src and "占用" in src
+
+    def test_landing_pages_use_the_shared_guide(self):
+        for name in ("Dashboard.tsx", "Settings.tsx"):
+            src = _read(ROOT / "desktop" / "src" / "pages" / name)
+            assert "EngineOffline" in src, f"{name} 仍在自己拼一段无法执行的提示"
+
+    def test_status_bar_offers_restart(self):
+        src = _read(ROOT / "desktop" / "src" / "components" / "Layout.tsx")
+        assert "handleRestartEngine" in src, "状态栏只报「本地代理未运行」，没有恢复入口"
+        assert "restartEngine" in src
+        assert "查看原因" in src
+
+    def test_boot_has_a_time_deadline(self):
+        """「还在启动」必须有时间上限。
+
+        端口被别的程序占着时请求会挂着不回：既没有成功也没有异常，
+        失败计数永远是 0 —— 只按次数判就会永远停在「首次启动需要几秒」。
+        """
+        comp = _read(ROOT / "desktop" / "src" / "components" / "EngineOffline.tsx")
+        assert "BOOT_DEADLINE_MS" in comp
+        for name in ("components/Layout.tsx", "pages/Dashboard.tsx"):
+            src = _read(ROOT / "desktop" / "src" / name)
+            assert "useBootDeadline" in src, f"{name} 没有时间兜底，可能永久停在「启动中」"
+
+    def test_engine_down_is_not_mistaken_for_first_run(self):
+        """取不到配置 ≠ 首次使用：不能把用户丢进向导。"""
+        src = _read(ROOT / "desktop" / "src" / "App.tsx")
+        start = src.index("const cfg = (await api.getConfig())")
+        body = src[start:start + 800]
+        assert "setNeedOnboarding(false)" in body, (
+            "引擎没起来时仍会进首次向导 —— 用户填完中转站也保存不了"
+        )

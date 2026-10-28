@@ -33,7 +33,6 @@ import {
   currentProxyPort,
   syncProxyPort,
   displayDomain,
-  humanizeLoadError,
   type PersonalConfig,
   type SecurityLevel,
   type RelayPrecheck,
@@ -42,6 +41,7 @@ import {
   type EngineStatus,
 } from '../services/api';
 import { useToast } from '../components/Toast';
+import { EngineOffline } from '../components/EngineOffline';
 import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/tauriShim';
 import { checkForUpdate, type UpdateCheck } from '../lib/updater';
 
@@ -880,35 +880,15 @@ export default function Settings() {
   }
 
   if (loadError || !config) {
-    // 原始报错翻译成「怎么了 + 怎么办」，原始信息收进折叠的技术细节。
-    const err = humanizeLoadError(loadError);
+    // ★ P1-30：与首页共用同一份引导。此前这里只写「请确认玄盾代理已启动
+    //   （127.0.0.1:xxx）」+「重试」—— 用户照做不了，只能反复点重试。
     return (
       <div>
         <div className="page-header">
           <h1 className="page-title">设置</h1>
         </div>
-        <div className="alert danger">
-          <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
-          <div>
-            <b>无法连接本地代理</b>
-            <div className="mt-8">{err.message}</div>
-            <details className="mt-8">
-              <summary
-                className="faint"
-                style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
-              >
-                技术细节
-              </summary>
-              <div className="mono faint" style={{ fontSize: 12, marginTop: 4 }}>
-                {err.detail}
-              </div>
-            </details>
-            <div className="mt-8 faint">
-              请确认玄盾代理已启动（127.0.0.1:{currentProxyPort()}）。
-            </div>
-          </div>
-        </div>
-        <button className="btn" onClick={load}>
+        <EngineOffline error={loadError} onRetried={() => load()} />
+        <button className="btn secondary mt-8" onClick={() => load()}>
           重试
         </button>
       </div>

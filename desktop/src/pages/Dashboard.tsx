@@ -15,7 +15,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ShieldCheck,
-  ShieldAlert,
   ShieldX,
   Clock,
   PauseCircle,
@@ -37,12 +36,12 @@ import {
   findingExplanation,
   primaryFindingCategory,
   displayDomain,
-  humanizeLoadError,
   type StateResponse,
   type LogEntry,
   type RelayReputation,
 } from '../services/api';
 import { useToast } from '../components/Toast';
+import { EngineOffline, useBootDeadline } from '../components/EngineOffline';
 import { copyToClipboard } from '../lib/tauriShim';
 
 /**
@@ -351,38 +350,22 @@ export default function Dashboard() {
   //   轮询 2 秒一次，一次抖动就把首页整页替换成红色错误卡太粗暴，
   //   而且引擎刚启动时的第一次请求本来就可能失败。
   //   连续失败 2 次（约 6 秒）以上，才认定是真连不上。
-  if (loadError && !state && failRef.current >= 2) {
-    // 把底层原始报错（如 `GET /api/state → HTTP 500`）翻译成「怎么了 + 怎么办」，
-    // 原始信息收进折叠的技术细节里备查。
-    const err = humanizeLoadError(loadError);
+  //
+  // ★ P1-30：还要有**时间**兜底。端口被别的程序占着时请求会挂着不回，
+  //   既没有成功也没有失败（loadError 永远是 null），只看失败次数
+  //   就会一直显示「读取中」，用户等多久都没有下一步。
+  const bootTimedOut = useBootDeadline();
+  if (!state && (failRef.current >= 2 || bootTimedOut)) {
+    // ★ P1-30：这里不再自己拼一段「请确认代理已启动」的说明。
+    //   那种文案用户执行不了（他不知道引擎在哪、也不知道端口会被占用）。
+    //   统一交给 EngineOffline：三种常见原因 + 一键重启 + 运行状态入口。
     return (
       <div>
         <div className="page-header">
           <h1 className="page-title">首页</h1>
         </div>
-        <div className="alert danger">
-          <ShieldAlert size={17} strokeWidth={1.5} className="alert-icon" />
-          <div>
-            <b>无法连接本地代理</b>
-            <div className="mt-8">{err.message}</div>
-            <details className="mt-8">
-              <summary
-                className="faint"
-                style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
-              >
-                技术细节
-              </summary>
-              <div className="mono faint" style={{ fontSize: 12, marginTop: 4 }}>
-                {err.detail}
-              </div>
-            </details>
-            <div className="mt-8 faint">
-              请确认玄盾代理已启动（默认 127.0.0.1:{currentProxyPort()}）。
-              若尚未配置中转站，请前往「设置」页面完成配置。
-            </div>
-          </div>
-        </div>
-        <button className="btn" onClick={() => load()}>
+        <EngineOffline error={loadError} onRetried={() => load()} />
+        <button className="btn secondary mt-8" onClick={() => load()}>
           重试
         </button>
       </div>

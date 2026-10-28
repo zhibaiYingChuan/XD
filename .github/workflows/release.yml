@@ -41,9 +41,8 @@ jobs:
     steps:
       # ★ P1-26：本 job 的依赖面只有「取仓库 + pip」，allowlist 可核准，
       #   因此出网策略用 block（audit 只记录不拦截，等于事后才看得见）。
-      #   build job 仍保留 audit —— 它的依赖面横跨 npm/pypi/crates/rustup/apt
-      #   与 Tauri/linuxdeploy 的按需下载，allowlist 无法在离线环境核准；
-      #   强行 block 会以「假阳性」的方式阻断发布。该差距已在 PR 说明中登记。
+      #   build job 也已按同样方式收紧为 block，允许清单按步骤逐个列出，
+      #   见该 job 的注释。
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
@@ -203,17 +202,55 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
     steps:
-      # ★ P1-26：这里仍是 audit，是**已登记**的已知差距，不是遗漏。
-      #   本 job 的出网面横跨 npm / pypi / crates.io / rustup / apt
-      #   与 Tauri、linuxdeploy 的按需下载，allowlist 无法离线核准；
-      #   贸然 block 只会以假阳性方式阻断发布（等于把供应链加固
-      #   变成"发不出版"）。可核准的部分已经在 preflight / CI / release 里 block。
-      #   ★ 与之配套的实际加固：build_engine.py 已去掉
-      #     --assume-yes-for-download —— 构建期不再静默抓第三方工具。
+      # ★ P1-26：出网从 audit 收紧为 block，并给出可核准的允许清单。
+      #   audit 只记录、不拦截 —— 意味着构建期任何一个被投毒的依赖都能
+      #   悄悄把数据或载荷发出去，而门禁本身「全部通过」。
+      #
+      #   这份清单按**步骤实际需要的域名**逐条列出，不做通配放开：
+      #     · 取源码 / actions / 产物上传：github.com、codeload、
+      #       objects/release-assets.githubusercontent、uploads.github.com
+      #     · Python：pypi.org + files.pythonhosted.org（Nuitka 已禁用
+      #       ccache 下载，不再需要 nuitka.net）
+      #     · 前端：registry.npmjs.org；Rust：index/static.crates.io、
+      #       static.rust-lang.org、sh.rustup.rs
+      #     · Linux 打包：apt 源（deb 与 AppImage 的系统库）
+      #     · Windows 签名：时间戳服务 timestamp.digicert.com
+      #
+      #   ★ 如果第一轮被拦：harden-runner 会在日志里逐条列出被阻断的
+      #     `host:port`，把它补进下面这张表即可 —— 这比"全放开再看日志"
+      #     更安全，因为默认是拒绝而不是允许。
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            uploads.github.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            index.crates.io:443
+            static.crates.io:443
+            crates.io:443
+            static.rust-lang.org:443
+            sh.rustup.rs:443
+            archive.ubuntu.com:80
+            archive.ubuntu.com:443
+            security.ubuntu.com:80
+            security.ubuntu.com:443
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            esm.ubuntu.com:80
+            esm.ubuntu.com:443
+            timestamp.digicert.com:443
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 

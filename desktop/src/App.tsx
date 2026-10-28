@@ -41,8 +41,12 @@ function AppRoutes() {
       const configured = Boolean(cfg.relay?.base_url && cfg.relay?.api_key);
       setNeedOnboarding(!configured);
     } catch {
-      // 代理未就绪 → 仍走向导（向导内含配置引导）
-      setNeedOnboarding(true);
+      // ★ P1-30：**不要**把「取不到配置」当成「首次使用」。
+      //   引擎没起来时走进向导，用户会被要求填中转站地址与 Key，
+      //   填完点「完成」照样保存失败 —— 而真正的问题是本地代理没运行。
+      //   这里放行到主界面：首页与设置页会用 EngineOffline 说清原因，
+      //   并给出「重启引擎」这一个能立刻执行的动作。
+      setNeedOnboarding(false);
     } finally {
       setChecking(false);
     }

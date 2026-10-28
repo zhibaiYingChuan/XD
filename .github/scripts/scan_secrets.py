@@ -60,7 +60,9 @@ _PEM_LABELS = (
 PEM_MARKERS = tuple(
     (_PEM_HEAD + label + _PEM_TAIL).encode() for label in _PEM_LABELS
 ) + (
-    b"PuTTY-User-Key-File-",
+    # 同样拼接：这个文件本身会被自己扫到（自检必须通过），
+    # 写成字面量会让仓库里真的多出一处「像私钥」的字符串。
+    ("PuTTY" + "-User-Key-File-").encode(),
 )
 
 # PKCS#12 的 DER 编码：06 0B 2A 86 48 86 F7 0D 01 0C 0A（OID 1.2.840.113549.1.12.10）

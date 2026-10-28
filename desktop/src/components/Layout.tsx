@@ -16,7 +16,8 @@ import {
 } from 'lucide-react';
 import { api, STATE_LABELS, currentProxyPort, syncProxyPort } from '../services/api';
 import type { StateResponse, LicenseStatus } from '../services/api';
-import { getAppVersion, setTrayState, type TrayState } from '../lib/tauriShim';
+import { getAppVersion, isTauri, setTrayState, type TrayState } from '../lib/tauriShim';
+import { useBootDeadline } from './EngineOffline';
 
 // ══════════════════════════════════════════════════════════════
 // 侧边导航（产品文档：4 个页面）
@@ -72,6 +73,13 @@ function StatusBar() {
   //   两者对用户的意义完全不同 —— 前者等两秒就好，后者是真故障。
   const [everUp, setEverUp] = useState(false);
   const failRef = useRef(0);
+  // ★ P1-30：引擎没起来时，用户必须能**就地**恢复，而不是只被告知
+  //   「请确认代理已启动（127.0.0.1:18765）」—— 那句话他没有办法执行。
+  const [restarting, setRestarting] = useState(false);
+  // 重建轮询用的计数器：重启成功后立刻重新拉一次，不必等退避到 30 秒。
+  const [pollKey, setPollKey] = useState(0);
+  // ★ P1-30：「还在启动」最多维持 20 秒 —— 之后必须给出可执行的动作。
+  const bootTimedOut = useBootDeadline();
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +108,24 @@ function StatusBar() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, []);
+  }, [pollKey]);
+
+  /** 就地重启引擎：成功即立刻重拉一次状态，失败把原因留在设置页。 */
+  const handleRestartEngine = async () => {
+    if (restarting) return;
+    setRestarting(true);
+    try {
+      await api.restartEngine();
+      failRef.current = 0;
+      setPollKey((k) => k + 1);
+    } catch {
+      // 具体原因（端口被占用 / 配置损坏）由「设置 → 运行状态」呈现，
+      // 状态栏这一层只说「仍然没起来」，不猜原因。
+      failRef.current = 4;
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   useEffect(() => {
     // ★ P1-10：先同步「实际运行中的端口」，再开始轮询。
@@ -133,7 +158,11 @@ function StatusBar() {
     // ★ 冷启动：引擎还在拉起时**不要**报「本地代理未运行」。
     //   每次打开应用先红一下，用户会以为防护坏了，甚至去重装。
     //   连续失败 3 次（约 14 秒）仍没起来，才当作真的没运行。
-    if (!everUp && failRef.current < 3) {
+    //
+    // ★ P1-30：但"还在启动"必须有**时间上限**。端口被别的程序占着时，
+    //   请求会长时间挂着不回 —— 既没有成功也没有失败，失败计数一直是 0，
+    //   界面就永远停在「首次启动需要几秒」。到点就必须说真话。
+    if (!everUp && failRef.current < 3 && !bootTimedOut) {
       return (
         <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot learning" />
@@ -149,8 +178,21 @@ function StatusBar() {
           本地代理未运行
         </span>
         <span className="status-meta">
-          请确认玄盾代理已启动（127.0.0.1:{currentProxyPort()}）
+          端口 127.0.0.1:{currentProxyPort()} 没有响应 ·
+          可重启引擎，或看「设置 → 运行状态」里的原因
         </span>
+        {isTauri() && (
+          <button
+            className="btn ghost sm"
+            onClick={() => void handleRestartEngine()}
+            disabled={restarting}
+          >
+            {restarting ? '正在重启…' : '重启引擎'}
+          </button>
+        )}
+        <Link className="btn ghost sm" to="/settings#sec-engine">
+          查看原因
+        </Link>
       </div>
     );
   }
