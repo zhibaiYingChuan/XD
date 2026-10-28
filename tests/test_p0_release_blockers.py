@@ -40,6 +40,31 @@ if str(ROOT / "src") not in sys.path:
 from daoti_xuandun_personal.proxy import app as app_mod  # noqa: E402
 from daoti_xuandun_personal.storage import db as db_mod  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _treat_as_activated(monkeypatch):
+    """把「授权判定」固定为已授权。
+
+    ★★ 2026-10-28（CI 实测）：本文件的用例测的是流式终止、截断处理、
+      引擎身份等**与授权无关**的行为，但它们都要经过
+      ``app._protection_enabled()`` 这道门。
+
+      该门的语义是「未激活 / 已过期 → 只读直通」：公钥缺失时按已授权处理，
+      公钥在、码不在时按未激活处理。开发机上有 license.json，门是开的，
+      用例全绿；干净 runner 上公钥随包分发（发布前置条件）而没有码，
+      门是关的 —— 三个用例因此只在 CI 上失败，本地永远复现不出来。
+
+      这里显式把授权判定钉成已授权，让用例只依赖被测逻辑；
+      需要验「未激活只读」的用例请自行 monkeypatch 回真实实现。
+    """
+    from daoti_xuandun_personal import license as lic_mod
+
+    monkeypatch.setattr(lic_mod, "load_public_key", lambda: None)
+    app_mod._protection_cache.clear()
+    yield
+    app_mod._protection_cache.clear()
+
+
 LIB_RS = ROOT / "desktop" / "src-tauri" / "src" / "lib.rs"
 API_TS = ROOT / "desktop" / "src" / "services" / "api.ts"
 APP_PY = ROOT / "src" / "daoti_xuandun_personal" / "proxy" / "app.py"
