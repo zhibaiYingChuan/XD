@@ -174,7 +174,7 @@ class TestMaskedKeyIsNotAKey:
             "而界面只显示过一次「保存失败」，用户无从关联"
         )
 
-        idx_others = body.find("find_masked_key_in_others(")
+        idx_others = body.find("reconcile_masked_others(")
         assert idx_others != -1, "没找到 others 的掩码守卫，判据失效"
         assert idx_others < first_setattr, (
             "others 的掩码校验在 setattr 之后 —— 保存失败会污染内存"

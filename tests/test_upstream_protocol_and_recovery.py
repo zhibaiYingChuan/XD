@@ -453,12 +453,17 @@ class TestStatsDaysWiredThrough:
 
 class TestConfigSaveRollback:
     def test_invalid_save_does_not_pollute_memory(self):
-        """校验失败的保存，运行态必须一字未动（磁盘没变、内存也不能变）。"""
+        """校验失败的保存，运行态必须一字未动（磁盘没变、内存也不能变）。
+
+        ★ 2026-10-29：调用方式改为 ``endpoint(payload=...)``。
+          原来构造 Request 再位置传参时，``payload`` 收到的是 Request 对象
+          （它支持 ``[]`` 访问 scope），``"guard" in payload`` 恒为 False ——
+          写入与回滚都没被真正执行，用例是在「什么都没发生」的前提下假绿的。
+        """
         import asyncio
 
         import pytest
         from fastapi import HTTPException
-        from starlette.requests import Request
 
         cfg = PersonalConfig()
         original_port = cfg.server.port
@@ -474,23 +479,14 @@ class TestConfigSaveRollback:
                 and "PUT" in (getattr(r, "methods", None) or set())
             )
 
-            body = json.dumps({
+            payload = {
                 "guard": {"security_level": "strict"},
                 "server": {"port": 80},          # 非法端口 → validate() 必然报错
-            }).encode("utf-8")
-
-            scope = {
-                "type": "http", "method": "PUT", "path": "/api/config",
-                "headers": [], "query_string": b"",
-                "client": ("127.0.0.1", 40001),
             }
-
-            async def _receive():
-                return {"type": "http.request", "body": body, "more_body": False}
 
             with pytest.raises(HTTPException) as ei:
                 asyncio.new_event_loop().run_until_complete(
-                    endpoint(Request(scope, _receive))
+                    endpoint(payload=payload)
                 )
             assert ei.value.status_code == 400
 
@@ -502,3 +498,151 @@ class TestConfigSaveRollback:
             )
         finally:
             app_mod._config = old
+
+
+# ══════════════════════════════════════════════════════════════
+# P0（2026-10-29）：配置页保存被「掩码回显」整单拒绝
+# ══════════════════════════════════════════════════════════════
+
+
+class TestSaveWithMaskedRelayList:
+    """配置页保存必须能成功，即使客户端回传了掩码的 others。
+
+    ★★ 实测（用户截图）：点「保存」必然 400 ——
+      「第 1 条中转站配置的 API Key 看起来是脱敏后的串（含 ****）」，
+      于是**只要配过一家中转站，配置页就再也存不了任何设置**。
+
+      成因链：``GET /api/config`` 的 relay 里带 ``others``（其余中转站），
+      每一项的 Key 都被 ``to_safe_dict()`` 换成了掩码；前端整体回传，
+      后端「见掩码即拒绝」。守卫挡住的是「把真实 Key 写成掩码」，
+      却把正常保存一起挡死。
+
+      正确语义：**与服务端自己发出的掩码一致 = 未改动**，保留真实 Key；
+      对不上记录的值才是异常，仍拒绝。
+    """
+
+    KEY_A = "sk-A-real-key-0001"
+    KEY_B = "sk-B-real-key-0002"
+    URL_A = "https://a.example.com"
+    URL_B = "https://b.example.com"
+
+    def _cfg(self):
+        import importlib
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        cfg = cfg_mod.PersonalConfig()
+        cfg.relay.name = "A 家"
+        cfg.relay.base_url = self.URL_A
+        cfg.relay.api_key = self.KEY_A
+        cfg.relay.others = [{
+            "id": cfg.relay.make_relay_id(self.URL_B, self.KEY_B),
+            "name": "B 家",
+            "base_url": self.URL_B,
+            "api_key": self.KEY_B,
+            "enabled": True,
+            "port": 0,
+        }]
+        cfg.relay.active_id = cfg.relay.make_relay_id(self.URL_A, self.KEY_A)
+        return cfg
+
+    def _put(self, cfg, relay_payload):
+        """调用真实的 PUT /api/config 端点。
+
+        ★ 必须用 ``payload=`` 关键字直接传解析后的 body。
+          这个端点的签名是 ``update_config(payload: Dict = Body(...))``：
+          若按 ASGI 方式构造 Request 再位置传参，``payload`` 收到的会是
+          **Request 对象**，而 Starlette 的 Request 支持 ``[]`` 访问 scope ——
+          于是 ``"relay" in payload`` 恒为 False，整个 relay 分支被静默跳过，
+          测试拿到的是「保存成功但什么都没改」的假结果。
+          （本文件原有的回滚用例正是这样假绿的：它断言的是 validate()
+            报错，而错误来自「地址为空」而不是它想验的路径。）
+        """
+        import asyncio
+
+        old = app_mod._config
+        app_mod._config = cfg
+        try:
+            application = app_mod.create_app()
+            endpoint = next(
+                r.endpoint for r in application.routes
+                if getattr(r, "path", "") == "/api/config"
+                and "PUT" in (getattr(r, "methods", None) or set())
+            )
+            return asyncio.new_event_loop().run_until_complete(
+                endpoint(payload={"relay": relay_payload})
+            )
+        finally:
+            app_mod._config = old
+
+    @staticmethod
+    def _echo(cfg):
+        """模拟配置页的提交体：整份 relay 回显（含掩码的 others）。"""
+        return json.loads(json.dumps(cfg.to_safe_dict()["relay"]))
+
+    def _isolate(self, monkeypatch, tmp_path):
+        """把配置文件挪到临时目录，避免测试写到真实 config.json。"""
+        import importlib
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        monkeypatch.setattr(
+            cfg_mod, "CONFIG_FILE", tmp_path / "config.json", raising=False
+        )
+
+    def test_masked_others_echo_saves_successfully(self, tmp_path, monkeypatch):
+        self._isolate(monkeypatch, tmp_path)
+        cfg = self._cfg()
+        echoed = self._echo(cfg)
+        echoed["api_key"] = ""          # 前端 keyDraft 为空 = 不改当前 Key
+
+        out = self._put(cfg, echoed)
+
+        assert out["ok"] is True, "配置页保存仍然被拒 —— 用户被彻底卡住"
+        assert cfg.relay.api_key == self.KEY_A, "当前中转站的真实 Key 被改掉了"
+        assert cfg.relay.others[0]["api_key"] == self.KEY_B, (
+            "保存把列表里的真实 Key 换成了掩码 —— 之后切到那家必然 401，"
+            "而配置页看不出任何异常"
+        )
+
+    def test_top_level_masked_echo_keeps_real_key(self, tmp_path, monkeypatch):
+        self._isolate(monkeypatch, tmp_path)
+        cfg = self._cfg()
+        echoed = self._echo(cfg)        # api_key 就是服务端发出去的掩码
+
+        out = self._put(cfg, echoed)
+
+        assert out["ok"] is True
+        assert cfg.relay.api_key == self.KEY_A, (
+            "回显的掩码被当成「用户改了 Key」，真实 Key 丢了"
+        )
+
+    def test_real_new_key_is_applied(self, tmp_path, monkeypatch):
+        self._isolate(monkeypatch, tmp_path)
+        cfg = self._cfg()
+        echoed = self._echo(cfg)
+        echoed["api_key"] = "sk-A-rotated-9999"
+
+        self._put(cfg, echoed)
+
+        assert cfg.relay.api_key == "sk-A-rotated-9999", (
+            "用户真填的新 Key 没生效 —— 保存提示成功但请求仍用旧 Key"
+        )
+        assert cfg.relay.others[0]["api_key"] == self.KEY_B
+
+    def test_mask_that_does_not_match_server_is_rejected(self, tmp_path, monkeypatch):
+        """对不上记录的掩码值仍然是错误，不能一律放行。"""
+        import pytest
+        from fastapi import HTTPException
+
+        self._isolate(monkeypatch, tmp_path)
+        cfg = self._cfg()
+        echoed = self._echo(cfg)
+        echoed["api_key"] = ""
+        echoed["others"][0]["api_key"] = "sk-ZZZZ****9999"
+
+        with pytest.raises(HTTPException) as ei:
+            self._put(cfg, echoed)
+
+        assert ei.value.status_code == 400
+        assert cfg.relay.others[0]["api_key"] == self.KEY_B, (
+            "被拒绝的保存污染了内存 —— 之后转发会用上掩码串"
+        )

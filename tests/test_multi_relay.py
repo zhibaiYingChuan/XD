@@ -547,78 +547,88 @@ class TestSecretsNeverLeaveTheBackend:
 
 
 class TestSavingDoesNotCorruptTheList:
-    """前端整体回传 relay 时，掩码不得被写回磁盘。"""
+    """掩码回显既不能写回磁盘，也不能把正常保存挡死。"""
 
-    def test_backend_rejects_masked_key_in_others(self):
-        """★★ 后端必须硬拦，不能只靠前端不传。
+    def test_masked_echo_is_restored_to_the_real_key(self):
+        """服务端自己发出的掩码 = 用户没改过 → 换回真实 Key 并放行。
 
-        这条守卫的失效是**静默且不可逆**的：
-        前端 relayPayload 整体回传 config.relay，
-        其余中转站的 api_key 拿到的已经是掩码串 ——
-        每保存一次配置就把它们全换成掩码落进磁盘。
+        ★★ 2026-10-29 实测 P0（用户截图）：旧实现「见掩码即整单拒绝」，
+          于是只要配过一家中转站，配置页就再也保存不了任何设置 ——
+          用户彻底被卡住。守卫要挡的是「把真 Key 写成掩码」，
+          不是「回显了掩码」。
         """
         from daoti_xuandun_personal.proxy import app as app_mod
 
-        masked = mask_relay_key(KEY_B)
-        got = app_mod.find_masked_key_in_others([
-            {"name": "B 家", "base_url": URL_B, "api_key": masked},
-        ])
-        assert got is not None, (
-            "列表里的掩码串没被识别 —— "
-            "用户每保存一次配置就会把其余中转站的真实 Key 换成掩码，"
-            "之后切到那家就是 401，而界面看不出任何异常"
+        current = [{
+            "id": "b1", "name": "B 家", "base_url": URL_B, "api_key": KEY_B,
+        }]
+        merged, err = app_mod.reconcile_masked_others(
+            [{
+                "id": "b1", "name": "B 家", "base_url": URL_B,
+                "api_key": mask_relay_key(KEY_B),
+            }],
+            current,
         )
-        assert got[0] == 0
-
-    def test_masked_guard_accepts_real_keys(self):
-        """反向自证：真实 Key 不能被误拦，否则用户根本存不进去。"""
-        from daoti_xuandun_personal.proxy import app as app_mod
-
-        assert app_mod.find_masked_key_in_others([
-            {"name": "B 家", "base_url": URL_B, "api_key": KEY_B},
-        ]) is None
-
-    def test_masked_guard_finds_the_offending_index(self):
-        """★ 必须报出**具体第几条 + 那个值**，否则报错文案指向错误的家。
-
-        变异验证实测：把返回值里的 key 换成空串，这条用例照样绿 ——
-        说明它只锁住了下标，没锁住内容。
-        """
-        from daoti_xuandun_personal.proxy import app as app_mod
-
-        masked = mask_relay_key(KEY_B)
-        got = app_mod.find_masked_key_in_others([
-            {"api_key": KEY_B},
-            {"api_key": masked},
-        ])
-        assert got is not None, "第二条是掩码串却没被报出"
-        idx, value = got
-        assert idx == 1, f"报出的下标是 {idx}，应为 1"
-        assert value == masked, (
-            f"报出的值是 {value!r}，应为原样的掩码串 —— "
-            "报错文案会拿它去提示用户，指错家就等于没提示"
+        assert err is None, f"正常回显被拒了：{err}"
+        assert merged[0]["api_key"] == KEY_B, (
+            "掩码没被换回真实 Key —— 每保存一次配置就把别家的 Key 写坏，"
+            "之后切到那家必然 401"
         )
 
-    def test_masked_guard_handles_empty_and_non_dict(self):
+    def test_mask_that_does_not_match_server_is_rejected(self):
+        """对不上记录的掩码值仍然是错误：那才是「有人塞了假 Key」。"""
         from daoti_xuandun_personal.proxy import app as app_mod
 
-        assert app_mod.find_masked_key_in_others(None) is None
-        assert app_mod.find_masked_key_in_others([]) is None
-        assert app_mod.find_masked_key_in_others(["junk", 3]) is None
+        current = [{
+            "id": "b1", "name": "B 家", "base_url": URL_B, "api_key": KEY_B,
+        }]
+        merged, err = app_mod.reconcile_masked_others(
+            [{
+                "id": "b1", "name": "B 家", "base_url": URL_B,
+                "api_key": "sk-ZZZZ****9999",
+            }],
+            current,
+        )
+        assert err is not None, "伪造的掩码串被当成「未改动」放行了"
+        assert "第 1 条" in err, "报错没指出是第几条，用户无从定位"
 
-    def test_frontend_payload_is_the_real_risk(self):
-        """★ 前端确实会整体回传 —— 所以后端那道守卫不是多余的。
+    def test_real_keys_pass_through(self):
+        """反向自证：真实 Key 不能被改动。"""
+        from daoti_xuandun_personal.proxy import app as app_mod
 
-        这条判据的作用是：若将来有人把 relayPayload 改成
-        只提交部分字段，本用例会失败并提醒同步更新说明。
+        merged, err = app_mod.reconcile_masked_others(
+            [{"name": "B 家", "base_url": URL_B, "api_key": KEY_B}],
+            [],
+        )
+        assert err is None
+        assert merged[0]["api_key"] == KEY_B
+
+    def test_non_dict_items_and_none_are_tolerated(self):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        merged, err = app_mod.reconcile_masked_others(None, [])
+        assert merged == [] and err is None
+        merged, err = app_mod.reconcile_masked_others([], [])
+        assert merged == [] and err is None
+        merged, err = app_mod.reconcile_masked_others(["junk", 3], [])
+        assert err is None and merged == ["junk", 3]
+
+    def test_frontend_payload_does_not_carry_masked_others(self):
+        """★ 前端的提交体必须逐字段显式列出，不能再整体展开。
+
+        整体展开会把服务端返回的掩码列表一起带回去 ——
+        那是这次「保存永远失败」的直接成因（见 Settings.tsx 注释）。
         """
         src = SETTINGS_TSX.read_text(encoding="utf-8")
         m = re.search(r"const relayPayload = \(\) => \{(.*?)\n  \};", src, re.S)
         assert m, "未找到 relayPayload"
         block = m.group(1)
-        assert re.search(r"\.\.\.config\.relay", block), (
-            "relayPayload 不再整体回传 —— "
-            "请同步更新「后端必须硬拦 others 掩码」的说明与判据"
+        assert "...config.relay" not in block, (
+            "relayPayload 又在整体展开 config.relay —— "
+            "掩码的其余中转站会被一起回传，后端将整单拒绝"
+        )
+        assert re.search(r"api_key:\s*keyDraft", block), (
+            "api_key 必须取 keyDraft（空串=保持原 Key），否则会提交掩码"
         )
 
     def test_switching_does_not_lose_configuration(self):

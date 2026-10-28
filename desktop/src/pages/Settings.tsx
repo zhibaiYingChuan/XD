@@ -676,10 +676,25 @@ export default function Settings() {
    * ★ api_key 一律取 keyDraft，绝不取 config.relay.api_key ——
    *   后者装的是服务端返回的掩码，提交它等于用 ``xxxx****yyyy``
    *   覆盖真实 Key。空串的语义是「保持原 Key 不变」（后端既有约定）。
+   *
+   * ★★ 2026-10-29（实测 P0，用户截图）：**绝不能整体展开 config.relay**。
+   *   服务端返回的 relay 里还有一个列表字段（其余中转站的副本），
+   *   每一项的 api_key 都是掩码。整体回传时后端会看到「掩码冒充真 Key」，
+   *   于是整单 400 —— 用户看到的是「第 1 条中转站配置的 API Key
+   *   看起来是脱敏后的串」，而且**只要配过一家就永远保存不了任何设置**。
+   *   列表里的其它中转站由专门接口增删改（addRelay / switchRelay /
+   *   setRelayPort / removeRelay），不经过这个保存请求。
+   *   所以这里逐字段显式列出：多传一个字段都可能再次踩到同一个坑。
    */
   const relayPayload = () => {
     if (!config) return null;
-    return { ...config.relay, api_key: keyDraft };
+    return {
+      name: config.relay.name,
+      base_url: config.relay.base_url,
+      api_key: keyDraft,
+      enabled: config.relay.enabled,
+      port: config.relay.port ?? 0,
+    };
   };
 
   /**

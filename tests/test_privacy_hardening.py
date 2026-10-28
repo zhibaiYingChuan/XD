@@ -52,6 +52,17 @@ def client(tmp_path, monkeypatch):
 
     from daoti_xuandun_personal import paths
     importlib.reload(paths)
+
+    # ★★ 2026-10-29：`config.CONFIG_FILE` 是 **import 时固化** 的路径，
+    #   只设 XUANDUN_DATA_DIR 再 reload(paths) 并不会把它挪到 tmp ——
+    #   于是这些用例会读到**开发机真实的 config.json**（连带把开发者自己的
+    #   中转站配置带进来）。实测后果：/v1/chat/completions 真的向那家发了
+    #   请求并拿到上游 401，表现为「同一个用例单独跑绿、整个文件跑红」，
+    #   而且在测试里打了真实外网请求。
+    #   这里把配置文件也钉到 tmp，才算真正隔离。
+    cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+    monkeypatch.setattr(cfg_mod, "CONFIG_FILE", tmp_path / "config.json")
+
     from daoti_xuandun_personal.proxy import app as app_mod
 
     try:

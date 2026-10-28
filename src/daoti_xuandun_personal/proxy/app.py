@@ -2010,39 +2010,49 @@ def create_app() -> FastAPI:
             #      已经是掩码串（见 config.to_safe_dict）。原实现只守了
             #      顶层 api_key，于是用户**每保存一次配置**就把其余中转站
             #      的真实 Key 全换成 `sk-a…CD⟪…⟫`，切过去必然 401。
-            bad = find_masked_key_in_others(relay_payload.get("others"))
-            if bad is not None:
-                idx, _key = bad
-                logger.warning(
-                    "拒绝保存：第 %d 条中转站的 api_key 是掩码串", idx + 1
+            #
+            #    ★★ 2026-10-29（实测 P0，用户截图）：此后加的守卫是
+            #      「见到掩码就整单拒绝」—— 它挡住了写坏 Key，也把**正常保存**
+            #      一起挡死：只要配过一家中转站，配置页就再也存不了任何东西
+            #      （报「第 1 条中转站配置的 API Key 看起来是脱敏后的串」）。
+            #      现在改为与服务器现有记录对齐：服务端自己发出去的掩码
+            #      视为「未改动」，换回真实 Key；对不上记录才拒绝。
+            if "others" in (relay_payload or {}):
+                merged_others, others_err = reconcile_masked_others(
+                    relay_payload.get("others"), _config.relay.others
                 )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"第 {idx + 1} 条中转站配置的 API Key 看起来是脱敏后的串"
-                        "（含 ****），已拒绝保存。若这不是你填的，"
-                        "说明列表里的 Key 已被掩码污染。"
-                    ),
-                )
+                if others_err:
+                    logger.warning("拒绝保存：%s", others_err)
+                    raise HTTPException(status_code=400, detail=others_err)
+                # ★ 必须写回 payload：下面真正写内存时是从 payload 重新取的
+                #   （relay_payload = payload["relay"]），只改局部变量会被丢掉。
+                payload["relay"] = {**relay_payload, "others": merged_others}
+                relay_payload = payload["relay"]
 
             # ② 顶层 api_key
             #    ★ 必须报错而不是 warning 后 continue：真实 Key 里含 ****
             #      的情况确实存在（部分中转站会这样签发），静默丢弃的后果是
             #      「提示保存成功、实际没生效」—— 用户下一次请求就 401，
             #      且无从关联到这次保存。
+            #    ★ 但「与服务端当前掩码一字不差」的值只可能是回显，
+            #      按「未改动」处理（空串语义），不再误拒正常保存。
             top_key = relay_payload.get("api_key")
             if isinstance(top_key, str) and top_key and is_masked_key(top_key):
-                logger.warning(
-                    "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "这个 API Key 看起来是脱敏后的串（含 ****），"
-                        "已拒绝保存。若这是新填的 Key，请确认复制完整；"
-                        "若不修改 Key，请把该输入框清空后再保存。"
-                    ),
-                )
+                if top_key == _config.relay.mask_key():
+                    payload["relay"] = {**relay_payload, "api_key": ""}
+                    relay_payload = payload["relay"]
+                else:
+                    logger.warning(
+                        "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "这个 API Key 看起来是脱敏后的串（含 ****），"
+                            "已拒绝保存。若这是新填的 Key，请确认复制完整；"
+                            "若不修改 Key，请把该输入框清空后再保存。"
+                        ),
+                    )
 
         # ③ 全部校验通过后才写内存；任何失败都回滚到快照
         try:
@@ -3716,30 +3726,58 @@ def _record_log(
         logger.warning("日志记录失败: %s", e)
 
 
-def find_masked_key_in_others(
-    others: Optional[List[Any]],
-) -> Optional[Tuple[int, str]]:
-    """在中转站列表里找出第一个「掩码串冒充真 Key」的条目。
+def reconcile_masked_others(
+    incoming: Optional[List[Any]],
+    current: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """把前端回传的中转站列表与现有记录对齐：掩码值换回真实 Key。
 
-    ★ 为什么必须单独抽出来：
-      这条守卫的失效后果是**静默且不可逆** ——
-      用户每点一次「保存中转站配置」，其余中转站的真实 Key
-      就被替换成 `sk-a…CD⟪…⟫` 落进磁盘；之后切到那家必然 401，
-      而配置页显示一切正常，用户只会以为中转站封了他。
+    ★★ 2026-10-29 实测 P0（用户截图）：配置页点「保存」必然失败，
+      报「第 1 条中转站配置的 API Key 看起来是脱敏后的串（含 ****）」。
 
-    ★ 判据放在模块级而非路由闭包内：
-      写在闭包里就只能靠「读源码找 is_masked_key 字样」来判断，
-      而那种判据是恒真的 —— 把判断条件改掉、字样还在，测试照样绿。
+      成因：前端把 ``GET /api/config`` 拿到的 relay **整体**回传，
+      而 ``to_safe_dict()`` 已经把 others 每一项的 Key 换成了掩码。
+      旧做法是「见到掩码就整单拒绝」—— 它保住了「不把真实 Key 写坏」，
+      却把**正常保存**一并挡死：只要配过一家中转站，
+      之后任何设置都存不进去，用户被彻底卡住。
 
-    Returns: (下标, 该条的值)；没有则 None
+      正确判据不是「有没有 ****」，而是「这个掩码值是不是服务端自己发出去的」：
+        · 与服务端当前掩码一致  → 用户没动过这个字段，保留真实 Key；
+        · 不一致 / 对不上记录   → 仍然是错误，拒绝并说明（防止有人塞掩码串）。
+
+    Returns: (合并后的列表, 错误信息)；错误信息非 None 表示应拒绝保存
     """
-    for i, item in enumerate(others or []):
+    if not isinstance(incoming, list):
+        return list(current), None
+
+    by_id = {str(r.get("id") or ""): r for r in current}
+    by_url = {str(r.get("base_url") or ""): r for r in current}
+
+    merged: List[Dict[str, Any]] = []
+    for i, item in enumerate(incoming):
         if not isinstance(item, dict):
+            merged.append(item)
             continue
-        key = str(item.get("api_key") or "")
-        if is_masked_key(key):
-            return i, key
-    return None
+        entry = dict(item)
+        key = str(entry.get("api_key") or "")
+        if not is_masked_key(key):
+            merged.append(entry)
+            continue
+
+        old = by_id.get(str(entry.get("id") or "")) or by_url.get(
+            str(entry.get("base_url") or "")
+        )
+        real = str((old or {}).get("api_key") or "")
+        if real and not is_masked_key(real) and key == mask_relay_key(real):
+            entry["api_key"] = real
+            merged.append(entry)
+            continue
+
+        return merged, (
+            f"第 {i + 1} 条中转站配置的 API Key 是脱敏后的串（含 ****），"
+            "与服务端记录对不上，已拒绝保存。请删除这一条后重新添加。"
+        )
+    return merged, None
 
 
 def resolve_forward_target(
