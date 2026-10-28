@@ -157,6 +157,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bundle: deb
             bundle_glob: '*.deb'
+            # ★ 2026-10-29（P0-9）：Linux runner 偶发被回收（job 在第 N 步被
+            #   cancelled，step 无 error），这是基础设施问题，重试一次即过。
+            #   只给两个 Linux 矩阵项加重试；Windows/macOS 不声明 = 只跑一次。
+            max_attempts: 2
 
           # ★ AppImage 单开一个 job，与 deb 分离。
           #
@@ -183,6 +187,7 @@ jobs:
             bundle: appimage
             bundle_glob: '*.AppImage'
             allow_failure: true
+            max_attempts: 2
 
     runs-on: ${{ matrix.os }}
 
@@ -194,6 +199,13 @@ jobs:
     #   这样设计的理由：AppImage 的失败源于 linuxdeploy 扫 ELF 依赖
     #   时的缺陷，与本项目的代码正确性无关。让它失败等于让
     #   「Ubuntu 用户能装上的 deb」也发不出去。
+    #
+    # ★★ 2026-10-29（P0-9）：continue-on-error 只允许「这个 job 不染红整轮」，
+    #   **不再允许「缺件被静默吞掉」**。放行之后还必须过 release job 的
+    #   「Assert every required asset is present」：dist/ 里没有 .AppImage
+    #   且未设置仓库变量 ALLOW_MISSING_APPIMAGE=1 时，发布直接失败。
+    #   v0.1.27-alpha 就是缺了 AppImage 却整体 success（第 4 次同形态），
+    #   而缺件只留了一条 warning 在几万行日志里。
     continue-on-error: ${{ matrix.allow_failure || false }}
 
     # ★★ 整个 job 强制 UTF-8。
@@ -713,12 +725,36 @@ jobs:
           if [ -n "${TAURI_SIGN_CONFIG:-}" ]; then
             CONFIG_ARGS="$CONFIG_ARGS --config $TAURI_SIGN_CONFIG"
           fi
-          if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }} \
-               $CONFIG_ARGS; then
+          # ★★ 2026-10-29（P0-9）：Linux runner 偶发被回收 —— job 在打包中途
+          #   被 cancelled，日志里看不出任何代码/依赖原因。v0.1.27-alpha 的
+          #   AppImage 第 4 次就是这么消失的。基础设施抖动重试一次即可。
+          #   ★ 用自写循环而不是 nick-invision/retry：引入新 Action 就要再钉
+          #     一个 40 位 SHA，而这条重试只需要「再跑一遍同一条命令」，
+          #     自写更小的攻击面（不引入任何第三方代码）。
+          #   ★ 矩阵项不声明 max_attempts 时只跑一次（Windows / macOS 不变）。
+          MAX_ATTEMPTS='${{ matrix.max_attempts }}'
+          [ -n "$MAX_ATTEMPTS" ] || MAX_ATTEMPTS=1
+          attempt=0
+          ok=0
+          while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+            attempt=$((attempt + 1))
+            echo "::group::tauri build 第 $attempt/$MAX_ATTEMPTS 次"
+            if npm run tauri build -- --verbose --bundles ${{ matrix.bundle }} \
+                 $CONFIG_ARGS; then
+              ok=1
+            fi
+            echo "::endgroup::"
+            [ "$ok" = "1" ] && break
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "::warning title=打包失败，准备重试::第 $attempt/$MAX_ATTEMPTS 次 tauri build 失败，60s 后重试（Linux runner 偶发被回收，属基础设施问题）"
+              sleep 60
+            fi
+          done
+          if [ "$ok" = "1" ]; then
             exit 0
           fi
           if [ "${{ matrix.allow_failure }}" = "true" ]; then
-            echo "::warning title=AppImage 打包失败（可选产物，不阻断发布）::linuxdeploy 未能完成打包，详见本步骤日志；deb 与 Windows/macOS 产物不受影响。"
+            echo "::warning title=AppImage 打包失败（可选产物，不阻断发布）::linuxdeploy 未能完成打包，详见本步骤日志；deb 与 Windows/macOS 产物不受影响。缺件是否允许发布，由 release job 的「Assert every required asset is present」按 ALLOW_MISSING_APPIMAGE 判定。"
             exit 0
           fi
           exit 1
@@ -834,11 +870,17 @@ jobs:
           path: artifacts
 
       # 退出码 1 = 报毒超阈值 → 阻断发布。
-      # 未配密钥 / VT 不可达时脚本自行跳过（退出 0）并打 warning。
+      # 未配密钥 / VT 整体不可达时脚本自行跳过（退出 0）并打 warning。
+      #
+      # ★ 2026-10-29（P0-9）：**没有结论不得当通过**。
+      #   超时（status != completed）或拿不到逐引擎结果时脚本返回 1，
+      #   不再退回「按总数=0 判定通过」。确需跳过时设仓库变量
+      #   VT_ALLOW_SKIP=1，脚本降级为 warning 并明确写出「本次未得到结论」。
       - name: Scan installers on VirusTotal
         env:
           VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
           VT_MAX_MALICIOUS: '3'
+          VT_ALLOW_SKIP: ${{ vars.VT_ALLOW_SKIP }}
         run: |
           set -euo pipefail
           python .github/scripts/virustotal_scan.py artifacts
@@ -965,16 +1007,54 @@ jobs:
           grep -q '\.sig' checksums-sha256.txt \
             || { echo "::error::校验和未覆盖 .sig 更新签名"; exit 1; }
 
+      # ★★ 2026-10-29（第三轮审查 P0-9）：缺件门禁。
+      #
+      #   v0.1.27-alpha 的实际形态：整体 run = success，Release 已建，
+      #   但只有 3/4 个平台产物 —— Linux AppImage 的 build job 在
+      #   「Build Tauri app」被 runner 取消（同一形态第 4 次），
+      #   而它带 continue-on-error，于是缺件谁也没被叫醒。
+      #
+      #   判据改成「**要上传的资产清单是否齐**」，而不是「各 job 是否绿」：
+      #   dist/ 是下一步真正上传给用户的目录，缺了就是缺了。
+      #
+      #   ★ 为什么放在**创建 Release 之前**（而不是建完再删）：
+      #     缺件时 Release 根本不存在，不需要「建了再删」——
+      #     删除本身就带风险：删除 API 失败会留下一个残缺的公开 Release，
+      #     而它已经通知过 watcher；此外「发了又撤」的痕迹比「没发」更难解释。
+      #     发布前拦下，状态最干净、代价最小。
+      #   ★ 豁免走仓库变量 ALLOW_MISSING_APPIMAGE=1（不是默认放行）：
+      #     默认放行等于这道门禁不存在。
+      #   ★ 豁免时脚本会写出正文提示，由「Compose release notes」贴进
+      #     Release 正文 —— 缺件必须让用户看见，不能只在日志里说。
+      - name: Assert every required asset is present
+        env:
+          # 仓库变量（Settings → Secrets and variables → Actions → Variables）
+          ALLOW_MISSING_APPIMAGE: ${{ vars.ALLOW_MISSING_APPIMAGE }}
+          # 提示文本写到 runner 临时目录：放进 dist/ 会被当成发布资产上传，
+          # 也会混进 checksums-sha256.txt。
+          ASSET_NOTICE_OUT: ${{ runner.temp }}/asset-notice.md
+        run: python3 .github/scripts/check_release_assets.py dist --notice-out "$ASSET_NOTICE_OUT"
+
       # ★ 2026-10-27：发布说明改为**自己生成**，不再用
       #   generate_release_notes。原因很实在：用户点开 Release 的第一件事
       #   应该是「怎么确认这东西没被篡改」，而自动生成的变更列表给不了。
       #   误报申诉做得再好，用户在安装前仍需要一个自己能核对的依据。
       - name: Compose release notes
         shell: bash
+        env:
+          ASSET_NOTICE_OUT: ${{ runner.temp }}/asset-notice.md
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
           {
+            # ★ P0-9：缺件豁免的提示放在**最前面** —— 用户点开 Release
+            #   第一眼就该知道「这次的 Linux 包不全、自动更新不能用」，
+            #   而不是自己找半天才发现没有 AppImage。
+            #   文件不存在 = 没有豁免，什么都不加。
+            if [ -f "$ASSET_NOTICE_OUT" ]; then
+              cat "$ASSET_NOTICE_OUT"
+              echo
+            fi
             echo "## 安装前请做三步验证"
             echo
             echo "1. **核对哈希**：下载 \`checksums-sha256.txt\`，与本地文件算出的 SHA256 比对。不一致就不要安装 —— 那才可能是真的被篡改。"
