@@ -215,6 +215,9 @@ jobs:
       #       static.rust-lang.org、sh.rustup.rs
       #     · Linux 打包：apt 源（deb 与 AppImage 的系统库）
       #     · Windows 签名：时间戳服务 timestamp.digicert.com
+      #     · Windows 引擎编译：dependencywalker.com（Nuitka standalone 的
+      #       Dependency Walker，由下面对应的预置步骤按固定 URL 下载并
+      #       校验 SHA-256，构建期本身不再触网）
       #
       #   ★ 如果第一轮被拦：harden-runner 会在日志里逐条列出被阻断的
       #     `host:port`，把它补进下面这张表即可 —— 这比"全放开再看日志"
@@ -230,6 +233,7 @@ jobs:
             objects.githubusercontent.com:443
             release-assets.githubusercontent.com:443
             raw.githubusercontent.com:443
+            dependencywalker.com:443
             uploads.github.com:443
             *.actions.githubusercontent.com:443
             *.blob.core.windows.net:443
@@ -328,6 +332,43 @@ jobs:
               sys.exit(1)
           PY
           echo "PASS：UTF-8 输出正常"
+
+      # ★★ 2026-10-28：Windows 的 Nuitka standalone 编译必须依赖
+      #   Dependency Walker（depends.exe）。
+      #
+      #   P1-26 去掉了 `--assume-yes-for-download`（不再允许构建期静默
+      #   从第三方拉可执行文件），但**没有**补上显式安装 —— 于是
+      #   v0.1.24-alpha 首轮 win-x64 直接 FATAL：
+      #   「Nuitka does not work in '--mode=standalone' ... without
+      #     dependency walker」。
+      #
+      #   这里按 P1-26 的原意补齐：固定 URL + 固定 SHA-256，校验通过后
+      #   解到 Nuitka 的下载缓存目录（NUITKA_CACHE_DIR_DOWNLOADS）——
+      #   构建期不再触网，也不需要交互确认。
+      #   注意 depends.exe 运行时依赖同目录的 depends.dll，两者一起解出。
+      - name: Pre-seed Nuitka Dependency Walker (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://dependencywalker.com/depends22_x64.zip"
+          $sha = "35db68a613874a2e8c1422eb0ea7861f825fc71717d46dabf1f249ce9634b4f1"
+          $zip = Join-Path $env:RUNNER_TEMP "depends22_x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 120
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $sha) {
+            throw "Dependency Walker 校验失败：期望 $sha，实际 $actual"
+          }
+          # Nuitka 的缓存布局：<downloads>/depends/<arch>/depends.exe
+          $cache = Join-Path $env:RUNNER_TEMP "nuitka-downloads"
+          $dest = Join-Path $cache "depends\x86_64"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          if (-not (Test-Path (Join-Path $dest "depends.exe"))) {
+            throw "解压后缺少 depends.exe"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "NUITKA_CACHE_DIR_DOWNLOADS=$cache" -Encoding utf8
+          Write-Host "Dependency Walker 已就位：$dest"
 
       # ★ Nuitka 必须在目标平台本机跑 —— 它调用的是本机 C 编译器，
       #   不能交叉编译。所以这里是三个 runner 各自编译，不是编译三份。
