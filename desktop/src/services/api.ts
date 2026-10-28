@@ -433,6 +433,64 @@ export function currentProxyPort(): number {
   return _proxyPort;
 }
 
+// ══════════════════════════════════════════════════════════════
+// 管理令牌（★ P0-5）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 为什么前端需要管令牌：
+ *
+ * 引擎启动时由桌面端注入 XUANDUN_ADMIN_TOKEN，之后所有 /api/* 请求
+ * 都必须带 X-Admin-Token（防本机任意进程读日志/改中转站）。
+ * Tauri 模式下由 Rust 侧 proxy_call 统一注入，前端不必关心；
+ * 但**浏览器回退通道**（httpGet / httpSend）以前完全不发这个头 ——
+ * 于是「桌面端在跑、用浏览器打开 1420」这个最常见的调试姿势，
+ * 全站 401、首启直接卡在向导，而错误文案还把锅推给端口。
+ */
+let _adminToken: string | null = null;
+
+/** 设置管理令牌（桌面端启动时注入；纯浏览器模式下保持为空）。 */
+export function setAdminToken(token: string | null): void {
+  const t = (token ?? '').trim();
+  _adminToken = t ? t : null;
+}
+
+/**
+ * 启动时拉取管理令牌。
+ *
+ * 只有 Tauri 拿得到（IPC 不经过 HTTP，天然不会被 401 挡住）；
+ * 纯浏览器预览拿不到 —— 那条通道要求用户以「不设令牌」的方式手动启动引擎。
+ * 拿不到时保持为空，由 401 的专门文案兜底，不阻断界面启动。
+ */
+export async function initAdminToken(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    setAdminToken(await invoke<string>('get_admin_token'));
+  } catch {
+    /* 忽略：缺令牌只会影响浏览器回退通道 */
+  }
+}
+
+function baseHeaders(): Record<string, string> {
+  const h: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (_adminToken) h['X-Admin-Token'] = _adminToken;
+  return h;
+}
+
+/**
+ * 401 的统一解释。
+ *
+ * ★ 不能沿用「请检查端口」那套文案：401 与端口无关，
+ *   把人引向端口只会让他反复重启引擎而永远解决不了。
+ */
+function unauthorizedMessage(path: string): string {
+  return (
+    `${path} → 401：管理接口仅限玄盾桌面端访问。` +
+    '若你在浏览器里预览，请先关闭正在运行的桌面端，' +
+    '或以不设置 XUANDUN_ADMIN_TOKEN 的方式手动启动引擎。'
+  );
+}
+
 // 注意：显式标注为 Record 而非 as const 字面量类型，
 // 否则 TS 会把 FAST 收窄成字面量 5000，导致默认值参数类型不兼容。
 const TIMEOUT: Record<'FAST' | 'NORMAL' | 'PROBE', number> = {
@@ -465,16 +523,64 @@ function requireTauriFor(what: string): void {
   }
 }
 
+/**
+ * 从后端错误体里取出「人话」（★ P1-11）。
+ *
+ * 后端存在三种错误形态：
+ *   · `{"detail": "..."}`     —— FastAPI 业务异常（最常见）
+ *   · `{"detail": [{...}]}`   —— 422 参数校验错误（数组，含 msg 字段）
+ *   · `{"error": {"message": "..."}}` —— 代理透传的上游错误
+ *
+ * 原实现只认 `detail` 且只处理字符串，其余一律退化成「HTTP 500」——
+ * 用户拿到的是一句状态码，等于没有错误信息，也没法判断该改哪里。
+ */
+function extractErrorMessage(data: unknown, fallback: string): string {
+  const pick = (v: unknown): string | null => {
+    if (typeof v === 'string') return v.trim() ? v : null;
+    if (Array.isArray(v)) {
+      const parts = v.map(pick).filter((x): x is string => Boolean(x));
+      return parts.length ? parts.join('；') : null;
+    }
+    if (v && typeof v === 'object') {
+      const obj = v as Record<string, unknown>;
+      for (const key of ['msg', 'message', 'detail']) {
+        if (key in obj) {
+          const got = pick(obj[key]);
+          if (got) return got;
+        }
+      }
+    }
+    return null;
+  };
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+    for (const key of ['detail', 'error', 'message']) {
+      if (key in obj) {
+        const got = pick(obj[key]);
+        if (got) return got;
+      }
+    }
+  }
+  return fallback;
+}
+
 async function httpGet<T>(path: string, timeoutMs = TIMEOUT.NORMAL): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${proxyBase()}${path}`, {
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: baseHeaders(),
     });
     if (!res.ok) {
-      throw new Error(`GET ${path} → HTTP ${res.status}`);
+      if (res.status === 401) throw new Error(unauthorizedMessage(path));
+      let detail = `GET ${path} → HTTP ${res.status}`;
+      try {
+        detail = extractErrorMessage(await res.json(), detail);
+      } catch {
+        /* 忽略解析失败 */
+      }
+      throw new Error(detail);
     }
     return (await res.json()) as T;
   } catch (e) {
@@ -499,17 +605,16 @@ async function httpSend<T>(
     const res = await fetch(`${proxyBase()}${path}`, {
       method,
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: baseHeaders(),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!res.ok) {
-      // 尽量提取后端 detail
+      // ★ P0-5：401 有确定含义（缺管理令牌），不能被并进「HTTP 401」里
+      if (res.status === 401) throw new Error(unauthorizedMessage(path));
+      // 尽量提取后端给出的原因（三种形态都认，见 extractErrorMessage）
       let detail = `HTTP ${res.status}`;
       try {
-        const data = await res.json();
-        if (data?.detail) {
-          detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
-        }
+        detail = extractErrorMessage(await res.json(), detail);
       } catch {
         /* 忽略解析失败 */
       }
@@ -551,6 +656,28 @@ async function call<T>(
     default:
       return httpSend<T>(httpMethod, httpPath, body, timeoutMs);
   }
+}
+
+/**
+ * 把日志筛选条件编码成 query string（★ P0-6）。
+ *
+ * ★ 为什么必须显式编码：后端这两个端点的筛选参数是 **query 参数**
+ *   （`log_type: Optional[str] = None`），而浏览器通道原来把整个
+ *   params 当 body 发过去 —— 后端一个字段都读不到，全部按 None 处理。
+ *   后果不是「删不掉」，而是**删得比用户以为的多**：
+ *   确认框写「筛选结果 12 条」，实际清空整库。
+ *
+ *   Tauri 通道由 Rust 的 filter_query() 拼同样的 query 串，
+ *   两条通道从此同一口径。
+ */
+function toFilterQuery(params: LogFilterParams): string {
+  const q = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    q.append(key, String(value));
+  }
+  const s = q.toString();
+  return s ? `?${s}` : '';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -712,14 +839,14 @@ export const api = {
     call<{ ok: boolean; matched: number }>(
       'count_filtered_logs',
       'POST',
-      '/api/logs/delete-filtered',
+      `/api/logs/delete-filtered${toFilterQuery(params)}`,
       params,
     ),
   deleteFilteredLogs: (params: LogFilterParams = {}) =>
     call<{ ok: boolean; deleted: number }>(
       'delete_filtered_logs',
       'POST',
-      '/api/logs/delete-filtered/confirm',
+      `/api/logs/delete-filtered/confirm${toFilterQuery(params)}`,
       params,
     ),
 

@@ -182,6 +182,10 @@ export default function Settings() {
   //   或命令异常）—— 区块据此降级为不可用提示，而不是崩掉整个设置页。
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [engineVersion, setEngineVersion] = useState<string | null>(null);
+  // ★ P1-17：取状态失败必须与「还在读取」区分开。
+  //   此前失败时 engine 恒为 null，界面永远停在「读取中…」——
+  //   用户会一直等一个永远不会来的结果，而没有任何重试入口。
+  const [engineError, setEngineError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
 
   // ★ 软件更新（2026-10-20）：只在用户点击时联网；不做后台轮询。
@@ -189,6 +193,9 @@ export default function Settings() {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updatePct, setUpdatePct] = useState(0);
+  // ★ P1-18：安装成功后会立刻触发重启；重启还没走到时如果直接放开按钮，
+  //   用户会看到「下载并安装」又出现，以为没装上而反复点。
+  const [updateDone, setUpdateDone] = useState(false);
 
   // 已配置列表的加载刻意**不并入**上面的 load()：
   // 那是配置页的主数据，一旦它失败（引擎未起），
@@ -251,15 +258,18 @@ export default function Settings() {
    */
   const loadEngine = useCallback(async (fetchVersion: boolean) => {
     let s: EngineStatus | null = null;
+    let err: string | null = null;
     try {
       s = await api.getEngineStatus();
-    } catch {
+    } catch (e) {
       // 命令异常（非浏览器降级）时同样按「不可用」展示 ——
       // 不能因为引擎状态取不到就让整个设置页报错。
       s = null;
+      err = e instanceof Error ? e.message : String(e);
     }
     if (!mountedRef.current) return;
     setEngine(s);
+    setEngineError(err);
     if (!fetchVersion) return;
     if (s?.running) {
       try {
@@ -608,6 +618,7 @@ export default function Settings() {
     if (updateBusy) return;
     setUpdateBusy(true);
     setUpdatePct(0);
+    setUpdateDone(false);
     try {
       setUpdateCheck(await checkForUpdate());
     } finally {
@@ -617,14 +628,21 @@ export default function Settings() {
 
   /** 下载并安装；成功后会由 updater 封装重启应用。 */
   const handleInstallUpdate = async () => {
-    if (updateBusy || updateCheck?.kind !== 'available') return;
+    if (updateBusy || updateDone || updateCheck?.kind !== 'available') return;
     setUpdateBusy(true);
     setUpdatePct(0);
     try {
       await updateCheck.install(setUpdatePct);
+      // 成功路径也必须落到这里：重启命令是异步的，
+      // 若它迟迟不返回，锁不释放就等于「永久停在 100%」。
+      if (mountedRef.current) {
+        setUpdateDone(true);
+        toast.success('更新已安装，应用即将重启');
+      }
     } catch (e) {
       toast.error(`更新失败：${e instanceof Error ? e.message : String(e)}`);
-      setUpdateBusy(false);
+    } finally {
+      if (mountedRef.current) setUpdateBusy(false);
     }
   };
 
@@ -838,7 +856,10 @@ export default function Settings() {
   //   running 与 startup_error 同时为真，此时用户真正要知道的是「它失败了」，
   //   而不是被显示成「运行中」。
   const engineView: { label: string; badge: string } = !engine
-    ? { label: '读取中…', badge: 'neutral' }
+    ? engineError
+      // ★ P1-17：「读取失败」必须是独立状态，否则界面永远停在「读取中…」
+      ? { label: '读取失败', badge: 'danger' }
+      : { label: '读取中…', badge: 'neutral' }
     : engine.startup_error
       ? { label: '启动失败', badge: 'danger' }
       : engine.running
@@ -1609,6 +1630,24 @@ export default function Settings() {
               </div>
             </div>
 
+            {/* ★ P1-17：读不到状态时给出原因与重试入口，
+                而不是让用户对着「读取中…」无限等待。 */}
+            {engineError && (
+              <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
+                <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <b>无法读取引擎状态</b>
+                  <div className="mt-8">{firstLine(engineError)}</div>
+                  <button
+                    className="btn ghost sm mt-8"
+                    onClick={() => void loadEngine(true)}
+                  >
+                    重试
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* 启动失败原因：只给一句可读的话，长文本/堆栈折叠备查。 */}
             {engine?.startup_error && (
               <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
@@ -1681,12 +1720,14 @@ export default function Settings() {
             <button
               className="btn"
               onClick={() => void handleInstallUpdate()}
-              disabled={updateBusy}
+              disabled={updateBusy || updateDone}
             >
               <Download size={14} strokeWidth={1.5} />
-              {updateBusy
-                ? `下载安装中 ${updatePct}%`
-                : `下载并安装 v${updateCheck.version}`}
+              {updateDone
+                ? '已安装，等待重启…'
+                : updateBusy
+                  ? `下载安装中 ${updatePct}%`
+                  : `下载并安装 v${updateCheck.version}`}
             </button>
           )}
         </div>
@@ -1703,6 +1744,9 @@ export default function Settings() {
           <div className="field-hint">
             发现新版本 <b>v{updateCheck.version}</b>（当前 v{updateCheck.current}）。
             更新包会用内置公钥验签，验不过不会安装；安装完成后应用会自动重启。
+            <div className="mt-8 faint" style={{ fontSize: 12 }}>
+              下载若连续 2 分钟没有进展，会停下来并提示重试（不会永久卡住）。
+            </div>
             {updateCheck.notes && (
               <div
                 className="mt-8"

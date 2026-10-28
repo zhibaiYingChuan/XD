@@ -602,16 +602,32 @@ class PersonalConfig:
     # ── 环境变量覆盖 ──
 
     def apply_env_overrides(self) -> None:
-        """应用环境变量覆盖（便于 CI / 脚本化配置）。"""
+        """应用环境变量覆盖（便于 CI / 脚本化配置）。
+
+        ★★ P1-9（2026-10-28）：端口变量名必须与桌面端（Rust）一致。
+        ────────────────────────────────────────────────────────────
+        Rust 读的是 ``XUANDUN_PROXY_PORT``，这里原读 ``XUANDUN_PERSONAL_PORT``：
+        照文档做端口隔离时，桌面端连 A、引擎听 B —— 双方各自"正常"，
+        只有用户看到「引擎启动失败」。
+
+        现在两侧都认**两个**名字，规范名优先，旧名保留兼容（会打一条提示）。
+        """
         if v := os.getenv("XUANDUN_PERSONAL_RELAY_URL"):
             self.relay.base_url = v
         if v := os.getenv("XUANDUN_PERSONAL_RELAY_KEY"):
             self.relay.api_key = v
-        if v := os.getenv("XUANDUN_PERSONAL_PORT"):
+        port_raw = os.getenv("XUANDUN_PROXY_PORT")
+        if not port_raw and (legacy := os.getenv("XUANDUN_PERSONAL_PORT")):
+            port_raw = legacy
+            logger.warning(
+                "XUANDUN_PERSONAL_PORT 是历史名称，请改用 XUANDUN_PROXY_PORT"
+                "（桌面端只认规范名时会出现「端口隔离无效」）"
+            )
+        if port_raw:
             try:
-                self.server.port = int(v)
+                self.server.port = int(port_raw)
             except ValueError:
-                logger.warning("无效的端口环境变量: %s", v)
+                logger.warning("无效的端口环境变量: %s", port_raw)
         if v := os.getenv("XUANDUN_PERSONAL_LEVEL"):
             self.guard.security_level = v
         logger.info("已应用环境变量覆盖")

@@ -39,10 +39,22 @@ jobs:
     name: Preflight Gate
     runs-on: ubuntu-22.04
     steps:
+      # ★ P1-26：本 job 的依赖面只有「取仓库 + pip」，allowlist 可核准，
+      #   因此出网策略用 block（audit 只记录不拦截，等于事后才看得见）。
+      #   build job 仍保留 audit —— 它的依赖面横跨 npm/pypi/crates/rustup/apt
+      #   与 Tauri/linuxdeploy 的按需下载，allowlist 无法在离线环境核准；
+      #   强行 block 会以「假阳性」的方式阻断发布。该差距已在 PR 说明中登记。
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -89,20 +101,14 @@ jobs:
       # ★ 私钥绝不能出现在仓库里。
       #   一旦入库，任何人都能签发激活码，授权体系瞬间失效，
       #   且 Git 历史无法真正清除（后续删除，commit 里仍在）。
-      - name: Assert private key is absent
-        run: |
-          set -euo pipefail
-          # ★ 一次判断，不要 grep 串联 ——
-          #   `grep -Ei 'a|\.pem$' | grep -i private` 里第一个分支已匹配全部
-          #   .pem，第二个分支再过滤，绕一圈等于没过滤。
-          #   直接按文件名含 private 判定。
-          HIT=$(git ls-files | grep -i 'private' || true)
-          if [ -n "$HIT" ]; then
-            echo "::error::检测到疑似私钥被 git 追踪 —— 立即处理，视为安全事故"
-            echo "$HIT"
-            exit 1
-          fi
-          echo "PASS：私钥未被追踪"
+      #
+      # ★ P1-24：判据从「文件名含 private」升级为「按内容特征」。
+      #   旧写法漏掉 id_rsa / *.p12 / *.pfx / *.key，也漏掉
+      #   把 PEM 粘进 README、issue 模板、测试夹具里的情况 ——
+      #   而那几种恰恰是最容易发生的。
+      #   判据与实现都在 .github/scripts/scan_secrets.py，可本地跑通再推。
+      - name: Assert no private key material is tracked
+        run: python .github/scripts/scan_secrets.py
 
       # 公钥必须在（build_engine.py 打包时要读它）
       # ★ 位置随 tools/ 移出而变更：公钥现在随包分发，放在包内。
@@ -197,6 +203,13 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
     steps:
+      # ★ P1-26：这里仍是 audit，是**已登记**的已知差距，不是遗漏。
+      #   本 job 的出网面横跨 npm / pypi / crates.io / rustup / apt
+      #   与 Tauri、linuxdeploy 的按需下载，allowlist 无法离线核准；
+      #   贸然 block 只会以假阳性方式阻断发布（等于把供应链加固
+      #   变成"发不出版"）。可核准的部分已经在 preflight / CI / release 里 block。
+      #   ★ 与之配套的实际加固：build_engine.py 已去掉
+      #     --assume-yes-for-download —— 构建期不再静默抓第三方工具。
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
@@ -312,6 +325,8 @@ jobs:
             echo "::warning title=本次产物未签名::WINDOWS_CERT_PFX_BASE64 未配置，引擎与安装包均为未签名产物。用户安装时被杀软拦截的概率显著升高。"
             exit 0
           fi
+          # ★ P1-23：口令一律打码，避免被日志回显或后续步骤拼进输出。
+          echo "::add-mask::$CERT_PASSWORD"
           # signtool 不在 PATH 上，按 SDK 版本取最新的那个
           SIGNTOOL=$(ls "C:/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe 2>/dev/null | sort -V | tail -1 || true)
           if [ -z "$SIGNTOOL" ]; then
@@ -328,6 +343,10 @@ jobs:
           fi
           for f in "${files[@]}"; do
             echo "签名 $f"
+            # ★ P1-23：signtool 只接受 /p <口令>，这一点绕不开；
+            #   能做的三件事都做了：口令已 add-mask、PFX 与配置只存在于
+            #   runner 临时目录、打包结束即删（见下方 Cleanup 步骤）。
+            #   真正的原点是"证书只在一次性 runner 上落地"，不在本机。
             "$SIGNTOOL" sign /fd sha256 /f "$PFX" /p "$CERT_PASSWORD" \
               /tr http://timestamp.digicert.com /td sha256 "$f"
             "$SIGNTOOL" verify /pa /v "$f"
@@ -340,9 +359,14 @@ jobs:
           #     用户在「已安装的应用」目录里被扫到的正是那一份。
           #   ★ 配置里含证书密码，所以只在 runner 的临时目录生成、
           #     并不进入仓库；PFX 也留到打包结束再删。
-          python - "$PFX" "$CERT_PASSWORD" "$RUNNER_TEMP/tauri.signing.conf.json" <<'PY'
-          import json, sys
-          pfx, pwd, out = sys.argv[1], sys.argv[2], sys.argv[3]
+          #   ★ P1-23：口令经**环境变量**传入，不再出现在 python 的 argv 里
+          #     （argv 会被进程列表看到，也会进崩溃转储）。
+          SIGN_PFX="$PFX" SIGN_PWD="$CERT_PASSWORD" \
+          SIGN_OUT="$RUNNER_TEMP/tauri.signing.conf.json" python - <<'PY'
+          import json, os
+          pfx = os.environ["SIGN_PFX"]
+          pwd = os.environ["SIGN_PWD"]
+          out = os.environ["SIGN_OUT"]
           cfg = {"bundle": {"windows": {"signCommand": {
               "cmd": "signtool",
               "args": [
@@ -647,7 +671,16 @@ jobs:
             echo "校验 $f"
             "$SIGNTOOL" verify /pa /v "$f"
           done
-          rm -f "$RUNNER_TEMP/codesign.pfx" "$RUNNER_TEMP/tauri.signing.conf.json"
+
+      # ★ P1-23：证书与含口令的签名配置**无条件**清理（if: always）。
+      #   原先的 rm 写在「校验签名」步骤末尾 —— 一旦校验失败就直接退出，
+      #   临时证书留在 runner 上直到回收。清理不该依赖前一步的成功。
+      - name: Cleanup signing material (Windows)
+        if: always() && matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/codesign.pfx" "$RUNNER_TEMP/tauri.signing.conf.json" || true
+          echo "已清理临时证书与签名配置"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -732,14 +765,39 @@ jobs:
     needs: [build, virustotal]
     if: success() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
+    # ★ P1-25：发布挂到 environment 上 —— 一旦仓库配置了必需审核人，
+    #   发版就需要人工批准，而不是拿到 tag 推送权限就能直接发。
+    #   未配置时等同于普通 job（GitHub 会自动创建同名 environment），
+    #   不会阻断发布。
+    environment: release
     permissions:
       contents: write
+      # ★ P1-21：生成 SLSA 来源证明需要这两项。
+      #   id-token 用于 OIDC 换取签名身份，attestations 用于写入证明存储。
+      id-token: write
+      attestations: write
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
-          egress-policy: audit
+          egress-policy: block
           disable-sudo: true
+          # ★ P1-26：本 job 的出网面可核准 —— GitHub API、产物下载、
+          #   证明写入。不在这里 block，等于整条流水线只有审计没有拦截。
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            uploads.github.com:443
+            pipelines.actions.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            *.actions.githubusercontent.com:443
+            # gh attestation verify 需要用 Sigstore 的信任根核验证明
+            tuf-repo-cdn.sigstore.dev:443
+            rekor.sigstore.dev:443
+            *.sigstore.dev:443
 
       # ★ 2026-10-21：release job 里要跑 .github/scripts/make_latest_json.py，
       #   这个 job 之前**没有 checkout**，脚本根本不在工作目录里 ——
@@ -783,37 +841,46 @@ jobs:
           test -n "$(ls -A dist)" || { echo "::error::没有可发布的产物"; exit 1; }
           ls -l dist
 
-      - name: Generate SHA256 checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          # ★ 四种格式都要算。只认 *.exe 的话，macOS/Linux 用户
-          #   拿不到任何校验值 —— 而校验值恰恰是他们最需要的
-          #   （从第三方下载时无法确认文件未被篡改）。
-          #   *.deb 同样必须算：它是 Linux 的**主力**安装格式。
-          find . -type f \( -name "*.exe" -o -name "*.dmg" \
-                         -o -name "*.AppImage" -o -name "*.deb" \
-                         -o -name "*.app.tar.gz" \) \
-            -exec sha256sum {} \; \
-            | sed 's|  \./|  |' > checksums-sha256.txt
-          cat checksums-sha256.txt
-          # 一个都没算出来就是失败：静默产出空校验文件比报错更糟，
-          # 用户会以为「没校验值也能装」。
-          test -s checksums-sha256.txt \
-            || { echo "::error::未找到任何安装包，校验文件为空"; exit 1; }
-
       # ★ 2026-10-20：生成自动更新清单。
       #   它必须作为 Release 资产，前端 updater 从
       #   releases/latest/download/latest.json 读取。
       #   缺 .sig 或找不到更新包时直接失败——静默跳过的后果是
       #   「新版本发了，但所有旧版本都检查不到更新」。
+      #
+      # ★ P1-22：清单必须**先于**校验和生成 —— 否则 latest.json
+      #   本身没有校验值，而它恰恰决定每个客户端从哪里下载更新，
+      #   被替换的后果比任何一个安装包都严重。
       - name: Generate updater manifest
         # ★ 用 python3：release job 没有 setup-python，
         #   ubuntu-22.04 不保证存在 `python` 别名。
         # ★ 读 dist 而不是 artifacts：清单里的文件名必须与实际上传的
         #   ASCII 资产名逐字一致，否则客户端下载 404。
         run: python3 .github/scripts/make_latest_json.py dist
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # ★ P1-22：覆盖面从「只有安装包」扩展到**所有上传的资产**：
+          #   安装包 + `.sig` 更新签名 + `latest.json` 更新清单。
+          #   `.sig` 是客户端验签的唯一依据，latest.json 决定下载地址 ——
+          #   这两个被替换的后果，比某个安装包被替换更严重。
+          #   ★ 只有 checksums-sha256.txt 与 RELEASE_NOTES.md 不参与：
+          #     前者不能自校验，后者会在下一步写入自身哈希（见 Compose）。
+          find . -type f ! -name 'checksums-sha256.txt' ! -name 'RELEASE_NOTES.md' \
+            -exec sha256sum {} \; \
+            | sed 's|  \./|  |' | LC_ALL=C sort -k2 > checksums-sha256.txt
+          cat checksums-sha256.txt
+          # 一个都没算出来就是失败：静默产出空校验文件比报错更糟，
+          # 用户会以为「没校验值也能装」。
+          test -s checksums-sha256.txt \
+            || { echo "::error::未找到任何安装包，校验文件为空"; exit 1; }
+          # 必须真的覆盖到这两类，否则等于又退回旧口径。
+          grep -q 'latest\.json' checksums-sha256.txt \
+            || { echo "::error::校验和未覆盖 latest.json"; exit 1; }
+          grep -q '\.sig' checksums-sha256.txt \
+            || { echo "::error::校验和未覆盖 .sig 更新签名"; exit 1; }
 
       # ★ 2026-10-27：发布说明改为**自己生成**，不再用
       #   generate_release_notes。原因很实在：用户点开 Release 的第一件事
@@ -841,6 +908,11 @@ jobs:
             echo "|---|---|---|"
             while read -r sha name; do
               [ -n "${sha:-}" ] || continue
+              # 表格只列安装包：给 .sig / latest.json 挂 VirusTotal 报告链接
+              # 没有意义（VT 不分析它们），它们仍完整出现在下方的原文块里。
+              case "$name" in
+                *.sig|latest.json) continue ;;
+              esac
               echo "| \`$name\` | \`$sha\` | [查看报告](https://www.virustotal.com/gui/file/$sha) |"
             done < dist/checksums-sha256.txt
             echo
@@ -850,9 +922,69 @@ jobs:
             cat dist/checksums-sha256.txt
             echo '```'
             echo
+            echo "> 本说明文件自身的 SHA256 追加在 \`checksums-sha256.txt\` 末尾"
+            echo "> （表格里没有它，因为表格是先于本文件生成的）。"
+            echo
             echo "版本：\`$VER\`　·　完整变更比对：https://github.com/${{ github.repository }}/compare/${GITHUB_REF_NAME}^...${GITHUB_REF_NAME}"
           } > dist/RELEASE_NOTES.md
+
+          # ★ P1-22：发布说明也有校验值 —— 但**不能在它自己的正文里**
+          #   （那会形成自引用）。做法：正文写完后把它的哈希追加到
+          #   checksums 文件末尾，正文里已声明"在末尾"。
+          ( cd dist && sha256sum RELEASE_NOTES.md >> checksums-sha256.txt )
           cat dist/RELEASE_NOTES.md
+
+      # ★ P1-25：tag 被移动后重跑会**静默替换**已发布的资产 ——
+      #   用户下载到的已经是另一个字节流，而 Release 页面看起来毫无变化。
+      #   这里在创建前直接拒绝，把"覆盖"变成一次明确的失败。
+      #
+      # ★ 为什么不用 prerelease 标记来兜底：带 -alpha/-beta 的版本一旦
+      #   标成 prerelease，GitHub 的 `releases/latest/download/latest.json`
+      #   会直接 404（latest 只指向非预发布版本），
+      #   结果就是全体客户端的自动更新同时失效。宁可保留普通发布，
+      #   由 environment 审核 + 重名阻断来控制"谁能发、能不能覆盖"。
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release $GITHUB_REF_NAME 已存在 —— tag 被移动后重跑会静默替换已发布资产，已阻断"
+            exit 1
+          fi
+          echo "PASS：目标 Release 尚不存在"
+
+      # ★ P1-21：SLSA 构建来源证明。
+      #   在此之前，发布链只有"我们说是从这份源码构建的"，
+      #   没有任何机器可回读的证据。证明写入仓库的 attestations 存储，
+      #   任何人都可以用 `gh attestation verify` 独立核对。
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.app.tar.gz
+            dist/latest.json
+
+      # ★ P1-21 后半：证明写完必须**回读**一次。
+      #   「上传成功」和「能验证通过」是两件事，前者不保证后者。
+      - name: Verify attestation is readable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          found=0
+          for f in dist/*.exe dist/*.dmg dist/*.deb dist/*.AppImage dist/*.app.tar.gz; do
+            [ -e "$f" ] || continue
+            found=$((found + 1))
+            echo "校验来源证明：${f##*/}"
+            gh attestation verify "$f" --repo "${{ github.repository }}"
+          done
+          [ "$found" -gt 0 ] || { echo "::error::没有可校验的产物"; exit 1; }
+          echo "PASS：来源证明可回读（$found 个产物）"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2

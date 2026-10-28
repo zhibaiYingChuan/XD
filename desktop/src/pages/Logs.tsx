@@ -186,6 +186,11 @@ function DetailDrawer({
   // ★ 2026-10-23：证据包（凭证指纹 + 首次出现方向）。
   //   与详情并行拉取：证据包失败不该让整个抽屉打不开。
   const [evidence, setEvidence] = useState<EvidenceBundle | null>(null);
+  // ★ P1-15：证据包请求失败必须与「确实没有凭证」区分开。
+  //   此前 catch 里只把 evidence 置空，界面上两者完全同形 ——
+  //   用户会把「取不到」读成「这条没有中转站痕迹」，得出相反结论。
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [evidenceRetry, setEvidenceRetry] = useState(0);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [marking, setMarking] = useState(false);
@@ -199,6 +204,17 @@ function DetailDrawer({
     titleRef.current?.focus();
   }, []);
 
+  // ★ P1-16：父组件把 onClose 写成内联箭头函数，每次重渲染都是新引用。
+  //   此前它出现在下面 effect 的依赖里 —— 父组件任意一次重渲染
+  //   （列表刷新、loading 变化）都会让抽屉「清空 → 重新请求」，
+  //   用户看到的就是内容闪回「加载中」并重复打接口。
+  //   这里把回调放进 ref，effect 只认 logId。
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  // 详情：只在换条目时重新请求
   useEffect(() => {
     let cancelled = false;
     // ★ 切到上一条/下一条时先清空旧详情（2026-10-20）。
@@ -206,7 +222,6 @@ function DetailDrawer({
     //   而标题的位置感已经变成「本页 3 / 20」——
     //   用户会把上一条的判定当成这一条的。
     setDetail(null);
-    setEvidence(null);
     setLoading(true);
     (async () => {
       try {
@@ -215,23 +230,40 @@ function DetailDrawer({
       } catch (e) {
         if (!cancelled) {
           toast.error(`加载详情失败：${e instanceof Error ? e.message : String(e)}`);
-          onClose();
+          onCloseRef.current();
         }
       } finally {
         if (!cancelled) setLoading(false);
-      }
-      // 证据包单独取，失败就当作「这条没有来源记录」
-      try {
-        const e = await api.getLogEvidence(logId);
-        if (!cancelled) setEvidence(e);
-      } catch {
-        if (!cancelled) setEvidence(null);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [logId, onClose, toast]);
+  }, [logId, toast]);
+
+  // 证据包：独立 effect，与详情并行；失败可单独重试（P1-15）
+  useEffect(() => {
+    let cancelled = false;
+    setEvidence(null);
+    setEvidenceError(null);
+    (async () => {
+      try {
+        const e = await api.getLogEvidence(logId);
+        if (!cancelled) {
+          setEvidence(e);
+          setEvidenceError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setEvidence(null);
+          setEvidenceError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [logId, evidenceRetry]);
 
   // ESC 关闭；←/→ 在本页内逐条翻看。
   // ★ 逐条核对是真实场景（一次误报排查往往要连着看十几条），
@@ -593,6 +625,29 @@ function DetailDrawer({
                 </div>
               )}
 
+              {/* ★ P1-15：取不到 ≠ 没有。两者此前在界面上完全同形，
+                  用户会据此得出「这枚凭证不是中转站带的」这种相反结论。 */}
+              {evidenceError && (
+                <div className="alert danger mt-16" style={{ marginBottom: 0 }}>
+                  <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+                  <div>
+                    <b>证据包加载失败</b>
+                    <div className="mt-8" style={{ fontSize: 12 }}>
+                      这不代表「这条记录没有凭证来源」，只是这次没取到。
+                    </div>
+                    <div className="mono faint mt-8" style={{ fontSize: 11 }}>
+                      {evidenceError}
+                    </div>
+                    <button
+                      className="btn ghost sm mt-8"
+                      onClick={() => setEvidenceRetry((n) => n + 1)}
+                    >
+                      重试
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* ★ 2026-10-23：凭证来源。
                   用户要的不是「你拦了什么」，而是「这枚 token 到底是谁放进来的」——
                   响应侧先出现才是能拿去问中转站的证据；请求侧先出现说明是自己这边带进来的。 */}
@@ -818,6 +873,10 @@ export default function Logs() {
   );
   const [stats, setStats] = useState<LogBreakdown | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // ★ P1-14：「清空」此前是唯一没有在飞锁的破坏性按钮 ——
+  //   连点两下会弹两次确认框，两条 Toast 互相覆盖，
+  //   第二次请求还会在第一次删完之后再删一次（此时范围已变）。
+  const [clearing, setClearing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -995,16 +1054,21 @@ export default function Logs() {
   };
 
   const handleClearAll = async () => {
+    if (clearing) return;
     if (!window.confirm('确定清空全部安全日志吗？\n\n此操作不可恢复。\n（脱敏记录会一并删除，本地不留存任何原始敏感值）')) {
       return;
     }
+    setClearing(true);
     try {
       const r = await api.clearLogs(0);
       toast.success(`已清空 ${r.deleted} 条日志`);
       setOffset(0);
       load();
+      loadStats();
     } catch (e) {
       toast.error(`清空失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -1108,7 +1172,7 @@ export default function Logs() {
           <button
             className="btn secondary"
             onClick={handleDeleteFiltered}
-            disabled={total === 0 || deleting}
+            disabled={total === 0 || deleting || clearing}
           >
             <Filter size={15} strokeWidth={1.5} />
             {deleting ? '处理中...' : '删除筛选结果'}
@@ -1120,10 +1184,10 @@ export default function Logs() {
             className="btn secondary"
             style={{ color: 'var(--xd-danger)' }}
             onClick={handleClearAll}
-            disabled={total === 0}
+            disabled={total === 0 || clearing || deleting}
           >
             <Trash2 size={15} strokeWidth={1.5} />
-            清空
+            {clearing ? '清空中...' : '清空'}
           </button>
         </div>
       </div>
@@ -1297,7 +1361,11 @@ export default function Logs() {
       )}
 
       {/* 列表 */}
+      {/* ★ P1-13：加载失败时不再渲染「暂无日志记录」空态。
+          此前错误条与空态同屏，用户读到的是「日志没了」，
+          而事实是「这次没取到」—— 两者对应的下一步动作完全不同。 */}
       {entries.length === 0 ? (
+        loadErr ? null : (
         <div className="card">
           <div className="empty">
             <div className="empty-icon">
@@ -1322,6 +1390,7 @@ export default function Logs() {
             </div>
           </div>
         </div>
+        )
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {/* 横向滚动容器：窗口变窄时表格不再被挤压截断，而是出现横向滚动条。

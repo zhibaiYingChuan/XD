@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -118,7 +119,6 @@ def _extract_signature_blob(stdout: str, sig_path: Path) -> bytes:
 
 def main() -> int:
     key = os.environ.get("TAURI_SIGNING_PRIVATE_KEY", "").strip()
-    password = os.environ.get("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
     if not key:
         raise SystemExit("TAURI_SIGNING_PRIVATE_KEY 为空 —— 无法签名更新包")
 
@@ -129,28 +129,30 @@ def main() -> int:
 
     env = {**os.environ, "TAURI_SIGNING_PRIVATE_KEY": key}
 
+    # ★ P1-23：不再经 shell 拼命令、也不再把口令写进 argv。
+    #   · 旧实现在 Windows 上走 shell 拼 `-p "<口令>"`：
+    #     口令进命令行 = 进程列表可见 + 会被引号注入改写；
+    #   · 现在直接调 node 执行 @tauri-apps/cli 的入口脚本（argv 只含路径），
+    #     口令由 CLI 原生支持的 TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+    #     环境变量传入（它本就在 os.environ 里，也随 env 传给子进程）。
+    node = shutil.which("node")
+    if not node:
+        raise SystemExit("找不到 node —— 无法调用 tauri CLI 做签名探测")
+    cli_js = DESKTOP / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"
+    if not cli_js.is_file():
+        raise SystemExit(
+            f"找不到 {cli_js} —— 请先在 desktop/ 下执行 npm ci"
+        )
+
     with tempfile.TemporaryDirectory() as td:
         probe = Path(td) / "probe.txt"
         probe.write_text("xuandun updater key probe", encoding="utf-8")
 
-        if os.name == "nt":
-            cmd = f'npx --no-install tauri signer sign "{probe}"'
-            if password:
-                cmd += f' -p "{password}"'
-            result = subprocess.run(
-                cmd, cwd=str(DESKTOP), env=env, shell=True,
-                capture_output=True, text=True,
-            )
-        else:
-            argv = [
-                "npx", "--no-install", "tauri", "signer", "sign", str(probe),
-            ]
-            if password:
-                argv += ["-p", password]
-            result = subprocess.run(
-                argv, cwd=str(DESKTOP), env=env,
-                capture_output=True, text=True,
-            )
+        argv = [node, str(cli_js), "signer", "sign", str(probe)]
+        result = subprocess.run(
+            argv, cwd=str(DESKTOP), env=env,
+            capture_output=True, text=True,
+        )
 
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()[-800:]

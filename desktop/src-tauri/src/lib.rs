@@ -106,8 +106,13 @@ fn admin_token() -> &'static str {
 mod env_keys {
     /// 数据目录（config.json / 数据库 / 激活状态），需与引擎侧一致
     pub const DATA_DIR: &str = "XUANDUN_DATA_DIR";
-    /// 引擎监听端口
+    /// 引擎监听端口（规范名）
     pub const PROXY_PORT: &str = "XUANDUN_PROXY_PORT";
+    /// 引擎监听端口（历史名称，Python 侧曾用）
+    ///
+    /// ★ P1-9：两侧都认两个名字。原实现 Rust 只认规范名、Python 只认旧名，
+    ///   照文档做端口隔离时桌面端连 A、引擎听 B，表现为「引擎启动失败」。
+    pub const PROXY_PORT_LEGACY: &str = "XUANDUN_PERSONAL_PORT";
     /// WebView2 CDP 调试端口
     pub const CDP_PORT: &str = "XUANDUN_CDP_PORT";
 }
@@ -294,16 +299,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// 读取失败回退默认端口：配置文件不存在是正常情况（首次运行）。
 fn proxy_port() -> u16 {
     // 环境变量优先：开发/测试用独立端口，避免与稳定版抢占 18765。
-    if let Ok(v) = std::env::var(env_keys::PROXY_PORT) {
+    // ★ P1-9：规范名优先，历史名兜底 —— 两个名字都必须在两侧生效。
+    for key in [env_keys::PROXY_PORT, env_keys::PROXY_PORT_LEGACY] {
+        let Ok(v) = std::env::var(key) else {
+            continue;
+        };
         if let Ok(p) = v.trim().parse::<u16>() {
             if (1024..=65535).contains(&p) {
                 return p;
             }
         }
-        log_line(
-            "WARN",
-            &format!("{} 取值非法，已回退默认端口: {:?}", env_keys::PROXY_PORT, v),
-        );
+        log_line("WARN", &format!("{key} 取值非法，已回退默认端口: {v:?}"));
     }
 
     let base = data_dir().join("config.json");
@@ -726,26 +732,92 @@ pub fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     app.exit(0);
 }
 
+/// 有界地执行一个外部命令：到点就杀掉并返回 None。
+///
+/// ★★ P0-7（2026-10-28）：为什么必须给它加超时
+/// ────────────────────────────────────────────────────────────
+/// `tasklist` / `taskkill` 原来走 `.output()` / `.status()`，两者都是
+/// **无超时**的阻塞调用。而它们恰好被 `terminate_engine_child` /
+/// `reap_child_sync` / `process_alive` 在**持有 lifecycle 锁**时调用：
+/// 一旦系统繁忙、taskkill 卡在句柄上，这把锁就永不释放 ——
+/// 之后 19 个命令全部排在 `lifecycle.lock().await`，
+/// 界面永久 pending，连「停止引擎」按钮自己也点不动。
+///
+/// 这里改为 spawn + 轮询 try_wait，超过 budget 就 kill 掉子进程本身。
+/// 宁可拿不到输出（调用方按「未知」保守处理），也不阻塞整个应用。
+fn run_command_bounded(mut cmd: Command, budget: Duration) -> Option<std::process::Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    log_line("WARN", "外部命令超时，已强制结束");
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// 跨平台强杀进程树
 #[cfg(target_os = "windows")]
 fn kill_cmd(flag_tree: &str, flag_force: &str, pid: u32) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), flag_tree, flag_force])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), flag_tree, flag_force])
+        .creation_flags(CREATE_NO_WINDOW);
+    let _ = run_command_bounded(cmd, Duration::from_secs(5));
 }
 
 #[cfg(not(target_os = "windows"))]
 fn kill_cmd(_flag_tree: &str, _flag_force: &str, pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-9", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let mut cmd = Command::new("kill");
+    cmd.args(["-9", &pid.to_string()]);
+    let _ = run_command_bounded(cmd, Duration::from_secs(5));
+}
+
+/// 从后端错误体里取出可读信息（★ P1-11 的 Rust 侧同口径实现）。
+///
+/// 三种形态：`detail`（字符串）、`detail[]`（422 校验数组，元素含 msg）、
+/// `error.message`（网关透传的上游错误）。与前端 extractErrorMessage 同一套规则，
+/// 否则会出现「Tauri 模式说 A、浏览器模式说 B」。
+fn extract_error_message(v: &serde_json::Value) -> Option<String> {
+    fn pick(v: &serde_json::Value) -> Option<String> {
+        match v {
+            serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            serde_json::Value::Array(items) => {
+                let parts: Vec<String> = items.iter().filter_map(pick).collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("；"))
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for key in ["msg", "message", "detail"] {
+                    if let Some(s) = map.get(key).and_then(pick) {
+                        return Some(s);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    for key in ["detail", "error", "message"] {
+        if let Some(s) = v.get(key).and_then(pick) {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// 调用本地代理 API（GET/POST/PUT/DELETE）
@@ -781,13 +853,12 @@ async fn proxy_call(
         .map_err(|e| format!("读取本地代理响应失败: {e}"))?;
 
     if !status.is_success() {
-        // 尽量提取后端 detail
+        // ★ P1-11：后端的错误体有三种形态，不能只认 detail:
+        //   {"detail": "..."} / {"detail": [{...}]}（422 校验）/ {"error":{"message":...}}
+        //   只认字符串 detail 时，422 与上游透传的错误一律退化成
+        //   「本地代理返回 HTTP 500」，用户拿到的等于没有信息。
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(detail) = v.get("detail") {
-                let msg = match detail {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
+            if let Some(msg) = extract_error_message(&v) {
                 return Err(msg);
             }
         }
@@ -804,16 +875,72 @@ async fn proxy_call(
 // 引擎健康检查 + 生命周期
 // ══════════════════════════════════════════════════════════════
 
-async fn check_engine_health() -> bool {
+/// 引擎身份标记的固定盐（★ 与 Python 侧 app.py 的 _ENGINE_INSTANCE_SALT 必须一字不差）
+const ENGINE_INSTANCE_SALT: &[u8] = b"xuandun-engine/v1";
+
+/// 端口被陌生程序占用时的统一提示。
+const FOREIGN_ENGINE_MSG: &str =
+    "端口 18765 已被其他程序占用，且对端身份校验失败（不是玄盾引擎）。\
+     为避免把中转站密钥交给陌生进程，已拒绝连接；请关闭占用该端口的程序后重试。";
+
+/// 本机引擎**应有**的身份标记：sha256(盐 + 管理令牌) 的前 32 位十六进制。
+///
+/// ★ 与 Python 侧 `_engine_instance_id()` 完全同构。
+///   令牌只在本进程内存与引擎环境变量里，本机其它程序拿不到 ——
+///   因此算不出这个值，也就冒认不成引擎。
+fn expected_engine_instance() -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(ENGINE_INSTANCE_SALT);
+    h.update(admin_token().as_bytes());
+    let hex = format!("{:x}", h.finalize());
+    hex[..32].to_string()
+}
+
+/// 引擎探测结果（★ P0-1：把「健康」与「可信」分开）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineProbe {
+    /// 没有引擎在听 / 在听但不是玄盾 / 在听是玄盾但未就绪
+    Down,
+    /// 玄盾引擎且已就绪
+    Ready,
+    /// 端口上有程序在回 2xx，但身份对不上 —— 绝不与它交换任何凭据
+    Foreign,
+}
+
+async fn probe_engine() -> EngineProbe {
     let Ok(client) = http_client(2) else {
-        return false;
+        return EngineProbe::Down;
     };
     let health_url = format!("{}/health", proxy_base());
     let Ok(Ok(resp)) = timeout(Duration::from_secs(2), client.get(health_url).send()).await
     else {
-        return false;
+        return EngineProbe::Down;
     };
-    resp.status().is_success()
+    if !resp.status().is_success() {
+        return EngineProbe::Down;
+    }
+    // ★ 2xx 不代表是我们 —— 必须看身份标记。
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        return EngineProbe::Foreign;
+    };
+    let instance = body.get("instance").and_then(|v| v.as_str()).unwrap_or("");
+    if instance != expected_engine_instance() {
+        return EngineProbe::Foreign;
+    }
+    let ready = body.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ready {
+        return EngineProbe::Down;
+    }
+    EngineProbe::Ready
+}
+
+/// 引擎是否「可信且就绪」。
+///
+/// ★ 只判 2xx 的老实现会把「外部进程冒认」与「检测/落库已失效」
+///   都当成健康，见 probe_engine 的注释。
+async fn check_engine_health() -> bool {
+    matches!(probe_engine().await, EngineProbe::Ready)
 }
 
 fn unix_now() -> u64 {
@@ -1145,14 +1272,11 @@ fn process_alive(pid: u32) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let Ok(o) = Command::new("tasklist")
-        .arg("/NH")
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return true; // 查不到就保守认为还活着
+    let mut cmd = Command::new("tasklist");
+    cmd.arg("/NH").creation_flags(CREATE_NO_WINDOW);
+    // ★ P0-7：有界执行 —— 这里是持 lifecycle 锁的路径，绝不无限等待
+    let Some(o) = run_command_bounded(cmd, Duration::from_secs(3)) else {
+        return true; // 查不到就保守认为还活着（超时同理）
     };
 
     let text = String::from_utf8_lossy(&o.stdout);
@@ -1198,20 +1322,35 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
         // 已在运行且健康 → 直接返回
         // parking_lot 守卫非 Send，必须在 await 前显式释放
         let running = state.status.lock().running;
-        if running && check_engine_health().await {
+        if running && probe_engine().await == EngineProbe::Ready {
             return Ok(());
         }
 
         // 端口上的引擎已就绪（外部引擎，或我们拉起但 status 滞后）
-        if check_engine_health().await {
-            let mut st = state.status.lock();
-            st.running = true;
-            st.healthy = true;
-            if st.started_at.is_none() {
-                st.started_at = Some(unix_now());
+        match probe_engine().await {
+            EngineProbe::Ready => {
+                let mut st = state.status.lock();
+                st.running = true;
+                st.healthy = true;
+                if st.started_at.is_none() {
+                    st.started_at = Some(unix_now());
+                }
+                st.startup_error = None;
+                return Ok(());
             }
-            st.startup_error = None;
-            return Ok(());
+            EngineProbe::Foreign => {
+                // ★★ P0-1：端口被陌生进程占着，必须在这里就停下
+                //   后续流程会 spawn 引擎并把中转站 Key 交给「就绪的那一方」；
+                //   对冒认者而言，这正是它等待的时刻。
+                //   拒绝连接 + 把原因写进 startup_error（界面可见），
+                //   绝不再 spawn（抢不到端口，只会刷屏）。
+                let mut st = state.status.lock();
+                st.healthy = false;
+                st.startup_error = Some(FOREIGN_ENGINE_MSG.to_string());
+                log_line("ERROR", FOREIGN_ENGINE_MSG);
+                return Err(FOREIGN_ENGINE_MSG.to_string());
+            }
+            EngineProbe::Down => {}
         }
 
         // 已经有人在拉起 → 不重复 spawn，交给下面的等待段
@@ -1418,6 +1557,18 @@ fn spawn_health_monitor(app: tauri::AppHandle) {
             }
 
             // 尝试重启
+            // ★★ P0-1：端口被陌生程序占着时绝不重启 —— 既抢不到端口，
+            //   又会在 3s 循环里反复刷屏；更不会把凭据交给对方。
+            //   改为退避 30s 后继续观察（对方退出即自动恢复）。
+            if probe_engine().await == EngineProbe::Foreign {
+                log_line("ERROR", FOREIGN_ENGINE_MSG);
+                if let Some(ctrl) = app.try_state::<TrayController>() {
+                    ctrl.force_paused(&app);
+                }
+                fail_streak = 0;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
             // ★ 必须整段持锁：原来这里是 stop_engine（自己拿锁再放）
             //   然后裸调 start_engine_process（不持锁），
             //   两步之间存在窗口 —— 并发的 ensure 会看到引擎已停而
@@ -1543,6 +1694,15 @@ async fn get_engine_status(app: tauri::AppHandle) -> Result<EngineStatus, String
     let state = app.state::<EngineState>();
     let snapshot = state.status.lock().clone();
     Ok(snapshot)
+}
+
+/// 把管理令牌交给前端（★ P0-5）。
+///
+/// 只经 Tauri IPC 返回：IPC 不经过 HTTP，天然不会被引擎的 401 挡住，
+/// 也不需要把令牌写进任何前端可持久化的位置。
+#[tauri::command]
+fn get_admin_token() -> String {
+    admin_token().to_string()
 }
 
 #[tauri::command]
@@ -2315,6 +2475,8 @@ pub fn run() {
             get_engine_status,
             restart_engine,
             stop_engine_command,
+            // ★ P0-5：前端浏览器回退通道需要带管理令牌
+            get_admin_token,
             get_state,
             get_stats,
             get_diagnostics,

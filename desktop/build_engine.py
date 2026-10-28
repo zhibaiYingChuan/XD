@@ -230,7 +230,12 @@ def main() -> int:
         # 网络受限环境会 FATAL 失败。ccache 只影响编译速度，不影响产物。
         "--disable-cache=ccache",
         "--remove-output",
-        "--assume-yes-for-download",
+        # ★ P1-26：不再"自动确认下载"（此前显式传过那个参数）。
+        #   它让 Nuitka 在构建期**静默**从第三方拉取工具（ccache /
+        #   dependencywalker 等）：出网抓可执行文件发生在 CI 的可信构建
+        #   链路里，却既不在依赖清单中、也不在审计日志里。
+        #   去掉之后，构建期任何"需要下载"的动作都会直接失败 ——
+        #   失败可查，静默抓取不可查。需要的工具应在构建前显式安装。
         f"--output-dir={SCRIPT_DIR}",
         # 个人版自身的包 + 其运行时依赖
         "--include-package=daoti_xuandun_personal",

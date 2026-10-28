@@ -1,0 +1,60 @@
+# 依赖更新（P1-20）
+#
+# 为什么要开 dependabot：本项目的三条依赖链（Python 引擎 / 前端 / Rust 壳）
+# 都直接决定产物里有什么。没有自动化更新时，唯一的升级触发是"某个漏洞
+# 被公开报道"—— 那已经太晚了。
+#
+# ★ 策略：只开安全与补丁级别的小步更新，major 一律人工评估。
+#   引擎是 Nuitka 冻结的，major 升级会改变构建行为，不适合自动合并。
+
+version: 2
+
+updates:
+  # Python 引擎（pyproject.toml / setup.py 在仓库根）
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # 前端（Tauri 的 webview 侧）
+  - package-ecosystem: npm
+    directory: "/desktop"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # Tauri 主版本与 CLI 必须同步升级，自动 PR 只会造成半升级
+      - dependency-name: "@tauri-apps/*"
+        update-types: ["version-update:semver-major"]
+
+  # Rust 壳
+  - package-ecosystem: cargo
+    directory: "/desktop/src-tauri"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-patch:
+        patterns: ["*"]
+        update-types: ["patch"]
+
+  # GitHub Actions 本身也是依赖：action 被投毒等于发布链被接管。
+  # ★ 这里只做"发现新版"，实际合入仍需把 SHA 钉死（见 ci.yml / release.yml）。
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5

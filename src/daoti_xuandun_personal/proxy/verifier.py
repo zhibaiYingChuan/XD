@@ -23,8 +23,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import statistics
+import sys
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..types import (
@@ -35,6 +38,83 @@ from ..types import (
 )
 
 logger = logging.getLogger("xuandun-personal.verifier")
+
+# 构建期生成的密钥文件名（由 desktop/build_engine.py 写入引擎目录）
+_BUILD_SECRETS_FILE = "build_secrets.json"
+
+
+def _load_build_secrets() -> Optional[Dict[str, str]]:
+    """读取构建期随机密钥；不存在或不可用时返回 None。
+
+    ★★ 2026-10-28（P0 取证）：为什么注入点必须在这里，而不是 app.py
+    ────────────────────────────────────────────────────────────
+    原实现是 ``app.py::_inject_build_secrets(config)``，而它拿到的
+    ``PersonalConfig`` **根本没有** ``shell_key`` / ``mapping_key`` 字段
+    —— Python 允许给普通对象临时挂属性，于是赋值成功、日志打印
+    「已加载构建期密钥」，然后**没有任何一处读取它**。
+    护栏真正用的是本函数作用域里的 ``XuanDunConfig``，它照旧回退到
+    源码里那两个明文常量（``daoti_xuandun_16`` / ``ancient_map_16b!``）。
+
+    一句话：换了锁芯，钥匙还插在旧锁上。
+    所以注入点必须收敛到「构造护栏配置的那一行之前」，否则加固永远是空转。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(sys.executable)),
+                        _BUILD_SECRETS_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError:
+        logger.info(
+            "未找到构建期密钥（%s）：开发态正常；发布包出现说明打包链路有问题",
+            _BUILD_SECRETS_FILE,
+        )
+        return None
+    except ValueError:
+        logger.warning("构建期密钥文件不是合法 JSON，已忽略：%s", path)
+        return None
+
+    if not isinstance(data, dict):
+        logger.warning("构建期密钥文件格式异常（不是对象），已忽略：%s", path)
+        return None
+
+    out: Dict[str, str] = {}
+    for key in ("shell_key", "mapping_key"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            out[key] = value
+    if not out:
+        logger.warning("构建期密钥文件存在但内容为空，护栏将回退到明文 fallback")
+    return out or None
+
+
+@contextmanager
+def _build_secrets_env():
+    """在构造护栏配置期间，把构建期密钥放进企业版读取的**官方入口**。
+
+    ★ 为什么用环境变量而不是构造后 setattr：
+      企业版 ``XuanDunConfig.__post_init__`` 只认 ``XUANDUN_SHELL_KEY`` /
+      ``XUANDUN_MAPPING_KEY``；构造后改属性虽然也能生效（DynamicShell 等
+      尚未实例化），但 ``__post_init__`` 已经把「正在使用不安全 fallback」
+      写进 stderr —— 发布包里那条告警是**假的**，会长期误导排障。
+      走官方入口则两头都对：既没有假告警，也不必依赖赋值顺序。
+
+    ★ 用完立刻删除：环境变量对同用户的其它进程可读，不能长期驻留。
+      ``XuanDunConfig`` 在构造时已把密钥读成 bytes 存在对象里，删掉不影响。
+    """
+    secrets = _load_build_secrets() or {}
+    applied_keys: List[str] = []
+    for key, env_name in (
+        ("shell_key", "XUANDUN_SHELL_KEY"),
+        ("mapping_key", "XUANDUN_MAPPING_KEY"),
+    ):
+        if key in secrets:
+            os.environ[env_name] = secrets[key]
+            applied_keys.append(env_name)
+    try:
+        yield bool(applied_keys)
+    finally:
+        for env_name in applied_keys:
+            os.environ.pop(env_name, None)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -951,20 +1031,39 @@ class ResponseVerifier:
         self._try_load_guardrail()
 
     def _try_load_guardrail(self) -> None:
-        """尝试加载企业版输出护栏。"""
+        """加载输出护栏（只取需要的那一个组件）。
+
+        ★★ P1-8（2026-10-28）：不要为了拿 output_guardrail 而实例化整个
+          企业版 ``XuanDun``。
+          那会连带建出 reject_gate / DynamicShell / 两个 mapper /
+          timing_checker / 各 checker —— 个人版一个都用不上，
+          却要为它们付启动时间与常驻内存；更糟的是「跑着一整套企业版
+          检测管道」这件事本身与个人版的产品边界不符：
+          个人版只做**出站脱敏 + 响应验真**，不做内容审查。
+
+          现在直接构造 ``OutputGuardrail(config)`` —— 它本来就是
+          独立组件（内部自带洛书编码器，不共享输入侧原型库）。
+        """
         try:
-            from daoti_xuandun.xuandun import XuanDun
+            from daoti_xuandun._check_output import OutputGuardrail
             from daoti_xuandun.config import DefenseLevel, XuanDunConfig
 
-            config = XuanDunConfig.preset(DefenseLevel.STANDARD)
+            # ★★ 构建期密钥必须在 preset **之前**进入：XuanDunConfig 的
+            #   __post_init__ 会在这里把 shell_key / mapping_key 定下来。
+            #   之后再赋值虽然也能生效，但那条「正在使用不安全 fallback」的
+            #   告警已经写进 stderr —— 发布包里它就是假消息。
+            with _build_secrets_env() as secrets_applied:
+                config = XuanDunConfig.preset(DefenseLevel.STANDARD)
             config.enable_output_guardrail = True
-            self._shield = XuanDun(config=config)
-            self._output_guardrail = self._shield.output_guardrail
+            if not secrets_applied:
+                logger.info("护栏使用源码内 fallback 密钥（开发态正常；发布包应已注入）")
+            self._output_guardrail = OutputGuardrail(config)
             self._guardrail_available = self._output_guardrail is not None
-            logger.info("企业版输出护栏加载成功（复用提示词注入 + 敏感泄露检测）")
+            logger.info("输出护栏加载成功（提示词注入 + 敏感泄露检测）")
         except Exception as e:  # noqa: BLE001 — 复用失败不应阻断个人版
+            self._output_guardrail = None
             self._guardrail_available = False
-            logger.warning("企业版输出护栏加载失败，仅启用个人版自研检测: %s", e)
+            logger.warning("输出护栏加载失败，仅启用个人版自研检测: %s", e)
 
     def set_level(self, level: str) -> None:
         if level not in (s.value for s in SecurityLevel):
@@ -1077,24 +1176,26 @@ class ResponseVerifier:
             return findings
 
         if category == "content_policy":
-            # 内容合规类（模型自己说了敏感词）与中转站是否篡改无关。
-            # 标 medium 而非 high：均衡档显示为「提示」，严格档即使
-            # 判到阻断也会被 decide_response_action 降级为提示。
-            severity = "medium"
-            detail = (
-                f"内容合规检查：{reason}（只作记录，与中转站是否篡改无关）"
-                if reason
-                else "内容合规检查命中（只作记录，与中转站是否篡改无关）"
-            )
-        else:
-            severity = "high" if risk == "high" else "medium"
-            # ★ 2026-10-22：不再往界面抛「[企业版护栏]」这种内部产品名。
-            #   它是我们自己的实现细节，用户看到只会疑惑「我买的是个人版，
-            #   怎么冒出企业版的东西」。换成中性的「内容检查」。
-            detail = (
-                f"内容检查：{reason}" if reason
-                else "内容检查命中风险内容"
-            )
+            # ★★ P1-8（2026-10-28）：个人版**不记**内容合规类命中。
+            #
+            #   这一类判的是「模型自己说了敏感词 / 违规语义」，与
+            #   「中转站有没有篡改返回」毫无关系 —— 而个人版的产品承诺
+            #   是出站脱敏 + 响应验真，不是内容审查。
+            #
+            #   原实现给它标 medium 并落成一条「提示」：用户看到的是
+            #   「玄盾提示了你 39 次」，点进去全是自己的技术总结
+            #   （实测稳定版 39 条误报全出在这里），既不可解释，
+            #   又把真正重要的伤害信号淹没。边界归位后这里直接返回。
+            return findings
+
+        severity = "high" if risk == "high" else "medium"
+        # ★ 2026-10-22：不再往界面抛「[企业版护栏]」这种内部产品名。
+        #   它是我们自己的实现细节，用户看到只会疑惑「我买的是个人版，
+        #   怎么冒出企业版的东西」。换成中性的「内容检查」。
+        detail = (
+            f"内容检查：{reason}" if reason
+            else "内容检查命中风险内容"
+        )
 
         findings.append(
             VerificationFinding(

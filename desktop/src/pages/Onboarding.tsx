@@ -39,6 +39,10 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
 
   // ── 激活 ──
   const [license, setLicense] = useState<LicenseStatus | null>(null);
+  // ★ P1-17：取机器码失败时此前没有任何失败态，界面永远显示「正在获取…」，
+  //   用户会一直等下去（而机器码是激活的第一步）。
+  const [licenseError, setLicenseError] = useState<string | null>(null);
+  const [licenseRetry, setLicenseRetry] = useState(0);
   const [code, setCode] = useState('');
   const [activating, setActivating] = useState(false);
   const [rebindOpen, setRebindOpen] = useState(false);
@@ -63,11 +67,20 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
   // 进入激活步骤时才拉状态（此时引擎已由 Layout 拉起）
   useEffect(() => {
     if (step !== 1) return;
+    let cancelled = false;
+    setLicenseError(null);
     api
       .getLicenseStatus()
-      .then(setLicense)
-      .catch(() => undefined);
-  }, [step]);
+      .then((s) => {
+        if (!cancelled) setLicense(s);
+      })
+      .catch((e) => {
+        if (!cancelled) setLicenseError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step, licenseRetry]);
 
   const handleActivate = async () => {
     const trimmed = code.trim();
@@ -232,8 +245,28 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
 
                 <div className="field">
                   <label className="field-label">你的机器码</label>
-                  <div className="code-box">{license?.machineCode ?? '（正在获取…）'}</div>
-                  <div className="field-hint">复制这段发给玄盾官方，即可为你签发激活码</div>
+                  <div className="code-box">
+                    {license?.machineCode
+                      ?? (licenseError ? '（获取失败）' : '（正在获取…）')}
+                  </div>
+                  {licenseError ? (
+                    <>
+                      <div className="field-hint" style={{ color: 'var(--xd-danger)' }}>
+                        机器码获取失败：{licenseError}
+                      </div>
+                      <div className="field-hint">
+                        请确认玄盾本地引擎已启动，然后重试。
+                      </div>
+                      <button
+                        className="btn ghost sm mt-8"
+                        onClick={() => setLicenseRetry((n) => n + 1)}
+                      >
+                        重试
+                      </button>
+                    </>
+                  ) : (
+                    <div className="field-hint">复制这段发给玄盾官方，即可为你签发激活码</div>
+                  )}
                   {license && (
                     <div className="btn-row mt-8">
                       <button

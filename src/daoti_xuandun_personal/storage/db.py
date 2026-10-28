@@ -269,18 +269,37 @@ class PersonalStorage:
             try:
                 self._init_schema()
                 return self._conn
+            except sqlite3.OperationalError as e:
+                # ★★ P0-3（2026-10-28）：把「暂时不可用」与「文件损坏」分开
+                # ────────────────────────────────────────────────────────
+                # OperationalError 覆盖的是「数据库被另一个进程锁住」
+                # 「磁盘只读 / 已满」「无法打开文件」这类**环境问题**，
+                # 文件本身是好的。原实现把它和真正的损坏一起吞进
+                # `except sqlite3.DatabaseError`：健康库被改名成 .corrupt-*、
+                # 再重建一个空库，用户看到的是日志/信誉/台账全部归零。
+                # 只读盘上更糟：每次启动都「隔离→建空库→再失败」，
+                # 变成崩溃循环，而真正的根因（盘不可写）被完全掩盖。
+                #
+                # 现在：只关连接、原样抛出。由调用方报「引擎启动失败：
+                # 数据库不可用（<原因>）」，用户的原始数据一个字都不动。
+                self._close_quietly()
+                raise
             except sqlite3.DatabaseError as e:
                 # 首次访问（PRAGMA / 建表）就会暴露「文件不是数据库」
                 # 或「database disk image is malformed」。
-                try:
-                    self._conn.close()
-                except Exception:  # noqa: BLE001 — 关闭失败不影响后续重建
-                    pass
+                self._close_quietly()
                 if attempt == 1:
                     self._quarantine_db(e)
                     continue
                 raise
         raise RuntimeError("数据库重建失败")  # pragma: no cover — 循环内必返回或抛出
+
+    def _close_quietly(self) -> None:
+        """关闭连接，失败也不抛出（收尾动作不该掩盖真正的异常）。"""
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001 — 关闭失败不影响后续重建
+            pass
 
     def _quarantine_db(self, err: Exception) -> None:
         """把损坏的数据库文件（含 WAL/SHM 旁文件）改名隔离，供人工抢救。"""

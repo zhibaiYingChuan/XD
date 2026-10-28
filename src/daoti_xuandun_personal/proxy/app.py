@@ -29,6 +29,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -68,6 +69,19 @@ logger = logging.getLogger("xuandun-personal.app")
 
 # 流式响应中期验证阈值（字节）
 STREAM_VERIFY_THRESHOLD = 8192
+
+# ── 中转站探针的时间预算（★ P1-10）─────────────────────────────
+# 同一条链上有三个超时，语义与层级不同，必须严格递增：
+#   引擎单轮 (connect + read) × 最多 2 轮 = PROBE_TOTAL_BUDGET_S
+#     < 桌面端 REQ_PROBE（lib.rs）
+#     < 前端 TIMEOUT.PROBE（api.ts，仅浏览器模式）
+# 任何一层小于上一层，都会出现「客户端已超时、服务端还在发请求」。
+PROBE_CONNECT_TIMEOUT_S = 6.0
+PROBE_READ_TIMEOUT_S = 12.0
+PROBE_MAX_ROUNDS = 2
+PROBE_TOTAL_BUDGET_S = int(
+    PROBE_MAX_ROUNDS * (PROBE_CONNECT_TIMEOUT_S + PROBE_READ_TIMEOUT_S)
+)  # = 36s
 
 # 统计类信号（见 verifier.PatternTracker._STATISTICAL）。
 # 这里用于「给用户报哪一条」时跳过它们 ——
@@ -160,65 +174,54 @@ def _license_file_path() -> str:
     return str(paths.data_file("license.json"))
 
 
-# 构建期生成的密钥文件名（由 build_engine.py 写入引擎目录）
-_BUILD_SECRETS_FILE = "build_secrets.json"
+# 引擎身份标记的固定盐（★ 与 desktop/src-tauri/src/lib.rs 的同名常量必须一字不差）
+_ENGINE_INSTANCE_SALT = b"xuandun-engine/v1"
 
 
-def _inject_build_secrets(config) -> bool:
-    """把构建期生成的密钥注入护栏配置。
+def _engine_instance_id() -> str:
+    """引擎身份标记：由管理令牌派生，用于向桌面端证明「我就是玄盾」。
 
-    反编译加固
+    ★★ P0-1（2026-10-28）：为什么「健康」不等于「可信」
     ────────────────────────────────────────────────────────────
-    护栏层原本带两个明文 fallback 密钥
-    （``shell_key = b"daoti_xuandun_16"`` / ``mapping_key = b"ancient_map_16b!"``），
-    反编译者一眼就能拿到，动态壳与符号映射的初始化种子就此失去意义。
+    桌面端原来只判 `/health` 是不是 2xx。于是本机任意进程只要抢在桌面端
+    之前占住 127.0.0.1:18765 并回一个 200，就会被当成自家引擎 ——
+    随后用户的中转站 API Key 被 POST 过去、管理令牌也一并下发，
+    全量凭据被接管，而界面没有任何提示。
 
-    正确做法是**构建期生成随机密钥**，随包分发，运行时读入：
-      · 源码与二进制里都不再有固定密钥
-      · 每个版本的密钥不同，跨版本复用无效
-      · 仍不抗「读出二进制里的密钥再重打包」——
-        那是抬高门槛而非绝对防线，靠的是校验点分散
+    这里给出一个**只有知道管理令牌者才能算出的标记**：
+      · 桌面端算同一个值并比对，不一致即拒绝下发任何凭据
+      · 标记本身不泄露令牌（SHA-256 单向），也不可用于重放
 
-    ★ 文件缺失时**不静默**：那是开发态源码运行的正常情况。
-      但若有人以为「构建过了」而实际没生成，
-      护栏会带着固定 fallback 密钥运行 —— 那是假装的加固。
-      所以这里返回 False，由调用方决定是否要求它存在。
+    ★ 未配置管理令牌（纯本地手动调试）时返回空串 ——
+      桌面端按「不可信」处理，宁可报错也不把 Key 交给陌生进程。
     """
-    import json as _json
-    import os as _os
-    import sys as _sys
+    token = os.environ.get("XUANDUN_ADMIN_TOKEN", "").strip()
+    if not token:
+        return ""
+    digest = hashlib.sha256(
+        _ENGINE_INSTANCE_SALT + token.encode("utf-8")
+    ).hexdigest()
+    return digest[:32]
 
-    exe_dir = _os.path.dirname(_os.path.abspath(_sys.executable))
-    path = _os.path.join(exe_dir, _BUILD_SECRETS_FILE)
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-    except OSError:
-        return False
-    except ValueError:
-        logger.warning("构建密钥文件不是合法 JSON，已忽略：%s", path)
-        return False
+def _inject_build_secrets(config) -> bool:  # pragma: no cover - 已废弃，见下
+    """【已废弃，不要使用】构建期密钥的注入点已迁到 verifier.py。
 
-    if not isinstance(data, dict):
-        logger.warning("构建密钥文件格式异常（不是对象），已忽略：%s", path)
-        return False
+    ★★ 2026-10-28 取证结论：这个函数一直是**空转**的。
+      · 它接收的是 ``PersonalConfig``，该类没有 shell_key / mapping_key
+        字段；Python 允许临时挂属性，于是赋值"成功"、日志打印
+        「已加载构建期密钥」，然后没有任何一处读取它。
+      · 护栏真正使用的 ``XuanDunConfig`` 在 ``verifier._try_load_guardrail``
+        里独立构造，照旧回退到源码中的明文常量。
 
-    applied = False
-    shell = data.get("shell_key")
-    mapping = data.get("mapping_key")
-    if isinstance(shell, str) and shell:
-        config.shell_key = shell.encode("utf-8")
-        applied = True
-    if isinstance(mapping, str) and mapping:
-        config.mapping_key = mapping.encode("utf-8")
-        applied = True
-
-    if applied:
-        logger.info("已加载构建期密钥（来源：%s）", _BUILD_SECRETS_FILE)
-    else:
-        logger.warning("构建密钥文件存在但内容为空，护栏将回退到默认密钥")
-    return applied
+    保留本函数仅为兼容外部引用，内部不再调用；真正的注入见
+    ``verifier.py::_build_secrets_env``。
+    """
+    logger.warning(
+        "调用了已废弃的 _inject_build_secrets（对 PersonalConfig 无效），"
+        "构建期密钥实际由 verifier 注入"
+    )
+    return False
 
 
 @asynccontextmanager
@@ -850,6 +853,11 @@ def create_app() -> FastAPI:
         status = upstream.status_code
         try:
             body_bytes = await upstream.aread()
+        except httpx.HTTPError as e:
+            # ★ 错误响应也可能读到一半断开：此时连「上游说了什么」都拿不到，
+            #   但状态码已经收到，仍然如实透传，不能变成我们自己的 500。
+            logger.warning("读取上游错误响应体失败（%s）: %s", domain, e)
+            body_bytes = b""
         finally:
             await upstream.aclose()
         media_type = upstream.headers.get("content-type", "application/json")
@@ -872,8 +880,20 @@ def create_app() -> FastAPI:
         """
         try:
             body_bytes = await upstream.aread()
-        except httpx.HTTPError:
-            body_bytes = b""
+        except httpx.HTTPError as e:
+            # ★★ P0-4（2026-10-28）：读到一半失败 ≠ 空响应
+            #   原实现把 body_bytes 置空后继续走管道，最终以**上游的 200**
+            #   返回一个空内容，并记成「本次检查通过」。用户拿到的半截
+            #   结果与「模型什么都没说」完全同形，KPI 还把它算成一次安全检查。
+            logger.warning("读取上游响应体失败（%s）: %s", domain, e)
+            _log_body_read_failure(domain, model, e)
+            return JSONResponse(
+                status_code=502,
+                content={"error": {
+                    "type": "upstream_read_failed",
+                    "message": "读取上游响应失败（连接被中断），本次回答不完整，请重试",
+                }},
+            )
         finally:
             # 已读全量 → 立即关闭，把连接归还连接池
             await upstream.aclose()
@@ -1001,7 +1021,7 @@ def create_app() -> FastAPI:
         collected: List[str] = []
         total_len = 0
         mid_verified = False
-        state = {"blocked": False}
+        state = {"blocked": False, "interrupted": ""}
         last_verified_len = 0
 
         async def _generator() -> AsyncGenerator[bytes, None]:
@@ -1171,6 +1191,21 @@ def create_app() -> FastAPI:
                             ).encode("utf-8")
                         mid_verified = True
                         last_verified_len = total_len
+            except httpx.HTTPError as e:
+                # ★★ P0-8（2026-10-28）：上游中途断开不能「只是断流」
+                #
+                #   原实现让异常直接冒出生成器，连接被关闭；客户端收到的
+                #   是一个**看起来正常结束**的半截回答 —— 它无法区分
+                #   「被阻断 / 模型答完了 / 上游被截断」，于是把半截结果
+                #   当成完整答案继续用下去。
+                #   这里补一条可识别的 error 事件，并在流尾补 [DONE]，
+                #   严格按 OpenAI 协议等待结束标记的客户端也能正常收尾。
+                state["interrupted"] = f"{type(e).__name__}: {e}"
+                logger.warning("上游流式中断（%s）: %s", domain, e)
+                yield _sse_error_frame(
+                    "upstream_stream_interrupted",
+                    "上游连接中断，本次回答不完整（请重试）",
+                )
             finally:
                 # 流结束后的收尾（无论正常/异常结束都执行）
                 # ★★ 2026-10-04（H1）：响应是 stream=True 取得的，
@@ -1213,14 +1248,26 @@ def create_app() -> FastAPI:
                 #   「计数动了却什么都不显示」会让他以为防护根本没开。
                 if findings and action == Action.PASS.value:
                     action = Action.ALERT.value
-                _record_log(
-                    LogType.RESPONSE_VERIFY, domain, action, severity,
-                    model, findings, None, session_id, redaction_records,
-                    text_preview=readable,
-                    response_model=sse_model,
-                )
-                _record_reputation(domain, action, latency_ms, readable,
-                                   categories=_finding_categories(findings))
+                if state["interrupted"]:
+                    # ★ P0-8：中断的响应内容不完整，任何「通过/提示」结论都无意义。
+                    #   按链路级失败留痕（proxy_error 不计入 KPI 三档）。
+                    _log_stream_interrupted(
+                        domain, model, state["interrupted"], readable
+                    )
+                else:
+                    _record_log(
+                        LogType.RESPONSE_VERIFY, domain, action, severity,
+                        model, findings, None, session_id, redaction_records,
+                        text_preview=readable,
+                        response_model=sse_model,
+                    )
+                    _record_reputation(domain, action, latency_ms, readable,
+                                       categories=_finding_categories(findings))
+
+            # ★ P0-8：凡由我们主动提前收尾的流（阻断 / 中断），补上 OpenAI
+            #   协议的结束标记。正常读完的上游自己会带 [DONE]，这里不重复补。
+            if state["blocked"] or state["interrupted"]:
+                yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
             _generator(),
@@ -1238,13 +1285,34 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        """健康检查。"""
-        return {
-            "status": "ok",
-            "version": app.version,
-            "guard_ready": _verifier is not None,
-            "relay_configured": bool(_config and _config.relay.base_url),
-        }
+        """健康检查（★ P0-2：这是一个「就绪」信号，不是一个恒真的 200）。
+
+        ★★ 为什么必须区分 200 与 503
+        ────────────────────────────────────────────────────────────
+        原实现无条件返回 200 + status=ok，只把 guard_ready 放在字段里。
+        而桌面端的就绪判定只看 HTTP 2xx，于是「引擎起来了、但存储或检测器
+        已经失效」被完全当成健康：托盘显示「防护运行中」，
+        实际一条都没检查、一条都没记录 —— 这是最典型的 fail-open。
+
+        现在：任一核心组件缺失即 503，ready=false，桌面端据此显示
+        「引擎异常」并对外暴露真实原因，而不是继续假装在防护。
+        """
+        storage_ready = _storage is not None
+        guard_ready = _verifier is not None
+        ready = storage_ready and guard_ready
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ok" if ready else "degraded",
+                "ready": ready,
+                "version": app.version,
+                "storage_ready": storage_ready,
+                "guard_ready": guard_ready,
+                "relay_configured": bool(_config and _config.relay.base_url),
+                # ★ 身份标记：只有知道管理令牌的进程才能算出同一个值
+                "instance": _engine_instance_id(),
+            },
+        )
 
     @app.get("/api/state")
     async def get_state():
@@ -1750,7 +1818,21 @@ def create_app() -> FastAPI:
         # ★ 用专用超时而不是共用的 _http_client：共用客户端的 read 超时是
         #   request_timeout_s（本机为 300s）。测试按钮要让用户等 300 秒
         #   才知道地址是死的，那不是诊断，是惩罚。
-        probe_timeout = httpx.Timeout(connect=6.0, read=12.0, write=12.0, pool=6.0)
+        #
+        # ★★ P1-10（2026-10-28）：这三个数不是随便填的 ——
+        #   它们和桌面端 / 前端的超时构成一条**必须严格递增**的链：
+        #     引擎单轮 18s × 最多 2 轮 = 36s（PROBE_TOTAL_BUDGET_S）
+        #       < 桌面端 REQ_PROBE 45s（lib.rs）
+        #       < 前端 TIMEOUT.PROBE 50s（api.ts，仅浏览器模式用得到）
+        #   任何一层比上一层小，都会出现「客户端已放弃、服务端还在发请求」，
+        #   用户看到的是超时，日志里却有一次正常探测结论 —— 两边对不上。
+        #   tests/test_p1_contracts.py 会读这三处源码锁死这个顺序。
+        probe_timeout = httpx.Timeout(
+            connect=PROBE_CONNECT_TIMEOUT_S,
+            read=PROBE_READ_TIMEOUT_S,
+            write=PROBE_READ_TIMEOUT_S,
+            pool=PROBE_CONNECT_TIMEOUT_S,
+        )
 
         def _snippet(text: Any, limit: int = 300) -> str:
             return " ".join(str(text or "").split())[:limit]
@@ -2744,6 +2826,51 @@ def _split_sse_frames(buf: str) -> Tuple[List[str], str]:
     return frames, buf[start:]
 
 
+_SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
+
+
+def _iter_sse_data(sse_text: str) -> Iterable[str]:
+    """按 SSE 规范产出每个事件的 data 载荷（多条 data 行以换行连接）。
+
+    ★★ P0-9（2026-10-28）：为什么必须按「事件」而不是按「行」
+    ────────────────────────────────────────────────────────────
+    规范要求同一事件内的多条 ``data:`` 行先以 ``\\n`` 拼接，再交给应用。
+    原实现逐行 ``json.loads``，于是中转站只要把一段 JSON 从结构空白处
+    拆成两行（例如在 ``}}`` 与 ``]}`` 之间断开），就会出现：
+      · 客户端按规范拼回 → 看到全文
+      · 检测器两行各自解析失败 → 看到的内容是空
+    检测被静默绕过，而日志里一切正常 —— 正是「看不到的失效」。
+    """
+    if not sse_text:
+        return
+    for block in _SSE_EVENT_SPLIT.split(sse_text):
+        lines: List[str] = []
+        for raw in block.split("\n"):
+            line = raw.rstrip("\r")
+            if not line.startswith("data:"):
+                continue
+            value = line[5:]
+            # 规范：字段名后的第一个空格可省略，有则吃掉一个
+            if value.startswith(" "):
+                value = value[1:]
+            lines.append(value)
+        if lines:
+            yield "\n".join(lines)
+
+
+def _sse_error_frame(error_type: str, message: str) -> bytes:
+    """构造一条 SSE error 事件（★ P0-8 的终止信号载体）。
+
+    ★ 单独抽出来的理由：阻断路径与中断路径各自手写一份 JSON 拼接，
+      文案类型名必然漂移 —— 而漂移的后果是「客户端只认得其中一种」，
+      换一种上游行为就又是一次静默截断。
+    """
+    payload = {"error": {"type": error_type, "message": message}}
+    return (
+        "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+    ).encode("utf-8")
+
+
 def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
     """从 SSE 累积文本中提取内容、tool_calls 与 model。
 
@@ -2781,11 +2908,8 @@ def _extract_sse_frames(sse_text: str) -> Tuple[str, List[Any], str]:
     def _slot(idx: int) -> Dict[str, str]:
         return tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
 
-    for raw_line in sse_text.split("\n"):
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
+    for raw_data in _iter_sse_data(sse_text):
+        data = raw_data.strip()
         if data == "[DONE]":
             break
         try:
@@ -4124,6 +4248,98 @@ def _describe_upstream_status(code: int) -> str:
     return f"中转站返回异常状态（{code}）"
 
 
+_scrub_fallback_sanitizer = None
+
+
+def _scrub_secrets(text: str) -> str:
+    """把文本里的凭证就地替换成掩码（用于**落库**的上游原文）。
+
+    ★★ P0-10（2026-10-28）
+    ────────────────────────────────────────────────────────────
+    上游 401 的典型回显是
+        ``Incorrect API key provided: sk-…``
+    原实现把前 500 字原样写进 SQLite 的 text_preview：
+    可全文搜索、可 CSV 导出 —— 等于把用户刚填错的 Key 又抄了一份进库。
+
+    ★ 刻意**不使用**用户当前配置的脱敏器：那个实例会跟着用户关掉的
+      类别（比如「API 密钥」）一起关闭命中。但落库脱敏与「要不要往
+      中转站发」是两回事 —— 用户关掉某一类，代表他允许这类内容外发，
+      不代表他允许明文存进本地库、还能被搜索和导出。
+      所以这里固定用一份「全类别开启」的实例，规则同源、开关独立。
+
+      · 命中区间用 ``_mask_value`` 压成「前 4 + 长度 + 尾 2」
+      · 脱敏器异常时按最保守策略**直接清空**，宁可少一条线索
+    """
+    global _scrub_fallback_sanitizer
+    if not text:
+        return ""
+    if _scrub_fallback_sanitizer is None:
+        from .sanitizer import RequestSanitizer
+        _scrub_fallback_sanitizer = RequestSanitizer(level="balanced")
+    try:
+        hits = _scrub_fallback_sanitizer.scan(text)
+    except Exception as e:  # noqa: BLE001 — 脱敏失败绝不能放原文过去
+        logger.warning("上游错误体脱敏失败，已丢弃预览: %s", e)
+        return ""
+    if not hits:
+        return text
+    out = text
+    # 倒序替换：从后往前改，前面命中的区间下标才不会被位移带偏
+    for h in sorted(hits, key=lambda x: int(x.get("start", 0)), reverse=True):
+        start = int(h.get("start", 0))
+        end = int(h.get("end", start))
+        masked = str(h.get("masked") or mask_secret(out[start:end]))
+        out = out[:start] + masked + out[end:]
+    return out
+
+
+def _log_body_read_failure(domain: str, model: str, err: Exception) -> None:
+    """记录一次「上游响应体读取失败」（★ P0-4）。
+
+    与 ``_log_upstream_error`` 同口径：只留一条链路级日志，
+    不碰 daily_stats，也不更新中转站信誉 ——
+    连接被中断既不是「检测通过」，也不是「检测到危险内容」。
+    """
+    if _storage is None:
+        return
+    try:
+        _storage.insert_log(LogEntry(
+            log_type=LogType.PROXY_ERROR.value,
+            relay_domain=domain,
+            action=Action.ALERT.value,
+            severity="low",
+            model=model,
+            summary=f"读取上游响应失败：{type(err).__name__}"[:200],
+            text_preview="",
+        ))
+    except Exception as e:  # noqa: BLE001 — 日志失败不该改变返回给上游的结果
+        logger.warning("响应读取失败日志写入失败: %s", e)
+
+
+def _log_stream_interrupted(
+    domain: str, model: str, reason: str, readable: str,
+) -> None:
+    """记录一次「上游流式中断」（★ P0-8）。
+
+    与 ``_log_body_read_failure`` 同口径：链路级失败，不进 KPI 三档，
+    也不扣中转站信誉 —— 连接断了不代表它返回了危险内容。
+    """
+    if _storage is None:
+        return
+    try:
+        _storage.insert_log(LogEntry(
+            log_type=LogType.PROXY_ERROR.value,
+            relay_domain=domain,
+            action=Action.ALERT.value,
+            severity="low",
+            model=model,
+            summary=f"上游流式中断：{reason}"[:200],
+            text_preview=_make_preview(readable),
+        ))
+    except Exception as e:  # noqa: BLE001 — 日志失败不该改变流的行为
+        logger.warning("流式中断日志写入失败: %s", e)
+
+
 def _log_upstream_error(
     domain: str, model: str, status_code: int, body_bytes: bytes,
 ) -> None:
@@ -4154,8 +4370,9 @@ def _log_upstream_error(
             severity="low",
             model=model,
             summary=summary[:200],
+            # ★★ P0-10：上游错误体可能回显用户的 Key，落库前必须先脱敏
             text_preview=_make_preview(
-                body_bytes.decode("utf-8", errors="ignore"), 500
+                _scrub_secrets(body_bytes.decode("utf-8", errors="ignore")), 500
             ),
         ))
     except Exception as e:  # noqa: BLE001 — 日志失败不该改变返回给上游的结果
@@ -4378,7 +4595,9 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
 
     config = PersonalConfig.load()
     config.apply_env_overrides()
-    _inject_build_secrets(config)
+    # ★ 构建期密钥不再在这里注入：PersonalConfig 根本没有相关字段，
+    #   赋值只是挂了个没人读的属性（2026-10-28 取证）。
+    #   真正的注入点在 verifier.py::_try_load_guardrail（构造护栏配置之前）。
 
     parser = argparse.ArgumentParser(
         prog="daoti_xuandun_personal.proxy.app",

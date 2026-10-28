@@ -314,7 +314,13 @@ class RelayReputation:
     self_suspect_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # ★★ P1-12（2026-10-28）：`@property` 不在 asdict 里。
+        #   level 是属性，于是 /api/relays 的每一项都没有 level 字段，
+        #   前端首页「信誉等级」文字永远是空 —— 用户看到一张有分数、
+        #   没有结论的卡片。等级是给人看的，必须在响应里。
+        d["level"] = self.level
+        return d
 
     @property
     def level(self) -> Literal["safe", "normal", "risky", "malicious"]:

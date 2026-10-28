@@ -1,0 +1,24 @@
+# 代码所有者（P1-20）
+#
+# 为什么需要有这个文件：公开仓库里任何人都能开 PR，
+# 而本仓库的几处改动一旦被合入就会**静默削弱防护**——
+# 检测判据、发布流水线、签名与密钥材料。
+# CODEOWNERS 让这些路径必须由维护者本人复核，而不是靠"记得看"。
+
+# 默认：全部路径
+*                                   @zhibaiYingChuan
+
+# 检测判据与引擎：判据改错不会让任何测试变红，只会让拦截变松
+/src/daoti_xuandun_personal/        @zhibaiYingChuan
+/src/daoti_xuandun/                 @zhibaiYingChuan
+
+# 发布链：供应链与签名相关，等价于"谁能发布"
+/.github/workflows/                 @zhibaiYingChuan
+/.github/scripts/                   @zhibaiYingChuan
+SECURITY.md                         @zhibaiYingChuan
+desktop/build_engine.py             @zhibaiYingChuan
+desktop/verify_guardrail_bundle.py  @zhibaiYingChuan
+
+# 授权体系
+/src/daoti_xuandun_personal/license.py         @zhibaiYingChuan
+/src/daoti_xuandun_personal/license_pub.pem    @zhibaiYingChuan

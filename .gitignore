@@ -251,6 +251,20 @@ tests/*
 #      提到「系统提示词」被当中转站篡改）。
 !tests/test_upstream_protocol_and_recovery.py
 !tests/test_false_positive_guards.py
+# ★ 2026-10-28：第二轮全局审查的 P0 回归。
+#   这十条的共同特征是「界面上一切正常、底层已经坏了」
+#   （/health 恒真、截断冒充成功、浏览器通道 401/误删全库、
+#     引擎身份不校验、taskkill 无超时、流式不补终止事件、
+#     多行 data 绕过检测、上游错误体明文入库、锁等待被当成库损坏）。
+#   判据不含任何攻击样本，只锁「失败时的行为」，必须随码走。
+!tests/test_p0_release_blockers.py
+# ★ 2026-10-28：第二轮审查的 P1 跨语言契约回归。
+#   这些缺陷的共性是「单侧永远发现不了」——端口环境变量两侧名字不同、
+#   三套超时无序、错误体只认一种形态、@property 不进 asdict，
+#   以及前端「加载失败与空态同屏」「破坏性按钮没有在飞锁」
+#   「证据包失败被吞」「抽屉依赖内联回调反复请求」。
+#   判据不含攻击样本，只锁契约与失败时的行为，必须随码走。
+!tests/test_p1_contracts.py
 #   test_false_positive_e2e —— 误报率端到端门禁（2026-10-19）
 #     （函数级全绿不等于链路不误拦：真实引擎进程 + 本地假上游，
 #      balanced/strict 两档各跑请求侧与响应侧，
@@ -300,12 +314,31 @@ desktop/src-tauri/examples/
 #   它只做「上报 + 数报毒家数」，不含任何检测判据或攻击样本。
 !.github/scripts/
 !.github/scripts/*.py
+# ★ P1-20：治理文件必须入库，否则公开仓库等于「没有安全策略、
+#   没有代码所有者、没有 PR 模板、没有依赖更新」。
+#   它们本身不含任何检测判据或攻击样本。
+!.github/CODEOWNERS
+!.github/dependabot.yml
+!.github/pull_request_template.md
 # 完整版门禁配置：含门禁名称与判据，仅本地使用
 .ci-local/
 
-# 内部开发文档（不对外发布）
-docs/
+# 内部开发文档（保留在本地）
+# ★ P1-27：架构与开发文档必须随仓库走 —— 否则 clone 之后
+#   既看不懂项目怎么分层，也不知道怎么构建/测试，
+#   而"文档不随码走"必然腐化成过期描述。
+#   只有仍在演进、且含内部判据细节的那两份留在本地。
+docs/*
+!docs/README.md
+!docs/ARCHITECTURE.md
+!docs/DEVELOPMENT.md
+!docs/SECURITY_BOUNDARIES.md
 GUARDRAIL.md
+
+# ★ P1-29：企业版文档不属于个人版仓库。
+#   它被跟踪进公开仓库时，等于把另一个产品的版本号（v1.3.5-beta）
+#   与功能清单混进了这个产品的 Release 说明里。
+企业版文档/
 
 # 签发记录（内部）
 *_LOG.json
