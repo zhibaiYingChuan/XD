@@ -41,6 +41,7 @@ function deriveTrayState(
   s: StateResponse['state'],
   today: StateResponse['today'],
   reachable: boolean,
+  readOnly = false,
 ): { state: TrayState; detail: string } {
   if (!reachable || s === 'paused') {
     return { state: 'paused', detail: s === 'paused' ? '防护已暂停' : '本地代理未运行' };
@@ -59,7 +60,28 @@ function deriveTrayState(
        现在它只作为右侧的计数出现（见下方 status-stat）。 */
     return { state: 'safe', detail: `今日 ${today.suspect_count} 条提示` };
   }
+  // ★★ P1-2：只读态（未激活）下的这些次数全是「未经检测的直通」，
+  //   说成「已检查」就是账本说谎 —— 托盘与状态栏都不能这么写。
+  if (readOnly) {
+    return {
+      state: 'safe',
+      detail: `今日已转发 ${today.total_calls} 次（未经检测）`,
+    };
+  }
   return { state: 'safe', detail: `今日已检查 ${today.total_calls} 次` };
+}
+
+/** 缺失的检测层翻译成人话（后端给的是代码名）。 */
+const MISSING_LAYER_LABELS: Record<string, string> = {
+  system_prompt_inject: '系统提示词篡改检测',
+  sensitive_leak: '敏感信息泄露检测',
+};
+
+function describeMissingLayers(layers?: string[]): string {
+  if (!layers || layers.length === 0) return '检测规则回退到内置最小集';
+  return layers
+    .map((l) => MISSING_LAYER_LABELS[l] ?? l)
+    .join('、') + ' 未启用';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -139,8 +161,9 @@ function StatusBar() {
 
   // 下发托盘持续态（两段式变色的「持续」段）
   // 只在状态实际变化时下发，避免每 2s 一次无意义的 IPC。
+  // ★ read_only 必须进 key：激活前后同一个数字的说法不同（已检查 / 已转发）。
   const trayKey = reachable
-    ? `${state?.state}|${state?.today?.danger_count}|${state?.today?.suspect_count}|${state?.today?.total_calls}`
+    ? `${state?.state}|${state?.today?.danger_count}|${state?.today?.suspect_count}|${state?.today?.total_calls}|${state?.read_only ? 'ro' : 'ok'}`
     : 'unreachable';
   const lastTrayKey = useRef<string>('');
   useEffect(() => {
@@ -150,6 +173,7 @@ function StatusBar() {
       state?.state ?? 'learning',
       state?.today,
       reachable,
+      state?.read_only ?? false,
     );
     setTrayState(ts, detail);
   }, [trayKey, state, reachable]);
@@ -225,6 +249,25 @@ function StatusBar() {
         </span>
       )}
 
+      {/* ★★ P1-3：降级必须可见，而且是**常驻**的（状态栏每页都在）。
+          护栏整包缺失 / 规则回退到内置最小集时，界面原本与「一切正常」
+          完全一样 —— 检测能力缩水是比误报更危险的状态。
+          样式复用上面那条只读提示（同一档：还没开始正确保护，不是故障）。 */}
+      {state?.degraded && (
+        <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
+          降级运行：{describeMissingLayers(state.guardrail_missing_layers)}
+        </span>
+      )}
+
+      {/* ★ P1-3：授权校验本身出问题（公钥缺失 / 验签异常）时也要说清楚 ——
+          这时按「已授权」处理是刻意的（不拿我方故障惩罚用户），
+          但用户有权知道这次其实没验过。 */}
+      {state?.license_check?.reason && !state?.license_check?.read_only && (
+        <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
+          {state.license_check.reason}
+        </span>
+      )}
+
       <span className="status-bar-spacer" />
 
       {today && today.total_calls > 0 && (
@@ -240,7 +283,18 @@ function StatusBar() {
             style={{ textDecoration: 'none', color: 'inherit' }}
             title="查看今天参与统计的记录（不含已标记误报与转发中断）"
           >
-            今日检查 <b className="mono">{today.total_calls}</b> 次
+            {/* ★★ P1-2：只读态下这个数字是「已转发」，不是「已检查」。
+                两句话同时出现在屏幕上（「不做防护」+「已检查 N 次」）
+                等于账本说谎，用户只会得出一个错误结论。 */}
+            {state?.read_only ? (
+              <>
+                今日已转发 <b className="mono">{today.total_calls}</b> 次（未经检测）
+              </>
+            ) : (
+              <>
+                今日检查 <b className="mono">{today.total_calls}</b> 次
+              </>
+            )}
           </Link>
           {today.danger_count > 0 && (
             <Link

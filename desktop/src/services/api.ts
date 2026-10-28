@@ -45,6 +45,26 @@ export interface StateResponse {
    *   否则用户会以为防护在正常工作。
    */
   read_only?: boolean;
+  /**
+   * 今日「已转发但未经检测」的次数（P1-2）。
+   *
+   * ★ today.total_calls 里混着「检测过的」与「直通的」两类记录，
+   *   单看它回答不了「这里面有多少次其实没检测」。
+   *   只读态下两者相等；正常防护时这个数通常是 0。
+   */
+  unchecked_forwarded?: number;
+  /** 降级运行（护栏缺失 / 规则回退到内置最小集）。P1-3 */
+  degraded?: boolean;
+  /** 具体缺了哪几层检测（护栏缺失时非空）。P1-3 */
+  guardrail_missing_layers?: string[];
+  /** 规则来源：file = 规则文件已加载；builtin_fallback = 回退内置最小集 */
+  rules_source?: string;
+  /** 授权校验结论（P1-3）：ok=false 表示只读；reason 说明降级原因 */
+  license_check?: {
+    ok: boolean;
+    read_only: boolean;
+    reason: string;
+  };
 }
 
 export interface DailyStat {
@@ -465,7 +485,8 @@ export function setAdminToken(token: string | null): void {
 export async function initAdminToken(): Promise<void> {
   if (!isTauri()) return;
   try {
-    setAdminToken(await invoke<string>('get_admin_token'));
+    // ★ P1-9：启动路径上的 IPC 更要紧 —— 它卡住就没有任何页面可用
+    setAdminToken(await invokeBounded<string>('get_admin_token', undefined, TIMEOUT.FAST));
   } catch {
     /* 忽略：缺令牌只会影响浏览器回退通道 */
   }
@@ -493,18 +514,52 @@ function unauthorizedMessage(path: string): string {
 
 // 注意：显式标注为 Record 而非 as const 字面量类型，
 // 否则 TS 会把 FAST 收窄成字面量 5000，导致默认值参数类型不兼容。
-const TIMEOUT: Record<'FAST' | 'NORMAL' | 'PROBE', number> = {
+const TIMEOUT: Record<'FAST' | 'NORMAL' | 'PROBE' | 'RESTART', number> = {
   FAST: 5_000,      // 状态查询、配置读写
   NORMAL: 15_000,   // 列表查询、模式切换
   // ★ 真实网络探测：引擎侧最坏情况（/models 失败后再打业务端点）约 36s。
   //   必须比引擎侧宽，否则是前端先超时、用户拿到超时错误而非探测结论。
   PROBE: 50_000,
+  // ★ P1-9：重启引擎要杀进程 + 等新进程起来，比普通 IPC 慢；
+  //   但仍必须有上界 —— 否则「重启中…」可以永久停在按钮上。
+  //   ★ 必须 > Rust 侧 wait_engine_ready 的 60 秒上限：
+  //     比它短的话，前端先报超时、引擎随后才起来，用户会看到
+  //     「重启失败」而实际成功了 —— 谎报失败与谎报成功一样有害。
+  RESTART: 70_000,
 };
 
 class ApiTimeoutError extends Error {
   constructor(public path: string, public timeoutMs: number) {
     super(`${path} 请求超时（${timeoutMs / 1000}s）`);
     this.name = 'ApiTimeoutError';
+  }
+}
+
+/**
+ * 给 Tauri IPC 调用加一个**上界**（P1-9，2026-10-29）。
+ *
+ * ★ 为什么必须有：invoke 走的是本机 IPC，Rust 侧若在某个 await 上
+ *   永久挂住（等锁、等子进程、等一个不会返回的 channel），
+ *   前端拿到的是一个永远 pending 的 Promise —— 界面不会报错，
+ *   按钮也不会复位，用户只能重开页面。
+ *   超时后抛出 ApiTimeoutError，调用方按「失败」处理即可复位各种 busy 态。
+ */
+async function invokeBounded<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+  timeoutMs = TIMEOUT.NORMAL,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new ApiTimeoutError(`ipc:${cmd}`, timeoutMs)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([invoke<T>(cmd, args), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -652,7 +707,12 @@ async function call<T>(
   if (isTauri()) {
     // ★ P0-2/P0-3 修复：Tauri 命令需要顶层参数（如 id），
     //   不能只塞进 payload，否则 Rust 侧反序列化失败
-    return invoke<T>(tauriCmd, { ...(tauriArgs ?? {}), payload: body ?? {} });
+    // ★ P1-9：IPC 同样要有上界，否则卡住的命令会让界面永久停在 busy 态
+    return invokeBounded<T>(
+      tauriCmd,
+      { ...(tauriArgs ?? {}), payload: body ?? {} },
+      timeoutMs,
+    );
   }
   switch (httpMethod) {
     case 'GET':
@@ -714,7 +774,8 @@ export const api = {
    */
   getEngineStatus: async (): Promise<EngineStatus | null> => {
     if (!isTauri()) return null;
-    return invoke<EngineStatus>('get_engine_status');
+    // ★ P1-9：IPC 必须有上界（Rust 侧等锁时这条命令可能永不返回）
+    return invokeBounded<EngineStatus>('get_engine_status', undefined, TIMEOUT.FAST);
   },
   /**
    * 重启引擎（Rust 侧「先停后起」，全程持锁保证原子性）。
@@ -726,7 +787,9 @@ export const api = {
     if (!isTauri()) {
       throw new Error('重启引擎仅在桌面版可用');
     }
-    await invoke<void>('restart_engine');
+    // ★ P1-9：重启比普通命令慢，但仍要有上界 ——
+    //   否则「重启中…」可以永久停在按钮上。
+    await invokeBounded<void>('restart_engine', undefined, TIMEOUT.RESTART);
   },
 
   // ── 日志 ──
@@ -963,8 +1026,10 @@ export const api = {
   getActivePort: async () => {
     if (isTauri()) {
       try {
-        const mod = await import('@tauri-apps/api/core');
-        return (await mod.invoke<number>('get_active_port')) ?? DEFAULT_PROXY_PORT;
+        // ★ P1-9：同样要有上界，否则启动时首帧会一直卡在「正在启动」
+        return (await invokeBounded<number>(
+          'get_active_port', undefined, TIMEOUT.FAST,
+        )) ?? DEFAULT_PROXY_PORT;
       } catch {
         /* 回退用配置端口 */
       }
@@ -996,15 +1061,15 @@ export const api = {
   //   返回一个假的「未激活」—— 假的未激活会让人以为码坏了。
   getLicenseStatus: async (): Promise<LicenseStatus> => {
     requireTauriFor('getLicenseStatus');
-    return invoke<LicenseStatus>('get_license_status');
+    return invokeBounded<LicenseStatus>('get_license_status', undefined, TIMEOUT.FAST);
   },
   activate: async (code: string): Promise<LicenseStatus> => {
     requireTauriFor('activate');
-    return invoke<LicenseStatus>('activate_license', { code });
+    return invokeBounded<LicenseStatus>('activate_license', { code }, TIMEOUT.NORMAL);
   },
   clearLicense: async (): Promise<LicenseStatus> => {
     requireTauriFor('clearLicense');
-    return invoke<LicenseStatus>('clear_license');
+    return invokeBounded<LicenseStatus>('clear_license', undefined, TIMEOUT.NORMAL);
   },
   /**
    * 生成换绑请求串。
@@ -1015,7 +1080,7 @@ export const api = {
    */
   buildRebindRequest: async (code: string): Promise<RebindRequest> => {
     requireTauriFor('buildRebindRequest');
-    return invoke<RebindRequest>('build_rebind_request', { code });
+    return invokeBounded<RebindRequest>('build_rebind_request', { code }, TIMEOUT.NORMAL);
   },
 };
 

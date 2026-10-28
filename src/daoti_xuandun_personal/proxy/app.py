@@ -335,20 +335,6 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json" if _docs_enabled else None,
     )
 
-    # CORS：仅允许本地桌面端（tauri://localhost / http://localhost:1420）
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "http://localhost:1420",
-            "http://127.0.0.1:1420",
-        ],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
-    )
-
     # ★★ 本机管理接口鉴权（2026-10-20）
     # ────────────────────────────────────────────────────────────
     # 引擎监听 127.0.0.1，但「本机」不等于「本应用」：任何本机进程都能
@@ -365,6 +351,17 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _admin_guard(request: Request, call_next):
+        # ★★ P1-4（2026-10-29 第三轮审查）：放行 OPTIONS 预检。
+        #   预检请求不带自定义头（浏览器不允许），必然缺 X-Admin-Token；
+        #   守在这里拦掉它，浏览器连「能不能发这个请求」都问不出来 ——
+        #   前端会把它读成网络故障，而真实原因是 401。
+        #
+        #   ★ 直接回 204 而不是 call_next：带 Origin 但没带
+        #     Access-Control-Request-* 的 OPTIONS 不算预检，会被转到路由上
+        #     拿到 405 —— 浏览器同样问不出结论。OPTIONS 本身没有业务含义，
+        #     统一给一个 2xx，具体允许哪些方法由外层 CORS 的响应头回答。
+        if request.method == "OPTIONS":
+            return Response(status_code=204)
         if _admin_token and request.url.path.startswith("/api/"):
             supplied = request.headers.get("x-admin-token", "")
             if not hmac.compare_digest(supplied, _admin_token):
@@ -375,6 +372,34 @@ def create_app() -> FastAPI:
                     },
                 )
         return await call_next(request)
+
+    # ★★ CORS 必须**最后添加**，才能成为最外层中间件（P1-4，2026-10-29）
+    # ────────────────────────────────────────────────────────────
+    # Starlette 的 add_middleware 是「插入到列表头部」，而中间件栈按
+    # 列表顺序由外向内包裹 —— 后添加的在**外层**。
+    #
+    # 原实现先加 CORS、后用 @app.middleware("http") 加守卫，于是守卫在外层：
+    # 它 401 短路时直接返回，响应不经过 CORS，**401 上没有
+    # access-control-allow-origin**；浏览器于是把 401 读成 CORS 失败
+    # （fetch 先抛 TypeError），`api.ts` 里那两段 401 文案成了死代码，
+    # 用户看到的是「无法连接到玄盾本地服务」——一个不可诊断的故障。
+    #
+    # 现在顺序反过来：CORS 最外层，任何响应（含 401/403/500）都会带上
+    # CORS 头；OPTIONS 预检也由它直接应答，不再走到守卫。
+    #
+    # CORS：仅允许本地桌面端（tauri://localhost / http://localhost:1420）
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+        ],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
+    )
 
     # ══════════════════════════════════════════════════════════
     # 中转站代理端点
@@ -523,6 +548,52 @@ def create_app() -> FastAPI:
             )
             if (_reputation and target_relay) else ""
         )
+
+        # ★★ P1-7（2026-10-29 第三轮审查）：中转站地址还没填时，别假装是
+        #   「上游不可达」。
+        #
+        #   原路径：base_url 为空 → 拼出 "/chat/completions" → httpx 抛
+        #   UnsupportedProtocol → 走 httpx.HTTPError 分支 → 502
+        #   「中转站不可达：Request URL is missing an 'http://' or 'https://'
+        #   protocol.」—— 用户照着这句话去查网络、查中转站，而真正要做的事
+        #   只有一件：去设置页把地址填上。而且这条路径当时**不写日志**，
+        #   日志页里连「请求被拒过」都看不到。
+        #
+        #   现在：400 + 明确类型 + 明确动作，并记一条链路日志（proxy_error
+        #   不计入 KPI 三档，只作为事实留痕）。
+        if not str((target_relay or {}).get("base_url") or "").strip():
+            message = (
+                "还没有配置中转站地址：请打开玄盾「设置」，"
+                "填入中转站地址与 API Key 后再使用"
+            )
+            logger.warning(
+                "会话 %s 请求被拒：尚未配置中转站地址（未发出任何上游请求）",
+                session_id,
+            )
+            # ★ 留痕而不是静默：用户事后在日志页必须能看到「这次请求被拒过」。
+            #   与 _proxy_error 同口径（proxy_error / alert / low）——
+            #   它不计入 KPI 三档，也不是「拦截」。
+            if _storage is not None:
+                try:
+                    _storage.insert_log(LogEntry(
+                        log_type=LogType.PROXY_ERROR.value,
+                        relay_domain="",
+                        action=Action.ALERT.value,
+                        severity="low",
+                        model=model,
+                        summary="尚未配置中转站地址，请求未发出",
+                    ))
+                except Exception as e:  # noqa: BLE001 — 留痕失败不阻断响应
+                    logger.warning("未配置中转站的日志写入失败: %s", e)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "type": "relay_not_configured",
+                        "message": message,
+                    }
+                },
+            )
 
         # 防护已暂停 → 直通
         if time.time() < _paused_until:
@@ -1367,6 +1438,59 @@ def create_app() -> FastAPI:
             },
         )
 
+    def _license_check_state() -> Dict[str, Any]:
+        """授权校验的可读结论（供 /api/state 暴露降级原因）。
+
+        ★★ P1-3（2026-10-29 第三轮审查）：授权校验只有两种结局是「正常」的
+          （已授权 / 明确未激活），其余都是**降级**：验签组件缺失、
+          公钥读不出来、授权文件读坏 —— 那些路径一律按「已授权」处理
+          （不能拿我方故障惩罚用户），但界面必须能看见这件事，
+          否则用户看到的仍是「防护中」，而实际根本没校验过。
+        """
+        enabled = _protection_enabled()
+        if not enabled:
+            return {
+                "ok": False,
+                "read_only": True,
+                "reason": "未激活或已过期，当前为只读模式（只转发、不检测）",
+            }
+        try:
+            from .. import license as lic
+
+            if not lic.load_public_key():
+                return {
+                    "ok": True,
+                    "read_only": False,
+                    "reason": "验签组件不可用（公钥缺失），本次按已授权处理",
+                }
+        except Exception as e:  # noqa: BLE001 — 自检本身不能把接口打崩
+            return {
+                "ok": True,
+                "read_only": False,
+                "reason": (
+                    f"授权校验异常（{type(e).__name__}），本次按已授权处理"
+                ),
+            }
+        return {"ok": True, "read_only": False, "reason": ""}
+
+    def _degrade_fields() -> Dict[str, Any]:
+        """降级状态（护栏缺失 / 规则回退到内置最小集）。
+
+        ★★ P1-3：这些值本来只在 verifier.get_stats() 里，
+          而它没有任何 HTTP 出口 —— 于是「护栏整包缺失、少两层检测」
+          在界面上与「一切正常」完全一样。检测能力缩减必须可见，
+          这是比误报更危险的状态。
+        """
+        stats = _verifier.get_stats() if _verifier is not None else {}
+        return {
+            "degraded": bool(stats.get("degraded", False)),
+            "guardrail_missing_layers": list(
+                stats.get("guardrail_missing_layers") or []
+            ),
+            "rules_source": str(stats.get("rules_source") or ""),
+            "license_check": _license_check_state(),
+        }
+
     @app.get("/api/state")
     async def get_state():
         """当前防护状态（首页状态栏）。"""
@@ -1380,6 +1504,9 @@ def create_app() -> FastAPI:
                 "state": "paused",
                 "message": f"防护已暂停，剩余 {remain // 60} 分 {remain % 60} 秒",
                 "paused_remaining_s": remain,
+                # ★ P1-3：暂停态同样要能看到降级 ——「暂停」与「护栏缺失」
+                #   是两件不同的事，前者是用户选的，后者是他不知道的。
+                **_degrade_fields(),
             }
 
         # 今日统计
@@ -1415,7 +1542,14 @@ def create_app() -> FastAPI:
                 message = "等待第一次请求..."
         else:
             state = "protecting"
-            message = f"今日已检查 {today['total_calls']} 次请求"
+            # ★★ P1-2：只读态（未激活）下的 total 全是「未经检测的直通」，
+            #   把它称作「已检查」就是账本说谎 —— 用户会同时读到
+            #   「未激活，不做防护」和「今日已检查 N 次」两句相反的话。
+            message = (
+                f"今日已检查 {today['total_calls']} 次请求"
+                if _protection_enabled()
+                else f"今日已转发 {today['total_calls']} 次（未经检测）"
+            )
 
         return {
             "state": state,
@@ -1428,6 +1562,15 @@ def create_app() -> FastAPI:
             #   仍会照常显示，用户会以为防护在正常工作 ——
             #   而实际上请求都在直通。这是对用户的谎报。
             "read_only": not _protection_enabled(),
+            # ★★ P1-2：「已转发但未经检测」必须能与「已检查」分开数。
+            #   today.total_calls 里混着两类记录（检测过的 + 直通的），
+            #   单看它无法回答「这里面有多少次其实没有检测」。
+            #   这里给一个只数 relay 日志（未检测直通）的独立口径。
+            "unchecked_forwarded": _storage.count_logs(
+                log_type=LogType.RELAY.value, start_ts=_days_to_start_ts(1)
+            ),
+            # ★ P1-3：降级（护栏缺失 / 规则回退）与授权校验结论。
+            **_degrade_fields(),
         }
 
     @app.get("/api/stats")
@@ -2303,15 +2446,18 @@ def create_app() -> FastAPI:
 
         # ★ 先起监听再落盘：端口起不来时不应留下一条「看起来已配好」的记录。
         #   失败原因逐条回给界面（谁占用了、换哪个），不要只说「失败」。
+        #
+        # ★★ P1-6（2026-10-29 第三轮审查）：只有**本次要用的这个端口**
+        #   绑不上，才算这次新增失败。其它端口的历史失败只记 warning ——
+        #   否则「上次某个端口被别的软件占着」会连带封死「新增一家」，
+        #   而报错说的是一个与他这次操作无关的端口号。
         if port:
             errs = await _sync_relay_ports(
                 set(relay_cfg.assigned_ports()) | {port})
-            if errs:
+            failure = _port_failure_for(errs, port, "新增中转站")
+            if failure:
                 raise HTTPException(
-                    status_code=400,
-                    detail=_errors_detail(
-                        [errs.get(port) or next(iter(errs.values()))]
-                    ),
+                    status_code=400, detail=_errors_detail([failure]),
                 )
 
         relay_cfg.others = list(relay_cfg.others) + [{
@@ -2390,12 +2536,11 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="引擎还没准备好接收新端口，请重启玄盾后再试")
             errs = await _sync_relay_ports(desired)
-            if errs:
+            # ★ P1-6：只对本次要申请的那个端口判失败，历史失败仅告警。
+            failure = _port_failure_for(errs, port, "设置专属端口")
+            if failure:
                 raise HTTPException(
-                    status_code=400,
-                    detail=_errors_detail(
-                        [errs.get(port) or next(iter(errs.values()))]
-                    ),
+                    status_code=400, detail=_errors_detail([failure]),
                 )
         except HTTPException:
             relay_cfg.port, relay_cfg.others = snapshot
@@ -4117,6 +4262,37 @@ async def _sync_relay_ports(desired: Iterable[int]) -> Dict[int, str]:
     if _relay_listeners is None:
         return {}
     return await _relay_listeners.sync(desired)
+
+
+def _port_failure_for(
+    errs: Dict[int, str], port: int, action: str
+) -> Optional[str]:
+    """从「本次同步的端口失败集」里挑出**与本次操作有关**的那一条。
+
+    ★★ P1-6（2026-10-29 第三轮审查）
+    ────────────────────────────────────────────────────────────
+    ``sync(desired)`` 的入参是「配置里声明过的**全部**端口」，
+    它返回的失败集因此混着两类东西：
+      · 本次刚改的那个端口绑不上 —— 这次的保存该失败；
+      · 别的端口在更早的时候就没绑上（被别的软件占着）——
+        与这次操作毫无关系，却原来会让「新增一家 / 改任意端口」全部 400，
+        而报错说的是一个用户没动过的端口号。
+
+    全量校验当作本次操作的准入条件 = 一个域的问题封死另一域的正常路径。
+    所以这里只认 ``port`` 这一条；其余的原样打 warning（界面上
+    仍可通过 GET /api/config 的 port_errors 长期看到）。
+    """
+    if not port:
+        return None
+    if int(port) in errs:
+        return errs[int(port)]
+    others = {p: e for p, e in errs.items() if int(p) != int(port)}
+    if others:
+        logger.warning(
+            "%s：另有专属端口未生效（与本次操作无关，仅告警）: %s",
+            action, others,
+        )
+    return None
 
 
 def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:

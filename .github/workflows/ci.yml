@@ -81,3 +81,67 @@ jobs:
       - name: Run test suite
         run: python -m pytest tests -q --no-header -p no:cacheprovider
         timeout-minutes: 15
+
+  # ══════════════════════════════════════════════════════════
+  # 桌面端：前端构建 + Rust 类型检查
+  # ══════════════════════════════════════════════════════════
+  # ★★ P1-10（2026-10-29 第三轮审查）：这两步此前**完全不在 CI 里**。
+  #   证据是真实的：vite 从 5.4.21 跳到 8.3.5（跨三个主版本）期间
+  #   三个 PR 全绿 —— 因为没有任何 job 执行过 `npm run build`。
+  #   同一个洞让 `cargo check` 级别的错误只在发 tag 之后才暴露。
+  #
+  # ★ 为什么放在 windows-latest 而不是 ubuntu：
+  #   Tauri 的 Linux 构建要 apt 装 libwebkit2gtk 等系统库（需要出网到
+  #   ubuntu 源），而本工作流的出网策略是 block + 允许清单。
+  #   Windows runner 自带 Rust / Node 与 WebView2 开发头，
+  #   整条链只需要 registry.npmjs.org 与 crates.io 两类白名单主机。
+  desktop:
+    name: Desktop (frontend build + rust check)
+    runs-on: windows-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            index.crates.io:443
+            static.crates.io:443
+            crates.io:443
+            static.rust-lang.org:443
+            sh.rustup.rs:443
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+        with:
+          toolchain: stable
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      # 必须用 npm 脚本而不是裸 `vite build`：`npm run build` = tsc + vite build，
+      # 类型错误与技术栈版本不兼容都会在这里暴露。
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+
+      # ★★ 顺序不能反：tauri 的 generate_context! 在**编译期**要求
+      #   frontendDist（../dist）存在，而 dist/ 不入库。
+      #   先构建前端再 cargo check，仓库里不需要提交任何构建产物。
+      - name: Check Rust
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+        timeout-minutes: 20

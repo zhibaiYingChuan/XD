@@ -146,6 +146,8 @@ def kpi_contribution(
         （见 app.py 的 _proxy_error / _log_upstream_error）—— 连 total 也不计。
       · 其余类型（response_verify / request_sanitize / relay）每行计 1 次
         total，并按 action 归入 danger / suspect / safe 之一。
+      · ★ relay（未检测直通，暂停 / 未激活）只计 total，**不计 safe**：
+        它回答的是「转发了几次」，不是「检查过几次且安全」。
       · marked_safe=1：用户已确认是误报，不再计入风险档。
         与 _adjust_daily_stats_for_mark 的历史行为保持一致 ——
         只有 block / alert 被标记时才连 total 一起回退；
@@ -157,6 +159,20 @@ def kpi_contribution(
     suspect = 1 if action == Action.ALERT.value else 0
     safe = 1 if action == Action.PASS.value else 0
     total = 1
+    # ★★ P1-2（2026-10-29 第三轮审查）：relay = **未经检测的直通**
+    #   （防护已暂停 / 未激活只读模式）。它可以算「已转发」，
+    #   但绝不能算「已检查且安全」。
+    #
+    #   原口径把它按 action=pass 记进 safe，于是只读用户的首页
+    #   同时读到两句话：「未激活，不做防护」和「今日已检查 N 次、安全 N」——
+    #   数字本身在说谎，信誉分也被「安全通过」污染。
+    #
+    #   ★ 为什么改在纯函数里而不是只在录入处扣掉：删除日志会触发
+    #     _recompute_daily_stats，它逐行调用本函数。若只在录入侧扣，
+    #     用户删一条日志就会让「安全」凭空涨回来 —— 那正是这个函数
+    #     被抽出来要消灭的那种口径分叉。
+    if log_type == LogType.RELAY.value:
+        safe = 0
     if marked_safe:
         # 与 _adjust_daily_stats_for_mark 同一口径：
         # 只有 block / alert 被标记时才回退（pass 标记无意义，维持原样）。

@@ -17,32 +17,105 @@
 import { isTauri } from './tauriShim';
 
 export type UpdateCheck =
-  | { kind: 'unavailable'; reason: string }
+  | {
+      kind: 'unavailable';
+      reason: string;
+      /**
+       * 手动下载页（P1-9）。
+       *
+       * ★ 国内网络直连 GitHub 常常失败。此时只把 reqwest 的原文
+       *   （`error sending request for url (...)`）抛给用户，
+       *   等于告诉他一件事，却不告诉他能做什么。
+       *   有它就渲染「打开下载页」按钮，让用户一步走下去。
+       */
+      downloadUrl?: string;
+    }
   | { kind: 'latest'; current: string }
   | {
-    kind: 'available';
-    current: string;
-    version: string;
-    notes: string;
-    /** 下载并安装；完成后自动重启应用 */
-    install: (onProgress?: (percent: number) => void) => Promise<void>;
-  };
+      kind: 'available';
+      current: string;
+      version: string;
+      notes: string;
+      /** 下载并安装；完成后自动重启应用 */
+      install: (onProgress?: (percent: number) => void) => Promise<void>;
+    };
 
 /** 下载安装的「无进展」上限：超过这段时间没有任何进度事件就报错退出等待。 */
 const UPDATE_STALL_TIMEOUT_MS = 120_000;
 
+/**
+ * 检查更新的**硬超时**（P1-9）。
+ *
+ * ★ 为什么必须有：`check()` 直连 GitHub 的 latest.json。国内网络下
+ *   常见的是「连上了但永远不回」或 DNS 卡住 —— reqwest 的默认超时
+ *   不是没有就是不覆盖整条链路。结果就是点「检查更新」后按钮一直转，
+ *   用户既不知道要等多久，也不知道能不能重试。
+ *   15 秒足够一次正常往返，超过就当作「连不上」，给可执行的下一步。
+ */
+const UPDATE_CHECK_TIMEOUT_MS = 15_000;
+
+/** 手动下载页：与 README / tauri.conf.json 的更新端点同一仓库。 */
+export const DOWNLOAD_PAGE_URL =
+  'https://github.com/zhibaiYingChuan/XD/releases/latest';
+
+/** 把底层网络错误翻译成「用户能照做」的一句话。 */
+function describeCheckFailure(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  // reqwest / fetch 的网络层失败关键词（不同平台措辞不同，全部收下）
+  const looksNetworky = /timeout|timed out|超时|request|connect|dns|network|sending|resolve|tls|ssl|proxy/i
+    .test(raw);
+  if (looksNetworky) {
+    return (
+      '无法连接 GitHub（常见于国内网络，直连 github.com 会被阻断或超时）。'
+      + `请手动下载：${DOWNLOAD_PAGE_URL}`
+    );
+  }
+  return raw;
+}
+
+/** 给一个 Promise 加硬超时（超时即 reject，不依赖底层是否响应）。 */
+async function withTimeout<T>(
+  work: Promise<T>,
+  ms: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** 检查更新。不会下载任何东西。 */
 export async function checkForUpdate(): Promise<UpdateCheck> {
   if (!isTauri()) {
-    return { kind: 'unavailable', reason: '浏览器预览模式不支持自动更新' };
+    return {
+      kind: 'unavailable',
+      reason: '浏览器预览模式不支持自动更新',
+      downloadUrl: DOWNLOAD_PAGE_URL,
+    };
   }
   try {
     const [{ check }, app] = await Promise.all([
       import('@tauri-apps/plugin-updater'),
       import('@tauri-apps/api/app'),
     ]);
-    const current = await app.getVersion();
-    const update = await check();
+    // ★ P1-9：整条检查（含 import 后的 getVersion 与 check）都在超时之内 ——
+    //   任何一段挂住都算「这次检查失败」，不能让按钮永久转圈。
+    const result = await withTimeout(
+      (async () => {
+        const current = await app.getVersion();
+        const update = await check();
+        return { current, update };
+      })(),
+      UPDATE_CHECK_TIMEOUT_MS,
+      `检查更新超时（${UPDATE_CHECK_TIMEOUT_MS / 1000} 秒无响应）`,
+    );
+    const { current, update } = result;
     if (!update) return { kind: 'latest', current };
 
     return {
@@ -114,9 +187,13 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
       },
     };
   } catch (e) {
+    // ★ P1-9：不把 reqwest / fetch 的原文直接甩给用户 ——
+    //   一句 `error sending request for url (...)` 既不是中文，
+    //   也没有告诉他接下来能做什么。
     return {
       kind: 'unavailable',
-      reason: e instanceof Error ? e.message : String(e),
+      reason: describeCheckFailure(e),
+      downloadUrl: DOWNLOAD_PAGE_URL,
     };
   }
 }

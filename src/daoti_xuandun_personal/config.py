@@ -75,7 +75,18 @@ def normalize_relay_base(base_url: str) -> str:
 
 
 def mask_relay_key(api_key: str) -> str:
-    """掩码显示 API Key。"""
+    """掩码显示 API Key。
+
+    ★★ P1-5（2026-10-29 第三轮审查）：**空 Key 必须返回空串**。
+      原实现对空串也走短 Key 分支返回 ``"***"``，而 ``"***"`` 是真值 ——
+      于是设置页的「当前：…」把它当成已配置的 Key 回显出来，
+      而真正该走的「尚未配置」分支成了永远到不了的死代码。
+      用户看到「当前：***（留空则保持不变）」会以为自己配过 Key，
+      之后每一次请求 401 都不会让他想到 Key 其实一直是空的。
+      空就是空：界面据此显示「尚未配置」，语义与后端一致。
+    """
+    if not api_key:
+        return ""
     if len(api_key) <= 8:
         return "***"
     return f"{api_key[:4]}{_MASK_MARK}{api_key[-4:]}"
@@ -584,6 +595,26 @@ class PersonalConfig:
         except json.JSONDecodeError as e:
             # ★ M2：先备份再降级，避免后续 save() 把这唯一的原始数据覆盖掉
             _backup_corrupt_config(raw_text, e)
+            return PersonalConfig()
+
+        # ★★ P1-1（2026-10-29 第三轮审查）：**JSON 合法但顶层不是对象**。
+        #   `[]` / `null` / `"x"` 都能通过 json.loads，却在下面
+        #   `raw.get("relay", {})` 处抛 AttributeError ——
+        #   它不落进上面的 JSONDecodeError 分支，也不落进下面的
+        #   TypeError 分支（外层没有 except AttributeError），
+        #   于是引擎启动时直接崩掉：界面永远起不来、配置页也打不开，
+        #   而磁盘上的文件其实完全可读。
+        #
+        #   处理方式与「JSON 解析失败」一致：**先备份再降级为默认配置**。
+        #   不能只 `return PersonalConfig()` —— 那会让用户此后任何一次
+        #   保存都把这份还看得懂的原始内容覆盖掉，连人工抢救的机会都没了。
+        if not isinstance(raw, dict):
+            _backup_corrupt_config(
+                raw_text,
+                ValueError(
+                    f"配置文件顶层必须是 JSON 对象，实际是 {type(raw).__name__}"
+                ),
+            )
             return PersonalConfig()
 
         try:

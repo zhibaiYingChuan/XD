@@ -361,3 +361,9 @@ __pycache__/
 !tests/test_activation_webui.py
 # test_redteam_attack.py 依赖这个本地辅助模块；只入库测试、不入库它，CI 会 ImportError
 !tests/redteam_relay_attack.py
+
+# ★ 2026-10-29（第三轮审查 P1 批次）：健壮性 / 可见性 / 契约回归。
+#   覆盖：配置顶层非对象、只读态 KPI 口径、降级可见、CORS 与鉴权顺序、
+#   空 Key 掩码语义、端口失败归属、未配置 relay 的业务端点、更新检查超时、
+#   CI 是否真的构建了前端。这些都是「不报错的静默错误」，必须随码走。
+!tests/test_p1_round3_fixes.py

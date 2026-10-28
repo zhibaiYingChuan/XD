@@ -1793,6 +1793,18 @@ export default function Settings() {
                   : `下载并安装 v${updateCheck.version}`}
             </button>
           )}
+          {/* ★ P1-9：直连 GitHub 失败时（国内网络常见）必须给一条可走的路。
+              只显示一句 reqwest 原文等于把用户留在原地 —— 这里提供
+              「打开下载页」，用系统浏览器打开，不经过 WebView 的网络策略。 */}
+          {updateCheck?.kind === 'unavailable' && updateCheck.downloadUrl && (
+            <button
+              className="btn ghost"
+              onClick={() => void openExternal(updateCheck.downloadUrl as string)}
+            >
+              <ExternalLink size={14} strokeWidth={1.5} />
+              打开下载页
+            </button>
+          )}
         </div>
 
         {updateCheck?.kind === 'latest' && (
