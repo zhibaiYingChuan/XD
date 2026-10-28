@@ -359,3 +359,5 @@ __pycache__/
 !tests/test_pipeline.py
 !tests/test_activation_audit.py
 !tests/test_activation_webui.py
+# test_redteam_attack.py 依赖这个本地辅助模块；只入库测试、不入库它，CI 会 ImportError
+!tests/redteam_relay_attack.py
