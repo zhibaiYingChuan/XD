@@ -543,7 +543,11 @@ function extractErrorMessage(data: unknown, fallback: string): string {
     }
     if (v && typeof v === 'object') {
       const obj = v as Record<string, unknown>;
-      for (const key of ['msg', 'message', 'detail']) {
+      // ★★ 2026-10-29（P0-4）：`errors` 是引擎一批 400 出口的形态
+      //   （`{"detail": {"errors": ["中转站地址不能为空", ...]}}`）。
+      //   原来只认 msg/message/detail，于是这类校验错误一律退化成
+      //   「HTTP 400 Bad Request」，用户不知道该改哪一项。
+      for (const key of ['msg', 'message', 'detail', 'errors']) {
         if (key in obj) {
           const got = pick(obj[key]);
           if (got) return got;

@@ -631,6 +631,27 @@ class TestSavingDoesNotCorruptTheList:
             "api_key 必须取 keyDraft（空串=保持原 Key），否则会提交掩码"
         )
 
+    def test_switching_clears_the_key_draft(self):
+        """★★ 2026-10-29（第三轮审查 P0-6）：切站必须清 Key 草稿。
+
+        `keyDraft` 既用于输入框显示、也用于保存时提交的 api_key ——
+        先给 A 填 Key、再切到 B、然后保存，就会把 A 的 Key 写进 B。
+        此后 B 全部 401，而配置页看不出任何异常。
+        """
+        src = SETTINGS_TSX.read_text(encoding="utf-8")
+        m = re.search(
+            r"const switchTo = useCallback\((.*?)\n  \);", src, re.S
+        )
+        assert m, "未找到 switchTo"
+        body = m.group(1)
+        assert "setKeyDraft('')" in body, (
+            "切换中转站后没有清空 Key 草稿 —— A 家的 Key 会被写进 B 家，"
+            "之后 B 全部 401 且界面无异常"
+        )
+        assert "testSeqRef.current += 1" in body, (
+            "切换后没有作废在飞的连接测试 —— 面板会显示上一家的结论"
+        )
+
     def test_switching_does_not_lose_configuration(self):
         """★★ 切走再切回，那一家的地址与 Key 必须一字不差。
 

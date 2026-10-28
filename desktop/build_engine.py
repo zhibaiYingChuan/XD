@@ -77,6 +77,19 @@ SRC_DIR = os.path.join(PERSONAL_ROOT, "src")
 #   `from daoti_xuandun.xuandun import XuanDun` 必然 ImportError
 #   → _guardrail_available 恒为 False。
 GUARDRAIL_SRC_DIR = SRC_DIR
+
+
+def has_guardrail_source() -> bool:
+    """护栏层源码是否在场（在场才能编进去）。
+
+    ★ 2026-10-29（第三轮审查 P0-2）：把原来的内联判定抽成函数。
+      内联时测试只能「先建个目录、再断言这个目录存在」—— 那是
+      断言自己的夹具，恒真；护栏真丢了也测不出来。
+      抽出来后正反两面都能测：空目录必须 False，真实仓库必须 True。
+    """
+    return os.path.isdir(os.path.join(GUARDRAIL_SRC_DIR, "daoti_xuandun"))
+
+
 RESOURCE_ENGINE_DIR = os.path.join(SCRIPT_DIR, "src-tauri", "resources", "engine")
 
 # 引擎入口：Nuitka 编译的入口脚本。
@@ -196,7 +209,7 @@ def main() -> int:
     #   此处曾按「仓库外企业版路径」判定，本地恰好有那个目录所以
     #   一直带上了，干净 clone 上却静默跳过 —— 已修正为包内路径。
     guardrail_dir = os.path.join(GUARDRAIL_SRC_DIR, "daoti_xuandun")
-    has_guardrail = os.path.isdir(guardrail_dir)
+    has_guardrail = has_guardrail_source()
     if has_guardrail:
         print("护栏层已就位 → 将编入（提示词注入 + 敏感泄露）")
     else:

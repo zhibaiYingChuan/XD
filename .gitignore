@@ -344,3 +344,18 @@ GUARDRAIL.md
 *_LOG.json
 .venv/
 __pycache__/
+
+# ★★ 2026-10-29（第三轮审查 P0-8）：安全关键测试必须随码走。
+#   本轮审查发现：磁盘上 48 个测试文件、入库只有 30 个，
+#   缺的正是「脱敏还原」「误报回归」「变异检测」「护栏一致性」
+#   这几类最该自动化的判据 —— 于是「本机绿」无法被任何人复核，
+#   CI 也从来没跑过它们。
+!tests/conftest.py
+!tests/test_placeholder_roundtrip.py
+!tests/test_false_positive.py
+!tests/test_mutation_guard.py
+!tests/test_guardrail_parity.py
+!tests/test_redteam_attack.py
+!tests/test_pipeline.py
+!tests/test_activation_audit.py
+!tests/test_activation_webui.py

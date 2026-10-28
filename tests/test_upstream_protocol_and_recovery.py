@@ -646,3 +646,157 @@ class TestSaveWithMaskedRelayList:
         assert cfg.relay.others[0]["api_key"] == self.KEY_B, (
             "被拒绝的保存污染了内存 —— 之后转发会用上掩码串"
         )
+
+
+class TestConfigSaveIsScoped:
+    """保存只校验「本次提交的分片」，空 relay 不得封死其它设置。
+
+    ★★ 2026-10-29（第三轮审查 P0-3）：首启向导允许「先跳过」，
+      此时 relay 是空的。而 update_config 原来无条件全量校验，
+      于是用户改安全级别 / 端口 / 日志保留**全部 400**，
+      报的还是与操作无关的「中转站地址不能为空」。
+    """
+
+    def _put(self, cfg, payload):
+        import asyncio
+
+        old = app_mod._config
+        app_mod._config = cfg
+        try:
+            application = app_mod.create_app()
+            endpoint = next(
+                r.endpoint for r in application.routes
+                if getattr(r, "path", "") == "/api/config"
+                and "PUT" in (getattr(r, "methods", None) or set())
+            )
+            return asyncio.new_event_loop().run_until_complete(
+                endpoint(payload=payload)
+            )
+        finally:
+            app_mod._config = old
+
+    def _empty_relay_cfg(self):
+        import importlib
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        cfg = cfg_mod.PersonalConfig()
+        cfg.relay.base_url = ""
+        cfg.relay.api_key = ""
+        cfg.relay.enabled = True          # 出厂默认值
+        return cfg
+
+    def test_guard_save_works_without_relay(self, tmp_path, monkeypatch):
+        import importlib
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        monkeypatch.setattr(
+            cfg_mod, "CONFIG_FILE", tmp_path / "config.json", raising=False
+        )
+        cfg = self._empty_relay_cfg()
+
+        out = self._put(cfg, {"guard": {"security_level": "strict"}})
+
+        assert out["ok"] is True, "跳过首启向导后，改安全级别仍然被空 relay 挡住"
+        assert cfg.guard.security_level == "strict"
+
+    def test_server_and_storage_save_work_without_relay(self, tmp_path, monkeypatch):
+        import importlib
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        monkeypatch.setattr(
+            cfg_mod, "CONFIG_FILE", tmp_path / "config.json", raising=False
+        )
+        cfg = self._empty_relay_cfg()
+
+        self._put(cfg, {"server": {"port": 18766}})
+        self._put(cfg, {"storage": {"log_retention_days": 7}})
+
+        assert cfg.server.port == 18766
+        assert cfg.storage.log_retention_days == 7
+
+    def test_relay_shard_is_still_validated(self, tmp_path, monkeypatch):
+        """反向自证：真的提交了空 relay，必须仍然 400。"""
+        import importlib
+
+        import pytest
+        from fastapi import HTTPException
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        monkeypatch.setattr(
+            cfg_mod, "CONFIG_FILE", tmp_path / "config.json", raising=False
+        )
+        cfg = self._empty_relay_cfg()
+
+        with pytest.raises(HTTPException) as ei:
+            self._put(cfg, {"relay": {"base_url": "", "api_key": "",
+                                      "enabled": True}})
+
+        assert ei.value.status_code == 400
+        assert "中转站地址不能为空" in str(ei.value.detail), (
+            "错误体里没有可展示的文案 —— 用户只会看到 HTTP 400"
+        )
+        assert isinstance(ei.value.detail, str), (
+            "错误体仍是对象形态，前端与 Rust 两条通道都读不出来"
+        )
+
+
+class TestMalformedSaveDoesNotPoisonRuntime:
+    """畸形入参必须 400，且运行态一字不动。
+
+    ★★ 2026-10-29（第三轮审查 P0-5）：实测
+      `{"relay": {"others": ["x"]}}` 会在 `others[].get` 处抛
+      AttributeError；原实现只回滚 HTTPException，于是内存被写坏，
+      `GET /api/config` 之后永久 500，设置页整页失效。
+    """
+
+    def _put(self, cfg, payload):
+        import asyncio
+
+        old = app_mod._config
+        app_mod._config = cfg
+        try:
+            application = app_mod.create_app()
+            endpoint = next(
+                r.endpoint for r in application.routes
+                if getattr(r, "path", "") == "/api/config"
+                and "PUT" in (getattr(r, "methods", None) or set())
+            )
+            return asyncio.new_event_loop().run_until_complete(
+                endpoint(payload=payload)
+            )
+        finally:
+            app_mod._config = old
+
+    def test_malformed_shapes_are_rejected_and_state_survives(
+        self, tmp_path, monkeypatch
+    ):
+        import importlib
+
+        import pytest
+        from fastapi import HTTPException
+
+        cfg_mod = importlib.import_module("daoti_xuandun_personal.config")
+        monkeypatch.setattr(
+            cfg_mod, "CONFIG_FILE", tmp_path / "config.json", raising=False
+        )
+        cfg = cfg_mod.PersonalConfig()
+        cfg.relay.base_url = "https://a.example.com"
+        cfg.relay.api_key = "sk-A-real-key-0001"
+
+        for bad in (
+            {"relay": "abc"},
+            {"relay": {"others": ["x"]}},
+        ):
+            with pytest.raises(HTTPException) as ei:
+                self._put(cfg, bad)
+            assert ei.value.status_code == 400, f"{bad} 没有被拒绝"
+            # ★ 关键：内存必须完好，否则下一次 GET /api/config 会 500
+            assert cfg.relay.base_url == "https://a.example.com"
+            assert cfg.relay.api_key == "sk-A-real-key-0001"
+            assert cfg.relay.others == []
+
+        # `others: null` 的语义是「本次没提交这个字段」→ 按不动处理，不是错误
+        out = self._put(cfg, {"relay": {"others": None}})
+        assert out["ok"] is True
+        assert cfg.relay.api_key == "sk-A-real-key-0001"
+        assert cfg.to_safe_dict()["relay"]["api_key"] != "sk-A-real-key-0001"

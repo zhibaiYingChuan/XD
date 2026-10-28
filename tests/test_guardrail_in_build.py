@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -157,6 +158,54 @@ def test_detection_says_yes_in_isolated_clone(monkeypatch, tmp_path):
 # ══════════════════════════════════════════════════════════════
 
 
+def _run_verifier(root: Path) -> subprocess.CompletedProcess:
+    """跑真实的产物门禁脚本，指向给定目录。"""
+    script = _REPO / "desktop" / "verify_guardrail_bundle.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--root", str(root)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+
+
+def _fake_binary(root: Path, payload: bytes) -> None:
+    """造一个「像引擎可执行文件」的合成产物。"""
+    root.mkdir(parents=True, exist_ok=True)
+    blob = payload + b"\x00" * (2 * 1024 * 1024)   # 骗过 >1MB 的兜底判据
+    (root / "engine_main.exe").write_bytes(blob)
+
+
+def test_bundle_gate_passes_on_real_guardrail_symbols(tmp_path):
+    """正样本：产物里有护栏符号 → 门禁必须通过。"""
+    _fake_binary(
+        tmp_path,
+        b"OutputGuardrail\x00SensitiveLeakDetector\x00PromptLeakChecker",
+    )
+    got = _run_verifier(tmp_path)
+    assert got.returncode == 0, got.stdout + got.stderr
+
+
+def test_bundle_gate_rejects_personal_layer_strings(tmp_path):
+    """★★ 负样本：只有个人版自己的字符串 → 门禁**必须**失败。
+
+    ★ 2026-10-29（第三轮审查 P0-2）：这是本轮最关键的回归判据。
+      旧判据用的正是 `system_prompt_inject` / `sensitive_leak`，
+      而这两个串**由个人版自己在「护栏不可用」分支输出**，
+      于是「护栏整包缺失」的产物照样让门禁通过（一个月、三轮审查全绿）。
+      现在用「只含这两个串」的合成产物做负样本：门禁若仍然通过，
+      说明判据又被写回被测对象自己产出的符号上了。
+    """
+    _fake_binary(
+        tmp_path,
+        b"system_prompt_inject\x00sensitive_leak\x00guardrail_missing_layers",
+    )
+    got = _run_verifier(tmp_path)
+    assert got.returncode == 1, (
+        "只含个人版字符串的产物被判为「护栏在位」—— 门禁恒真，"
+        "会放行一个没有提示词注入与敏感泄露检测的包：\n"
+        + got.stdout + got.stderr
+    )
+
+
 def test_missing_guardrail_aborts_build(monkeypatch, tmp_path):
     """★ 护栏缺失必须让构建**失败**，不能只打印警告。
 
@@ -173,12 +222,17 @@ def test_missing_guardrail_aborts_build(monkeypatch, tmp_path):
     empty.mkdir()
     monkeypatch.setattr(mod, "GUARDRAIL_SRC_DIR", str(empty))
 
-    guardrail_dir = os.path.join(mod.GUARDRAIL_SRC_DIR, "daoti_xuandun")
-    assert not os.path.isdir(guardrail_dir), "测试前提失效：护栏目录竟然存在"
-
-    # 直接验判定逻辑本身：护栏不在 → has_guardrail 必须为 False
-    has_guardrail = os.path.isdir(guardrail_dir)
-    assert has_guardrail is False
+    # ★ 2026-10-29：原来这里是「建个空目录 → 断言目录不存在」，
+    #   等于断言自己的夹具（恒真）。现在调用 build_engine 里
+    #   抽出来的真实判定函数，并做正反自证。
+    assert mod.has_guardrail_source() is False, (
+        "护栏目录为空却判为「有护栏」—— 构建会继续，"
+        "产出一个缺少提示词注入与敏感泄露检测的包"
+    )
+    monkeypatch.setattr(mod, "GUARDRAIL_SRC_DIR", str(_REPO / "src"))
+    assert mod.has_guardrail_source() is True, (
+        "仓库里明明有 src/daoti_xuandun，判定却说没有 —— 构建会被无故中止"
+    )
 
     # 而 build_engine.main() 在护栏缺失时必须 return 6（中止），
     # 而不是继续往下走去编译一个没有护栏的包。

@@ -359,6 +359,16 @@ export default function Settings() {
         // 只刷新列表会让上面的地址输入框还显示旧那家的值。
         await load();
         await loadConfigured();
+        // ★★ 2026-10-29（P0-6）：切站必须清掉「这一家的草稿」。
+        //   keyDraft 既用于输入框显示、也用于保存时提交的 api_key ——
+        //   先给 A 填了 Key、再切到 B、然后点保存，就会把 A 的 Key
+        //   写进 B；此后 B 全部 401，而界面看不出任何异常。
+        //   测试结论同理：它是「上一家」的结论，留在屏幕上是误导。
+        testSeqRef.current += 1;      // 作废在飞的测试
+        if (mountedRef.current) {
+          setKeyDraft('');
+          setRelayTest(null);
+        }
         if (mountedRef.current) toast.success(`已切换到「${name}」`);
       } catch (e) {
         if (mountedRef.current) {
@@ -833,7 +843,12 @@ export default function Settings() {
         toast.error('测试未能完成，请查看下方结论');
       }
     } finally {
-      if (mountedRef.current && seq === testSeqRef.current) setTesting(false);
+      // ★★ 2026-10-29（第三轮审查 04-IR）：这里必须**无条件**复位。
+      //   原来写的是 `seq === testSeqRef.current`，而「保存」与「切换」
+      //   都会递增这个序号 —— 用户在测试中点一次保存，testing 就永远
+      //   停在 true，地址框/Key 框/测试按钮全部永久禁用，只能重开页面。
+      //   陈旧结论由上面的序号判断丢弃（那部分保留），锁的复位不该受它影响。
+      if (mountedRef.current) setTesting(false);
     }
   };
 

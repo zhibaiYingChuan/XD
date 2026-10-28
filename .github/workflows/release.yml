@@ -79,11 +79,16 @@ jobs:
       #   上却静默跳过，产出没有提示词注入与敏感泄露检测的包，
       #   界面还照常显示「防护中」。
       #   这道门禁就是为拦住它存在的，必须在 CI 里跑。
-      - name: Assert guardrail is bundled
+      # ★★ 2026-10-29（第三轮审查 P0-2）：这一步只验**源码在位**，
+      #   不能声称「已编入产物」—— 产物要等 build 之后才存在，
+      #   而原来这句 PASS 文案出现在构建**之前**，给了人错误的安全感。
+      #   产物级的护栏断言在 build job 的
+      #   「Assert guardrail is present in compiled engine」。
+      - name: Assert guardrail source is present
         run: |
           set -euo pipefail
           python -m pytest tests/test_guardrail_in_build.py -q --no-header -p no:cacheprovider
-          echo "PASS：护栏层已确认编入产物"
+          echo "PASS：护栏层源码在位（产物校验在 build 阶段按二进制符号执行）"
 
       # ★★ 误报率必须在**发布前**这一层也验一次。
       #   分支 CI（ci.yml）只挂在 push/PR 上，tag 触发不到它 ——

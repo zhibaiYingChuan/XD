@@ -507,13 +507,37 @@ class PersonalConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
 
-    def validate(self) -> List[str]:
-        """全量校验，返回所有错误。"""
+    def validate(self, only: Optional[List[str]] = None) -> List[str]:
+        """校验配置，返回错误列表（空表示通过）。
+
+        Args:
+            only: 只校验这些分片（``relay`` / ``guard`` / ``server`` /
+                  ``storage``）；``None`` = 全量。
+
+        ★★ 2026-10-29（第三轮审查 P0-3）：加 ``only`` 的直接原因是
+          一次真实的「守卫堵死正常路径」——
+          首启向导允许「先跳过，进主界面看看」（Onboarding.tsx），
+          此时 relay 是空的；而 update_config 无条件做**全量**校验，
+          于是用户改安全级别、改端口、改日志保留天数**全部 400**，
+          报的还是与他操作无关的「中转站地址不能为空」。
+
+          校验的语义应当是「这次要写的东西是否合法」，
+          不是「整份配置是否完美」。其它调用方（启动、加中转站、
+          切换）保持全量，行为不变。
+        """
+        scopes = (
+            {"relay", "guard", "server", "storage"}
+            if only is None
+            else set(only)
+        )
         errors: List[str] = []
-        errors.extend(self.server.validate())
-        errors.extend(self.guard.validate())
-        errors.extend(self.storage.validate())
-        if self.relay.enabled:
+        if "server" in scopes:
+            errors.extend(self.server.validate())
+        if "guard" in scopes:
+            errors.extend(self.guard.validate())
+        if "storage" in scopes:
+            errors.extend(self.storage.validate())
+        if "relay" in scopes and self.relay.enabled:
             errors.extend(self.relay.validate())
             # ★ 专属端口不能与主端口相同：主端口已有唯一语义
             #   （按 Key 识别 / 未识别用当前启用项），

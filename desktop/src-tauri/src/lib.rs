@@ -802,7 +802,11 @@ fn extract_error_message(v: &serde_json::Value) -> Option<String> {
                 }
             }
             serde_json::Value::Object(map) => {
-                for key in ["msg", "message", "detail"] {
+                // ★★ 2026-10-29（P0-4）：`errors` 是引擎一批 400 出口的形态
+                //   （`{"detail": {"errors": ["...", "..."]}}`）。原来只认
+                //   msg/message/detail，这类校验错误在 Tauri 模式下退化成
+                //   「HTTP 400 Bad Request」，用户不知道该改哪一项。
+                for key in ["msg", "message", "detail", "errors"] {
                     if let Some(s) = map.get(key).and_then(pick) {
                         return Some(s);
                     }

@@ -1021,7 +1021,19 @@ def create_app() -> FastAPI:
         collected: List[str] = []
         total_len = 0
         mid_verified = False
-        state = {"blocked": False, "interrupted": ""}
+        # ★★ 2026-10-29（第三轮审查 P0-1）：
+        #   delivered       —— 是否已经有内容帧交给客户端（决定能不能记 block）
+        #   upstream_done   —— 上游自己的 [DONE] 已被吞掉，由我们统一补一次
+        state = {
+            "blocked": False,
+            "interrupted": "",
+            "delivered": False,
+            "upstream_done": False,
+        }
+        # ★ P0-1：工具调用帧先扣住，验证通过后再交付。
+        #   威胁模型里真正会被「执行」的只有 tool_calls —— 正文只是文本。
+        #   扣住它，就能在「中转站指示客户端执行危险操作」时做到真阻断。
+        held_tool_frames: List[str] = []
         last_verified_len = 0
 
         async def _generator() -> AsyncGenerator[bytes, None]:
@@ -1085,7 +1097,21 @@ def create_app() -> FastAPI:
                     pending += text
                     frames, pending = _split_sse_frames(pending)
                     for frame in frames:
+                        # ★★ P0-1（2026-10-29）：结束标记由代理统一补发。
+                        #   原来上游的 [DONE] 被原样透传，阻断时我们又补一个 ——
+                        #   客户端会收到**两个** [DONE]，且严格按协议
+                        #   「读到 [DONE] 就收工」的客户端根本读不到后面的
+                        #   阻断帧。这里吞掉上游的，流尾只发一次。
+                        if _is_done_frame(frame):
+                            state["upstream_done"] = True
+                            continue
+                        # ★ P0-1：工具调用帧扣住 —— 它们是唯一会被客户端
+                        #   真正执行的东西。验证通过后才交付。
+                        if _is_tool_call_frame(frame):
+                            held_tool_frames.append(frame)
+                            continue
                         yield _restore_out(frame).encode("utf-8")
+                        state["delivered"] = True
 
                     # 累计到 8KB 后做一次中期验证
                     if (
@@ -1101,29 +1127,22 @@ def create_app() -> FastAPI:
                         findings.extend(result.findings)
                         if result.action == Action.BLOCK.value and result.severity == "high":
                             state["blocked"] = True
-                            # 发送 SSE error 事件后关闭流
-                            # ★★ 与非流式路径共用 _blocked_advice()：
-                            #   两处各写一份文案必然漂移——
-                            #   而漂移的后果是「流式能给出路、非流式只给结论」，
-                            #   用户换 AI 工具后行为就变了，且没人发现。
-                            error_payload = {
-                                "error": {
-                                    "type": "relay_response_blocked",
-                                    **_blocked_advice(result.findings),
-                                }
-                            }
-                            yield (
-                                "data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n"
-                            ).encode("utf-8")
+                            # ★★ 2026-10-29（P0-1）：这条是**事后**阻断 ——
+                            #   中期验证发生在内容已经开始转发之后，
+                            #   所以文案必须如实说「已中断」，
+                            #   不能说「没有交给 AI 工具」（那是假的）。
+                            yield _sse_error_frame(
+                                "relay_response_blocked",
+                                _late_block_advice(result.findings),
+                            )
                             break
                         mid_verified = True
 
-                # ★ 正常结束：把残留缓冲（末尾没有空行收尾的部分）还原后发出。
-                #   被阻断时 pending 不再发出 —— 阻断后不该再吐内容。
-                if not state["blocked"] and pending:
-                    yield _restore_out(pending).encode("utf-8")
-
                 # ★ 流结束：对全文做最终验证 + 第三层脱敏恢复
+                #
+                # ★★ P0-1：残留缓冲与扣住的工具调用帧都**推迟到验证之后**再发
+                #   （原来残留缓冲先发、再验证，于是「验证发现高危」时
+                #   最后一段内容已经给出去了）。
                 if not state["blocked"]:
                     full = "".join(collected)
                     sse_text, sse_tools, sse_model = _extract_sse_frames(full)
@@ -1177,20 +1196,25 @@ def create_app() -> FastAPI:
                             and result.severity == "high"
                         ):
                             state["blocked"] = True
-                            error_payload = {
-                                "error": {
-                                    "type": "relay_response_blocked",
-                                    "message": result.findings[0].detail
-                                    if result.findings else "响应含高危内容",
-                                }
-                            }
-                            yield (
-                                "data: " + json.dumps(
-                                    error_payload, ensure_ascii=False
-                                ) + "\n\n"
-                            ).encode("utf-8")
+                            yield _sse_error_frame(
+                                "relay_response_blocked",
+                                _late_block_advice(result.findings),
+                            )
                         mid_verified = True
                         last_verified_len = total_len
+
+                    # ★★ P0-1：验证通过后才把扣住的工具调用帧与残留缓冲
+                    #   交出去。这一步必须在最终验证之后 —— 放在之前等于
+                    #   「先交付、后判定」，正是本轮要修的形态。
+                    if not state["blocked"]:
+                        for frame in held_tool_frames:
+                            yield _restore_out(frame).encode("utf-8")
+                            state["delivered"] = True
+                        held_tool_frames.clear()
+                        if pending:
+                            yield _restore_out(pending).encode("utf-8")
+                            pending = ""
+                            state["delivered"] = True
             except httpx.HTTPError as e:
                 # ★★ P0-8（2026-10-28）：上游中途断开不能「只是断流」
                 #
@@ -1232,13 +1256,41 @@ def create_app() -> FastAPI:
                 #   两条口径分叉，用户看到的是分叉的那一半）。
                 readable = _extract_sse_content(joined)
                 severity = _max_severity(findings)
-                # ★ 与非流式路径统一：按合并后的最高严重度决定处置，
-                #   而不是「有 findings 就一律 ALERT」——
-                #   否则流式下 high 级发现永远不会被记为 BLOCK，
-                #   信誉分的 danger_count 也就永远不涨。
-                #   ★ 第二个参数同样传「有没有发现」，与非流式路径同一个口径。
+                # ★★ P0-1（2026-10-29）：**事实层必须与真实行为一致**。
+                #
+                #   流式是边收边发的，中期验证/最终验证发现高危时，
+                #   前面那部分内容早已交给了 AI 工具。原实现在这里
+                #   无条件写 action=BLOCK，界面与 KPI 于是都显示
+                #   「已拦截 / 危险 +1」—— 而用户那边早就拿到内容了。
+                #   这不是漏放，是账本说谎：下一次复盘会得出
+                #   「这条被拦住了」的错误结论，也永远发现不了这类攻击。
+                #
+                #   现在的口径：
+                #     · 已经有内容交付过 → alert，并在 detail 里写明
+                #       「内容已送达 + 工具调用是否扣住」，不计入「已拦截」；
+                #     · 没有任何内容交付（例如只有工具调用帧就被拦下）
+                #       → 仍然是 block，因为这次真的没让任何东西落地。
+                late_block = state["blocked"] and state["delivered"]
+                if late_block:
+                    findings.append(
+                        VerificationFinding(
+                            category="late_delivery",
+                            severity="high",
+                            detail=(
+                                "流式响应在判定为高危前已发出部分内容"
+                                + (
+                                    "（工具调用已扣住、未交付给 AI 工具）"
+                                    if held_tool_frames
+                                    else "（本次没有工具调用）"
+                                )
+                                + "；这是事后告警，不计入「已拦截」"
+                            ),
+                        )
+                    )
                 action = (
-                    Action.BLOCK.value
+                    Action.ALERT.value
+                    if late_block
+                    else Action.BLOCK.value
                     if state["blocked"]
                     else _resolve_action(severity, findings or None)
                 )
@@ -1264,10 +1316,11 @@ def create_app() -> FastAPI:
                     _record_reputation(domain, action, latency_ms, readable,
                                        categories=_finding_categories(findings))
 
-            # ★ P0-8：凡由我们主动提前收尾的流（阻断 / 中断），补上 OpenAI
-            #   协议的结束标记。正常读完的上游自己会带 [DONE]，这里不重复补。
-            if state["blocked"] or state["interrupted"]:
-                yield b"data: [DONE]\n\n"
+            # ★★ P0-1：结束标记由代理**统一补发一次**。
+            #   上游自己的 [DONE] 已在转发循环里被吞掉（见 _is_done_frame），
+            #   所以这里无论正常读完 / 阻断 / 中断，都只发一次 ——
+            #   客户端不会收到两个 [DONE]，阻断帧也一定排在它之前。
+            yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
             _generator(),
@@ -1988,6 +2041,12 @@ def create_app() -> FastAPI:
             copy.deepcopy(_config.storage),
         )
 
+        # ★★ P0-5（2026-10-29）：形状校验必须**最先**做 —— 连掩码守卫
+        #   自己都会在 `relay_payload.get(...)` 上踩到畸形入参
+        #   （`{"relay": "abc"}` → AttributeError），而它不是 HTTPException，
+        #   原来的回滚分支兜不住，运行态就此被写坏。
+        _require_config_shapes(payload)
+
         if "relay" in payload:
             relay_payload = payload["relay"]
 
@@ -2054,7 +2113,8 @@ def create_app() -> FastAPI:
                         ),
                     )
 
-        # ③ 全部校验通过后才写内存；任何失败都回滚到快照
+        # ③ 写入（形状已在最前面校验过）
+        # ④ 全部校验通过后才写内存；任何失败都回滚到快照
         try:
             if "relay" in payload:
                 relay_payload = payload["relay"]
@@ -2077,11 +2137,21 @@ def create_app() -> FastAPI:
                     if hasattr(_config.storage, k) and v is not None:
                         setattr(_config.storage, k, v)
 
-            errors = _config.validate()
+            # ★ P0-3：只校验**本次提交的分片**。
+            #   全量校验会让「还没填的空 relay」封死 guard/server/storage
+            #   的保存 —— 跳过首启向导后改任何设置都 400。
+            errors = _config.validate(
+                only=[k for k in ("relay", "guard", "server", "storage")
+                      if k in payload]
+            )
             if errors:
-                raise HTTPException(status_code=400, detail={"errors": errors})
-        except HTTPException:
-            # 校验失败 ⇒ 运行态必须与写入前完全一致
+                raise HTTPException(
+                    status_code=400, detail=_errors_detail(errors)
+                )
+        except Exception:
+            # ★ P0-5：**任何**异常都要回滚，不能只兜 HTTPException。
+            #   校验失败 / 形状异常 / 类型错误混在一起时，
+            #   只要内存被改了一半，后续每个请求都在用坏配置。
             (_config.relay, _config.guard, _config.server, _config.storage) = snapshot
             raise
 
@@ -2239,9 +2309,9 @@ def create_app() -> FastAPI:
             if errs:
                 raise HTTPException(
                     status_code=400,
-                    detail={"errors": [
-                        errs.get(port) or next(iter(errs.values()))
-                    ]},
+                    detail=_errors_detail(
+                        [errs.get(port) or next(iter(errs.values()))]
+                    ),
                 )
 
         relay_cfg.others = list(relay_cfg.others) + [{
@@ -2311,7 +2381,7 @@ def create_app() -> FastAPI:
                 target["port"] = port
             errors = _config.validate()
             if errors:
-                raise HTTPException(status_code=400, detail={"errors": errors})
+                raise HTTPException(status_code=400, detail=_errors_detail(errors))
 
             desired = set(relay_cfg.assigned_ports())
             if port and _relay_listeners is None:
@@ -2323,7 +2393,9 @@ def create_app() -> FastAPI:
             if errs:
                 raise HTTPException(
                     status_code=400,
-                    detail={"errors": [errs.get(port) or next(iter(errs.values()))]},
+                    detail=_errors_detail(
+                        [errs.get(port) or next(iter(errs.values()))]
+                    ),
                 )
         except HTTPException:
             relay_cfg.port, relay_cfg.others = snapshot
@@ -3443,6 +3515,59 @@ def _block_evidence(
     return out
 
 
+def _is_done_frame(frame: str) -> bool:
+    """这一帧是不是上游的结束标记 `data: [DONE]`。
+
+    ★★ 2026-10-29（P0-1）：结束标记必须由代理统一发一次。
+      原实现把上游的 [DONE] 原样透传，阻断时又补一个 ——
+      客户端收到两个 [DONE]，且严格按协议「读到 [DONE] 就收工」的
+      客户端根本读不到后面的阻断帧，等于被阻断的内容照样"正常结束"。
+    """
+    return frame.strip().endswith("[DONE]")
+
+
+def _is_tool_call_frame(frame: str) -> bool:
+    """这一帧里是否带 tool_calls 增量。
+
+    ★★ 2026-10-29（P0-1）：威胁模型里**真正会被执行**的只有 tool_calls，
+      正文只是文本。所以流式下把工具调用帧扣住、验证通过后再交付，
+      就能在"中转站指示客户端执行危险操作"时做到真阻断；
+      正文仍然实时转发，不牺牲首字延迟。
+    """
+    return '"tool_calls"' in frame or '"function_call"' in frame
+
+
+def _late_block_advice(findings: List[Any]) -> str:
+    """事后阻断（内容已开始转发）时给用户的说明。
+
+    ★ 必须与 `_blocked_advice` 区分开：那条说"没有交给 AI 工具"，
+      而事后阻断时前半段内容**已经**交过去了。照抄那句就是在撒谎，
+      用户会以为没泄露而不去核查。
+    """
+    hit = _pick_explainable_finding(findings)
+    reason = getattr(hit, "detail", "") if hit is not None else ""
+    return (
+        f"玄盾中断了这次响应（{reason or '命中高危判定'}）。"
+        "注意：流式响应在判定完成前已有部分内容发给了 AI 工具，"
+        "因此这次属于**事后告警**，不是拦截成功。"
+        "请勿采信或执行刚才收到的内容；建议把 AI 工具地址改回模型厂商官方地址重试。"
+    )
+
+
+def _pick_explainable_finding(findings: List[Any]):
+    """挑一条"用户看得懂"的发现：优先非统计、非纯观测类。
+
+    ★ 只按"第一条"取会把 `dangerous_content`（文案里自带
+      「仅作记录，不阻断」）当成阻断原因发给用户 —— 于是阻断帧
+      自己宣称"不阻断"。这是 2026-10-29 实测到的原话。
+    """
+    observable = _STATISTICAL_SIGNALS | OBSERVATION_ONLY_SIGNALS
+    for f in findings or []:
+        if getattr(f, "category", "") not in observable:
+            return f
+    return findings[0] if findings else None
+
+
 def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
     """生成阻断时给用户的 error 字段。
 
@@ -3460,12 +3585,7 @@ def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
     「本次长度偏离历史均值 124σ」用户看不懂，说了只会更困惑；
     「中转站调用了你没声明的工具」他能立刻判断对不对。
     """
-    hit = next(
-        (f for f in findings if getattr(f, "category", "") not in _STATISTICAL_SIGNALS),
-        None,
-    )
-    if hit is None:
-        hit = findings[0] if findings else None
+    hit = _pick_explainable_finding(findings)
     reason = getattr(hit, "detail", "") or "响应含高危内容"
 
     # ★ 2026-10-20：不再断言「当前中转站被判定不可信」。
@@ -3724,6 +3844,54 @@ def _record_log(
         )
     except Exception as e:  # noqa: BLE001 — 日志失败不应阻断业务
         logger.warning("日志记录失败: %s", e)
+
+
+def _errors_detail(errors: List[str]) -> str:
+    """把校验错误列表压成一句人能读的话。
+
+    ★★ 2026-10-29（第三轮审查 P0-4）：原来返回 ``{"errors": [...]}``
+      对象，而前端 `api.ts` 与 Rust `lib.rs` 两条错误解析通道都只认
+      ``msg`` / ``message`` / ``detail`` 是**字符串**的情况 ——
+      于是用户最终只看到「保存失败：本地代理返回 HTTP 400 Bad Request」，
+      既不知道哪一项填错，也没有下一步。引擎侧统一成字符串，
+      两端无需改协议即可读懂。
+    """
+    joined = "；".join(str(e) for e in errors if str(e).strip())
+    return joined or "配置校验未通过"
+
+
+def _require_config_shapes(payload: Dict[str, Any]) -> None:
+    """写内存前校验入参形状；畸形体一律 400。
+
+    ★★ 2026-10-29（第三轮审查 P0-5）：实测畸形的
+      ``{"relay": {"others": ["x"]}}`` 会在后续 ``others[].get`` 处抛
+      AttributeError。原实现只捕获 HTTPException 回滚，于是**运行态被写坏**：
+      磁盘毫发无损，但 ``GET /api/config`` 之后永久 500，设置页整页失效，
+      只有重启引擎才恢复。形状校验必须在任何 setattr 之前。
+    """
+    for key in ("relay", "guard", "server", "storage"):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, dict):
+            raise HTTPException(
+                status_code=400, detail=f"配置项 {key} 必须是对象"
+            )
+
+    relay = payload.get("relay")
+    if not isinstance(relay, dict):
+        return
+    others = relay.get("others")
+    if others is None:
+        return
+    if not isinstance(others, list):
+        raise HTTPException(
+            status_code=400, detail="relay.others 必须是列表"
+        )
+    for i, item in enumerate(others):
+        if not isinstance(item, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"relay.others 第 {i + 1} 项必须是对象",
+            )
 
 
 def reconcile_masked_others(

@@ -368,17 +368,57 @@ class TestStreamTermination:
         assert rows and rows[0].action != "pass", "中断的响应被记成了「通过」"
 
     def test_block_ends_with_done_marker(self, tmp_path):
-        """阻断后同样要补终止标记，否则客户端一直等。"""
+        """阻断后只补**一个**结束标记，且阻断帧必须排在它之前。
+
+        ★★ 2026-10-29（第三轮审查 P0-1）：本用例原来只断言
+          「以 [DONE] 结尾」—— 那个断言在「内容先外泄、事后补标记、
+          还发两个 [DONE]」的缺陷形态下**也是绿的**，等于给缺陷发了
+          合格证。现在把三条真实性质都钉住：
+            1. [DONE] 只出现一次（上游的那个已被代理吞掉）；
+            2. 阻断帧在 [DONE] 之前（否则严格客户端读不到）；
+            3. 内容已交付 ⇒ 记账必须是 alert，不能写 block。
+        """
         resp = _StreamResp([
             b'data: {"choices":[{"delta":{"content":"payload"}}]}\n\n',
         ])
-        result, _store = _run(tmp_path, resp, stream=True,
+        result, store = _run(tmp_path, resp, stream=True,
                               verifier=_BlockingVerifier())
         out = result
 
         assert b"relay_response_blocked" in out
-        assert out.rstrip().endswith(b"data: [DONE]"), (
-            "阻断后没有终止标记 —— 客户端无法判断这条流已经结束"
+        assert out.count(b"data: [DONE]") == 1, (
+            "结束标记发了不止一次 —— 客户端会看到两个 [DONE]"
+        )
+        assert out.rfind(b"relay_response_blocked") < out.find(b"data: [DONE]"), (
+            "阻断帧排在结束标记之后 —— 严格按协议读到 [DONE] 就收工的客户端"
+            "根本看不到这条阻断"
+        )
+        rows = store.query_logs(limit=5)
+        assert rows and rows[0].action == "alert", (
+            f"内容已经交给客户端了，却把这次记成 {rows[0].action!r} —— "
+            "账本说谎，下次复盘会得出「拦住了」的错误结论"
+        )
+        assert "已发出部分内容" in (rows[0].detail_json or ""), (
+            "日志没有写明「内容已送达」，用户无法判断这次到底泄露没泄露"
+        )
+
+    def test_tool_call_frames_are_withheld_when_blocked(self, tmp_path):
+        """被阻断时，工具调用帧绝不能交付 —— 那是唯一会被执行的东西。"""
+        resp = _StreamResp([
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"function":{"name":"RunCommand","arguments":"{\\"command\\":\\"rm -rf /\\"}"}}]}}]}\n\n',
+        ])
+        result, store = _run(tmp_path, resp, stream=True,
+                              verifier=_BlockingVerifier())
+        out = result
+
+        assert b"RunCommand" not in out, (
+            "被判定高危的工具调用仍然发给了客户端 —— AI 工具会照着执行"
+        )
+        assert b"relay_response_blocked" in out
+        rows = store.query_logs(limit=5)
+        assert rows and rows[0].action == "block", (
+            "这次确实没让任何东西落地（工具调用已扣住），应当记 block"
         )
 
 
