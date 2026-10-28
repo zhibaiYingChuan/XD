@@ -636,3 +636,74 @@ class TestTaskkillIsBounded:
             assert "run_command_bounded" in body, (
                 f"{fn} 没有走有界执行器 —— 该调用可能永久阻塞 lifecycle 锁"
             )
+
+
+# ══════════════════════════════════════════════════════════════
+# 隐私门禁：放行占位串，但真钥匙必须仍然被拦
+# ══════════════════════════════════════════════════════════════
+
+
+class TestSecretScanDistinguishesPlaceholderFromRealKey:
+    """★ 2026-10-29（第三轮审查）：门禁原来只看 PEM 头。
+
+    后果是「只有头和尾、没有任何密钥体」的测试夹具也被判成泄露私钥，
+    测试为了能入库只能把 PEM 头拆成字符串拼接 —— 反而让真正该被
+    grep 到的形态从代码里消失。现按「头之后是否有 ≥200 个连续 base64
+    字符」区分：占位放行，真钥匙一律拦下。下面两条互为反向自证。
+    """
+
+    @staticmethod
+    def _scan(data: bytes):
+        import importlib.util
+
+        script = ROOT / ".github" / "scripts" / "scan_secrets.py"
+        spec = importlib.util.spec_from_file_location("scan_secrets_probe", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.scan_bytes("probe.txt", data)
+
+    def test_real_key_body_is_still_flagged(self):
+        body = b"MIIEpAIBAAKCAQEA" * 20          # 320 个连续 base64 字符
+        data = (
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            + body
+            + b"\n-----END RSA PRIVATE KEY-----\n"
+        )
+        assert self._scan(data), (
+            "带完整密钥体的 PEM 被放过了 —— 隐私门禁被改坏了"
+        )
+
+    def test_placeholder_header_without_body_is_allowed(self):
+        data = (
+            b"scan-secrets: allow-pem-placeholder\n"
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            b"MIIEpAIBAAKCAQEA\n"
+            b"-----END RSA PRIVATE KEY-----"
+        )
+        assert not self._scan(data), (
+            "显式声明过的测试占位串仍被判成私钥材料 —— "
+            "下一个人只好去拆字符串绕过门禁"
+        )
+
+    def test_placeholder_without_declaration_is_still_flagged(self):
+        """默认仍严格：没声明就按密钥材料处理（不给静默放行的口子）。"""
+        data = (
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            b"AAAA\n"
+        )
+        assert self._scan(data), (
+            "没有任何声明的 PEM 头被静默放行了 —— 门禁出现无条件豁免"
+        )
+
+    def test_declaration_cannot_hide_a_real_key(self):
+        """声明不能当免死金牌：带完整密钥体时，写了声明也照样拦。"""
+        body = b"MIIEpAIBAAKCAQEA" * 20
+        data = (
+            b"scan-secrets: allow-pem-placeholder\n"
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            + body
+            + b"\n-----END RSA PRIVATE KEY-----\n"
+        )
+        assert self._scan(data), (
+            "写了占位声明就能藏真钥匙 —— 这条豁免被滥用"
+        )

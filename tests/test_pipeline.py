@@ -65,6 +65,10 @@ def test_sanitizer_block() -> None:
     check("无效校验位身份证不误拦", r_invalid.action != Action.BLOCK.value, f"实际={r_invalid.action}")
 
     # 私钥 → 阻断
+    # scan-secrets: allow-pem-placeholder
+    # 下面这串只有 PEM 头尾、没有任何密钥体，是「私钥必须被阻断」
+    # 这条判据的测试输入，不是真钥匙（真钥匙体有上千个 base64 字符，
+    # 隐私门禁照样会拦 —— 见 test_p0_release_blockers 的正反自证）。
     r = s.sanitize("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----")
     check("PEM 私钥被阻断", r.action == Action.BLOCK.value, f"实际={r.action}")
 
