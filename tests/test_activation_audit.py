@@ -31,6 +31,14 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 _TOOL = _ROOT / "tools" / "activation" / "gen_activation_keys.py"
 
+# ★★ 2026-10-29：签发工具不在本仓库（P1-27 起独立存放）。
+#   干净 clone 上整个模块跳过，避免把「环境缺件」伪装成「代码坏了」。
+if not _TOOL.exists():
+    pytest.skip(
+        "签发工具不在本仓库（tools/activation/ 独立存放），跳过签发侧用例",
+        allow_module_level=True,
+    )
+
 # ★ issue 的机器码必须是**客户端「激活」页显示的那串**（32 位十六进制哈希），
 #   签发工具会硬校验格式并拒绝其它形态 —— 这是刻意的：宁可明确报错，
 #   也不要静默签出一张永远激活不了的码。

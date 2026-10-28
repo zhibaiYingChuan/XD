@@ -35,6 +35,16 @@ _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "tools" / "activation"))
 sys.path.insert(0, str(_REPO / "src"))
 
+# ★★ 2026-10-29：签发工具**不在本仓库**（P1-27 起独立存放，见 .gitignore）。
+#   本地有 tools/activation/ 时正常跑；干净 clone（CI）没有它，
+#   整个模块跳过 —— 否则测试会在收集期 ImportError，
+#   把一个「环境缺件」伪装成「代码坏了」。
+if not (_REPO / "tools" / "activation" / "gen_activation_keys.py").exists():
+    pytest.skip(
+        "签发工具不在本仓库（tools/activation/ 独立存放），跳过签发侧用例",
+        allow_module_level=True,
+    )
+
 
 @pytest.fixture(scope="module")
 def webui(tmp_path_factory):
