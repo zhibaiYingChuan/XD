@@ -26,7 +26,9 @@ if str(ROOT / "src") not in sys.path:
 
 from daoti_xuandun_personal.proxy import baseline as bl  # noqa: E402
 from daoti_xuandun_personal.proxy import verifier as vf  # noqa: E402
+from daoti_xuandun_personal.proxy.restorer import ContentRestorer  # noqa: E402
 from daoti_xuandun_personal.proxy.sanitizer import RequestSanitizer  # noqa: E402
+from daoti_xuandun_personal.types import RedactionRecord  # noqa: E402
 
 
 def _payload(tool_name: str, arguments: dict) -> dict:
@@ -242,3 +244,163 @@ class TestModelSnapshotSuffix:
         assert not bl._model_compatible(req, resp), (
             "换了模型系列（gpt-4o → gpt-4o-mini）必须仍然判为降级"
         )
+
+
+class TestMorningBlocks20261028:
+    """2026-10-28 早间日志复核：当天 5 条阻断全是误报，逐条固化。
+
+    ★ 每条都对应一个真实日志编号，判据与实现见各断言上的注释。
+      共同口径：个人版只对「中转站篡改 / 真实凭据外泄」负责，
+      模型自己输出什么、AI 怎么跑一次性命令，都不是阻断理由。
+    """
+
+    def _verifier(self) -> "vf.ResponseVerifier":
+        v = vf.ResponseVerifier(level="balanced", enable_pattern_check=False)
+        # 关掉企业版护栏，避免测试依赖外部组件是否安装
+        v._guardrail_available = False
+        return v
+
+    # ── #7336 / #7374：命令生命周期工具名是 Shell 的别名 ──
+    def test_check_command_status_is_alias_of_shell(self):
+        b = bl.RequestBaseline(tool_names=["Shell", "DeferExecuteTool"])
+        findings = bl.diff_against_baseline(
+            b, {"tool_names": ["CheckCommandStatus"]}, ""
+        )
+        sev = [f["severity"] for f in findings if f["category"] == "undeclared_tool"]
+        assert "high" not in sev, (
+            "「查命令状态」被当成中转站凭空造调用 —— 实测打断了两次正常对话"
+        )
+
+    # ── #7496 / #7515：python -c 里用 subprocess 跑 git 是正常开发动作 ──
+    def test_python_inline_subprocess_is_not_blocked(self):
+        cmd = (
+            'python -c "\nimport subprocess\n'
+            "out = subprocess.run(['git','status'], capture_output=True)\n"
+            'print(out)"'
+        )
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" and f.severity == "high"
+            for f in findings
+        ), "一次性的 python -c 检查被当成投递通道并阻断"
+
+    def test_python_inline_network_primitive_still_blocks(self):
+        cmd = 'python -c "import socket; s = socket.socket()"'
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" and f.severity == "high"
+            for f in findings
+        ), "内联代码里的网络原语被放过了 —— 那是把回答变成投递通道的形态"
+
+    # ── #7928 / #7496（第二项）：`.env` 作为过滤关键字出现 ≠ 去读它 ──
+    def test_dotenv_as_keyword_list_is_observation(self):
+        cmd = "python -c \"for k in ('XD_1','企业版','.env','key','pem'): pass\""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(f.category == "tool_call_dangerous" for f in findings), (
+            "仓库体检脚本把 .env 当关键字，被判成读取环境变量文件"
+        )
+        assert any(f.category == "dangerous_content" for f in findings), (
+            "应降级为观测项留痕，而不是彻底静默"
+        )
+
+    def test_dotenv_in_regex_is_observation(self):
+        cmd = (
+            "Get-ChildItem -Recurse | Where-Object "
+            "{ $_.Name -match 'pem|token|secrets|\\.env|\\.db' }"
+        )
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(f.category == "tool_call_dangerous" for f in findings), (
+            "正则交替式里的 .env 被当成文件读取"
+        )
+
+    def test_dotenv_as_path_still_blocks(self):
+        findings = vf._check_tool_calls(
+            _payload("Shell", {"command": "cat .env"}), ""
+        )
+        assert any(f.category == "tool_call_dangerous" for f in findings), (
+            "真的去读 .env 必须仍然阻断 —— 误报修成了漏报"
+        )
+
+    # ── #7501：本会话没做过脱敏时，正文里的占位符只是复述 ──
+    def test_placeholder_without_redaction_is_low(self):
+        r = ContentRestorer()
+        r.begin_session("s-7501")
+        _, anomalies = r.restore("s-7501", "占位符的格式是 ⟦XD_1⟧ 这样")
+        assert anomalies and anomalies[0].severity == "low", (
+            "AI 在回答里讨论占位符格式，被判成中转站伪造占位符并阻断"
+        )
+
+    def test_unknown_placeholder_in_redacted_session_is_high(self):
+        r = ContentRestorer()
+        r.begin_session("s-redacted")
+        r.register(
+            "s-redacted",
+            [RedactionRecord(index=1, category="phone",
+                             original="13800000000", redacted="⟦XD_1⟧")],
+        )
+        _, anomalies = r.restore("s-redacted", "⟦XD_9⟧")
+        assert anomalies and anomalies[0].severity == "high", (
+            "本会话确实脱敏过，却出现未登记编号 —— 这是伪造探测，必须仍然阻断"
+        )
+
+    # ── #8470：复核结论是「判据成立」，但文案要能看懂 ──
+    def test_key_shaped_output_blocks_with_explainable_detail(self):
+        v = self._verifier()
+        v._guardrail_available = True
+        v._output_guardrail = SimpleNamespace(
+            check_output=lambda *a, **k: SimpleNamespace(
+                risk_level="high",
+                reason="输出内容命中高危违规模式，已拦截",
+                action="block",
+            )
+        )
+        # 密钥形态在运行时拼接：避免本仓库的脱敏规则把测试源码本身改写
+        key = "sk" + "-proj-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+        res = v.verify(f"示例密钥：{key}", session_id="s-8470")
+        leak = [f for f in res.findings if f.category == "sensitive_leak"]
+        assert leak, "凭证形态必须留痕"
+        assert leak[0].severity == "high", (
+            "凭证本体出现在回答里是硬证据，不能因为放宽合规判据一起放过"
+        )
+        assert "密钥" in leak[0].detail and "更换" in leak[0].detail, (
+            "文案仍是「输出内容命中高危违规模式」这种黑话，用户看不懂要做什么"
+        )
+
+    # ── #7336 的通用化：未声明工具名只在伴随高危参数时才阻断 ──
+    def test_undeclared_tool_without_danger_is_medium(self):
+        v = self._verifier()
+        b = bl.RequestBaseline(tool_names=["Shell"])
+        payload = _payload("exfiltrate_files", {"path": "/tmp/a.txt"})
+        res = v.verify("", session_id="s-und", payload=payload, baseline=b)
+        und = [f for f in res.findings if f.category == "undeclared_tool"]
+        assert und and all(f.severity == "medium" for f in und), (
+            "客户端不认识的工具名被直接判 high —— 它没有执行面"
+        )
+        assert res.action != "block"
+
+    def test_undeclared_tool_with_danger_stays_high(self):
+        v = self._verifier()
+        b = bl.RequestBaseline(tool_names=["Shell"])
+        payload = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"type": "function",
+                         "function": {"name": "Shell",
+                                      "arguments": '{"command": "rm -rf /"}'}},
+                        {"type": "function",
+                         "function": {"name": "exfiltrate_files",
+                                      "arguments": '{"path": "/tmp/a.txt"}'}},
+                    ],
+                }
+            }]
+        }
+        res = v.verify("", session_id="s-und2", payload=payload, baseline=b)
+        assert any(
+            f.category == "undeclared_tool" and f.severity == "high"
+            for f in res.findings
+        ), "同一轮里既造新工具又给出高危命令，必须仍按高危处理"
+        assert res.action == "block"
+

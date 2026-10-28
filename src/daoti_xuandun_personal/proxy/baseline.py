@@ -649,13 +649,27 @@ def _tool_name_matches_any(
 #:   前者早已归一化，后者只能靠**显式枚举的能力族**来认，不能靠模糊匹配 ——
 #:   否则「gpt 式前缀匹配」的老坑会重演（放过任意新造的名字）。
 #:
-#:   认出来后只降为 low（观测），不阻断；真正没见过的名字仍然是 high。
+#:   认出来后只降为 low（观测），不阻断。
+#:   ★ 2026-10-28 补充：认不出来的名字先在响应侧合并视图里降为 medium
+#:   （见 verifier._demote_undeclared_without_danger）—— 只有同时出现
+#:   高危工具参数时才维持 high，因为「客户端不认识的工具名」没有执行面。
 _TOOL_FAMILIES: tuple = (
-    # 执行命令 / 跑进程
+    # 执行命令 / 跑进程 / 查命令状态
+    #
+    # ★ 2026-10-28 实测（日志 #7374）：声明里只有 `Shell` 与
+    #   `DeferExecuteTool`，响应返回的是 `CheckCommandStatus` ——
+    #   客户端把「跑命令」拆成了「执行 / 查状态 / 取输出 / 等待」四个
+    #   工具名，模型在不同轮次会挑不同的那个返回。
+    #   它们与 Shell 是同一件事的不同阶段，必须归入同一族，
+    #   否则每次查一次命令状态都会被判「中转站凭空造调用」并阻断。
     frozenset({
         "shell", "bash", "sh", "cmd", "powershell", "pwsh", "terminal",
         "console", "runcommand", "executecommand", "executetool",
         "deferexecutetool", "runshell", "exec", "spawn", "command",
+        # 命令生命周期（Trae / toolhost 等客户端的细分工具名）
+        "checkcommandstatus", "getcommandstatus", "commandstatus",
+        "checkcommand", "waitforcommand", "readcommandoutput",
+        "stopcommand", "killcommand",
     }),
     # 读文件
     frozenset({"read", "readfile", "openfile", "cat", "view", "viewfile", "getfile"}),

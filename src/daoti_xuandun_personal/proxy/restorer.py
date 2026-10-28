@@ -142,22 +142,33 @@ class ContentRestorer:
 
         if unknown_ids:
             if not self._vault.has_session(session_id) or self._vault.size(session_id) == 0:
+                # ★★ 2026-10-28（误报修复，日志 #7501）：
+                #   本会话从未脱敏过 → vault 是空的 → `resolve()` 必然返回
+                #   None，任何占位符都换不出原始值。此时正文里的 `⟦XD_n⟧`
+                #   只可能是模型在**复述/举例**（实测是 AI 在回答里讨论
+                #   占位符格式本身，证据还落在 SSE 的 `data:` 行首）。
+                #   按 high 阻断等于把「讨论该格式」判成「伪造探测」，
+                #   而这句话又恰好只会出现在安全话题里。
+                #   因此降为 low（只记录、不阻断、不告警）。
                 anomalies.append(
                     VerificationFinding(
                         category="placeholder_injection",
-                        severity="high",
+                        severity="low",
                         detail=(
-                            "响应中出现未经本代理生成的脱敏占位符，"
-                            "疑似中转站伪造以探测原始值"
+                            "响应里出现了脱敏占位符形态的字样，但本会话从未做过脱敏"
+                            "（没有可被置换的原始值，不构成探测；多为复述或示例，仅作记录）"
                         ),
                         evidence=text[:80],
                     )
                 )
             else:
+                # 本会话确实生成过占位符（说明脱敏链路在跑），却出现了
+                # 未登记的编号 —— 这才是「伪造占位符反查原始值」的形态，
+                # 仍是 high 并阻断。
                 anomalies.append(
                     VerificationFinding(
                         category="placeholder_injection",
-                        severity="medium",
+                        severity="high",
                         detail=(
                             f"响应中出现本会话未登记的占位符编号 {sorted(unknown_ids)}，"
                             "中转站可能试图还原或伪造占位符"

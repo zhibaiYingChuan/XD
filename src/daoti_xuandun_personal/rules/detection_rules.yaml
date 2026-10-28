@@ -64,8 +64,14 @@ dangerous_commands:
     label: 反弹 shell（内建 /dev/tcp 重定向）
   - pattern: '\b(?:ba|z|k|da)?sh\b\s+-i\b[^\n]*&'
     label: 反弹 shell（交互式 shell 重定向）
-  - pattern: '\bpython\s+-c\b[^\n]*(?:socket|subprocess|os\.system)'
-    label: Python 内联执行危险操作
+  # ★★ 2026-10-28（误报修复，日志 #7496 / #7515）：
+  #   旧判据是「python -c + (socket|subprocess|os.system)」即高危。
+  #   但 `python -c "import subprocess; subprocess.run(['git',...])"`
+  #   正是编程助手跑一次性检查的标准写法，实测两次中断正常对话。
+  #   真正危险的是内联代码里出现**网络原语或动态求值**，
+  #   破坏性命令仍由 rm -rf / dd / mkfs 等独立规则命中。
+  - pattern: '\bpython[23]?\s+-c\b[^\n]*(?:socket\.|urlopen|urllib|http\.client|requests\.(?:get|post|put|patch)|httpx\.|exec\s*\(|eval\s*\()'
+    label: Python 内联执行网络/动态代码
   - pattern: '\bbase64\s+-d\b[^\n]*\|\s*(?:ba)?sh\b'
     label: Base64 解码后执行
 
