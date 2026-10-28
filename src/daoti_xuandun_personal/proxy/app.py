@@ -1960,7 +1960,13 @@ def create_app() -> FastAPI:
         """读取配置（API Key 掩码）。"""
         if _config is None:
             raise HTTPException(status_code=503, detail="配置未就绪")
-        return _config.to_safe_dict()
+        data = _config.to_safe_dict()
+        # ★ P1-30b：把「配置里声明了、实际却没在监听」的专属端口一并回给界面。
+        #   多端口设计下最典型的静默失效是：主端口正常、首页数字照常更新，
+        #   而某一家的入口根本没绑上 —— 只在保存那一刻提示不够，
+        #   引擎重启后仍绑不上时，用户打开设置页必须能看到。
+        data["port_errors"] = _live_port_errors()
+        return data
 
     @app.put("/api/config")
     async def update_config(payload: Dict[str, Any] = Body(...)):
@@ -3874,6 +3880,24 @@ def _relay_port_map(relay_cfg) -> Dict[str, int]:
     return {
         str(r.get("id") or ""): int(r.get("port") or 0)
         for r in relay_cfg.all_relays()
+    }
+
+
+def _live_port_errors() -> Dict[str, str]:
+    """配置里声明了、但当前**没有在监听**的专属端口。
+
+    ★ 多端口设计的静默失效窗口：主端口正常、首页数字照常更新，
+      而某一家分配到的入口其实没绑上。保存那一刻的报错只覆盖"刚改完"，
+      引擎重启后仍绑不上（比如端口被别的软件长时间占着）时，
+      界面上必须仍然看得见 —— 所以放进 GET /api/config。
+    """
+    if _relay_listeners is None or _config is None:
+        return {}
+    want = {int(p) for p in _config.relay.assigned_ports() if p}
+    missing = sorted(want - _relay_listeners.ports())
+    return {
+        str(p): "端口没有在监听（可能被其他软件占用，换一个再试）"
+        for p in missing
     }
 
 

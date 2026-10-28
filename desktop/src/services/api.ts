@@ -941,7 +941,9 @@ export const api = {
 
   // ── 配置 ──
   getConfig: async () => {
-    const c = await call<PersonalConfig>('get_config', 'GET', '/api/config', undefined, TIMEOUT.FAST);
+    const c = await call<
+      PersonalConfig & { port_errors?: Record<string, string> }
+    >('get_config', 'GET', '/api/config', undefined, TIMEOUT.FAST);
     // ★ P1-10：拿到配置即同步端口，供后续浏览器模式请求与各页文案使用
     syncProxyPort(c?.server?.port);
     return c;

@@ -186,6 +186,9 @@ export default function Settings() {
   //   此前失败时 engine 恒为 null，界面永远停在「读取中…」——
   //   用户会一直等一个永远不会来的结果，而没有任何重试入口。
   const [engineError, setEngineError] = useState<string | null>(null);
+  // ★ P1-30b：专属端口没起来的原因（{端口: 原因}）。保存成功但某一家没绑定，
+  //   必须留在页面上，否则用户滑走 Toast 就再也看不到线索。
+  const [portErrors, setPortErrors] = useState<Record<string, string> | null>(null);
   const [restarting, setRestarting] = useState(false);
 
   // ★ 软件更新（2026-10-20）：只在用户点击时联网；不做后台轮询。
@@ -222,6 +225,11 @@ export default function Settings() {
       if (mountedRef.current) {
         setConfig(c);
         setLoadError(null);
+        // ★ P1-30b：配置里声明了、实际没在监听的专属端口。
+        //   重启后仍绑不上时，这里必须能看见 —— 否则「某一家连不上」
+        //   在主端口一切正常的情况下完全没有痕迹。
+        const errs = c.port_errors ?? {};
+        setPortErrors(Object.keys(errs).length ? errs : null);
         // ★ P1-10：显示的必须是「实际运行中的端口」而非配置值。
         //   用户改过端口但还没重启时，两者不同 ——
         //   若用配置值引导用户去改 AI 工具，会让他填一个还没生效的地址。
@@ -501,6 +509,21 @@ export default function Settings() {
       try {
         const r = await api.updateConfig(patch);
         if (mountedRef.current) setConfig(r.config);
+        // ★ P1-30b：多端口下「保存成功」不等于「都生效了」。
+        //   各家中转站的专属端口是随配置一起回传的，某一家的端口被占用时
+        //   后端会照常保存，只把失败原因放进 port_errors。
+        //   此前这里直接弹「已保存」，用户按界面上的地址去配 AI 工具，
+        //   连不上且毫无线索 —— 而 README 承诺的是「绑不上必须报错」。
+        const errs = r.port_errors ?? {};
+        const failed = Object.keys(errs);
+        if (mountedRef.current) setPortErrors(failed.length ? errs : null);
+        if (failed.length) {
+          toast.error(
+            `配置已保存，但有 ${failed.length} 个专属端口没有起来：`
+            + failed.map((p) => `${p}（${errs[p]}）`).join('；'),
+          );
+          return true;
+        }
         toast.success(successMsg);
         return true;
       } catch (e) {
@@ -903,6 +926,36 @@ export default function Settings() {
           所有检测都在本机完成；玄盾自身不上传任何数据（对话仍会发给你配置的中转站）
         </p>
       </div>
+
+      {/* ★ P1-30b：专属端口没起来时的常驻提示。
+          多端口设计下最典型的静默失效是：主端口一切正常、首页数字照常更新，
+          只有某一家的入口连不上。Toast 一闪而过看不出是哪个端口，
+          所以必须留在页面上，并指明去哪改。 */}
+      {portErrors && (
+        <div className="alert danger" style={{ marginBottom: 16 }}>
+          <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <b>有专属端口没有起来</b>
+            <div className="mt-8">
+              配置已保存，但下面这些入口现在连不上：
+            </div>
+            <div className="mt-8 mono" style={{ fontSize: 12 }}>
+              {Object.entries(portErrors).map(([port, why]) => (
+                <div key={port}>{port}：{why}</div>
+              ))}
+            </div>
+            <div className="mt-8 faint" style={{ fontSize: 12 }}>
+              到下面「多中转站」给这家换一个端口即可，改完立即生效（不用重启应用）。
+            </div>
+            <button
+              className="btn ghost sm mt-8"
+              onClick={() => setPortErrors(null)}
+            >
+              知道了
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ★ 页内导航（2026-10-20）。
           这一页有 7 个区块、总高约 1500px，而视口只有 720 ——

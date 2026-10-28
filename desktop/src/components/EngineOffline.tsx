@@ -103,17 +103,20 @@ export function EngineOffline({
             <Link to="/settings#sec-engine"> 「设置 → 运行状态」</Link>。
           </li>
           <li>
-            <b>改过端口？需要重启应用</b>：端口在进程启动时确定，
-            改完配置必须右键托盘「退出玄盾」再打开，只点窗口上的 × 不算退出。
+            <b>只有某一家连不上？</b>那是它分配到的<b>专属端口</b>没起来，
+            其它入口其实是正常的：到「设置 → 多中转站」看该端口是否被占用，
+            换一个再试。专属端口改完<b>立即生效，不用重启应用</b>。
           </li>
           <li>
-            <b>端口被别的程序占了？</b>关掉那个程序，
-            或到「设置 → 代理配置」换一个端口（换完同样要重启应用）。
+            <b>改过主端口？需要重启应用</b>：「设置 → 代理配置」里的主端口
+            是引擎启动时绑定的，改完必须右键托盘「退出玄盾」再打开
+            （只点窗口上的 × 不算退出）。
           </li>
         </ol>
 
         <div className="mt-8 faint" style={{ fontSize: 12 }}>
-          当前使用的端口：<span className="mono">127.0.0.1:{currentProxyPort()}</span>
+          主端口：<span className="mono">127.0.0.1:{currentProxyPort()}</span>
+          （各家中转站的专属端口在「设置 → 多中转站」里查看）
         </div>
 
         <div className="btn-row mt-16" style={{ marginBottom: 0 }}>

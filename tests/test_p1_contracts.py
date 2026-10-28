@@ -551,3 +551,46 @@ class TestLocalProxyOfflineIsRecoverable:
         assert "setNeedOnboarding(false)" in body, (
             "引擎没起来时仍会进首次向导 —— 用户填完中转站也保存不了"
         )
+
+
+class TestMultiRelayMultiPortConsistency:
+    """多中转站 + 多端口：主端口正常、某一家入口失效时不能静默。
+
+    玄盾是「一个进程监听多个端口」：主端口 + 每家中转站一个专属端口。
+    这带来两类**只看主端口发现不了**的失效：
+      ① 保存配置时某个专属端口绑不上 —— 后端照旧保存，只在 port_errors 里说明；
+      ② 引擎重启后某个专属端口仍绑不上 —— 界面上完全没痕迹。
+    两处都必须报出来，否则用户按界面上的地址去配 AI 工具，连不上且无线索。
+    """
+
+    def test_config_save_exposes_port_errors_to_ui(self):
+        src = _read(ROOT / "desktop" / "src" / "pages" / "Settings.tsx")
+        start = src.index("const save = useCallback")
+        body = src[start:start + 1600]
+        assert "port_errors" in body, (
+            "保存成功但专属端口没起来时，前端直接弹「已保存」—— 端口失败被丢掉"
+        )
+        assert "setPortErrors(" in body, "端口失败只弹 Toast，滑走就再也看不到"
+
+    def test_config_read_also_reports_live_port_gaps(self):
+        src = _read(ROOT / "src" / "daoti_xuandun_personal" / "proxy" / "app.py")
+        assert "_live_port_errors" in src
+        start = src.index('@app.get("/api/config")')
+        body = src[start:start + 900]
+        assert "port_errors" in body, (
+            "只在保存时报告端口失败 —— 重启后仍绑不上的端口在界面上没有痕迹"
+        )
+
+    def test_live_port_errors_is_safe_without_listener(self):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        # 没有监听器（测试 / 非 run() 启动）时必须返回空，而不是抛错或误报
+        assert app_mod._live_port_errors() == {}
+
+    def test_guide_distinguishes_main_port_from_relay_ports(self):
+        src = _read(ROOT / "desktop" / "src" / "components" / "EngineOffline.tsx")
+        assert "专属端口" in src, "引导没提专属端口，多中转站用户会以为整个引擎坏了"
+        assert "不用重启应用" in src, (
+            "把「改端口必须重启应用」当成普适规则 —— 专属端口其实是立即生效的"
+        )
+        assert "主端口" in src, "没有区分主端口与专属端口"
