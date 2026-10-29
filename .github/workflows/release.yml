@@ -55,6 +55,11 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: block
+          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
+          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
+          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
+          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
+          disable-telemetry: true
           allowed-endpoints: >
             github.com:443
             api.github.com:443
@@ -239,6 +244,11 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: block
+          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
+          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
+          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
+          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
+          disable-telemetry: true
           allowed-endpoints: >
             github.com:443
             api.github.com:443
@@ -893,6 +903,11 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: block
+          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
+          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
+          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
+          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
+          disable-telemetry: true
           allowed-endpoints: >
             github.com:443
             api.github.com:443
@@ -965,6 +980,11 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: block
+          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
+          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
+          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
+          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
+          disable-telemetry: true
           allowed-endpoints: >
             github.com:443
             api.github.com:443
@@ -1103,6 +1123,11 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: block
+          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
+          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
+          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
+          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
+          disable-telemetry: true
           allowed-endpoints: >
             github.com:443
             api.github.com:443
@@ -1350,6 +1375,11 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: block
+          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
+          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
+          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
+          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
+          disable-telemetry: true
           disable-sudo: true
           # ★ P1-26：本 job 的出网面可核准 —— GitHub API、产物下载、
           #   证明写入。不在这里 block，等于整条流水线只有审计没有拦截。
