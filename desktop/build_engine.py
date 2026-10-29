@@ -236,29 +236,40 @@ def main() -> int:
         shutil.rmtree(RESOURCE_ENGINE_DIR)
         print(f"已清空 resources/engine/")
 
-    # ★★ 2026-10-30：ccache 改为「系统里显式装了才用」。
+    # ★★ 2026-10-30：ccache 只在 Linux 且系统里显式装了时才用。
     #
     #   背景：Linux 上 Nuitka 的 C 编译约占整个 job 的 10.6 分钟，
     #   是构建里最长的一段。job 越长，GitHub 免费 runner 中途被回收的
-    #   概率越高 —— Linux AppImage 已连续 4 轮在 10 分钟处被砍，
-    #   与代码正确性完全无关。
+    #   概率越高 —— Linux AppImage 已连续 4 轮被砍，与代码正确性无关。
+    #
+    #   ★★ 为什么不是「加一个 --use-ccache」：Nuitka 没有这个选项。
+    #     实测 4.1.3 直接 `error: no such option: --use-ccache`，
+    #     win-x64 与 linux-appimage 双双在 1 分钟内失败。
+    #     Nuitka 的语义是**默认允许** ccache，只有 `--disable-cache=ccache`
+    #     才关闭 —— 所以「启用」就是**不传这个参数**。
+    #
+    #   ★ 为什么限定 Linux：Windows runner 上 Strawberry Perl 自带一个
+    #     `C:\Strawberry\c\bin\ccache.EXE`，`which` 会命中它；而 Nuitka 在
+    #     Windows 上走 MSVC，ccache 对 MSVC 并无可靠收益，反而多一层不确定。
     #
     #   ★ 安全边界没变：仍然**不允许 Nuitka 自己下载** ccache
     #     （那会让构建期静默抓取第三方可执行文件，见下方 P1-26 注释）。
     #     CI 里由 apt 显式安装、并把 ~/.cache/ccache 缓存起来；
     #     本地没装就退回全量编译，行为与以前完全一致。
-    ccache_bin = shutil.which("ccache")
+    ccache_bin = (
+        shutil.which("ccache") if sys.platform.startswith("linux") else None
+    )
     if ccache_bin:
-        print(f"检测到 ccache，启用编译缓存: {ccache_bin}")
+        print(f"检测到 ccache，交给 Nuitka 默认启用: {ccache_bin}")
     else:
-        print("未检测到 ccache，本次为全量 C 编译")
+        print("未启用 ccache，本次为全量 C 编译")
 
     cmd = [
         sys.executable, "-m", "nuitka",
         "--standalone",
-        # 有 ccache 就用；没有则禁用自动下载（Nuitka 默认会从
-        # nuitka.net 拉一份，网络受限环境会 FATAL 失败）。
-        "--use-ccache" if ccache_bin else "--disable-cache=ccache",
+        # 有 ccache 就不传（Nuitka 默认启用）；否则显式禁用，
+        # 顺带阻止它从 nuitka.net 自行下载 —— 网络受限环境会 FATAL。
+        *([] if ccache_bin else ["--disable-cache=ccache"]),
         "--remove-output",
         # ★ P1-26：不再"自动确认下载"（此前显式传过那个参数）。
         #   它让 Nuitka 在构建期**静默**从第三方拉取工具（ccache /
