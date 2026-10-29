@@ -151,16 +151,23 @@ jobs:
             # ★ 显式带上 app：updater 的 mac 更新包是 .app.tar.gz（不是 dmg）
             bundle: app,dmg
             bundle_glob: '*.dmg'
-          - os: ubuntu-22.04
-            name: Linux x64
-            art: linux-deb
-            target: x86_64-unknown-linux-gnu
-            bundle: deb
-            bundle_glob: '*.deb'
-            # ★ 2026-10-29（P0-9）：Linux runner 偶发被回收（job 在第 N 步被
-            #   cancelled，step 无 error），这是基础设施问题，重试一次即过。
-            #   只给两个 Linux 矩阵项加重试；Windows/macOS 不声明 = 只跑一次。
-            max_attempts: 2
+          # ★★ 2026-10-30：Linux 两个包已从矩阵中移出，改为
+          #   linux-engine → linux-deb / linux-appimage 三个独立 job。
+          #   理由与 AppImage 同源，但更彻底：
+          #
+          #     Nuitka 编译引擎一项就要 10.6~14.3 分钟，而免费的
+          #     ubuntu runner 在这段时间里被回收的概率很高
+          #     （v0.1.28 五轮里 Linux 侧失败 5 次，日志统一是
+          #      `The runner has received a shutdown signal`）。
+          #
+          #     把「编译引擎」单独成一个 job 有两个好处：
+          #       ① 它成功结束 → ccache 与 cargo 缓存才存得下来；
+          #          缓存存不下来，下一轮又是冷启动，永远追不上窗口；
+          #       ② deb / AppImage 各自只做打包（5 / 8 分钟），
+          #          即使其中一个被回收，另一个的产物仍在。
+          #
+          #   代价：Linux 三个 job 串行，最后出包时间比矩阵并行晚；
+          #   但总时长仍由 win-x64 决定，不影响整轮完成时间。
 
           # ★★ 2026-10-30：AppImage 已从矩阵中移出，改为独立的 linux-appimage
           #   job（见 build 之后）。原因是一个被数据反复证实的结构问题：
@@ -337,7 +344,16 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.cache/ccache
+          # ★★ 2026-10-30 实测修正：只缓存 ~/.cache/ccache 是**无效的**。
+          #   上一轮日志里 Nuitka 明确调用了 /usr/bin/ccache
+          #   （写 engine_main.build/ccache-5766.txt），但收尾时
+          #   "Cache saved" 里只有 cargo 与 node，没有 ccache ——
+          #   说明 ~/.cache/ccache 是空目录，Nuitka 把 ccache 的数据
+          #   放到了它自己的缓存根下（~/.cache/Nuitka）。
+          #   两个路径都收：不猜它用哪个，命中哪个算哪个。
+          path: |
+            ~/.cache/ccache
+            ~/.cache/Nuitka
           key: ccache-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ matrix.target }}-
@@ -879,13 +895,92 @@ jobs:
           #   缺失信息已由那一条 warning 承载，不会静默消失。
           if-no-files-found: ${{ matrix.allow_failure && 'warn' || 'error' }}
 
-      # ★★ 2026-10-30：把本次编译好的引擎单独存一份，供 linux-appimage 复用。
-      #
-      #   为什么单独一个 artifact，而不是混进安装包那个：
-      #   安装包 artifact 会被 release job 装配成**发布资产**，而引擎目录里
-      #   有上千个 .so/.bin —— 混进去等于把内部产物当成下载文件暴露出去。
-      - name: Upload prebuilt engine (Linux)
-        if: matrix.art == 'linux-deb'
+  # ══════════════════════════════════════════════════════════
+  # Linux 引擎编译（单独一个 job，只为「让缓存存得下来」）
+  #
+  # ★★ 为什么必须单独拆出来（2026-10-30）：
+  #   `actions/cache` 只在 job **成功结束**时才写缓存。原先引擎编译与
+  #   打包挤在同一个 job 里，总时长 13~16 分钟，被 runner 回收时
+  #   ccache 与 cargo 缓存一起丢掉 —— 下一轮又是冷启动，永远追不上
+  #   那个窗口。这是本轮连续失败真正的死循环。
+  #   现在它只做一件事：把引擎编出来、上传、并让缓存落盘。
+  #   成功一次之后，后面的构建就能命中缓存（Nuitka 3~4 分钟）。
+  # ══════════════════════════════════════════════════════════
+  linux-engine:
+    name: Build engine (linux)
+    needs: preflight
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            archive.ubuntu.com:80
+            archive.ubuntu.com:443
+            security.ubuntu.com:80
+            security.ubuntu.com:443
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            esm.ubuntu.com:80
+            esm.ubuntu.com:443
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      # ccache 只由我们显式安装 —— 绝不允许 Nuitka 自行下载（P1-26）。
+      - name: Install ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+
+      - name: Restore ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          # ★ 实测：Nuitka 把 ccache 数据放在自己的缓存根（~/.cache/Nuitka）
+          #   而不是 ~/.cache/ccache —— 两个都收，命中哪个算哪个。
+          path: |
+            ~/.cache/ccache
+            ~/.cache/Nuitka
+          key: ccache-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          restore-keys: |
+            ccache-x86_64-unknown-linux-gnu-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "nuitka==4.1.3"
+          pip install -e .
+
+      - name: Build Nuitka engine
+        working-directory: desktop
+        run: python build_engine.py
+
+      - name: Assert engine matches this build's commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE=$(find desktop/src-tauri/resources/engine -name 'xuandun-engine-*' -type f -print -quit)
+          test -n "$ENGINE" || { echo "::error::引擎产物不存在"; exit 1; }
+          echo "引擎：$ENGINE"
+
+      - name: Upload prebuilt engine
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: xuandun-engine-linux
@@ -893,7 +988,127 @@ jobs:
           if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════
-  # Linux AppImage（复用 deb job 编好的引擎，不再自己编译）
+  # Linux deb（复用引擎，只打包）
+  # ══════════════════════════════════════════════════════════
+  linux-deb:
+    name: Build (linux-deb)
+    needs: linux-engine
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            index.crates.io:443
+            static.crates.io:443
+            crates.io:443
+            static.rust-lang.org:443
+            sh.rustup.rs:443
+            archive.ubuntu.com:80
+            archive.ubuntu.com:443
+            security.ubuntu.com:80
+            security.ubuntu.com:443
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            esm.ubuntu.com:80
+            esm.ubuntu.com:443
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: cargo-${{ runner.os }}-x86_64-unknown-linux-gnu-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-x86_64-unknown-linux-gnu-
+
+      - name: Install Linux bundling dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Download prebuilt engine
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: xuandun-engine-linux
+          path: desktop/src-tauri/resources/engine
+
+      - name: Restore engine permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR=desktop/src-tauri/resources/engine
+          find "$DIR" -type f \( -name '*.bin' -o -name 'xuandun-engine-*' \) \
+            -exec chmod +x {} \;
+          echo "已恢复可执行位"
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Assert updater signing key matches pubkey
+        shell: bash
+        run: python .github/scripts/check_signing_key.py
+
+      - name: Build Tauri app (deb)
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          attempt=0
+          ok=0
+          while [ "$attempt" -lt 2 ]; do
+            attempt=$((attempt + 1))
+            echo "::group::tauri build 第 $attempt/2 次"
+            if npm run tauri build -- --verbose --bundles deb; then
+              ok=1
+            fi
+            echo "::endgroup::"
+            [ "$ok" = "1" ] && break
+            [ "$attempt" -lt 2 ] && sleep 60
+          done
+          [ "$ok" = "1" ] || exit 1
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: xuandun-personal-linux-deb
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*.deb
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════
+  # Linux AppImage（复用引擎，只做 linuxdeploy 打包）
   #
   # ★★ 为什么单独拆出来（2026-10-30，数据驱动）：
   #   AppImage 原先在 build 矩阵里，要把「Nuitka 编译引擎」整条走一遍，
@@ -907,7 +1122,8 @@ jobs:
   # ══════════════════════════════════════════════════════════
   linux-appimage:
     name: Build (linux-appimage)
-    needs: build
+    # ★ 与 deb 同源：都等 linux-engine 编好引擎，互不重复编译。
+    needs: linux-engine
     # ★ 可选产物：失败不染红整轮。缺件的后果由 release job 的
     #   「Assert every required asset is present」显式判定 ——
     #   那才是唯一有资格说「这次可以缺件」的地方。
@@ -1095,8 +1311,13 @@ jobs:
   # ══════════════════════════════════════════════════════════
   virustotal:
     name: VirusTotal Scan
-    needs: build
-    if: success() && startsWith(github.ref, 'refs/tags/v')
+    # ★★ 2026-10-30：把两个 Linux 包纳入 needs —— 否则扫描会在它们
+    #   还没产出时开始，扫不到 deb/AppImage，报告里少两行而没人发现。
+    #   AppImage 带 continue-on-error（可选产物），所以判据不能再用
+    #   success()：只有 build 与 linux-deb 必须成功，AppImage 缺席
+    #   只意味着少一个待扫文件。
+    needs: [build, linux-deb, linux-appimage]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.linux-deb.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Harden Runner
@@ -1142,7 +1363,9 @@ jobs:
     #   它带 continue-on-error（可选产物），所以结论判断不能再用 success()：
     #   只要 build 与 virustotal 成功就继续，缺件由门禁按
     #   ALLOW_MISSING_APPIMAGE 显式裁决 —— 这与「静默放过」是两回事。
-    needs: [build, virustotal, linux-appimage]
+    # ★★ 2026-10-30：virustotal 现在聚合了 build / linux-deb / linux-appimage
+    #   三个来源，release 只需等它 —— 重复列出会多一层失败传播面。
+    needs: [build, virustotal]
     if: ${{ !cancelled() && needs.build.result == 'success' && needs.virustotal.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-22.04
     # ★ P1-25：发布挂到 environment 上 —— 一旦仓库配置了必需审核人，
