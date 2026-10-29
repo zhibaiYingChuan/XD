@@ -88,15 +88,37 @@ def _get(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _drain_output(proc: subprocess.Popen, tail_lines: int = 40) -> str:
+    """取走子进程输出并返回尾部若干行。
+
+    ★ 必须打印出来的理由（2026-10-30 实测）：第一版把 stdout/stderr
+      收到 PIPE 却不读，于是 CI 上只留下一句
+      「引擎进程启动后立即退出（退出码 1）」—— 缺哪个库、报什么错，
+      全被自己吞掉了。诊断信息比结论更重要。
+    """
+    try:
+        out, _ = proc.communicate(timeout=5)
+    except Exception:
+        return ""
+    text = (out or b"").decode("utf-8", "replace")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines[-tail_lines:])
+
+
 def _wait_ready(port: int, proc: subprocess.Popen, deadline: float) -> dict:
-    """轮询 /health 直到就绪；进程提前退出则立即失败。"""
+    """轮询 /health 直到就绪；进程提前退出则立即失败并打印它的输出。"""
     url = f"http://127.0.0.1:{port}/health"
     last_err = ""
     while time.time() < deadline:
         if proc.poll() is not None:
+            tail = _drain_output(proc)
+            if tail:
+                print("---- 引擎输出（尾部）----")
+                print(tail)
+                print("--------------------------")
             raise SystemExit(
                 f"::error::引擎进程启动后立即退出（退出码 {proc.returncode}）——"
-                "产物缺依赖，或与当前系统不兼容"
+                "产物缺依赖，或与当前系统不兼容（上面是它的原始输出）"
             )
         try:
             data = _get(url)
@@ -105,6 +127,11 @@ def _wait_ready(port: int, proc: subprocess.Popen, deadline: float) -> dict:
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             last_err = str(e)
         time.sleep(0.5)
+    tail = _drain_output(proc) if proc.poll() is not None else ""
+    if tail:
+        print("---- 引擎输出（尾部）----")
+        print(tail)
+        print("--------------------------")
     raise SystemExit(f"::error::引擎在 {BOOT_TIMEOUT_S} 秒内没有就绪（最后一次错误：{last_err}）")
 
 
