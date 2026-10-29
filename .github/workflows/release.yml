@@ -909,6 +909,12 @@ jobs:
   linux-engine:
     name: Build engine (linux)
     needs: preflight
+    # ★★ 不能换到 ubuntu-24.04（曾考虑过，已否决）：
+    #   24.04 的 glibc 是 2.39，22.04 是 2.35。在 24.04 上编出来的
+    #   引擎二进制会要求 glibc ≥ 2.39，而 Ubuntu 22.04 用户
+    #   （以及 deb 的兼容下限）根本跑不起来 —— 包能装、启动即挂。
+    #   Linux 产物必须在**最老的支持版本**上编，这是兼容性底线，
+    #   不能为了「换个池子少被回收」牺牲它。
     runs-on: ubuntu-22.04
     env:
       PYTHONIOENCODING: utf-8
