@@ -278,10 +278,17 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11'
+          # ★ 2026-10-30：pip 此前没有任何缓存，每个 tag 都要重装
+          #   nuitka + fastapi/uvicorn/httpx/pydantic + 本项目。
+          #   构建链每缩短一分钟，runner 被回收的暴露窗口就少一分钟。
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
 
       # ★ 各平台用该平台的 Rust 工具链。macOS runner 是 arm64，
       #   显式指定 aarch64-apple-darwin 而不用默认工具链，
@@ -290,6 +297,27 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      # ★★ 2026-10-30：Rust 依赖缓存（此前完全没有）。
+      #
+      #   win-x64 的 job 总耗时 29.8 分钟，大头是**每次从零编译全部
+      #   crate**（Tauri + 上百个传递依赖）。每个 tag 都在重复同一份
+      #   编译，而 job 越长，中途被免费 runner 回收的概率越高 ——
+      #   Linux AppImage 已连续 4 轮在 10 分钟处被砍。
+      #
+      #   用官方 actions/cache 而不是第三方 rust-cache：少一个第三方
+      #   依赖，缓存内容与命中行为都可审计（构建链路上的第三方越少越好）。
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          # key 只随 Cargo.lock 变化：依赖没变就能复用已编译产物；
+          # 依赖一改 key 就变，避免拿到过期产物。
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ matrix.target }}-
 
       # Linux 打包 AppImage 需要这些系统库。
       # 缺 libwebkit2gtk 会报 "Required library 'webkit2gtk-4.1' not found"。
@@ -311,7 +339,27 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            fuse3
+            fuse3 \
+            ccache
+
+      # ★★ 2026-10-30：Nuitka 的 C 编译缓存。
+      #
+      #   Linux 上 `Build Nuitka engine` 单段约 10.6 分钟，是整个 job
+      #   里最长的一段，也是 AppImage 连续 4 轮被砍的时间窗。
+      #   ccache 由**上一步 apt 显式安装**（build_engine.py 检测到才启用，
+      #   绝不允许 Nuitka 自己从网上拉 —— 见 P1-26 的安全边界）。
+      #
+      #   key 用 run_id + restore-keys 前缀，而不是源码哈希：
+      #   ccache 的价值是复用**没改过的那些 C 文件**的编译结果，
+      #   把源码哈希放进 key 会让每次改动都全量 miss，等于没缓存。
+      - name: Restore ccache (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-
 
       - name: Install Python dependencies
         run: |

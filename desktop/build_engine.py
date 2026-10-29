@@ -236,12 +236,29 @@ def main() -> int:
         shutil.rmtree(RESOURCE_ENGINE_DIR)
         print(f"已清空 resources/engine/")
 
+    # ★★ 2026-10-30：ccache 改为「系统里显式装了才用」。
+    #
+    #   背景：Linux 上 Nuitka 的 C 编译约占整个 job 的 10.6 分钟，
+    #   是构建里最长的一段。job 越长，GitHub 免费 runner 中途被回收的
+    #   概率越高 —— Linux AppImage 已连续 4 轮在 10 分钟处被砍，
+    #   与代码正确性完全无关。
+    #
+    #   ★ 安全边界没变：仍然**不允许 Nuitka 自己下载** ccache
+    #     （那会让构建期静默抓取第三方可执行文件，见下方 P1-26 注释）。
+    #     CI 里由 apt 显式安装、并把 ~/.cache/ccache 缓存起来；
+    #     本地没装就退回全量编译，行为与以前完全一致。
+    ccache_bin = shutil.which("ccache")
+    if ccache_bin:
+        print(f"检测到 ccache，启用编译缓存: {ccache_bin}")
+    else:
+        print("未检测到 ccache，本次为全量 C 编译")
+
     cmd = [
         sys.executable, "-m", "nuitka",
         "--standalone",
-        # 禁用 ccache 自动下载：Nuitka 默认会从 nuitka.net 拉 ccache，
-        # 网络受限环境会 FATAL 失败。ccache 只影响编译速度，不影响产物。
-        "--disable-cache=ccache",
+        # 有 ccache 就用；没有则禁用自动下载（Nuitka 默认会从
+        # nuitka.net 拉一份，网络受限环境会 FATAL 失败）。
+        "--use-ccache" if ccache_bin else "--disable-cache=ccache",
         "--remove-output",
         # ★ P1-26：不再"自动确认下载"（此前显式传过那个参数）。
         #   它让 Nuitka 在构建期**静默**从第三方拉取工具（ccache /
