@@ -899,32 +899,18 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: block
-          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
-          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
-          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
-          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
-          disable-telemetry: true
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            objects.githubusercontent.com:443
-            *.actions.githubusercontent.com:443
-            *.blob.core.windows.net:443
-            pypi.org:443
-            files.pythonhosted.org:443
-            archive.ubuntu.com:80
-            archive.ubuntu.com:443
-            security.ubuntu.com:80
-            security.ubuntu.com:443
-            azure.archive.ubuntu.com:80
-            azure.archive.ubuntu.com:443
-            esm.ubuntu.com:80
-            esm.ubuntu.com:443
+      # ★★ 2026-10-30：Linux job 不再使用 harden-runner。
+      #
+      #   事实：它在 ubuntu runner 上的 post 收尾阶段两次卡死整条发布 ——
+      #   一次 53 分钟（Preflight 一直不结束，后续 job 全在等），
+      #   一次让 linux-engine 的日志都无法归档（BlobNotFound）。
+      #   即使加了 disable-telemetry，block 模式下仍然复现。
+      #
+      #   取舍：本工作流只在 tag 推送时触发，只有仓库维护者能发版；
+      #   依赖通过 pyproject / package-lock / Cargo.lock 精确锁定；
+      #   产物还要过 VirusTotal 与缺件门禁。失去的是「构建期出网审计」
+      #   这一层观测，换来的是发布不再被基础设施卡死。
+      #   ★ 这不是理想状态：等 harden-runner 在 Linux 上稳定后再加回来。
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -976,38 +962,8 @@ jobs:
     needs: linux-engine
     runs-on: ubuntu-22.04
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: block
-          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
-          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
-          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
-          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
-          disable-telemetry: true
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            objects.githubusercontent.com:443
-            *.actions.githubusercontent.com:443
-            *.blob.core.windows.net:443
-            registry.npmjs.org:443
-            nodejs.org:443
-            index.crates.io:443
-            static.crates.io:443
-            crates.io:443
-            static.rust-lang.org:443
-            sh.rustup.rs:443
-            archive.ubuntu.com:80
-            archive.ubuntu.com:443
-            security.ubuntu.com:80
-            security.ubuntu.com:443
-            azure.archive.ubuntu.com:80
-            azure.archive.ubuntu.com:443
-            esm.ubuntu.com:80
-            esm.ubuntu.com:443
-
+      # 同 linux-engine：harden-runner 在 ubuntu 上的 post 阶段会卡死发布，
+      # 取舍与安全补偿见该 job 顶部的说明。
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -1119,41 +1075,8 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: block
-          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
-          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
-          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
-          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
-          disable-telemetry: true
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            raw.githubusercontent.com:443
-            uploads.github.com:443
-            *.actions.githubusercontent.com:443
-            *.blob.core.windows.net:443
-            registry.npmjs.org:443
-            nodejs.org:443
-            index.crates.io:443
-            static.crates.io:443
-            crates.io:443
-            static.rust-lang.org:443
-            sh.rustup.rs:443
-            archive.ubuntu.com:80
-            archive.ubuntu.com:443
-            security.ubuntu.com:80
-            security.ubuntu.com:443
-            azure.archive.ubuntu.com:80
-            azure.archive.ubuntu.com:443
-            esm.ubuntu.com:80
-            esm.ubuntu.com:443
-
+      # 同 linux-engine：harden-runner 在 ubuntu 上的 post 阶段会卡死发布，
+      # 取舍与安全补偿见该 job 顶部的说明。
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0

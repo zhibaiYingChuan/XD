@@ -51,9 +51,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DEFAULT_ENGINE_DIR = ROOT / "src-tauri" / "resources" / "engine"
 
-# 启动到 /health 就绪的上限。CI 的冷启动（首次解包 + 建库）通常 < 15 秒，
-# 60 秒是给慢盘/杀软实时扫描留的余量。
-BOOT_TIMEOUT_S = 60
+# 启动到 /health 就绪的上限。CI 的冷启动（首次解包 + 建库）通常 < 15 秒；
+# Windows runner 上 Defender 首次扫描新 exe 可能吃掉几十秒，给足余量。
+BOOT_TIMEOUT_S = 150
 
 # 单次 HTTP 请求超时
 HTTP_TIMEOUT_S = 5
@@ -88,6 +88,16 @@ def _get(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _tail_file(path: str, tail_lines: int = 60) -> str:
+    """读取文件末尾若干行（文件不存在/读失败时返回空串）。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [ln.rstrip() for ln in fh if ln.strip()]
+        return "\n".join(lines[-tail_lines:])
+    except OSError:
+        return ""
+
+
 def _drain_output(proc: subprocess.Popen, tail_lines: int = 40) -> str:
     """取走子进程输出并返回尾部若干行。
 
@@ -105,17 +115,34 @@ def _drain_output(proc: subprocess.Popen, tail_lines: int = 40) -> str:
     return "\n".join(lines[-tail_lines:])
 
 
-def _wait_ready(port: int, proc: subprocess.Popen, deadline: float) -> dict:
-    """轮询 /health 直到就绪；进程提前退出则立即失败并打印它的输出。"""
+def _report_failure(proc: subprocess.Popen, engine_log: str) -> None:
+    """把能拿到的诊断信息全部打出来：文件日志优先，其次子进程输出。"""
+    tail = _tail_file(engine_log)
+    if tail:
+        print("---- engine.log（尾部）----")
+        print(tail)
+        print("---------------------------")
+    raw = _drain_output(proc)
+    if raw:
+        print("---- 引擎 stdout/stderr（尾部）----")
+        print(raw)
+        print("-----------------------------------")
+    if not tail and not raw:
+        print(
+            "（引擎没有留下任何输出 —— 可能是打包产物缺依赖、"
+            "或该平台的动态库与构建机不匹配）"
+        )
+
+
+def _wait_ready(
+    port: int, proc: subprocess.Popen, deadline: float, engine_log: str
+) -> dict:
+    """轮询 /health 直到就绪；进程提前退出则立即失败并打印诊断。"""
     url = f"http://127.0.0.1:{port}/health"
     last_err = ""
     while time.time() < deadline:
         if proc.poll() is not None:
-            tail = _drain_output(proc)
-            if tail:
-                print("---- 引擎输出（尾部）----")
-                print(tail)
-                print("--------------------------")
+            _report_failure(proc, engine_log)
             raise SystemExit(
                 f"::error::引擎进程启动后立即退出（退出码 {proc.returncode}）——"
                 "产物缺依赖，或与当前系统不兼容（上面是它的原始输出）"
@@ -127,11 +154,15 @@ def _wait_ready(port: int, proc: subprocess.Popen, deadline: float) -> dict:
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             last_err = str(e)
         time.sleep(0.5)
-    tail = _drain_output(proc) if proc.poll() is not None else ""
-    if tail:
-        print("---- 引擎输出（尾部）----")
-        print(tail)
-        print("--------------------------")
+    if proc.poll() is not None:
+        _report_failure(proc, engine_log)
+    else:
+        # 进程活着但没监听：把已有日志打出来，通常能看到它卡在哪一步
+        tail = _tail_file(engine_log)
+        if tail:
+            print("---- engine.log（尾部，进程仍在运行）----")
+            print(tail)
+            print("-----------------------------------------")
     raise SystemExit(f"::error::引擎在 {BOOT_TIMEOUT_S} 秒内没有就绪（最后一次错误：{last_err}）")
 
 
@@ -158,6 +189,11 @@ def main() -> int:
     env = dict(os.environ)
     env["XUANDUN_DATA_DIR"] = data_dir
     env["PYTHONIOENCODING"] = "utf-8"
+    # ★ 关键：Windows 的 --noconsole 产物没有 stdout，启动异常会完全静默。
+    #   引擎入口支持把日志写文件（engine_main.py::_setup_file_logging），
+    #   失败时读这个文件才能看到真实堆栈。
+    engine_log = os.path.join(data_dir, "engine.log")
+    env["XUANDUN_LOG_FILE"] = engine_log
     # 关掉代理：CI 上常有 http_proxy，会让 127.0.0.1 请求被绕出去。
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
               "ALL_PROXY", "all_proxy"):
@@ -182,7 +218,7 @@ def main() -> int:
 
     try:
         deadline = time.time() + BOOT_TIMEOUT_S
-        health = _wait_ready(port, proc, deadline)
+        health = _wait_ready(port, proc, deadline, engine_log)
         print(f"  /health: {health}")
 
         state = _get(f"http://127.0.0.1:{port}/api/state")
