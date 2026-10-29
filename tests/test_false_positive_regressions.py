@@ -245,6 +245,64 @@ class TestModelSnapshotSuffix:
             "换了模型系列（gpt-4o → gpt-4o-mini）必须仍然判为降级"
         )
 
+    def test_build_tag_suffix_is_same_model(self):
+        """构建号 + 渠道标记（-1017-cm）同样是同一模型。
+
+        ★ 2026-10-30 实测：十分钟内刷出十几条「高危 / 已拦截」，全部是
+              请求 deepseek/deepseek-v4.1-flash
+              返回 deepseek/deepseek-v4.1-flash-1017-cm
+          旧规则只认「以 -MMDD 结尾」，服务商再追加 `-cm` 就立刻失配。
+          这不是篡改，是同一模型的具体构建批次。
+        """
+        req = bl._normalize_model("deepseek/deepseek-v4.1-flash")
+        resp = bl._normalize_model("deepseek/deepseek-v4.1-flash-1017-cm")
+        assert bl._model_compatible(req, resp), (
+            "构建批次后缀被判成模型降级 —— 又是一轮刷屏误报"
+        )
+
+    def test_tag_before_date_is_same_model(self):
+        """渠道标记排在日期前面（-cm-1017）同样放行。"""
+        req = bl._normalize_model("deepseek-v4.1-flash")
+        resp = bl._normalize_model("deepseek-v4.1-flash-cm-1017")
+        assert bl._model_compatible(req, resp)
+
+    def test_capability_suffix_is_not_excused(self):
+        """豁免不能变成后门：带强弱/能力词的后缀仍然算换模型。
+
+        ★ 这条是给上一条「放宽」配的刹车。放宽判据最容易出的事，
+          就是把「真降级」一起放过 —— 那等于 model_downgrade 判据作废。
+        """
+        cases = [
+            ("gpt-4o", "gpt-4o-mini"),
+            ("gemini-1.5-pro", "gemini-1.5-pro-flash"),
+            ("gpt-4o", "gpt-4o-realtime-preview"),
+            ("deepseek-chat", "deepseek-chat-lite"),
+        ]
+        for req_raw, resp_raw in cases:
+            req = bl._normalize_model(req_raw)
+            resp = bl._normalize_model(resp_raw)
+            assert not bl._model_compatible(req, resp), (
+                f"{req_raw} → {resp_raw} 被错误豁免，等于放过真降级"
+            )
+
+    def test_suffix_without_a_date_is_not_excused(self):
+        """没有日期段的后缀不享受豁免（否则就是「任意后缀都放行」）。
+
+        ★ 首版放宽时正是这么写的，结果 `claude-3-5-sonnet-2`
+          与 `model-a-9999` 被一起放过 —— 前者是版本号冒充，
+          后者是既有测试专门盯住的逃逸通道。
+        """
+        for req_raw, resp_raw in [
+            ("claude-3-5-sonnet", "claude-3-5-sonnet-2"),
+            ("model-a", "model-a-9999"),
+            ("gpt-4-turbo", "gpt-4-turbo-build7"),
+        ]:
+            req = bl._normalize_model(req_raw)
+            resp = bl._normalize_model(resp_raw)
+            assert not bl._model_compatible(req, resp), (
+                f"{req_raw} → {resp_raw} 没有日期段却被豁免"
+            )
+
 
 class TestMorningBlocks20261028:
     """2026-10-28 早间日志复核：当天 5 条阻断全是误报，逐条固化。

@@ -450,6 +450,84 @@ def _strip_date_suffix(name: str) -> str:
     return _MODEL_MMDD_SUFFIX_RE.sub("", name)
 
 
+# ── 强弱 / 能力标签：出现在后缀里就说明「不是同一个模型」──
+#
+# ★ 这张表是 build-tag 豁免的**唯一刹车**：
+#   只要多出来的部分含其中任何一个词，就仍然按「换模型」处理。
+#   收录的是「换一个词就代表另一个产品」的那些：
+#     mini / lite / flash / air / nano  —— 更弱的型号（降级牟利的主战场）
+#     pro / max / ultra / large         —— 更强的型号
+#     reasoner / thinking / coder / code / math —— 不同能力专线
+#     vision / audio / realtime / omni / image / video / tts / stt —— 不同模态
+#   `-cm`、`-1017`、`-build7` 这类构建/渠道标记不在此列 —— 它们是同一个模型。
+_MODEL_CAPABILITY_TOKENS = frozenset({
+    "mini", "nano", "micro", "small", "tiny", "lite", "light", "air",
+    "flash", "fast", "turbo", "pro", "max", "plus", "ultra", "large",
+    "heavy", "haiku", "sonnet", "opus", "preview", "experimental",
+    "reasoner", "thinking", "instruct", "chat", "coder", "code",
+    "math", "vision", "audio", "realtime", "omni", "image", "video",
+    "tts", "stt", "whisper", "speech", "embed", "embedding", "rerank",
+})
+
+# 日期段：4 位合法月日（1017）或 6-8 位数字（20241017 / 241017）。
+# ★ 之所以不接受任意 4 位数字：那样 `model-a-9999` 就成了逃逸通道
+#   （既有测试专门盯这条），而它并不是一个日期。
+_MODEL_DATE_TOKEN_RE = re.compile(
+    r"^(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d{6,8})$"
+)
+
+# 渠道/构建标记：1-4 位纯字母（cm / hk / sg / dev）。带数字的一律不放行，
+# 因为 `-v2`、`-build7` 这类既可能是构建号，也可能是另一个型号的版本号，
+# 没有足够证据区分时应当继续告警。
+_MODEL_TAG_TOKEN_RE = re.compile(r"^[a-z]{1,4}$")
+
+
+def _is_build_tag_variant(req: str, resp: str) -> bool:
+    """resp 是否是「req + 日期构建标签」（同一模型的不同构建）。
+
+    ★★ 2026-10-30 实测误报（十分钟内十几条，全部标「高危 / 已拦截」）：
+        请求 deepseek/deepseek-v4.1-flash
+        返回 deepseek/deepseek-v4.1-flash-1017-cm
+      末尾的 `-cm` 让原有的 -MMDD 快照规则失配 —— 那条规则只认
+      「以 -MMDD 结尾」，一旦服务商再追加自己的渠道标记就漏掉。
+      而 `-1017-cm` 与 `-1017`、`-2024-11-01` 是同一种东西：
+      同一模型的具体构建批次，不是强弱变化。
+
+    ★ 判据（刻意很窄，宁可漏放也不当逃逸通道）：
+        ① resp 以 req 开头，紧跟一个分隔符；
+        ② 多出来的段里**至少有一段是日期**（合法月日 4 位 / 6-8 位数字）；
+        ③ 其余段只能是 1-4 位纯字母（渠道/构建标记，如 cm / hk / sg）；
+        ④ 任何一段都不得是强弱或能力词。
+      于是：
+        ✓ deepseek-v4.1-flash-1017-cm   （日期 + 渠道标记）
+        ✓ deepseek-v4.1-flash-cm-1017   （顺序反过来同样成立）
+        ✗ gpt-4o-mini                   （没有日期段，且 mini 是更弱的型号）
+        ✗ claude-3-5-sonnet-2           （没有日期段 —— 版本号不等于构建批次）
+        ✗ model-a-9999                  （9999 不是合法月日，是逃逸通道）
+        ✗ gpt-4o-realtime-preview       （能力词，属另一类模型）
+    ★ 反方向（resp 比 req 短）不在此处理：那由归一化剥快照号覆盖，
+      若仍不等，说明请求的确实不是同一个型号，应当继续告警。
+    """
+    if not resp.startswith(req):
+        return False
+    tail = resp[len(req):]
+    if not tail or tail[0] not in "-_.":
+        return False
+    tokens = [t for t in re.split(r"[-_.]", tail) if t]
+    if not tokens:
+        return False
+    if any(t in _MODEL_CAPABILITY_TOKENS for t in tokens):
+        return False
+    has_date = False
+    for t in tokens:
+        if _MODEL_DATE_TOKEN_RE.match(t):
+            has_date = True
+        elif not _MODEL_TAG_TOKEN_RE.match(t):
+            # 既不是日期、也不是短字母标记 —— 形态未知，不享受豁免
+            return False
+    return has_date
+
+
 def _model_compatible(req: str, resp: str) -> bool:
     """判断两个归一化后的模型名是否可能指向同一个模型。
 
@@ -478,6 +556,12 @@ def _model_compatible(req: str, resp: str) -> bool:
     # ★ 只看 4 位「合法月日」后缀，强弱词（mini/haiku/flash/pro）不在此列，
     #   所以「gpt-4o → gpt-4o-mini」这类真降级仍会被判出来。
     if _strip_date_suffix(req) == _strip_date_suffix(resp):
+        return True
+    # 同一模型的构建/渠道标签：deepseek-v4.1-flash-1017-cm ↔ deepseek-v4.1-flash
+    # ★ 2026-10-30：只认 -MMDD **结尾**的规则漏掉了「服务商再追加标记」的
+    #   真实形态，十分钟刷了十几条高危误报。这里按「后缀里有没有强弱词」判，
+    #   而不是枚举后缀长什么样 —— 枚举永远追不上服务商的命名。
+    if _is_build_tag_variant(req, resp):
         return True
     # 同系列合法变体：显式枚举，每一条都要能说出「为什么这是同一个模型」
     return _model_same_family(req, resp)
