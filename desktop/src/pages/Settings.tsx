@@ -44,6 +44,7 @@ import { useToast } from '../components/Toast';
 import { EngineOffline } from '../components/EngineOffline';
 import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/tauriShim';
 import { checkForUpdate, type UpdateCheck } from '../lib/updater';
+import { parseUpdateNotes } from '../lib/updateNotes';
 
 // ══════════════════════════════════════════════════════════════
 // 常量
@@ -1822,14 +1823,19 @@ export default function Settings() {
             <div className="mt-8 faint" style={{ fontSize: 12 }}>
               下载若连续 2 分钟没有进展，会停下来并提示重试（不会永久卡住）。
             </div>
-            {updateCheck.notes && (
-              <div
-                className="mt-8"
-                style={{ whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}
-              >
-                {updateCheck.notes.slice(0, 800)}
-              </div>
-            )}
+            {(() => {
+              // ★ 与启动弹窗同一套「人话化」解析：这里是用户主动来查的，
+              //   更不该把 Markdown 原文（`## 标题`、`- **修复** ...`）丢给他。
+              const notes = parseUpdateNotes(updateCheck.notes);
+              if (notes.length === 0) return null;
+              return (
+                <ul className="modal-notes mt-8" style={{ marginBottom: 0 }}>
+                  {notes.map((text, i) => (
+                    <li key={i}>{text}</li>
+                  ))}
+                </ul>
+              );
+            })()}
           </div>
         )}
         {!isTauri() && (

@@ -114,6 +114,52 @@ def test_non_tag_ref_is_rejected(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════
+# 更新说明（用户能看到的「这一版改了什么」）
+# ══════════════════════════════════════════════════════════════
+
+
+def test_notes_come_from_release_notes_file(tmp_path):
+    """latest.json 的 notes 必须是本版的人话说明，不能是占位文案。
+
+    ★ 2026-10-30 取证：此前 notes 取的是 `RELEASE_NOTES` 环境变量，
+      而**没有任何一处设置它** —— 于是每个用户的更新弹窗里都只有
+      一句「见 GitHub Release 说明」，等于客户端从来没拿到过更新内容，
+      而流水线一路绿。这类「看起来成功了」的失效必须由测试盯住。
+    """
+    _seed(tmp_path)
+    r = _run(tmp_path)
+    assert r.returncode == 0, r.stderr
+    data = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    notes = data["notes"]
+
+    assert "见 GitHub Release 说明" not in notes, "notes 又退回了占位文案"
+    assert len(notes.strip()) > 20, f"更新说明过短，等于没写：{notes!r}"
+    assert notes.count("\n- ") >= 2, f"更新说明不是条目式人话：{notes!r}"
+
+
+def test_release_notes_file_exists_for_current_version():
+    """当前版本必须有人话说明文件。
+
+    ★ 缺文件时脚本只打 warning 而不失败（不能让漏写说明阻断发版），
+      所以必须在这里拦住：否则「用户能看到这版改了什么」会静默失效。
+    """
+    import re
+
+    cargo = (REPO / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.M)
+    assert m, "无法从 Cargo.toml 读取版本号"
+    version = m.group(1)
+
+    notes_file = REPO / ".github" / "release_notes" / f"{version}.md"
+    assert notes_file.is_file(), (
+        f"缺少 {notes_file} —— 应用内的更新提示会退化成兜底文案"
+    )
+    body = notes_file.read_text(encoding="utf-8").strip()
+    assert len(body) > 40, "更新说明过短，用户看不出改了什么"
+    assert "- " in body, "更新说明应按条目书写（前端逐条渲染）"
+
+
+# ══════════════════════════════════════════════════════════════
 # 配置与发布链路的结构判据
 # ══════════════════════════════════════════════════════════════
 

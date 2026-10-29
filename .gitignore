@@ -320,6 +320,12 @@ desktop/src-tauri/examples/
 !.github/CODEOWNERS
 !.github/dependabot.yml
 !.github/pull_request_template.md
+# ★ 2026-10-30：每版的「人话更新说明」必须入库。
+#   它是 latest.json 的 notes 与 GitHub Release 正文的共同来源；
+#   不入库 = CI 上 checkout 后没有这个文件 = 应用内更新弹窗永远只有
+#   兜底文案，而流水线只打 warning 不会红 —— 又一个「看起来成功了」。
+!.github/release_notes/
+!.github/release_notes/*.md
 # 完整版门禁配置：含门禁名称与判据，仅本地使用
 .ci-local/
 

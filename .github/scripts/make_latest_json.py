@@ -55,6 +55,38 @@ def find_signature(path: Path) -> str | None:
     return value or None
 
 
+def read_notes(version: str) -> str:
+    """读取本版的「人话更新说明」，写进 latest.json 的 notes 字段。
+
+    ★ 为什么必须有这个函数
+    ────────────────────────────────────────────────────────────
+    此前 notes 取的是 `RELEASE_NOTES` 环境变量，而**没有任何地方设置它**，
+    于是每个用户看到的更新提示都是同一句「见 GitHub Release 说明」——
+    等于客户端从来拿不到更新内容。
+
+    ★ 单一来源：.github/release_notes/<version>.md
+      前端不再维护第二份版本说明（两份必然不同步）。这里按顺序取：
+        ① 环境变量 RELEASE_NOTES（临时覆盖 / 热修时用）
+        ② 仓库内的版本说明文件
+        ③ 兜底文案（并打 warning：说明流程漏了，但不阻断发版）
+    """
+    env = os.environ.get("RELEASE_NOTES", "").strip()
+    if env:
+        return env
+
+    notes_file = ROOT / ".github" / "release_notes" / f"{version}.md"
+    if notes_file.is_file():
+        text = notes_file.read_text(encoding="utf-8-sig").strip()
+        if text:
+            return text
+
+    print(
+        f"::warning::没有找到 {notes_file}，用户的更新提示只能显示兜底文案",
+        file=sys.stderr,
+    )
+    return "这一版主要是稳定性与体验上的改进，建议更新。"
+
+
 def main() -> int:
     art = Path(sys.argv[1] if len(sys.argv) > 1 else "artifacts")
     if not art.is_dir():
@@ -108,9 +140,10 @@ def main() -> int:
     else:
         print("::warning::没有 AppImage 更新包，Linux 自动更新本次不可用", file=sys.stderr)
 
+    version = read_version()
     payload = {
-        "version": read_version(),
-        "notes": os.environ.get("RELEASE_NOTES", "见 GitHub Release 说明"),
+        "version": version,
+        "notes": read_notes(version),
         "pub_date": _dt.datetime.now(_dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),

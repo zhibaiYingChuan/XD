@@ -40,6 +40,9 @@ export type UpdateCheck =
       install: (onProgress?: (percent: number) => void) => Promise<void>;
     };
 
+/** 「发现新版本」的载荷。弹窗与设置页共用同一个类型，避免两处字段漂移。 */
+export type AvailableUpdate = Extract<UpdateCheck, { kind: 'available' }>;
+
 /** 下载安装的「无进展」上限：超过这段时间没有任何进度事件就报错退出等待。 */
 const UPDATE_STALL_TIMEOUT_MS = 120_000;
 
@@ -196,4 +199,87 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
       downloadUrl: DOWNLOAD_PAGE_URL,
     };
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// 自动提示更新的本地状态（纯本地，不联网、不上报）
+// ══════════════════════════════════════════════════════════════
+
+const UPDATE_PREFS_KEY = 'xuandun-update-prefs';
+
+/** 两次自动检查的最小间隔：一天一次足够，再多就是骚扰。 */
+const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+type UpdatePrefs = {
+  /** 上次自动检查的时间戳（毫秒） */
+  lastCheckAt: number;
+  /** 用户明确「跳过这个版本」的版本号 */
+  skipped: string[];
+};
+
+function readPrefs(): UpdatePrefs {
+  const empty: UpdatePrefs = { lastCheckAt: 0, skipped: [] };
+  try {
+    const raw = localStorage.getItem(UPDATE_PREFS_KEY);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as Partial<UpdatePrefs>;
+    return {
+      lastCheckAt: Number(parsed.lastCheckAt) || 0,
+      skipped: Array.isArray(parsed.skipped)
+        ? parsed.skipped.filter((v): v is string => typeof v === 'string')
+        : [],
+    };
+  } catch {
+    // 存储损坏时按「从未检查过」处理：多检查一次无害，
+    // 返回「刚检查过」会让用户永远收不到更新提示。
+    return empty;
+  }
+}
+
+function writePrefs(p: UpdatePrefs): void {
+  try {
+    localStorage.setItem(UPDATE_PREFS_KEY, JSON.stringify(p));
+  } catch {
+    // 存储不可用（隐私模式 / 配额满）时退化为「每次启动都检查」。
+    // 宁可多查一次静态 JSON，也不要让更新提示永久消失。
+  }
+}
+
+/**
+ * 启动时是否该做一次自动检查。
+ *
+ * ★ 这不违反「不做后台轮询」：只在桌面端、且距上次检查超过 24 小时时
+ *   检查一次；只 GET 一个静态 latest.json，不带设备标识、不上报任何信息。
+ *   失败完全静默 —— 网络不通时不该在启动瞬间弹一个用户无法处理的错误。
+ */
+export function shouldAutoCheck(now: number = Date.now()): boolean {
+  return now - readPrefs().lastCheckAt >= AUTO_CHECK_INTERVAL_MS;
+}
+
+/**
+ * 记录「刚做过一次自动检查」。
+ *
+ * ★ 必须连失败一起记：否则网络长期不通时，每次启动都要先卡一次检查超时，
+ *   而用户对此毫无感知，只觉得「玄盾启动变慢了」。
+ */
+export function markAutoChecked(now: number = Date.now()): void {
+  writePrefs({ ...readPrefs(), lastCheckAt: now });
+}
+
+/** 该版本是否已被用户「跳过」。 */
+export function isVersionSkipped(version: string): boolean {
+  return readPrefs().skipped.includes(version);
+}
+
+/**
+ * 「跳过这个版本」。
+ *
+ * ★ 只影响**启动时的自动提示**；用户在设置页手动点「检查更新」
+ *   仍然会看到该版本 —— 那是他主动问的，不该被旧决定挡回去。
+ */
+export function skipVersion(version: string): void {
+  const p = readPrefs();
+  if (p.skipped.includes(version)) return;
+  // 只留最近 20 个：跳过列表是偏好不是账本，无限增长没有意义。
+  writePrefs({ ...p, skipped: [...p.skipped, version].slice(-20) });
 }

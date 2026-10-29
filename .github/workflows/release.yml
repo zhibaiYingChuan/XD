@@ -1090,6 +1090,18 @@ jobs:
               cat "$ASSET_NOTICE_OUT"
               echo
             fi
+            # ★ 2026-10-30：本版更新说明（人话），与 latest.json 的 notes
+            #   读同一个文件 —— 用户点开 Release 和在应用内看到的内容必须一致，
+            #   否则「应用说改了 A、Release 说改了 B」只会让人怀疑两边都在糊弄。
+            NOTES_FILE=".github/release_notes/$VER.md"
+            if [ -f "$NOTES_FILE" ]; then
+              echo "## 这一版改了什么"
+              echo
+              cat "$NOTES_FILE"
+              echo
+            else
+              echo "::warning::缺少 $NOTES_FILE，应用内的更新提示将显示兜底文案"
+            fi
             echo "## 安装前请做三步验证"
             echo
             echo "1. **核对哈希**：下载 \`checksums-sha256.txt\`，与本地文件算出的 SHA256 比对。不一致就不要安装 —— 那才可能是真的被篡改。"

@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
+import UpdateNotice from './components/UpdateNotice';
 import { ToastProvider } from './components/Toast';
 import Onboarding from './pages/Onboarding';
 import Dashboard from './pages/Dashboard';
@@ -75,16 +76,21 @@ function AppRoutes() {
   }
 
   return (
-    <Routes>
-      <Route element={<Layout />}>
-        <Route index element={<Dashboard />} />
-        <Route path="logs" element={<Logs />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="activate" element={<Activate />} />
-        <Route path="help" element={<Help />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
+    <>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="logs" element={<Logs />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="activate" element={<Activate />} />
+          <Route path="help" element={<Help />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+      {/* ★ 更新提示挂在路由之外：无论用户在哪个页面，
+          发现新版本都在同一个位置弹出，不随页面切换而重新挂载。 */}
+      <UpdateNotice />
+    </>
   );
 }
 
