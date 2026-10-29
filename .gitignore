@@ -49,6 +49,10 @@ desktop/src-tauri/gen/schemas/
 #   是给 CI/build 占位用的，体积同样巨大，一并排除。
 desktop/src-tauri/resources/
 desktop/engine_main.dist/
+# ★ 2026-10-30：PyInstaller onedir 的产物目录（engine_main/ + _internal/），
+#   体积几十到上百 MB，与 Nuitka 的 .dist 同性质，绝不能入库。
+desktop/engine_main/
+desktop/build/
 desktop/engine_main.build/
 desktop/engine_main.onefile-build/
 *.build/

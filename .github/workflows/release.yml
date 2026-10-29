@@ -13,9 +13,17 @@
 # 唯独每一个用户都激活不了 —— 发布后才发现等于白发一个版本。
 # 那正是「静默降级」最典型的形态，所以这里必须在构建期拦死。
 #
-# 三平台构建的坑：**Nuitka 不能交叉编译**。
-# 它调用的是本机 C 编译器，所以三个平台必须各自在对应 runner 上
-# 编译引擎，而不是编一份再分发。
+# 三平台构建的坑：**打包器不能交叉编译**。
+# 它调用的是本机工具链（PyInstaller 打本机解释器的包，Nuitka 更直接
+# 调本机 C 编译器），所以三个平台必须各自在对应 runner 上打包引擎，
+# 而不是编一份再分发。
+#
+# ★ 2026-10-30：引擎打包器由 Nuitka 换成 PyInstaller。
+#   原因不是「PyInstaller 更好」，而是 Nuitka 在 Linux 上要 13~14 分钟，
+#   正好落在 GitHub 免费 ubuntu runner 被回收的窗口里 —— v0.1.28
+#   连续 6 轮死在同一处，日志都是 `The runner has received a shutdown
+#   signal`。PyInstaller 同规模约 2 分钟。回退开关：build_engine.py
+#   --builder=nuitka。
 
 name: Release
 
@@ -327,43 +335,20 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            fuse3 \
-            ccache
+            fuse3
 
-      # ★★ 2026-10-30：Nuitka 的 C 编译缓存。
-      #
-      #   Linux 上 `Build Nuitka engine` 单段约 10.6 分钟，是整个 job
-      #   里最长的一段，也是 AppImage 连续 4 轮被砍的时间窗。
-      #   ccache 由**上一步 apt 显式安装**（build_engine.py 检测到才启用，
-      #   绝不允许 Nuitka 自己从网上拉 —— 见 P1-26 的安全边界）。
-      #
-      #   key 用 run_id + restore-keys 前缀，而不是源码哈希：
-      #   ccache 的价值是复用**没改过的那些 C 文件**的编译结果，
-      #   把源码哈希放进 key 会让每次改动都全量 miss，等于没缓存。
-      - name: Restore ccache (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          # ★★ 2026-10-30 实测修正：只缓存 ~/.cache/ccache 是**无效的**。
-          #   上一轮日志里 Nuitka 明确调用了 /usr/bin/ccache
-          #   （写 engine_main.build/ccache-5766.txt），但收尾时
-          #   "Cache saved" 里只有 cargo 与 node，没有 ccache ——
-          #   说明 ~/.cache/ccache 是空目录，Nuitka 把 ccache 的数据
-          #   放到了它自己的缓存根下（~/.cache/Nuitka）。
-          #   两个路径都收：不猜它用哪个，命中哪个算哪个。
-          path: |
-            ~/.cache/ccache
-            ~/.cache/Nuitka
-          key: ccache-${{ matrix.target }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ matrix.target }}-
-
+      # ★ 2026-10-30：ccache 缓存步骤已随 Nuitka 一起移除。
+      #   PyInstaller 不做 C 编译，这段缓存没有任何内容可存；
+      #   保留只会让每次构建多一次注定 miss 的缓存查询。
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # ★ 钉死 Nuitka 版本：版本漂移会改变构建行为
-          #   （含 ccache 下载策略），历史上因此出现过「同样的代码构建失败」。
-          pip install "nuitka==4.1.3"
+          # ★ 钉死打包器版本：版本漂移会改变产物布局与依赖收集结果。
+          #   ★ 2026-10-30：从 Nuitka 换成 PyInstaller —— Nuitka 要把每个
+          #   模块编译成 C 再编译成机器码，Linux 上一次 13~14 分钟，
+          #   正好落在免费 runner 被回收的窗口里（连续 6 轮失败）。
+          #   PyInstaller 只做打包与字节码归档，同规模约 2 分钟。
+          pip install "pyinstaller==6.11.1"
           pip install -e .
 
       # ★★ UTF-8 输出自检 —— 在**真实 runner 环境**里验证。
@@ -395,50 +380,31 @@ jobs:
           PY
           echo "PASS：UTF-8 输出正常"
 
-      # ★★ 2026-10-28：Windows 的 Nuitka standalone 编译必须依赖
-      #   Dependency Walker（depends.exe）。
+      # ★★ 2026-10-30：Dependency Walker 预置步骤已删除。
+      #   它当初存在，是因为 Nuitka 的 --standalone 在 Windows 上必须靠
+      #   depends.exe 解析 DLL 依赖。换成 PyInstaller 后不再需要 ——
+      #   少一次第三方下载、少一个出网白名单条目、少一处可能失效的
+      #   固定 SHA 校验。
       #
-      #   P1-26 去掉了 `--assume-yes-for-download`（不再允许构建期静默
-      #   从第三方拉可执行文件），但**没有**补上显式安装 —— 于是
-      #   v0.1.24-alpha 首轮 win-x64 直接 FATAL：
-      #   「Nuitka does not work in '--mode=standalone' ... without
-      #     dependency walker」。
-      #
-      #   这里按 P1-26 的原意补齐：固定 URL + 固定 SHA-256，校验通过后
-      #   解到 Nuitka 的下载缓存目录（NUITKA_CACHE_DIR_DOWNLOADS）——
-      #   构建期不再触网，也不需要交互确认。
-      #   注意 depends.exe 运行时依赖同目录的 depends.dll，两者一起解出。
-      - name: Pre-seed Nuitka Dependency Walker (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $url = "https://dependencywalker.com/depends22_x64.zip"
-          $sha = "35db68a613874a2e8c1422eb0ea7861f825fc71717d46dabf1f249ce9634b4f1"
-          $zip = Join-Path $env:RUNNER_TEMP "depends22_x64.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 120
-          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $sha) {
-            throw "Dependency Walker 校验失败：期望 $sha，实际 $actual"
-          }
-          # Nuitka 的缓存布局：<downloads>/depends/<arch>/depends.exe
-          $cache = Join-Path $env:RUNNER_TEMP "nuitka-downloads"
-          $dest = Join-Path $cache "depends\x86_64"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Expand-Archive -Path $zip -DestinationPath $dest -Force
-          if (-not (Test-Path (Join-Path $dest "depends.exe"))) {
-            throw "解压后缺少 depends.exe"
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "NUITKA_CACHE_DIR_DOWNLOADS=$cache" -Encoding utf8
-          Write-Host "Dependency Walker 已就位：$dest"
-
-      # ★ Nuitka 必须在目标平台本机跑 —— 它调用的是本机 C 编译器，
-      #   不能交叉编译。所以这里是三个 runner 各自编译，不是编译三份。
-      - name: Build Nuitka engine
+      # ★ 两个打包器都必须在目标平台本机跑（调用本机链接器 / 打包器），
+      #   不能交叉编译 —— 所以仍是三个 runner 各自构建，不是编三份。
+      - name: Build engine
         working-directory: desktop
         # 缺公钥时该脚本 return 4 —— 这里不做绕过。
         # 公钥缺失就是发布阻断，不是可选项。
         run: python build_engine.py
+
+      # ★★ 2026-10-30：把「产物真的能跑、护栏真的在」变成发布判据。
+      #
+      #   为什么要端到端跑一次，而不是继续 grep 二进制：
+      #   PyInstaller 把纯 Python 模块压缩进 PYZ，类名不以明文出现在
+      #   任何文件里 —— grep 判据会对好包恒假。而本地实测过更糟的形态：
+      #   numpy._core 漏收时，产物照样启动、/health 照常 ok，
+      #   只有护栏导入失败 → 两层检测全空，界面却显示「防护中」。
+      #   只有把进程拉起来问它自己，才能测出这件事。
+      - name: Verify engine runtime (guardrail in place)
+        working-directory: desktop
+        run: python verify_engine_runtime.py
 
       # ══════════════════════════════════════════════════════════
       # 代码签名 · 引擎 sidecar（2026-10-27 新增）
@@ -622,9 +588,12 @@ jobs:
         working-directory: desktop
         run: python verify_guardrail_bundle.py --pubkey-only
 
-      - name: Assert guardrail is present in compiled engine
-        working-directory: desktop
-        run: python verify_guardrail_bundle.py
+      # ★★ 2026-10-30：原来的「在二进制里 grep 护栏类名」已删除。
+      #   PyInstaller 把纯 Python 模块压缩进 PYZ 归档，类名不以明文出现在
+      #   任何文件里 —— 那条判据会对**好包**恒假，直接把发布拦死。
+      #   真正更强的判据已在上一步：把产物拉起来，读 /api/state 的
+      #   guardrail_missing_layers（见 desktop/verify_engine_runtime.py）。
+      #   它不仅能测「模块在不在」，还能测「导不导得进来、服务起不起得来」。
 
       - name: Install frontend dependencies
         working-directory: desktop
@@ -950,33 +919,24 @@ jobs:
           cache: 'pip'
           cache-dependency-path: pyproject.toml
 
-      # ccache 只由我们显式安装 —— 绝不允许 Nuitka 自行下载（P1-26）。
-      - name: Install ccache
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ccache
-
-      - name: Restore ccache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          # ★ 实测：Nuitka 把 ccache 数据放在自己的缓存根（~/.cache/Nuitka）
-          #   而不是 ~/.cache/ccache —— 两个都收，命中哪个算哪个。
-          path: |
-            ~/.cache/ccache
-            ~/.cache/Nuitka
-          key: ccache-x86_64-unknown-linux-gnu-${{ github.run_id }}
-          restore-keys: |
-            ccache-x86_64-unknown-linux-gnu-
-
+      # ★ 2026-10-30：ccache 与它的缓存步骤已删除。
+      #   PyInstaller 不做 C 编译（Nuitka 才需要），装 ccache 只是
+      #   多一次 apt 往返；而它当初存在的唯一理由就是给 Nuitka 加速。
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "nuitka==4.1.3"
+          pip install "pyinstaller==6.11.1"
           pip install -e .
 
-      - name: Build Nuitka engine
+      - name: Build engine
         working-directory: desktop
         run: python build_engine.py
+
+      # ★ 与 build job 同一道判据：拉起来问它自己，而不是 grep 二进制
+      #   （PyInstaller 的模块在 PYZ 里压缩存放，grep 恒假）。
+      - name: Verify engine runtime (guardrail in place)
+        working-directory: desktop
+        run: python verify_engine_runtime.py
 
       - name: Assert engine matches this build's commit
         shell: bash
