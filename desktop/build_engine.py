@@ -279,6 +279,19 @@ def _pyinstaller_cmd(version_file: str) -> list:
         "--exclude-module=mypy",
         "--exclude-module=unittest",
         "--exclude-module=test",
+        # ★★ 2026-10-30 CI 实测：产物在 Linux 上启动即崩，堆栈是
+        #     ModuleNotFoundError: No module named 'backports'
+        #     [PYI-3465:ERROR] Failed to execute script 'pyi_rth_pkgres'
+        #   即 PyInstaller 为 pkg_resources 注入的运行时钩子先于我们的代码
+        #   执行，而它在 Python 3.11 + 新版 setuptools 下依赖 backports
+        #   （本地是 3.12，不受影响 —— 典型的「本机能跑、CI 挂」）。
+        #
+        #   本项目的运行时链路（fastapi / uvicorn / httpx / pydantic / yaml /
+        #   jwt / cryptography / numpy）都不使用 pkg_resources 的入口点机制，
+        #   因此直接排除它，让那个钩子不启用 —— 比补一个空 backports 干净。
+        #   ★ 若将来引入依赖 pkg_resources 的库，这里会立刻在运行时验证
+        #     （verify_engine_runtime.py）里失败，不会静默降级。
+        "--exclude-module=pkg_resources",
     ]
     if platform.system().lower() == "windows":
         icon = os.path.join(SCRIPT_DIR, "src-tauri", "icons", "icon.ico")
