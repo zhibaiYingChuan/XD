@@ -664,8 +664,10 @@ jobs:
       - name: Build Tauri app
         working-directory: desktop
         env:
-          # 只在 CI 提供签名私钥；本地构建走 tauri.conf.json（不含
-          # createUpdaterArtifacts），因此不需要私钥也能正常打包。
+          # ★ 2026-10-29：tauri.conf.json 已开启 createUpdaterArtifacts，
+          #   没有私钥时 `tauri build` 会直接失败 —— 所以这两个 secret
+          #   从「可选」变成「发布必需」，缺失即整轮红。
+          #   本地构建同样需要注入私钥（见 docs/DEVELOPMENT.md）。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         # ★ 必须显式指定 --bundles，且传的是**格式名**（nsis/dmg/deb/appimage）
@@ -709,9 +711,14 @@ jobs:
         #     真实原因是 shell 选错了，与平台、代码都无关。
         shell: bash
         run: |
-          # ★ --config 只在 CI 合并「产出更新签名包」这一项：
-          #   本地构建没有签名私钥，若把它写进 tauri.conf.json，
-          #   `tauri build` 会因缺少 TAURI_SIGNING_PRIVATE_KEY 直接失败。
+          # ★ 2026-10-29：createUpdaterArtifacts 已移入 tauri.conf.json ——
+          #   Linux AppImage 只有开启它才会产出 `.AppImage.tar.gz`，
+          #   而缺了那个包，`latest.json` 里就没有 linux-x86_64 条目，
+          #   Linux 用户永远收不到自动更新。代价：本地 `tauri build`
+          #   也必须注入签名私钥（docs/DEVELOPMENT.md 已写明）。
+          #
+          # ★ 这里的 --config 保留（与主配置同值，幂等）：
+          #   「CI 会产出更新签名包」这个意图在流水线里仍应可见。
           #
           # ★ deb 不产出 updater 资产（Linux 自动更新走 AppImage），
           #   不给它加这个覆盖，避免 bundler 对不支持的格式报错。
@@ -818,10 +825,16 @@ jobs:
           #   原先写的是 `**/*.tar.gz`，把 deb 打包过程中的临时文件
           #   `bundle/deb/<包名>/control.tar.gz` 与 `data.tar.gz` 也收了进去，
           #   于是它们被当成发布资产传了上去（线上真的出现了这两坨）。
+          #
+          # ★ 2026-10-29：补 `**/*.AppImage.tar.gz` ——
+          #   macOS 的通配是 `*.app.tar.gz`（小写 app），Linux 的更新包叫
+          #   `*.AppImage.tar.gz`，两个通配互不覆盖。少了这一行，AppImage
+          #   更新包在 build job 就被丢下，release job 里当然永远缺 Linux。
           path: |
             desktop/src-tauri/target/release/bundle/**/${{ matrix.bundle_glob }}
             desktop/src-tauri/target/release/bundle/**/*.sig
             desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
+            desktop/src-tauri/target/release/bundle/**/*.AppImage.tar.gz
           # ★ 非 AppImage 的矩阵项：没产出文件就是失败。
           #   包少一个而没人知道，比构建失败更糟。
           #
@@ -941,23 +954,45 @@ jobs:
       #   于是更新 URL 直接 404 —— 这是最坏的一种错：
       #   发版全绿、更新清单也在，只有客户端悄悄永远升不了级。
       #   与其去猜 GitHub 的裁剪规则，不如自己先定成 ASCII 名。
+      #
+      # ★ 2026-10-29：补齐 AppImage 的**更新包**两类改名。
+      #   原先只写了 `*.AppImage.sig` / `*.AppImage`，而 Tauri 开启
+      #   createUpdaterArtifacts 后产出的更新包叫
+      #   `*.AppImage.tar.gz`(+`.sig`) —— 它两个 case 都不匹配，
+      #   落到兜底 `*) continue` 被**静默丢弃**：
+      #   dist/ 里没有更新包 → latest.json 没有 linux-x86_64 →
+      #   Linux 用户永远收不到自动更新，而流水线一路绿。
+      #   ★ 四个 AppImage 分支都要留着：`.AppImage` 是安装包本体，
+      #     `.AppImage.tar.gz` 才是更新包，`.sig` 各配一份。
+      #
+      # ★ 2026-10-29：版本号改从 Cargo.toml（SSOT）读，不再用 tag 名。
+      #   理由：make_latest_json.py 的 version 字段读的是 Cargo.toml，
+      #   两处来源不同时会出现「资产名一个版本、清单里另一个版本」，
+      #   而那种错在客户端表现为「下载 404」，与本段要防的正是同一类。
       - name: Stage release assets with ASCII names
         shell: bash
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME#v}"
+          VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
+                | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                | head -1)
+          test -n "$VER" \
+            || { echo "::error::无法从 Cargo.toml 读取版本号（SSOT）"; exit 1; }
+          echo "资产版本号（Cargo.toml）：$VER"
           rm -rf dist && mkdir -p dist
           while IFS= read -r -d '' f; do
             b="${f##*/}"
             case "$b" in
-              *setup.exe.sig)    n="xuandun-personal_${VER}_x64-setup.exe.sig" ;;
-              *setup.exe)        n="xuandun-personal_${VER}_x64-setup.exe" ;;
-              *.app.tar.gz.sig)  n="xuandun-personal_${VER}_aarch64.app.tar.gz.sig" ;;
-              *.app.tar.gz)      n="xuandun-personal_${VER}_aarch64.app.tar.gz" ;;
-              *.dmg)             n="xuandun-personal_${VER}_aarch64.dmg" ;;
-              *.AppImage.sig)    n="xuandun-personal_${VER}_amd64.AppImage.sig" ;;
-              *.AppImage)        n="xuandun-personal_${VER}_amd64.AppImage" ;;
-              *.deb)             n="xuandun-personal_${VER}_amd64.deb" ;;
+              *setup.exe.sig)        n="xuandun-personal_${VER}_x64-setup.exe.sig" ;;
+              *setup.exe)            n="xuandun-personal_${VER}_x64-setup.exe" ;;
+              *.app.tar.gz.sig)      n="xuandun-personal_${VER}_aarch64.app.tar.gz.sig" ;;
+              *.app.tar.gz)          n="xuandun-personal_${VER}_aarch64.app.tar.gz" ;;
+              *.dmg)                 n="xuandun-personal_${VER}_aarch64.dmg" ;;
+              *.AppImage.tar.gz.sig) n="xuandun-personal_${VER}_amd64.AppImage.tar.gz.sig" ;;
+              *.AppImage.tar.gz)     n="xuandun-personal_${VER}_amd64.AppImage.tar.gz" ;;
+              *.AppImage.sig)        n="xuandun-personal_${VER}_amd64.AppImage.sig" ;;
+              *.AppImage)            n="xuandun-personal_${VER}_amd64.AppImage" ;;
+              *.deb)                 n="xuandun-personal_${VER}_amd64.deb" ;;
               *) continue ;;
             esac
             cp "$f" "dist/$n"

@@ -33,6 +33,13 @@ Release，而它已经通知了 watcher），而且会留下一次「发布了�
 但「可以缺」必须由**人**显式声明（仓库变量 ALLOW_MISSING_APPIMAGE=1），
 不能由流水线自己默认 -- 默认放行等于这道门禁不存在。
 
+★ 2026-10-29：AppImage 在的时候，还要查它的**更新包**
+（`.AppImage.tar.gz`）与更新签名（`.AppImage.sig`）。
+这三种形态的缺件后果不同，但都不是「用户能感知的失败」：
+整包缺 → Linux 没得装；更新包缺 → 能装但永远升不了级；
+签名缺 → 更新包验不过，客户端静默放弃。
+只查第一个，等于给后两种开了静默通道。
+
 豁免必须让用户看见
 ────────────────────────────────────────────────────────────
 豁免成立时脚本会写一段提示文本（--notice-out），
@@ -66,6 +73,18 @@ EXEMPTABLE: dict[str, str] = {
     "Linux AppImage（.AppImage）": "*.AppImage",
 }
 
+# ★ 2026-10-29：**跟着 AppImage 走**的更新包。
+#   三者是同一件事的三个面：安装包本体、更新包（Tauri 开启
+#   createUpdaterArtifacts 后产出的 .AppImage.tar.gz）、更新签名。
+#   少了后两个，Linux 侧「能装但不能升级」：
+#   latest.json 要么直接跳过 linux-x86_64（旧版本永远看不到新版），
+#   要么写进一个下不回来/验不了签的地址。两者都不会报错。
+#   ★ 判定口径与 EXEMPTABLE 一致：AppImage 在时才要求，缺了走同一个豁免。
+APPIMAGE_UPDATE: dict[str, str] = {
+    "Linux AppImage 更新包（.AppImage.tar.gz）": "*.AppImage.tar.gz",
+    "Linux AppImage 更新签名（.AppImage.sig）": "*.AppImage.sig",
+}
+
 EXEMPT_ENV = "ALLOW_MISSING_APPIMAGE"
 
 # ★ 这段话会被原样贴进 Release 正文。不要写「构建失败」这类内部措辞 ——
@@ -78,6 +97,20 @@ NOTICE = """## ⚠ 本次发布缺少 Linux AppImage
 - Linux 用户请下载 **`.deb`** 安装，功能与 AppImage 版本一致。
 - **Linux 上的自动更新本次不可用**：更新清单（`latest.json`）里没有
   Linux 条目，旧版本不会自动升级到这一版，请手动下载 `.deb` 覆盖安装。
+"""
+
+# ★ 另一种缺件形态：安装包在、更新包/签名不在。
+#   它比整包缺失更隐蔽 —— Release 页面上看起来「Linux 有包」，
+#   只有自动更新是坏的。
+NOTICE_INCOMPLETE = """## ⚠ 本次 Linux AppImage 缺少更新包
+
+本次发布了 Linux AppImage 安装包，但缺少更新包（`.AppImage.tar.gz`）
+或更新签名（`.AppImage.sig`），已按仓库变量
+`ALLOW_MISSING_APPIMAGE=1` **显式豁免**后发布。
+
+- AppImage 本身可正常下载运行，功能不受影响。
+- **Linux 上的自动更新本次不可用**：缺更新包，`latest.json` 里没有
+  Linux 条目，旧版本不会自动升级到这一版，请手动下载覆盖安装。
 """
 
 
@@ -110,7 +143,11 @@ def main(argv: list[str]) -> int:
     exempt = os.getenv(EXEMPT_ENV, "").strip() == "1"
 
     print(f"核对发布资产：{dist}")
-    for label, pat in list(REQUIRED.items()) + list(EXEMPTABLE.items()):
+    for label, pat in (
+        list(REQUIRED.items())
+        + list(EXEMPTABLE.items())
+        + list(APPIMAGE_UPDATE.items())
+    ):
         hits = sorted(p.name for p in dist.glob(pat))
         mark = "OK  " if hits else "缺失"
         print(f"  [{mark}] {label:<28} {', '.join(hits) if hits else '（无）'}")
@@ -126,10 +163,16 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    # ② 可缺件：没豁免就阻断
+    # ② 可缺件：没豁免就阻断。
+    #    ★ 2026-10-29：AppImage 存在时，要求它的更新包与签名**同在**。
+    #      只查「AppImage 在不在」会放过一种更隐蔽的缺件：
+    #      包在、更新包不在 —— 用户能装，但永远升不了级。
     missing_optional = _missing(dist, EXEMPTABLE)
-    if missing_optional and not exempt:
-        for label, pat in missing_optional.items():
+    missing_update: dict[str, str] = {}
+    if not missing_optional:
+        missing_update = _missing(dist, APPIMAGE_UPDATE)
+    if (missing_optional or missing_update) and not exempt:
+        for label, pat in {**missing_optional, **missing_update}.items():
             print(f"::error::缺少资产且未豁免：{label}（{pat}）")
         print(
             f"阻断发布：如确认本次可以缺件，请设置仓库变量 {EXEMPT_ENV}=1 后重跑；\n"
@@ -138,15 +181,23 @@ def main(argv: list[str]) -> int:
         return 1
 
     # ③ 豁免成立：留下正文提示，不能静默
-    if missing_optional:
-        print(
-            f"::warning title=本次发布缺 Linux AppImage::已按 {EXEMPT_ENV}=1 豁免，"
-            "缺件说明会写入 Release 正文（Linux 用户改用 .deb，自动更新不可用）。"
-        )
+    if missing_optional or missing_update:
+        if missing_optional:
+            print(
+                f"::warning title=本次发布缺 Linux AppImage::已按 {EXEMPT_ENV}=1 豁免，"
+                "缺件说明会写入 Release 正文（Linux 用户改用 .deb，自动更新不可用）。"
+            )
+            notice = NOTICE
+        else:
+            print(
+                f"::warning title=本次 Linux AppImage 缺更新包::已按 {EXEMPT_ENV}=1 豁免，"
+                "缺件说明会写入 Release 正文（AppImage 可装，但 Linux 自动更新不可用）。"
+            )
+            notice = NOTICE_INCOMPLETE
         if notice_out:
             out = Path(notice_out)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(NOTICE, encoding="utf-8")
+            out.write_text(notice, encoding="utf-8")
             print(f"已写出正文提示：{out}")
 
     print("PASS：必备发布资产齐全")

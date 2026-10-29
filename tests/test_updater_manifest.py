@@ -118,12 +118,15 @@ def test_non_tag_ref_is_rejected(tmp_path):
 # ══════════════════════════════════════════════════════════════
 
 
-def test_tauri_config_enables_updater_but_not_local_signing():
-    """公钥与端点必须在；但 createUpdaterArtifacts 只能在 CI 配置里。
+def test_tauri_config_enables_updater_artifacts_for_every_platform():
+    """公钥与端点必须在；`createUpdaterArtifacts` 也必须开启。
 
-    ★ 若把 createUpdaterArtifacts 写进主配置，本地 `tauri build`
-      会因为缺少 TAURI_SIGNING_PRIVATE_KEY 直接失败 ——
-      这是「为了发版而把日常构建弄坏」。
+    ★ 2026-10-29 改判据：此前它只允许出现在 CI 配置里，
+      理由是「本地没私钥，写进主配置会让 `tauri build` 直接失败」。
+      但实测代价是 Linux AppImage **不产出** `.AppImage.tar.gz` ——
+      更新清单里于是永远没有 `linux-x86_64`，Linux 用户永远收不到更新，
+      而流水线一路绿。这不是「本地便不便利」能换的东西。
+      现在主配置开启、本地构建需注入签名私钥（docs/DEVELOPMENT.md 已写明）。
     """
     conf = json.loads(
         (REPO / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
@@ -134,15 +137,21 @@ def test_tauri_config_enables_updater_but_not_local_signing():
         "releases/latest/download/latest.json" in e
         for e in updater["endpoints"]
     ), "更新端点不是 releases/latest，指针会失效"
-    assert "createUpdaterArtifacts" not in conf["bundle"], (
-        "主配置开启了 updater 产物 —— 本地构建会被要求提供签名私钥"
+    assert conf["bundle"].get("createUpdaterArtifacts") is True, (
+        "主配置没开 createUpdaterArtifacts —— Linux 不会产出 .AppImage.tar.gz，"
+        "latest.json 里也就永远没有 linux-x86_64"
     )
 
+    # CI 叠加的同值配置保留：它让「CI 要产出更新签名包」在流水线里可见。
     ci_conf = json.loads(
         (REPO / "desktop/src-tauri/tauri.updater.conf.json")
         .read_text(encoding="utf-8")
     )
     assert ci_conf["bundle"]["createUpdaterArtifacts"] is True
+
+    # 本地构建的代价必须写在文档里，否则下一个人本地打包会撞墙。
+    dev = (REPO / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    assert "本地构建需注入签名私钥" in dev
 
 
 def test_release_workflow_signs_and_publishes_manifest():
@@ -168,6 +177,97 @@ def test_release_workflow_signs_and_publishes_manifest():
         "发布资产用了 tar.gz 通配 —— 会把 deb 的 control/data.tar.gz 也发出去"
     )
     assert "**/*.app.tar.gz" in text, "macOS 更新包应只收 *.app.tar.gz"
+
+    # ★ 2026-10-29：Linux 的更新包是 `.AppImage.tar.gz`（大写 A、大写 I），
+    #   与 macOS 的 `*.app.tar.gz` 互不覆盖 —— 上传与改名两处都必须显式写上。
+    #   少了任何一处，更新包都会在到达 release job 之前被丢掉。
+    assert "**/*.AppImage.tar.gz" in text, (
+        "上传清单少了 .AppImage.tar.gz —— Linux 更新包走不到 release job"
+    )
+    assert "*.AppImage.tar.gz.sig)" in text, "改名分支缺 .AppImage.tar.gz.sig"
+    assert "*.AppImage.tar.gz)" in text, "改名分支缺 .AppImage.tar.gz"
+
+    # ★ 版本号必须从 Cargo.toml（SSOT）读，不能硬编码或用 tag 名 ——
+    #   否则资产名与 latest.json 的 version 可能来自两个不同的地方。
+    stage = text.split("Stage release assets with ASCII names", 1)[1]
+    assert "desktop/src-tauri/Cargo.toml" in stage, (
+        "ASCII 改名步骤没从 Cargo.toml 读版本号"
+    )
+    assert "${GITHUB_REF_NAME#v}" not in stage.split("ls -l dist", 1)[0], (
+        "ASCII 改名步骤仍用 tag 名当版本号"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# 发布资产门禁（check_release_assets.py）的三条分支
+# ══════════════════════════════════════════════════════════════
+
+ASSET_GATE = REPO / ".github" / "scripts" / "check_release_assets.py"
+
+
+def _seed_dist(d: Path, *, appimage: bool = True, update: bool = True,
+               sig: bool = True) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "xuandun-personal_0.1.27-alpha_x64-setup.exe",
+        "xuandun-personal_0.1.27-alpha_aarch64.dmg",
+        "xuandun-personal_0.1.27-alpha_aarch64.app.tar.gz",
+        "xuandun-personal_0.1.27-alpha_amd64.deb",
+    ):
+        (d / name).write_text("x", encoding="utf-8")
+    if not appimage:
+        return
+    base = "xuandun-personal_0.1.27-alpha_amd64.AppImage"
+    (d / base).write_text("x", encoding="utf-8")
+    if update:
+        (d / f"{base}.tar.gz").write_text("x", encoding="utf-8")
+    if sig:
+        (d / f"{base}.sig").write_text("SIG", encoding="utf-8")
+
+
+def _run_gate(d: Path, *, exempt: bool, notice: Path):
+    env = {k: v for k, v in os.environ.items() if k != "ALLOW_MISSING_APPIMAGE"}
+    if exempt:
+        env["ALLOW_MISSING_APPIMAGE"] = "1"
+    return subprocess.run(
+        [sys.executable, str(ASSET_GATE), str(d), "--notice-out", str(notice)],
+        capture_output=True, text=True, env=env,
+    )
+
+
+def test_asset_gate_passes_when_appimage_update_package_is_complete(tmp_path):
+    """AppImage + 更新包 + 签名齐全 → 放行，且不写豁免提示。"""
+    dist = tmp_path / "dist"
+    _seed_dist(dist)
+    notice = tmp_path / "notice.md"
+    r = _run_gate(dist, exempt=False, notice=notice)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not notice.exists(), "全都齐了却写了缺件提示"
+
+
+def test_asset_gate_blocks_when_appimage_update_package_is_missing(tmp_path):
+    """安装包在、更新包不在 → 未豁免必须 exit 1。
+
+    ★ 这是最难被发现的缺件形态：Release 上「Linux 有包」，
+      只有自动更新是哑的。旧门禁只查 .AppImage，因此一路放行。
+    """
+    dist = tmp_path / "dist"
+    _seed_dist(dist, update=False)
+    r = _run_gate(dist, exempt=False, notice=tmp_path / "notice.md")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "AppImage.tar.gz" in (r.stdout + r.stderr), "没指出缺的到底是哪个包"
+
+
+def test_asset_gate_allows_exempted_incomplete_appimage_with_notice(tmp_path):
+    """已豁免 → 放行，但必须写出正文提示（缺件不能被静默吞掉）。"""
+    dist = tmp_path / "dist"
+    _seed_dist(dist, update=False)
+    notice = tmp_path / "notice.md"
+    r = _run_gate(dist, exempt=True, notice=notice)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::warning" in r.stdout
+    text = notice.read_text(encoding="utf-8")
+    assert "更新包" in text and "自动更新" in text
 
 
 def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):

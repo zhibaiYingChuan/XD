@@ -133,7 +133,7 @@ npx tauri build
 **为何用 Nuitka `--standalone` 而非 `--onefile`**：
 onefile 会自解压到临时目录，该行为特征被杀毒软件判定为 dropper —— 企业版 v1.3.1 曾因此被火绒误报 `Trojan/Intercept.a`。
 
-`createUpdaterArtifacts` **只在 CI 配置** `tauri.updater.conf.json` 里开启：本地构建没有签名私钥，写进主配置会让日常 `tauri build` 直接失败。
+`createUpdaterArtifacts` 已在主配置 `tauri.conf.json` 里开启（Linux 只有开启它才会产出 `.AppImage.tar.gz` 更新包）：**本地构建需注入签名私钥**（`TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`），否则 `tauri build` 直接失败。CI 用 `tauri.updater.conf.json` 同值叠加，保留它只为在流水线里显式声明这个意图。
 
 ### 三平台产物
 
@@ -141,7 +141,7 @@ onefile 会自解压到临时目录，该行为特征被杀毒软件判定为 dr
 |---|---|---|---|
 | Windows x64 | NSIS `.exe` | 同 `.exe` + `.exe.sig` | 已实机验证 |
 | macOS arm64 | `.dmg` | `.app.tar.gz` + `.sig` | 已接入 CI |
-| Linux x86_64 | `.deb`（主）/ `.AppImage` | `.AppImage` + `.sig` | 已接入 CI |
+| Linux x86_64 | `.deb`（主）/ `.AppImage` | `.AppImage.tar.gz` + `.sig` | 已接入 CI |
 
 macOS 分发需 Apple 签名与公证，未配置证书时产出的 `.dmg` 会触发 Gatekeeper 警告。
 

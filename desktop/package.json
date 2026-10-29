@@ -1,7 +1,7 @@
 {
   "name": "xuandun-personal-desktop",
   "private": true,
-  "version": "0.1.27-alpha",
+  "version": "0.1.28-alpha",
   "type": "module",
   "scripts": {
     "dev": "vite",
