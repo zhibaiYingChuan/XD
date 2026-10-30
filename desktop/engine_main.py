@@ -48,23 +48,31 @@ def _setup_file_logging() -> None:
 
 
 def _ensure_std_streams() -> None:
-    """兜底 sys.stdout / sys.stderr，防止 ``--noconsole`` 下为 None。
+    """把 stdout / stderr 统一成 UTF-8，缺流时兜底到空设备。
 
     ★★ 2026-10-30 CI 实测（Windows 专属，Linux/macOS 不出现）：
-       Windows 打包用 ``--noconsole``（引擎是后台服务，不能弹黑框），
-       PyInstaller 在该模式下把 ``sys.stdout`` / ``sys.stderr`` 置为 ``None``。
-       于是链路上**任何一处 print()** 都会抛
+       Windows runner 上这两个流的编码是 **cp1252**，引擎启动时打印的
+       中文提示直接抛
 
-           AttributeError: 'NoneType' object has no attribute 'write'
+           UnicodeEncodeError: 'charmap' codec can't encode characters
 
-       而异常若发生在启动早期、又被某个库吞掉，表现就是
-       「进程活着、端口不监听、日志空白」—— 正是我们观测到的形态。
+       堆栈落在 run() 的第一条状态输出上，进程随即退出 ——
+       而在中文 Windows 上是 GBK，问题同样存在，只是错误码不同。
 
-       这里给两个流一个指向 devnull 的真实文件对象：既不会崩，
-       也不会往任何地方喷输出。文件日志由 _setup_file_logging 负责。
+       这不是 CI 独有：任何非 UTF-8 控制台的用户机器都会中招。
+       这里统一 reconfigure 成 utf-8（errors=replace 保证永不因编码崩溃），
+       拿不到流时退回 devnull，绝不留下一个会抛异常的 stdout。
     """
     for name in ("stdout", "stderr"):
-        if getattr(sys, name, "missing") is None:
+        stream = getattr(sys, name, None)
+        fixed = False
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+                fixed = True
+            except Exception:
+                fixed = False
+        if not fixed:
             try:
                 setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
             except OSError:
