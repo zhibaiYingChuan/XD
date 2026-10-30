@@ -827,7 +827,7 @@ jobs:
           echo "已清理临时证书与签名配置"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # ★ 用 matrix.art 而不是 matrix.target 命名。
           #   Linux 的 deb 与 AppImage 是两个 job 但 target 相同
@@ -938,7 +938,7 @@ jobs:
           echo "引擎：$ENGINE"
 
       - name: Upload prebuilt engine
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xuandun-engine-linux
           path: desktop/src-tauri/resources/engine
@@ -1034,7 +1034,7 @@ jobs:
           [ "$ok" = "1" ] || exit 1
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xuandun-personal-linux-deb
           path: |
@@ -1195,7 +1195,7 @@ jobs:
           exit 0
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xuandun-personal-linux-appimage
           path: |
