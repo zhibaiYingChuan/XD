@@ -48,6 +48,7 @@ import {
 } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard, downloadText } from '../lib/tauriShim';
+import { confirmDialog } from '../lib/confirm';
 
 const PAGE_SIZE = 20;
 const SEARCH_DEBOUNCE = 300;
@@ -394,7 +395,9 @@ function DetailDrawer({
     // ★ 删除不可恢复（脱敏记录会一并删除），必须先确认。
     //   此前是单击即删 —— 用户本想点「复制详情」，手一抖就永久丢了一条记录，
     //   而界面上没有任何挽回入口。
-    if (!window.confirm('确定删除这条日志吗？\n\n此操作不可恢复。')) return;
+    // ★ 原生 window.confirm 在 Tauri 2.7 上弹不出来（见 lib/confirm.ts），
+    //   统一走应用内确认框；必须 await，否则还没等用户答复就往下走了。
+    if (!(await confirmDialog('确定删除这条日志吗？\n\n此操作不可恢复。'))) return;
     setDeleting(true);
     try {
       await api.deleteLog(logId);
@@ -1055,7 +1058,8 @@ export default function Logs() {
 
   const handleClearAll = async () => {
     if (clearing) return;
-    if (!window.confirm('确定清空全部安全日志吗？\n\n此操作不可恢复。\n（脱敏记录会一并删除，本地不留存任何原始敏感值）')) {
+    // ★ 同上：原生 confirm 不可用，走应用内确认框。
+    if (!(await confirmDialog('确定清空全部安全日志吗？\n\n此操作不可恢复。\n（脱敏记录会一并删除，本地不留存任何原始敏感值）'))) {
       return;
     }
     setClearing(true);
@@ -1092,11 +1096,12 @@ export default function Logs() {
         && !currentFilters.search && !currentFilters.days
         && currentFilters.marked_safe === undefined;
       const scope = all ? '全部日志' : '当前筛选结果';
-      if (!window.confirm(
+      // ★ 同上：原生 confirm 不可用，走应用内确认框。
+      if (!(await confirmDialog(
         `将删除${scope}中的 ${probe.matched} 条记录。\n\n`
         + '此操作不可恢复（脱敏记录会一并删除）。\n'
         + '确定继续吗？',
-      )) {
+      ))) {
         return;
       }
       const r = await api.deleteFilteredLogs(currentFilters);

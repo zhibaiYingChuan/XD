@@ -648,7 +648,35 @@ def complete_wizard(page):
             body = page.locator("body").inner_text()[:200]
         except Exception:
             pass
-        return False, f"完成向导失败（可能引擎未就绪导致保存失败）: {e} | 页面: {body!r}"
+        # ★ 2026-10-31：向导停在最后一步只说明「保存没成功」，
+        #   真正原因在 toast 文案里 —— 而 toast 渲染在页面末尾，
+        #   body[:200] 常把它整段截掉，于是失败原因永远只有
+        #   「可能引擎未就绪」这种猜测。这里把三样证据一起带出来：
+        #   toast 原文、最后几条控制台错误、当前是否仍处于 saving。
+        toast = ""
+        try:
+            toast = page.evaluate(
+                "(() => {"
+                " const n = document.querySelector("
+                "'[class*=toast],[class*=Toast],[role=alert]');"
+                " return n ? n.innerText : ''; })()"
+            )
+        except Exception:
+            pass
+        saving_hint = ""
+        try:
+            saving_hint = page.evaluate(
+                "(() => { const b = [...document.querySelectorAll('button')]"
+                " .find(x => x.textContent.includes('保存中'));"
+                " return b ? '按钮停在「保存中」' : '按钮已复位'; })()"
+            )
+        except Exception:
+            pass
+        cons = " | ".join(_console_errors[-3:]) if _console_errors else ""
+        return False, (
+            f"完成向导失败: {e} | toast={toast!r} | {saving_hint} | "
+            f"控制台={cons!r} | 页面={body!r}"
+        )
 
     return True, f"已用占位中转站走完向导（{PLACEHOLDER_URL}）"
 

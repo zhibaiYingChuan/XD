@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import copy
 import datetime as _dt
@@ -291,6 +292,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
     )
+
+    # ★★ 预热机器码缓存（2026-10-31）
+    #   机器码靠 PowerShell 的 Get-CimInstance 采集，一次 1–3 秒且同步阻塞。
+    #   若等用户第一次打开激活页才现算，这几秒会卡在事件循环上，
+    #   /health 跟着不响应，桌面端就会把健康引擎误判成死亡。
+    #   这里在启动阶段用后台线程先算一次，之后所有请求只读缓存。
+    def _warm_machine_code() -> None:
+        try:
+            from .. import license as _lic
+
+            _lic.machine_code()
+            logger.info("机器码已预热（后续调用只读缓存）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("机器码预热失败（不影响启动）: %s", e)
+
+    try:
+        import threading as _threading
+
+        _threading.Thread(
+            target=_warm_machine_code, name="warm-machine-code", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001
+        pass
 
     # ★ 必须报**实际**监听端口，不能报 _config.server.port。
     #   两者在 --port 传参时不相等：run() 解析出的 actual_port 写进了
@@ -2666,7 +2690,10 @@ def create_app() -> FastAPI:
         """
         from .. import license as lic
 
-        raw = lic.machine_code()
+        # ★★ 采集要跑 1–3 秒（PowerShell 的 Get-CimInstance），必须挪出事件循环。
+        #   此前在 async 端点里同步调用，激活页并发调两次卡住事件循环 3.7 秒，
+        #   /health 因此不响应，桌面端把健康引擎误判成死亡并强制重启。
+        raw = await asyncio.to_thread(lic.machine_code)
         return {
             "machineCode": lic.machine_code_hash(raw),
             # 采集不到稳定硬件 ID 时为 true，界面据此提示用户

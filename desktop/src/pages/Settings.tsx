@@ -45,6 +45,7 @@ import { EngineOffline } from '../components/EngineOffline';
 import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/tauriShim';
 import { checkForUpdate, type UpdateCheck } from '../lib/updater';
 import { parseUpdateNotes } from '../lib/updateNotes';
+import { confirmDialog } from '../lib/confirm';
 
 // ══════════════════════════════════════════════════════════════
 // 常量
@@ -321,10 +322,12 @@ export default function Settings() {
   const handleRestartEngine = async () => {
     if (restarting) return;
     if (
-      !window.confirm(
+      // ★ 原生 confirm 在 Tauri 2.7 上不可用（见 lib/confirm.ts），
+      //   统一走应用内确认框；必须 await，否则还没等用户答复就重启了。
+      !(await confirmDialog(
         '确定重启引擎吗？\n\n'
           + '重启期间正在进行的对话会短暂中断，请稍候片刻。',
-      )
+      ))
     ) {
       return;
     }
@@ -487,10 +490,11 @@ export default function Settings() {
       //   此前一点即删：用户只是想换个默认目标，手滑点到「移除」就永久
       //   丢了一把 Key，而界面上再没有任何地方能找回它。
       if (
-        !window.confirm(
+        // ★ 原生 confirm 不可用，走应用内确认框。
+        !(await confirmDialog(
           `确定移除「${name}」吗？\n\n`
             + '将删除该中转站的地址与 Key，此操作不可恢复。',
-        )
+        ))
       ) {
         return;
       }
@@ -631,7 +635,8 @@ export default function Settings() {
     if (!config) return;
     if (days === (config.storage?.log_retention_days ?? 0)) return;
     if (days > 0) {
-      const ok = window.confirm(
+      // ★ 原生 confirm 不可用，走应用内确认框。
+      const ok = await confirmDialog(
         `将只保留最近 ${days} 天的日志，更早的记录会立即删除且不可恢复。\n\n`
         + '脱敏明细会随日志一起删除。确定继续吗？',
       );
@@ -896,7 +901,8 @@ export default function Settings() {
 
   const resetKeywords = async () => {
     if (!config || config.guard.custom_keywords.length === 0) return;
-    if (!window.confirm('确定清空全部自定义关键词吗？')) return;
+    // ★ 原生 confirm 不可用，走应用内确认框。
+    if (!(await confirmDialog('确定清空全部自定义关键词吗？'))) return;
     await save({ guard: { ...config.guard, custom_keywords: [] } }, '已清空自定义关键词');
   };
 

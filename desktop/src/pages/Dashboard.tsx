@@ -43,6 +43,7 @@ import {
 import { useToast } from '../components/Toast';
 import { EngineOffline, useBootDeadline } from '../components/EngineOffline';
 import { copyToClipboard } from '../lib/tauriShim';
+import { confirmDialog } from '../lib/confirm';
 
 /**
  * 首页卡片的标题文案：优先说人话，说不出来才用引擎的原话。
@@ -265,10 +266,12 @@ export default function Dashboard() {
     // ★ 永久暂停是**危险操作**：一点之后所有对话都不再受保护，
     //   而用户此前只会看到一条 Toast —— 手滑点中就要手动恢复，且中途
     //   没有任何拦截兜底。这里加二次确认，文案必须讲清后果，不能只说
-    //   「确定暂停吗」。项目内既有约定用 window.confirm（见 Logs.tsx / Settings.tsx）。
+    //   「确定暂停吗」。项目内统一用 confirmDialog（见 lib/confirm.ts）。
     //   取消则不做任何改动，连 busy 都不置位。
     if (durationMin === 0) {
-      const ok = window.confirm(
+      // ★ 原生 window.confirm 在 Tauri 2.7 上弹不出来（见 lib/confirm.ts），
+      //   统一走应用内确认框；必须 await，否则还没等用户答复就暂停了。
+      const ok = await confirmDialog(
         '确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。',
       );
       if (!ok) return;

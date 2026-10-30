@@ -108,6 +108,12 @@ tests/__pycache__/
 _probe*.py
 _tmp*.py
 
+# ★ 2026-10-31：本机交互审计的产物目录（内含引擎/安装包副本，数百 MB）。
+#   它是可复现的运行产物，绝不能被 git add 带进仓库。
+artifacts/
+# 本地隔离实例的启动脚本（只在开发机用）
+run_cdp_isolated.ps1
+
 # 构建期生成的护栏密钥（每次构建都不同，入库等于公开）
 build_secrets.json
 

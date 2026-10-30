@@ -1,6 +1,6 @@
 [package]
 name = "xuandun-personal"
-version = "0.1.28-alpha"
+version = "0.1.29-alpha"
 description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据安全"
 authors = ["Daoti Team"]
 edition = "2021"
@@ -18,7 +18,10 @@ tauri-build = { version = "2", features = [] }
 # 不开这个 feature 则 TrayIconBuilder / TrayIconEvent 类型不存在。
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
+# ★ 2026-10-31 移除了 tauri-plugin-dialog：
+#   它在 2.7.2 里会把 window.confirm 改写成调用未被 ACL 授权的
+#   plugin:dialog|confirm，导致所有二次确认静默失效。
+#   项目已改用应用内确认框（src/lib/confirm.ts），不再依赖该插件。
 # 单实例：防止同时启动多个桌面端实例，各自拉起引擎抢占有端口 18765。
 # 后启动的实例由本插件直接拦下并退出，并把已有窗口拉到前台。
 tauri-plugin-single-instance = "2"
