@@ -116,18 +116,27 @@ def _drain_output(proc: subprocess.Popen, tail_lines: int = 40) -> str:
 
 
 def _report_failure(proc: subprocess.Popen, engine_log: str) -> None:
-    """把能拿到的诊断信息全部打出来：文件日志优先，其次子进程输出。"""
+    """把能拿到的诊断信息全部打出来：文件日志 → 线程栈 → 子进程输出。"""
     tail = _tail_file(engine_log)
     if tail:
         print("---- engine.log（尾部）----")
         print(tail)
         print("---------------------------")
+    # ★ 进程「活着但卡住」时，日志本身不会再有新行；
+    #   线程栈才是指向卡点的唯一证据（engine_main.py 用 faulthandler 定期写）。
+    stack = _tail_file(
+        os.path.join(os.path.dirname(engine_log), "engine_stack.txt"), 80
+    )
+    if stack:
+        print("---- engine_stack.txt（卡点）----")
+        print(stack)
+        print("---------------------------------")
     raw = _drain_output(proc)
     if raw:
         print("---- 引擎 stdout/stderr（尾部）----")
         print(raw)
         print("-----------------------------------")
-    if not tail and not raw:
+    if not tail and not raw and not stack:
         print(
             "（引擎没有留下任何输出 —— 可能是打包产物缺依赖、"
             "或该平台的动态库与构建机不匹配）"
@@ -157,12 +166,19 @@ def _wait_ready(
     if proc.poll() is not None:
         _report_failure(proc, engine_log)
     else:
-        # 进程活着但没监听：把已有日志打出来，通常能看到它卡在哪一步
+        # 进程活着但没监听：日志 + 线程栈是唯一线索
         tail = _tail_file(engine_log)
         if tail:
             print("---- engine.log（尾部，进程仍在运行）----")
             print(tail)
             print("-----------------------------------------")
+        stack = _tail_file(
+            os.path.join(os.path.dirname(engine_log), "engine_stack.txt"), 80
+        )
+        if stack:
+            print("---- engine_stack.txt（卡点，进程仍在运行）----")
+            print(stack)
+            print("---------------------------------------------")
     raise SystemExit(f"::error::引擎在 {BOOT_TIMEOUT_S} 秒内没有就绪（最后一次错误：{last_err}）")
 
 

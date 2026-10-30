@@ -20,6 +20,7 @@ Windows 上打包时用的是 ``--noconsole``（引擎是后台服务，不能�
 把根 logger 同时写到该文件（不动任何默认行为）。
 """
 
+import faulthandler
 import logging
 import os
 import sys
@@ -70,12 +71,37 @@ def _ensure_std_streams() -> None:
                 pass
 
 
+def _setup_stack_dump() -> None:
+    """启动后定期把线程栈 dump 到文件，用于诊断「进程活着但卡住」。
+
+    ★★ 2026-10-30 CI 实测（仅 Windows）：engine.log 停在
+       「calling run()...」之后再无输出，进程一直活着、端口始终不监听。
+       这不是异常（异常有 traceback），而是**卡住** —— 没有栈就无从判断
+       卡在 config 加载、还是 uvicorn 绑定。
+       faulthandler 是标准库，能在不打断进程的前提下定时把调用栈写下来。
+    """
+    path = (os.environ.get("XUANDUN_LOG_FILE") or "").strip()
+    if not path:
+        return
+    try:
+        stack_path = os.path.join(
+            os.path.dirname(os.path.abspath(path)), "engine_stack.txt"
+        )
+        fh = open(stack_path, "w", encoding="utf-8")
+        # 45 秒后第一次 dump，之后每 30 秒一次（CI 的超时是 150 秒）
+        faulthandler.dump_traceback_later(45, repeat=True, file=fh)
+    except Exception:
+        pass
+
+
 def main() -> int:
     _ensure_std_streams()
     _setup_file_logging()
+    _setup_stack_dump()
 
+    log = logging.getLogger("xuandun-engine")
     # 启动标记：File 日志为空时，至少能区分「没进来」与「进来了但卡住」。
-    logging.getLogger("xuandun-engine").info(
+    log.info(
         "engine_main start: frozen=%s meipass=%s argv=%s",
         getattr(sys, "frozen", False), getattr(sys, "_MEIPASS", ""), sys.argv,
     )
@@ -84,11 +110,17 @@ def main() -> int:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         sys.path.insert(0, sys._MEIPASS)
 
-    logging.getLogger("xuandun-engine").info("importing daoti_xuandun_personal...")
+    log.info("importing daoti_xuandun_personal...")
     from daoti_xuandun_personal.proxy.app import run
 
-    logging.getLogger("xuandun-engine").info("calling run()...")
-    run()
+    log.info("calling run()...")
+    try:
+        run()
+    except BaseException:
+        # ★ stderr 在 --noconsole 下是 devnull，异常会彻底消失。
+        #   这里必须显式记进文件日志，否则 CI 上只剩「进程退出了」。
+        log.exception("run() 抛出异常，引擎无法启动")
+        return 1
     return 0
 
 
