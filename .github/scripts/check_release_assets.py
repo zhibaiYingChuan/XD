@@ -73,15 +73,16 @@ EXEMPTABLE: dict[str, str] = {
     "Linux AppImage（.AppImage）": "*.AppImage",
 }
 
-# ★ 2026-10-29：**跟着 AppImage 走**的更新包。
-#   三者是同一件事的三个面：安装包本体、更新包（Tauri 开启
-#   createUpdaterArtifacts 后产出的 .AppImage.tar.gz）、更新签名。
-#   少了后两个，Linux 侧「能装但不能升级」：
-#   latest.json 要么直接跳过 linux-x86_64（旧版本永远看不到新版），
-#   要么写进一个下不回来/验不了签的地址。两者都不会报错。
+# ★ 2026-10-29：**跟着 AppImage 走**的更新签名。
+#   ★★ 2026-10-30 实测更正：Tauri 对 Linux 只产出 `.AppImage` 本体 +
+#      `.AppImage.sig`，**不会**产出 `.AppImage.tar.gz`（那是 macOS 的
+#      `.app.tar.gz` 形态）。此前把 tar.gz 列为必备，导致每一个 Linux
+#      包都被判「缺更新包」——v0.1.28 的发布就卡在这一条上。
+#      `make_latest_json.py` 登记 Linux 更新源时用的也是 `.AppImage` 本体，
+#      两处口径现在一致：更新包 = AppImage 自身，唯一要额外查的是签名。
+#      签名缺了，客户端验不过就会静默放弃更新，同样不会报错。
 #   ★ 判定口径与 EXEMPTABLE 一致：AppImage 在时才要求，缺了走同一个豁免。
 APPIMAGE_UPDATE: dict[str, str] = {
-    "Linux AppImage 更新包（.AppImage.tar.gz）": "*.AppImage.tar.gz",
     "Linux AppImage 更新签名（.AppImage.sig）": "*.AppImage.sig",
 }
 
@@ -102,15 +103,14 @@ NOTICE = """## ⚠ 本次发布缺少 Linux AppImage
 # ★ 另一种缺件形态：安装包在、更新包/签名不在。
 #   它比整包缺失更隐蔽 —— Release 页面上看起来「Linux 有包」，
 #   只有自动更新是坏的。
-NOTICE_INCOMPLETE = """## ⚠ 本次 Linux AppImage 缺少更新包
+NOTICE_INCOMPLETE = """## ⚠ 本次 Linux AppImage 缺少更新签名
 
-本次发布了 Linux AppImage 安装包，但缺少更新包（`.AppImage.tar.gz`）
-或更新签名（`.AppImage.sig`），已按仓库变量
-`ALLOW_MISSING_APPIMAGE=1` **显式豁免**后发布。
+本次发布了 Linux AppImage 安装包，但缺少更新签名（`.AppImage.sig`），
+已按仓库变量 `ALLOW_MISSING_APPIMAGE=1` **显式豁免**后发布。
 
 - AppImage 本身可正常下载运行，功能不受影响。
-- **Linux 上的自动更新本次不可用**：缺更新包，`latest.json` 里没有
-  Linux 条目，旧版本不会自动升级到这一版，请手动下载覆盖安装。
+- **Linux 上的自动更新本次不可用**：没有签名，客户端验不过会静默放弃
+  更新，请手动下载覆盖安装。
 """
 
 

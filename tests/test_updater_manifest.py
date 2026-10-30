@@ -251,8 +251,7 @@ def test_release_workflow_signs_and_publishes_manifest():
 ASSET_GATE = REPO / ".github" / "scripts" / "check_release_assets.py"
 
 
-def _seed_dist(d: Path, *, appimage: bool = True, update: bool = True,
-               sig: bool = True) -> None:
+def _seed_dist(d: Path, *, appimage: bool = True, sig: bool = True) -> None:
     d.mkdir(parents=True, exist_ok=True)
     for name in (
         "xuandun-personal_0.1.27-alpha_x64-setup.exe",
@@ -265,8 +264,6 @@ def _seed_dist(d: Path, *, appimage: bool = True, update: bool = True,
         return
     base = "xuandun-personal_0.1.27-alpha_amd64.AppImage"
     (d / base).write_text("x", encoding="utf-8")
-    if update:
-        (d / f"{base}.tar.gz").write_text("x", encoding="utf-8")
     if sig:
         (d / f"{base}.sig").write_text("SIG", encoding="utf-8")
 
@@ -291,29 +288,32 @@ def test_asset_gate_passes_when_appimage_update_package_is_complete(tmp_path):
     assert not notice.exists(), "全都齐了却写了缺件提示"
 
 
-def test_asset_gate_blocks_when_appimage_update_package_is_missing(tmp_path):
-    """安装包在、更新包不在 → 未豁免必须 exit 1。
+def test_asset_gate_blocks_when_appimage_signature_is_missing(tmp_path):
+    """安装包在、更新签名不在 → 未豁免必须 exit 1。
 
-    ★ 这是最难被发现的缺件形态：Release 上「Linux 有包」，
-      只有自动更新是哑的。旧门禁只查 .AppImage，因此一路放行。
+    ★ 2026-10-30 实测更正：Tauri 对 Linux 只产 `.AppImage` 与
+      `.AppImage.sig`，**不产** `.AppImage.tar.gz`（那是 macOS 的形态）。
+      此前按 tar.gz 要求，每一个 Linux 包都被判「缺更新包」，
+      v0.1.28 的发布就卡死在这一条上。真正会让「能装不能升级」的是签名缺失：
+      客户端验不过会静默放弃更新，而 Release 页面看起来一切正常。
     """
     dist = tmp_path / "dist"
-    _seed_dist(dist, update=False)
+    _seed_dist(dist, sig=False)
     r = _run_gate(dist, exempt=False, notice=tmp_path / "notice.md")
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "AppImage.tar.gz" in (r.stdout + r.stderr), "没指出缺的到底是哪个包"
+    assert ".sig" in (r.stdout + r.stderr), "没指出缺的到底是哪个签名"
 
 
 def test_asset_gate_allows_exempted_incomplete_appimage_with_notice(tmp_path):
     """已豁免 → 放行，但必须写出正文提示（缺件不能被静默吞掉）。"""
     dist = tmp_path / "dist"
-    _seed_dist(dist, update=False)
+    _seed_dist(dist, sig=False)
     notice = tmp_path / "notice.md"
     r = _run_gate(dist, exempt=True, notice=notice)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "::warning" in r.stdout
     text = notice.read_text(encoding="utf-8")
-    assert "更新包" in text and "自动更新" in text
+    assert "自动更新" in text
 
 
 def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):
