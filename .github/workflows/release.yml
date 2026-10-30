@@ -46,27 +46,14 @@ jobs:
   preflight:
     name: Preflight Gate
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
-      # ★ P1-26：本 job 的依赖面只有「取仓库 + pip」，allowlist 可核准，
-      #   因此出网策略用 block（audit 只记录不拦截，等于事后才看得见）。
-      #   build job 也已按同样方式收紧为 block，允许清单按步骤逐个列出，
-      #   见该 job 的注释。
-      - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: block
-          # ★★ 2026-10-30：关闭遥测上报。实测在 egress-policy: block 下，
-          #   它的 post 收尾要联网上报，却被自己的出网策略挡住而不返回 ——
-          #   有一轮 Post Harden Runner 卡了 53 分钟，把整条发布流水线拖死
-          #   （后续 job 全在等它）。我们只用它的出网拦截能力，不需要云端分析。
-          disable-telemetry: true
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            objects.githubusercontent.com:443
-            pypi.org:443
-            files.pythonhosted.org:443
+      # ★ 2026-10-31：harden-runner 已从本 job 移除。
+      #   它在 egress-policy: block 下，post 收尾阶段会卡死而不返回
+      #   （本仓库已因此卡死三次：Linux 两个 job 各一次、本次 preflight 一次）。
+      #   它挂住时后续 job 永远不会开始 —— 一个安全插件把整条发布流水线拖死，
+      #   比没有它更糟。本 job 只做「取仓库 + 本地断言 + pip install」，
+      #   出网面本来就窄，改由上面的 job 级超时兜底。
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -142,6 +129,8 @@ jobs:
   build:
     name: Build (${{ matrix.art }})
     needs: preflight
+    # 正常 8–12 分钟；给足余量，但不允许无限期挂住
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -888,6 +877,7 @@ jobs:
   linux-engine:
     name: Build engine (linux)
     needs: preflight
+    timeout-minutes: 25
     # ★★ 不能换到 ubuntu-24.04（曾考虑过，已否决）：
     #   24.04 的 glibc 是 2.39，22.04 是 2.35。在 24.04 上编出来的
     #   引擎二进制会要求 glibc ≥ 2.39，而 Ubuntu 22.04 用户
@@ -961,6 +951,7 @@ jobs:
     name: Build (linux-deb)
     needs: linux-engine
     runs-on: ubuntu-22.04
+    timeout-minutes: 25
     steps:
       # 同 linux-engine：harden-runner 在 ubuntu 上的 post 阶段会卡死发布，
       # 取舍与安全补偿见该 job 顶部的说明。
@@ -1065,6 +1056,7 @@ jobs:
   # ══════════════════════════════════════════════════════════
   linux-appimage:
     name: Build (linux-appimage)
+    timeout-minutes: 25
     # ★ 与 deb 同源：都等 linux-engine 编好引擎，互不重复编译。
     needs: linux-engine
     # ★ 可选产物：失败不染红整轮。缺件的后果由 release job 的
@@ -1226,6 +1218,7 @@ jobs:
   # ══════════════════════════════════════════════════════════
   virustotal:
     name: VirusTotal Scan
+    timeout-minutes: 20
     # ★★ 2026-10-30：把两个 Linux 包纳入 needs —— 否则扫描会在它们
     #   还没产出时开始，扫不到 deb/AppImage，报告里少两行而没人发现。
     #   AppImage 带 continue-on-error（可选产物），所以判据不能再用
@@ -1272,6 +1265,7 @@ jobs:
 
   release:
     name: Create Release
+    timeout-minutes: 20
     # ★★ 2026-10-30：把 linux-appimage 纳入 needs —— 否则 release 会在
     #   AppImage 还没跑完时就装配资产，然后被缺件门禁判成「缺 AppImage」，
     #   而那个包其实几分钟后才到。
