@@ -1015,9 +1015,10 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Assert updater signing key matches pubkey
-        shell: bash
-        run: python .github/scripts/check_signing_key.py
+      # ★ 2026-10-30：这里**不**重复校验更新签名密钥。
+      #   build job 里已经跑过一次（仅 win-x64，见那里的注释：CLI 的密钥
+      #   处理与平台无关，跑一次就够）。这里复制过来时漏了私钥环境变量，
+      #   脚本拿不到密钥直接 exit 1 —— 一次「多余但会失败」的校验。
 
       - name: Build Tauri app (deb)
         working-directory: desktop
