@@ -37,23 +37,15 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
-      # ★ P1-19/P1-26：与 release.yml 保持一致 ——
-      #   ① 所有 action 钉 40 位 commit SHA，不用浮动 tag
-      #      （tag 可被移动，`@v5` 等于把构建交给上游随时改写）；
-      #   ② 出网策略从 audit 收紧为 block：这个 job 的依赖面很小
-      #      （pip + 取仓库），allowlist 可核准；比"只审计不拦截"更实在。
-      - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            objects.githubusercontent.com:443
-            pypi.org:443
-            files.pythonhosted.org:443
+      # ★ 2026-10-31：harden-runner 已移除。
+      #   它在 ubuntu runner 上会把 egress 全程拦住，actions/checkout 偶发连不上而失败；
+      #   随后它的 post 收尾又要联网上报、被自己的策略挡住不返回，
+      #   job 永远停在 in_progress —— 后续 job 全部开始不了。
+      #   本仓库已因此卡死四次（release.yml 三次、本 job 一次）。
+      #   保留 P1-19 的另一半：所有 action 仍钉 40 位 commit SHA。
+      #   出网面收窄改用上面的 job 级超时兜底。
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -98,6 +90,7 @@ jobs:
   desktop:
     name: Desktop (frontend build + rust check)
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
