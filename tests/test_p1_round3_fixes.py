@@ -503,16 +503,17 @@ class TestUpdateCheckHasBoundedNetwork:
     def test_check_has_a_hard_timeout(self):
         src = _read(UPDATER_TS)
         assert "UPDATE_CHECK_TIMEOUT_MS" in src
-        assert "withTimeout" in src, "检查更新没有硬超时，直连 GitHub 挂住时按钮永久转圈"
+        assert "withTimeout" in src, "检查更新没有硬超时，直连更新服务器挂住时按钮永久转圈"
         assert "15_000" in src, "检查更新的超时上限应 ≤ 15s"
 
     def test_failure_message_is_actionable(self):
         src = _read(UPDATER_TS)
-        assert "无法连接 GitHub" in src, (
+        # ★ 2026-11-03：更新端点已从 GitHub 迁到自有站点 sfang.cc。
+        assert "无法连接更新服务器" in src, (
             "仍把 reqwest 原文甩给用户 —— 既不是中文，也没有下一步"
         )
         assert "DOWNLOAD_PAGE_URL" in src
-        assert "releases/latest" in src
+        assert "sfang.cc" in src, "手动下载页没有指向自有站点"
 
     def test_settings_offers_open_download_page(self):
         src = _read(SETTINGS_TSX)

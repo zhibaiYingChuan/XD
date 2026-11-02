@@ -840,6 +840,21 @@ OBSERVATION_ONLY_SIGNALS: frozenset = STATISTICAL_SIGNALS | {
     "credential_from_response",
 }
 
+#: 单条只告警、需要第二条独立证据才阻断的启发式判据。
+#:
+#: ★ 2026-11-03：这两类都依赖「文本共现 / 语义推断」，而不是
+#:   「结构化 tool_call 里出现了 rm -rf」这种确定性证据。
+#:   实测误报集中在引用、总结、教学场景（AI 在报告里复述检测器说明、
+#:   在代码里写 re.exec(s)）。单条就阻断，等于把「讨论安全」当成「攻击」。
+#:   两条独立启发式同时命中时仍阻断 —— 组合载荷才是真攻击的形态。
+CORROBORATION_REQUIRED_SIGNALS: frozenset = {
+    "toolchain_injection",
+    "constraint_violation",
+}
+
+#: 元信号：只描述「什么时候发现的」，不构成独立证据，不计入佐证数量。
+_META_SIGNALS: frozenset = {"late_delivery"}
+
 
 #: 内容合规类的护栏 reason 特征（用于把「模型说了敏感词」
 #: 与「中转站动了手脚」分开）。命中即归 content_policy。
@@ -1112,6 +1127,19 @@ def decide_response_action(
             getattr(findings[0], "detail", ""),
         )
         action = Action.ALERT.value
+
+    # ★ 2026-11-03：启发式判据单条不阻断。
+    #   证据类别（去掉 late_delivery 这类元信号）不足两条时，
+    #   把「单条文本共现」降为告警 —— 用户仍能看到，但对话不被打断。
+    if action == Action.BLOCK.value:
+        evidence = categories - _META_SIGNALS
+        if evidence & CORROBORATION_REQUIRED_SIGNALS and len(evidence) < 2:
+            logger.info(
+                "单条启发式信号（%s）不阻断，仅告警：%s",
+                "/".join(sorted(evidence)),
+                getattr(findings[0], "detail", ""),
+            )
+            action = Action.ALERT.value
 
     return action, max_sev
 

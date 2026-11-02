@@ -192,6 +192,40 @@ class TestRealEvidenceStillBlocks:
             assert action == "block", f"{cat} 不再阻断"
 
 
+class TestHeuristicNeedsCorroboration:
+    """单条启发式高危信号只告警，两条独立信号才阻断。
+
+    ★ 2026-11-03：工具链注入与约束违背都依赖文本共现，
+      实测误报集中在「AI 引用检测器说明」「AI 写 re.exec(s)」。
+      单条就阻断会把讨论安全当成攻击。
+    """
+
+    @staticmethod
+    def _f(cat: str) -> VerificationFinding:
+        return VerificationFinding(
+            category=cat, severity="high", detail="x", evidence="x",
+        )
+
+    def test_single_heuristic_is_alert(self):
+        for cat in ("toolchain_injection", "constraint_violation"):
+            action, _ = decide_response_action("balanced", [self._f(cat)])
+            assert action == "alert", f"单条 {cat} 仍阻断"
+
+    def test_two_heuristics_still_block(self):
+        action, _ = decide_response_action(
+            "balanced",
+            [self._f("toolchain_injection"), self._f("constraint_violation")],
+        )
+        assert action == "block", "两条独立启发式同时命中仍应阻断"
+
+    def test_meta_signal_does_not_count_as_corroboration(self):
+        action, _ = decide_response_action(
+            "balanced",
+            [self._f("toolchain_injection"), self._f("late_delivery")],
+        )
+        assert action == "alert", "late_delivery 是元信号，不能当第二条证据"
+
+
 class TestRelayCountsFollowLogs:
     """③ 中转站计数必须随日志重算，不能各说各话。"""
 

@@ -22,6 +22,7 @@ import { Download, ExternalLink, Sparkles } from 'lucide-react';
 import { isTauri, openExternal } from '../lib/tauriShim';
 import {
   DOWNLOAD_PAGE_URL,
+  FOCUS_CHECK_INTERVAL_MS,
   checkForUpdate,
   isVersionSkipped,
   markAutoChecked,
@@ -43,32 +44,47 @@ export default function UpdateNotice() {
   const [error, setError] = useState<string | null>(null);
   const aliveRef = useRef(true);
 
-  // ── 启动时静默检查一次 ────────────────────────────────────
+  // ── 启动时静默检查一次；窗口重新获得焦点时按 6 小时间隔复查 ──
+  const runCheck = useCallback(async () => {
+    const result = await checkForUpdate();
+    if (!aliveRef.current) return;
+    // ★ 先记账再判结果：失败也要记，否则网络长期不通时
+    //   每次启动都要先卡一次检查超时，用户只感觉「启动变慢了」。
+    //   但失败会标记出来，下一次按 30 分钟而不是 24 小时重试。
+    markAutoChecked(Date.now(), result.kind !== 'unavailable');
+    if (result.kind === 'available' && !isVersionSkipped(result.version)) {
+      setInfo(result);
+      setVisible(true);
+    }
+  }, []);
+
   useEffect(() => {
     aliveRef.current = true;
-    if (!isTauri() || !shouldAutoCheck()) {
+    if (!isTauri()) {
       return () => {
         aliveRef.current = false;
       };
     }
     const timer = setTimeout(() => {
-      void (async () => {
-        const result = await checkForUpdate();
-        if (!aliveRef.current) return;
-        // ★ 先记账再判结果：失败也要记，否则网络长期不通时
-        //   每次启动都要先卡一次检查超时，用户只感觉「启动变慢了」。
-        markAutoChecked();
-        if (result.kind === 'available' && !isVersionSkipped(result.version)) {
-          setInfo(result);
-          setVisible(true);
-        }
-      })();
+      if (shouldAutoCheck()) void runCheck();
     }, AUTO_CHECK_DELAY_MS);
+
+    // ★ 2026-11-03：应用长期挂在后台时，启动检查之后再也不会查。
+    //   窗口重新获得焦点时补一次，但至少间隔 6 小时，仍不轮询。
+    const onFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (shouldAutoCheck(Date.now(), FOCUS_CHECK_INTERVAL_MS)) void runCheck();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+
     return () => {
       aliveRef.current = false;
       clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
     };
-  }, []);
+  }, [runCheck]);
 
   // ── Esc 关闭（仅非安装中）────────────────────────────────
   useEffect(() => {

@@ -57,9 +57,8 @@ const UPDATE_STALL_TIMEOUT_MS = 120_000;
  */
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
 
-/** 手动下载页：与 README / tauri.conf.json 的更新端点同一仓库。 */
-export const DOWNLOAD_PAGE_URL =
-  'https://github.com/zhibaiYingChuan/XD/releases/latest';
+/** 手动下载页：与 tauri.conf.json 的更新端点同一自有站点。 */
+export const DOWNLOAD_PAGE_URL = 'https://sfang.cc/xuandun/personal';
 
 /** 把底层网络错误翻译成「用户能照做」的一句话。 */
 function describeCheckFailure(e: unknown): string {
@@ -69,8 +68,8 @@ function describeCheckFailure(e: unknown): string {
     .test(raw);
   if (looksNetworky) {
     return (
-      '无法连接 GitHub（常见于国内网络，直连 github.com 会被阻断或超时）。'
-      + `请手动下载：${DOWNLOAD_PAGE_URL}`
+      '无法连接更新服务器（sfang.cc）。'
+      + `请检查网络后重试，或手动下载：${DOWNLOAD_PAGE_URL}`
     );
   }
   return raw;
@@ -210,21 +209,35 @@ const UPDATE_PREFS_KEY = 'xuandun-update-prefs';
 /** 两次自动检查的最小间隔：一天一次足够，再多就是骚扰。 */
 const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * 应用一直开着时的复查间隔。
+ *
+ * ★ 2026-11-03：此前只在启动后查一次。用户把玄盾挂在后台好几天，
+ *   期间发的新版本永远收不到提示 —— 直到他主动重启。
+ *   现在窗口重新获得焦点时也查一次，但至少间隔 6 小时，仍不轮询。
+ */
+export const FOCUS_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** 检查失败后的重试间隔：网络抖动不该让用户等一整天。 */
+const RETRY_AFTER_FAILURE_MS = 30 * 60 * 1000;
+
 type UpdatePrefs = {
   /** 上次自动检查的时间戳（毫秒） */
   lastCheckAt: number;
+  /** 上次检查是否成功；失败时用更短的重试间隔 */
+  lastCheckOk: boolean;
   /** 用户明确「跳过这个版本」的版本号 */
   skipped: string[];
 };
 
 function readPrefs(): UpdatePrefs {
-  const empty: UpdatePrefs = { lastCheckAt: 0, skipped: [] };
+  const empty: UpdatePrefs = { lastCheckAt: 0, lastCheckOk: true, skipped: [] };
   try {
     const raw = localStorage.getItem(UPDATE_PREFS_KEY);
     if (!raw) return empty;
     const parsed = JSON.parse(raw) as Partial<UpdatePrefs>;
     return {
       lastCheckAt: Number(parsed.lastCheckAt) || 0,
+      lastCheckOk: parsed.lastCheckOk !== false,
       skipped: Array.isArray(parsed.skipped)
         ? parsed.skipped.filter((v): v is string => typeof v === 'string')
         : [],
@@ -252,18 +265,25 @@ function writePrefs(p: UpdatePrefs): void {
  *   检查一次；只 GET 一个静态 latest.json，不带设备标识、不上报任何信息。
  *   失败完全静默 —— 网络不通时不该在启动瞬间弹一个用户无法处理的错误。
  */
-export function shouldAutoCheck(now: number = Date.now()): boolean {
-  return now - readPrefs().lastCheckAt >= AUTO_CHECK_INTERVAL_MS;
+export function shouldAutoCheck(
+  now: number = Date.now(),
+  intervalMs: number = AUTO_CHECK_INTERVAL_MS,
+): boolean {
+  const prefs = readPrefs();
+  // 上次失败时用更短的重试间隔，避免一次网络抖动让用户等一整天
+  const effective = prefs.lastCheckOk ? intervalMs : RETRY_AFTER_FAILURE_MS;
+  return now - prefs.lastCheckAt >= effective;
 }
 
 /**
- * 记录「刚做过一次自动检查」。
+ * 记录一次自动检查的结果。
  *
  * ★ 必须连失败一起记：否则网络长期不通时，每次启动都要先卡一次检查超时，
  *   而用户对此毫无感知，只觉得「玄盾启动变慢了」。
+ * ★ 但失败要标记出来：下一次按 30 分钟而不是 24 小时重试。
  */
-export function markAutoChecked(now: number = Date.now()): void {
-  writePrefs({ ...readPrefs(), lastCheckAt: now });
+export function markAutoChecked(now: number = Date.now(), ok: boolean = true): void {
+  writePrefs({ ...readPrefs(), lastCheckAt: now, lastCheckOk: ok });
 }
 
 /** 该版本是否已被用户「跳过」。 */
