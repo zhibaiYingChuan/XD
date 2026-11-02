@@ -1071,6 +1071,43 @@ _EXECUTABLE_INJECTION = [
 ]
 
 
+#: 「写入意图」——只有表达「要动这个文件」才算注入。
+#:
+#: ★ 2026-11-03 实测误报：AI 在总结一次项目会话时，正文里同时出现了
+#:   AGENTS.md 与 process.env（描述项目规则），于是被判为
+#:   「针对 AI 编程工具配置文件的注入」。
+#:   根因是旧判据只要求「配置文件名 + 可执行载荷」在 600 字符内共现，
+#:   无法区分「描述/引用这个文件」与「要求写入这个文件」。
+#:   正常回答会提到 AGENTS.md（教学、总结、排障），但不会要求改它。
+_WRITE_INTENT = re.compile(
+    r"(?:写入|写到|写进|写为|创建|新建|修改|改成|改为|追加|添加|加入|加进|"
+    r"加(?:一个|个|入|进|上|\s*[:：])|"
+    r"配置为|设置为|替换|覆盖|保存到|放到|放进|"
+    r"内容如下|配置如下|如下所示|"
+    r"\bwrite\s+(?:to|into)\b|\bcreate\b|\bupdate\b|\bmodify\b|\bappend\b|"
+    r"\badd\s+(?:to|into)\b|\breplace\b|\bsave\s+(?:to|as)\b|"
+    r"\bput\s+(?:it\s+)?in\b)",
+    re.IGNORECASE,
+)
+
+
+def _has_write_intent_near(content: str, pos: int) -> bool:
+    """判断配置文件出现的位置附近是否表达了「写入/修改」意图。
+
+    取文件所在行 + 前后各一行，避免跨段落把无关的「写入」连过来。
+    只提到文件名（教学、总结、引用）不算注入。
+    """
+    line_start = content.rfind("\n", 0, pos) + 1
+    prev_start = content.rfind("\n", 0, max(0, line_start - 1)) + 1
+    line_end = content.find("\n", pos)
+    if line_end == -1:
+        line_end = len(content)
+    next_end = content.find("\n", line_end + 1)
+    if next_end == -1:
+        next_end = len(content)
+    return bool(_WRITE_INTENT.search(content[prev_start:next_end]))
+
+
 def _check_toolchain_injection(
     baseline: RequestBaseline, content: str
 ) -> List[Dict[str, str]]:
@@ -1097,8 +1134,7 @@ def _check_toolchain_injection(
     # ① 响应中是否出现「工具配置文件」
     file_hits: List[Tuple[str, str, int]] = []
     for pat, label in _TOOLCHAIN_CONFIG_FILES:
-        m = re.search(pat, content, re.IGNORECASE)
-        if m:
+        for m in re.finditer(pat, content, re.IGNORECASE):
             file_hits.append((label, m.group(0), m.start()))
     if not file_hits:
         return []
@@ -1106,14 +1142,16 @@ def _check_toolchain_injection(
     # ② 同一段内容里是否伴随可执行载荷
     payload_hits: List[Tuple[str, str, int]] = []
     for pat, label in _EXECUTABLE_INJECTION:
-        m = re.search(pat, content, re.IGNORECASE)
-        if m:
+        for m in re.finditer(pat, content, re.IGNORECASE):
             payload_hits.append((label, m.group(0)[:30], m.start()))
     if not payload_hits:
         return []
 
     # ③ 配置与载荷相距 600 字符内 —— 视为同一段配置
+    #    且文件附近必须表达「写入/修改」意图：只提到文件名是描述，不是注入
     for flabel, ftext, fpos in file_hits:
+        if not _has_write_intent_near(content, fpos):
+            continue
         for plabel, _, ppos in payload_hits:
             if abs(ppos - fpos) > 600:
                 continue

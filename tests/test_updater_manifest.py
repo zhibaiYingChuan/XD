@@ -179,10 +179,14 @@ def test_tauri_config_enables_updater_artifacts_for_every_platform():
     )
     updater = conf["plugins"]["updater"]
     assert updater["pubkey"].strip(), "更新公钥为空 —— 客户端无法验签"
+    # ★ 2026-11-03：端点从 GitHub 迁到自有站点 sfang.cc（国内可达性）。
+    #   判据改为「必须是稳定的 latest.json 指针」，不写死域名，
+    #   但禁止写死版本号 —— 那种指针在下一版就会 404。
+    endpoints = updater["endpoints"]
+    assert endpoints, "更新端点为空 —— 客户端不会检查更新"
     assert any(
-        "releases/latest/download/latest.json" in e
-        for e in updater["endpoints"]
-    ), "更新端点不是 releases/latest，指针会失效"
+        e.rstrip("/").endswith("/latest.json") for e in endpoints
+    ), f"更新端点必须指向稳定的 latest.json 指针：{endpoints}"
     assert conf["bundle"].get("createUpdaterArtifacts") is True, (
         "主配置没开 createUpdaterArtifacts —— Linux 不会产出 .AppImage.tar.gz，"
         "latest.json 里也就永远没有 linux-x86_64"

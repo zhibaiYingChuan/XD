@@ -262,6 +262,14 @@ CASES_TOOLCHAIN_NEG = [
     ("MCP 安全加固建议", '配置 MCP 时要注意安全：\n'
                        '不要把 command 指向未经审查的远程脚本，\n'
                        '也不要让 MCP server 有 ~/.ssh 的访问权限。'),
+    # ★ 2026-11-03 实测误报：AI 总结项目会话时同时提到 AGENTS.md 与 process.env，
+    #   旧判据只要求「文件名 + 载荷」共现，于是把「描述规则」当成「写入规则」。
+    ("项目会话总结（提到 AGENTS.md 与 process.env）",
+     '<summary> 1. Primary Request and Intent:\n'
+     '- 持续目标：按 g:\\TL 仓库文档开发「田螺」卖家后台 AI 培训师。\n'
+     '- 硬边界：用户可见文案只取 docs/05；账号/密码/验证码不落库不传输。\n'
+     '- 项目规则写在 AGENTS.md 里，代码通过 process.env 读取配置。\n'
+     '- 每轮工作流：先写红用例 → 改代码 → 同步文档。'),
 ]
 
 # AC-1.a 的攻击样本（应被拦）
