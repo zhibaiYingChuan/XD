@@ -1320,6 +1320,42 @@ _SEVERITY = {
     "new_dependency": "medium",
 }
 
+#: 常见公共站点后缀 —— 出现在工具调用参数里不构成「数据外传」证据。
+#:
+#: ★★ 2026-11-03（误报修复）：实测 8 条 new_external_endpoint 全部是
+#:   用户正在调研的站点（aliexpress / shopee / huggingface / modelscope /
+#:   apple 推送 / windows WNS）与本地 127.0.0.1。判据只知道「请求正文里
+#:   没提过这个域名」，不知道用户的意图就是访问它。
+#:   公共站点与内网地址一律不报；只有陌生域名才保持 medium。
+_BENIGN_HOST_SUFFIXES = (
+    "aliexpress.com", "shopee.co", "shopee.com", "lazada.com", "amazon.com",
+    "taobao.com", "tmall.com", "jd.com", "1688.com", "pinduoduo.com",
+    "github.com", "githubusercontent.com", "gitlab.com", "gitee.com",
+    "huggingface.co", "modelscope.cn", "pypi.org", "npmjs.com",
+    "apple.com", "microsoft.com", "windows.com", "google.com",
+    "cloudflare.com", "openai.com", "anthropic.com",
+    "baidu.com", "aliyun.com", "tencent.com", "bilibili.com", "zhihu.com",
+)
+
+
+def _is_benign_host(host: str) -> bool:
+    """该主机是否属于「公共站点 / 内网地址」—— 不构成外传证据。"""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return False
+    # 内网 / 回环：本地开发服务，不是外传
+    if h in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if h.startswith(("10.", "192.168.", "169.254.")):
+        return True
+    if h.startswith("172."):
+        try:
+            if 16 <= int(h.split(".")[1]) <= 31:
+                return True
+        except (IndexError, ValueError):
+            pass
+    return any(h == s or h.endswith("." + s) for s in _BENIGN_HOST_SUFFIXES)
+
 
 def diff_against_baseline(
     baseline: RequestBaseline,
@@ -1438,17 +1474,25 @@ def diff_against_baseline(
     #   模型在正常回答里写 `requests.get('https://api.example.com')`
     #   是讲解行为，不是执行行为。若把 content 也算进来，
     #   编程场景下几乎每条回答都会命中，误报率不可用。
+    #
+    # ★★ 2026-11-03（误报修复）：公共站点与内网地址不再报。
+    #   实测 8 条全部是用户正在调研的站点（aliexpress / shopee /
+    #   huggingface / modelscope / apple 推送 / windows WNS）与 127.0.0.1。
+    #   判据只知道「请求正文里没提过这个域名」，不知道用户的意图
+    #   就是访问它 —— 这类命中没有任何证据价值，只会淹没真信号。
     new_domains = (
         set(response_facts.get("exec_domains") or [])
         - baseline.request_domains
     )
     new_ips = set(response_facts.get("exec_ips") or []) - baseline.request_ips
-    if new_domains or new_ips:
+    risky_domains = {d for d in new_domains if not _is_benign_host(d)}
+    risky_ips = {i for i in new_ips if not _is_benign_host(i)}
+    if risky_domains or risky_ips:
         parts = []
-        if new_domains:
-            parts.append("域名 " + "、".join(sorted(new_domains)[:5]))
-        if new_ips:
-            parts.append("IP " + "、".join(sorted(new_ips)[:5]))
+        if risky_domains:
+            parts.append("域名 " + "、".join(sorted(risky_domains)[:5]))
+        if risky_ips:
+            parts.append("IP " + "、".join(sorted(risky_ips)[:5]))
         findings.append({
             "category": "new_external_endpoint",
             "severity": _SEVERITY["new_external_endpoint"],

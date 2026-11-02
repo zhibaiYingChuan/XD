@@ -259,6 +259,15 @@ def machine_code() -> str:
     return value
 
 
+def reset_machine_code_cache() -> None:
+    """清空机器码缓存。
+
+    ★ 仅供测试与「硬件变更后强制重算」使用。
+      正常运行时机器码在进程存活期间不会变，缓存是刻意的。
+    """
+    _MACHINE_CODE_CACHE.clear()
+
+
 def _machine_code_uncached() -> str:
     """真正去系统里采集（慢，1–3 秒）。只在进程内第一次调用时执行。
 

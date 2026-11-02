@@ -74,15 +74,47 @@ SUSPICIOUS_PATTERNS: Dict[str, str] = {
 }
 
 # 数据保留水印特征（响应中出现即说明中转站在二次处理/留存）
+#
+# ★★ 2026-11-03 重写（误报修复，日志 #15154）
+# ────────────────────────────────────────────────────────────
+# 旧规则里有一条 `[\u4e00-\u9fa5]{0,6}(?:转发|代理|中转)(?:服务|站|节点)`，
+# 只要文本里出现「中转站」三个字就算命中。实测它命中的是**用户自己
+# 整理的访谈笔记**（"中转站 link-ai 跑路了"），被模型复述回来 ——
+# 于是「用户写了中转站三个字」被当成「中转站自述保留数据」，
+# 一次性扣 30 分且不衰减，分数永久封顶 70。
+#
+# 新口径：必须同时具备「主体 + 留存动词 + 数据对象」才算留存声明。
+# 单纯出现「中转站 / 代理 / 转发」这类名词不构成任何证据。
 _WATERMARK_PATTERNS: List[Tuple[str, str]] = [
-    (r"[\u4e00-\u9fa5]{0,4}(?:本平台|本站|本站点)(?:保留|存储|记录|留存)", "中转站自述保留数据"),
-    (r"(?:conversation|chat)[-_ ]?(?:log|history)[\s_-]?(?:saved|retained|kept)", "会话历史留存声明"),
-    (r"for\s+(?:training|improvement|analysis)\s+purposes?", "训练用途声明"),
-    (r"(?:we|i)\s+(?:may|will|reserve)\s+the\s+right\s+to\s+(?:store|retain|log)", "数据留存权声明"),
-    (r"(?:powered|provided|served)\s+by\s+[\w.-]+\s*(?:relay|proxy|gateway)", "中转站标识"),
-    (r"[\u4e00-\u9fa5]{0,6}(?:转发|代理|中转)(?:服务|站|节点)", "中转服务标识"),
-    (r"\bthird[- ]party\s+(?:provider|relay|service)\b", "第三方中转声明"),
+    (
+        r"(?:本平台|本站|本站点|我们|我方)[^。\n]{0,16}"
+        r"(?:保留|存储|留存|记录)[^。\n]{0,16}"
+        r"(?:对话|会话|聊天|请求|提示词|数据|内容|记录)",
+        "中转站自述保留对话数据",
+    ),
+    (
+        r"\b(?:we|i)\b[^.\n]{0,40}\b(?:retain|store|log|keep)\b[^.\n]{0,40}"
+        r"\b(?:conversation|chat|prompt|request|message)s?\b",
+        "英文留存声明",
+    ),
+    (r"\bfor\s+(?:training|model improvement)\s+purposes?\b", "训练用途声明"),
 ]
+
+#: 代码块与引号内容 —— 匹配水印前先剔除。
+_FENCE_RE = re.compile(r"```.*?```", re.S)
+_QUOTE_RE = re.compile(r"[\"'“”‘’「」『』][^\"'“”‘’「」『』\n]{0,200}[\"'“”‘’「」『』]")
+
+
+def _strip_quoted_and_code(text: str) -> str:
+    """去掉代码块与引号内的内容，再做水印匹配。
+
+    ★ 为什么必须去：中转站的水印是它**自己**说的话，不会出现在
+      用户引用的原文、代码块或引号里。而实测误报恰恰来自
+      「用户笔记里的一句引语被模型复述」。
+    """
+    t = _FENCE_RE.sub(" ", text)
+    t = _QUOTE_RE.sub(" ", t)
+    return t
 
 
 # ══════════════════════════════════════════════════════════════
@@ -295,8 +327,9 @@ class ReputationTracker:
 
         # 水印检测
         if not rep.watermark_detected and content:
+            probe = _strip_quoted_and_code(content)
             for pattern, label in _WATERMARK_PATTERNS:
-                if re.search(pattern, content, re.IGNORECASE):
+                if re.search(pattern, probe, re.IGNORECASE):
                     rep.watermark_detected = True
                     rep.notes.append(f"检测到数据保留迹象：{label}")
                     logger.info("中转站 %s 命中水印特征：%s", netloc, label)
@@ -408,8 +441,9 @@ class ReputationTracker:
             if not rep.watermark_detected:
                 preview = str(f.get("text_preview") or "")
                 if preview:
+                    probe = _strip_quoted_and_code(preview)
                     for pattern, label in _WATERMARK_PATTERNS:
-                        if re.search(pattern, preview, re.IGNORECASE):
+                        if re.search(pattern, probe, re.IGNORECASE):
                             rep.watermark_detected = True
                             rep.notes.append(f"检测到数据保留迹象：{label}")
                             break

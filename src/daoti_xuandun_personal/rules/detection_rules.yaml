@@ -48,9 +48,11 @@ dangerous_commands:
     label: SQL 删库
   - pattern: '\btruncate\s+table\b'
     label: SQL 截断表
-  - pattern: '\beval\s*\('
+  # 2026-11-03 误报修复：前面紧邻 `.` 的是方法调用（re.exec / model.eval），
+  # 不是动态代码执行。旧写法把 `re.exec(s)` 判成 high。
+  - pattern: '(?<!\.)\beval\s*\('
     label: 动态代码执行 eval
-  - pattern: '\bexec\s*\('
+  - pattern: '(?<!\.)\bexec\s*\('
     label: 动态代码执行 exec
   - pattern: '\b(?:curl|wget)\b[^\n|;]*\|\s*(?:ba)?sh\b'
     label: 下载并执行远程脚本（curl|sh）

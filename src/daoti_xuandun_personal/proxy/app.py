@@ -293,6 +293,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
     )
 
+    # ★★ 2026-11-03：启动时按日志重算一次中转站派生数据。
+    #   检测规则会随版本修正（水印正则收窄、长度基线剔除近空响应、
+    #   公共站点不再算外传），而 relay_reputation 是**累加表** ——
+    #   不重算的话，旧规则留下的误判会一直挂在分数上：
+    #   用户升级后看到的还是 69 分，等于这次修复没生效。
+    #   以 logs 为唯一事实源重算，规则一改就立刻生效。
+    try:
+        _rebuild_reputation_from_logs()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("启动时重算中转站派生数据失败（不影响启动）: %s", e)
+
     # ★★ 预热机器码缓存（2026-10-31）
     #   机器码靠 PowerShell 的 Get-CimInstance 采集，一次 1–3 秒且同步阻塞。
     #   若等用户第一次打开激活页才现算，这几秒会卡在事件循环上，
@@ -1897,7 +1908,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="存储未就绪")
         if not _storage.delete_log(log_id):
             raise HTTPException(status_code=404, detail="日志不存在")
-        _sync_reputation_after_log_delete()
+        _rebuild_reputation_from_logs()
         return {"ok": True, "log_id": log_id}
 
     @app.post("/api/logs/clear")
@@ -1907,7 +1918,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="存储未就绪")
         before_ts = time.time() - before_days * 86400 if before_days > 0 else None
         count = _storage.clear_logs(before_ts)
-        _sync_reputation_after_log_delete()
+        _rebuild_reputation_from_logs()
         return {"ok": True, "deleted": count}
 
     @app.post("/api/logs/delete-filtered")
@@ -1959,7 +1970,7 @@ def create_app() -> FastAPI:
             start_ts=start_ts, marked_safe=marked_safe,
             log_type_not=exclude_log_type,
         )
-        _sync_reputation_after_log_delete()
+        _rebuild_reputation_from_logs()
         logger.info("按筛选条件删除日志 %d 条", deleted)
         return {"ok": True, "deleted": deleted, "dry_run": False}
 
@@ -4572,7 +4583,7 @@ def _migrate_relay_keys_to_fingerprint() -> None:
         logger.warning("信誉键迁移失败（不影响使用）: %s", e)
 
 
-def _sync_reputation_after_log_delete() -> None:
+def _rebuild_reputation_from_logs() -> None:
     """删日志后把中转站计数按剩余日志重算（2026-10-04）。
 
     ★ 为什么必须有

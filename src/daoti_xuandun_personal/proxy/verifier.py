@@ -147,8 +147,13 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     (r"\bdel\s+/[sfq]\b", "Windows 递归删除"),
     (r"\bDrop\s+(table|database)\b", "SQL 删库"),
     (r"\btruncate\s+table\b", "SQL 截断表"),
-    (r"\beval\s*\(", "动态代码执行 eval"),
-    (r"\bexec\s*\(", "动态代码执行 exec"),
+    # ★★ 2026-11-03（误报修复，日志 #11505）：
+    #   旧写法 `\bexec\s*\(` 会命中 `re.exec(s)` —— 那是 JavaScript
+    #   正则对象的 exec 方法，不是动态代码执行。实测把一段正常前端代码
+    #   判成 high，并计入「中转站责任」。
+    #   加负向后顾：前面紧邻 `.` 的一律视为方法调用（re.exec / model.eval）。
+    (r"(?<!\.)\beval\s*\(", "动态代码执行 eval"),
+    (r"(?<!\.)\bexec\s*\(", "动态代码执行 exec"),
     (r"\b(?:curl|wget)\b[^\n|;]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本（curl|sh）"),
     (r"\b(?:curl|wget)\b[^\n]*\b(?:\.onion|ngrok|pipedream|webhook\.site)\b", "向可疑地址发起请求"),
     (r"\bnc\b\s+-[a-z]*e\b|\bnetcat\b\s+-[a-z]*e\b", "反弹 shell（nc -e）"),
@@ -957,12 +962,20 @@ class PatternTracker:
                     )
 
         # 记录本次（限制窗口）
-        lengths.append(length)
-        if len(lengths) > self._window_size:
-            lengths.pop(0)
-        structs.append(signature)
-        if len(structs) > self._window_size:
-            structs.pop(0)
+        #
+        # ★★ 2026-11-03（误报修复）：近空响应不进基线。
+        #   实测基线均值只有 1–118 字符 —— 窗口里混进了大量
+        #   「工具调用分片 / 被中断的流 / 空响应」，σ 被压到接近 0，
+        #   于是任何一段正常回答都成了「279σ」。近 4 天 42 条长度告警、
+        #   14 条结构告警全部由此产生。低于阈值的响应既不进基线，
+        #   也不参与判定（它本身没有可比性）。
+        if length >= _MIN_BASELINE_LEN:
+            lengths.append(length)
+            if len(lengths) > self._window_size:
+                lengths.pop(0)
+            structs.append(signature)
+            if len(structs) > self._window_size:
+                structs.pop(0)
 
         return findings
 
@@ -970,6 +983,16 @@ class PatternTracker:
         """清除会话基线。"""
         self._lengths.pop(session_id, None)
         self._structures.pop(session_id, None)
+
+
+#: 参与「长度/结构基线」的响应最小长度。
+#:
+#: ★★ 2026-11-03（误报修复）：低于该长度的响应不进基线。
+#:   实测基线均值只有 1–118 字符 —— 窗口里混进了大量工具调用分片、
+#:   被中断的流和空响应，σ 被压到接近 0，于是任何一段正常回答
+#:   都成了「几十上百个 σ」。近 4 天 42 条长度告警、14 条结构告警
+#:   全部由此产生，没有一条指向真实篡改。
+_MIN_BASELINE_LEN = 200
 
 
 def _structure_distance(a: str, b: str) -> float:
