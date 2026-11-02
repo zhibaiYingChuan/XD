@@ -171,7 +171,13 @@ BUILTIN_RULES: List[_Rule] = [
     # ── 强身份信息（一律阻断）──
     _Rule("cn_idcard", "idcard", r"(?<![0-9Xx])\d{17}[\dXx](?![0-9Xx])",
           _cn_id_checksum_valid),
-    _Rule("bankcard", "bankcard", r"(?<!\d)\d{13,19}(?!\d)", _luhn_check),
+    # ★★ 2026-11-03（二次误报）：旧判据 `(?<!\d)\d{13,19}(?!\d)` 会把
+    #   哈希/Base64 里偶然出现的 13 位数字（恰好通过 Luhn）当成银行卡，
+    #   实测把一次正常的构建上传请求整条阻断。
+    #   修复：① 只认 15–19 位（13/14 位卡号早已淘汰，Amex 为 15 位）；
+    #        ② 前后必须是「非字母数字」边界，排除嵌在哈希/Base64/ID 里的数字。
+    _Rule("bankcard", "bankcard",
+          r"(?<![0-9A-Za-z])\d{15,19}(?![0-9A-Za-z])", _luhn_check),
 
     # ── 弱身份信息（按级别打码/阻断）──
     _Rule("cn_phone", "phone", r"(?<!\d)1[3-9]\d{9}(?!\d)"),

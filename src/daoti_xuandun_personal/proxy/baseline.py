@@ -130,7 +130,9 @@ _VIOLATION_SIGNALS: Dict[str, List[Tuple[str, str, str]]] = {
     "no_command_execution": [
         (r"\b(?:subprocess\.(?:run|call|Popen|check_output)|os\.system|os\.popen)\b",
          "响应要求执行系统命令", "high"),
-        (r"\bexec\s*\(|\beval\s*\(",
+        # ★ 2026-11-03（二次误报）：`re.exec(s)` / `model.eval()` 是方法调用，
+        #   不是动态代码执行。与 verifier 的修复保持一致，加负向后顾。
+        (r"(?<!\.)\bexec\s*\(|(?<!\.)\beval\s*\(",
          "响应使用动态代码执行", "high"),
     ],
     "no_file_mutation": [
@@ -1090,22 +1092,35 @@ _WRITE_INTENT = re.compile(
     re.IGNORECASE,
 )
 
+#: 子句边界：中文句号/分号/换行，以及后接空白的英文句号/分号。
+#: 用于把「文件名」与「写入动词」限制在同一子句内，避免跨句误连。
+_CLAUSE_BREAK = re.compile(r"[。！？；\n]|[.!?;](?=\s)")
+
 
 def _has_write_intent_near(content: str, pos: int) -> bool:
     """判断配置文件出现的位置附近是否表达了「写入/修改」意图。
 
-    取文件所在行 + 前后各一行，避免跨段落把无关的「写入」连过来。
-    只提到文件名（教学、总结、引用）不算注入。
+    ★ 2026-11-03 二次误报：上一版按「行」取上下文，而 AI 复核报告里
+      引用了检测器自己的说明「…（AGENTS.md）…。修改这类文件等于…」，
+      同一行内的「修改」被当成了写入意图。
+      现在按**子句**取上下文（句号/分号/换行分隔），
+      只有与文件名同处一个子句的写入动词才算数。
     """
-    line_start = content.rfind("\n", 0, pos) + 1
-    prev_start = content.rfind("\n", 0, max(0, line_start - 1)) + 1
-    line_end = content.find("\n", pos)
-    if line_end == -1:
-        line_end = len(content)
-    next_end = content.find("\n", line_end + 1)
-    if next_end == -1:
-        next_end = len(content)
-    return bool(_WRITE_INTENT.search(content[prev_start:next_end]))
+    start = 0
+    for m in _CLAUSE_BREAK.finditer(content, 0, pos):
+        start = m.end()
+    m_end = _CLAUSE_BREAK.search(content, pos)
+    end = m_end.start() if m_end else len(content)
+    clause = content[start:end]
+    if _WRITE_INTENT.search(clause):
+        return True
+    # 文件名单独成行时（如「写入\n.cursor/mcp.json」），允许看上一子句
+    if len(clause.strip()) <= 40:
+        prev_start = 0
+        for m in _CLAUSE_BREAK.finditer(content, 0, start):
+            prev_start = m.end()
+        return bool(_WRITE_INTENT.search(content[prev_start:start]))
+    return False
 
 
 def _check_toolchain_injection(

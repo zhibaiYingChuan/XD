@@ -42,8 +42,14 @@ dangerous_commands:
     label: fork 炸弹
   - pattern: '\bformat\s+[a-z]:'
     label: Windows 磁盘格式化
-  - pattern: '\bdel\s+/[sfq]\b'
-    label: Windows 递归删除
+  # 2026-11-03 二次误报：`del /q 某个临时文件` 不是递归删除。
+  # /q 只是静默、/f 只是强制；真正危险的是 /s 与通配符删除。
+  - pattern: '\bdel\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b'
+    label: Windows 递归删除 del /s
+  - pattern: '\bdel\s+(?:/[a-z]+\s+)*[^\n]*\*'
+    label: Windows 通配符删除 del *
+  - pattern: '\b(?:rmdir|rd)\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b'
+    label: Windows 递归删除目录 rmdir /s
   - pattern: '\bDrop\s+(table|database)\b'
     label: SQL 删库
   - pattern: '\btruncate\s+table\b'

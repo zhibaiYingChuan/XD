@@ -144,7 +144,14 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     (r"\bchmod\s+777\b", "权限全开 chmod 777"),
     (r":\(\)\s*\{.*\};\s*:", "fork 炸弹"),
     (r"\bformat\s+[a-z]:", "Windows 磁盘格式化"),
-    (r"\bdel\s+/[sfq]\b", "Windows 递归删除"),
+    # ★★ 2026-11-03（二次误报）：旧写法 `\bdel\s+/[sfq]\b` 把
+    #   `del /q 某个临时文件` 也标成「Windows 递归删除」。
+    #   `/q` 只是静默模式，`/f` 只是强制，都不递归；真正危险的是
+    #   `/s`（递归）与通配符删除。删除单个明确路径是正常运维操作。
+    (r"\bdel\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b", "Windows 递归删除 del /s"),
+    (r"\bdel\s+(?:/[a-z]+\s+)*[^\n]*\*", "Windows 通配符删除 del *"),
+    (r"\b(?:rmdir|rd)\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b",
+     "Windows 递归删除目录 rmdir /s"),
     (r"\bDrop\s+(table|database)\b", "SQL 删库"),
     (r"\btruncate\s+table\b", "SQL 截断表"),
     # ★★ 2026-11-03（误报修复，日志 #11505）：

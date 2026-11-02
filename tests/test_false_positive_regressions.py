@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ from daoti_xuandun_personal.proxy import baseline as bl  # noqa: E402
 from daoti_xuandun_personal.proxy import verifier as vf  # noqa: E402
 from daoti_xuandun_personal.proxy.restorer import ContentRestorer  # noqa: E402
 from daoti_xuandun_personal.proxy.sanitizer import RequestSanitizer  # noqa: E402
-from daoti_xuandun_personal.types import RedactionRecord  # noqa: E402
+from daoti_xuandun_personal.types import Action, RedactionRecord  # noqa: E402
 
 
 def _payload(tool_name: str, arguments: dict) -> dict:
@@ -206,6 +207,88 @@ class TestConstraintViolationSeverity:
             self._baseline(["no_command_execution"]), content
         )
         assert out and out[0]["severity"] == "high", "代码块里的真实调用仍应判 high"
+
+    def test_method_call_not_flagged(self):
+        """`re.exec(s)` / `model.eval()` 是方法调用，不是动态代码执行。
+
+        ★ 2026-11-03 实测误报：AI 复核报告里引用这两个方法名，
+          被 constraint_violation 判成「响应使用动态代码执行」。
+        """
+        content = "命中的是 `re.exec(s)`、`model.eval()` 这类方法调用，不是动态代码执行。"
+        out = bl._check_constraint_violations(
+            self._baseline(["no_command_execution"]), content
+        )
+        assert not out, f"方法调用被当成动态代码执行：{out}"
+
+
+class TestWindowsDeletePatterns:
+    """`del /q 单个文件` 不是递归删除。
+
+    ★ 2026-11-03 实测误报：清理服务器临时脚本的 `del /q xxx.bat`
+      被标成「Windows 递归删除」并判 high。
+    """
+
+    def _hit(self, cmd: str) -> bool:
+        return any(
+            re.search(pat, cmd)
+            for pat, _ in vf._BUILTIN_DANGEROUS_COMMANDS
+        )
+
+    def test_quiet_delete_single_file_is_not_dangerous(self):
+        assert not self._hit(r"del /q C:\wwwroot\sfang.cc\tmp.bat")
+
+    def test_force_delete_single_file_is_not_dangerous(self):
+        assert not self._hit(r"del /f C:\tmp\a.log")
+
+    def test_recursive_delete_is_dangerous(self):
+        assert self._hit(r"del /s /q C:\tmp\build")
+
+    def test_wildcard_delete_is_dangerous(self):
+        assert self._hit(r"del /q C:\tmp\*.*")
+
+    def test_recursive_rmdir_is_dangerous(self):
+        assert self._hit(r"rmdir /s /q C:\tmp\build")
+
+
+class TestBankcardFalsePositive:
+    """13 位数字恰好通过 Luhn 时，不得当成银行卡阻断。
+
+    ★ 2026-11-03 实测拦截：一次正常的构建上传请求被整条阻断，
+      证据是「3481…70（13 字符）」。哈希/Base64 里偶然出现的
+      13 位数字通过 Luhn 的概率约 1/10，旧判据 13–19 位全收。
+    """
+
+    @staticmethod
+    def _luhn_valid_13() -> str:
+        for n in range(3481000000000, 3481000001000):
+            s = str(n)
+            total = 0
+            for i, c in enumerate(reversed(s)):
+                d = int(c)
+                if i % 2 == 1:
+                    d *= 2
+                    if d > 9:
+                        d -= 9
+                total += d
+            if total % 10 == 0:
+                return s
+        raise AssertionError("未找到 13 位 Luhn 合法数字")
+
+    def test_13_digit_luhn_number_is_not_blocked(self):
+        s = RequestSanitizer(level="balanced")
+        s.set_category_enabled("bankcard", True)
+        num = self._luhn_valid_13()
+        r = s.sanitize(f"构建号 {num}")
+        assert r.action != Action.BLOCK.value, (
+            f"13 位数字 {num[:4]}… 被当成银行卡阻断"
+        )
+
+    def test_16_digit_card_still_blocked(self):
+        s = RequestSanitizer(level="balanced")
+        s.set_category_enabled("bankcard", True)
+        card = "4111" + "1111" * 3
+        r = s.sanitize(f"卡号 {card}")
+        assert r.action == Action.BLOCK.value, "真实 16 位卡号必须仍然阻断"
 
 
 class TestActivationCodeIsAllowed:
