@@ -46,7 +46,9 @@ dangerous_commands:
   # /q 只是静默、/f 只是强制；真正危险的是 /s 与通配符删除。
   - pattern: '\bdel\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b'
     label: Windows 递归删除 del /s
-  - pattern: '\bdel\s+(?:/[a-z]+\s+)*[^\n]*\*'
+  # 2026-11-03 三次误报：`[^\n]*\*` 会跨过 `&` 把后续 `dir *.bat` 的星号
+  # 算到 del 头上。通配符必须出现在 del 自己的命令段内。
+  - pattern: '\bdel\s+(?:/[a-z]+\s+)*[^&|;\n]*\*'
     label: Windows 通配符删除 del *
   - pattern: '\b(?:rmdir|rd)\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b'
     label: Windows 递归删除目录 rmdir /s

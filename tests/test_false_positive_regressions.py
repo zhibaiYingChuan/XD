@@ -246,6 +246,14 @@ class TestWindowsDeletePatterns:
     def test_wildcard_delete_is_dangerous(self):
         assert self._hit(r"del /q C:\tmp\*.*")
 
+    def test_wildcard_in_following_command_is_not_del_wildcard(self):
+        """`del /q 单文件 & dir *.bat` 里的星号属于 dir，不属于 del。
+
+        ★ 2026-11-03 三次误报（恶性）：旧写法 `[^\\n]*\\*` 跨过 `&`
+          把后续 `dir *.bat` 的星号算到 del 头上，6 小时刷出 106 条重复告警。
+        """
+        assert not self._hit(r"del /q C:\tmp\a.bat & dir C:\tmp\*.bat")
+
     def test_recursive_rmdir_is_dangerous(self):
         assert self._hit(r"rmdir /s /q C:\tmp\build")
 

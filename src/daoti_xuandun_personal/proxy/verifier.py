@@ -149,7 +149,12 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     #   `/q` 只是静默模式，`/f` 只是强制，都不递归；真正危险的是
     #   `/s`（递归）与通配符删除。删除单个明确路径是正常运维操作。
     (r"\bdel\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b", "Windows 递归删除 del /s"),
-    (r"\bdel\s+(?:/[a-z]+\s+)*[^\n]*\*", "Windows 通配符删除 del *"),
+    # ★★ 2026-11-03（三次误报，恶性）：`[^\n]*\*` 会跨过 `&` 把后续
+    #   `dir *.bat` 里的星号算到 `del` 头上，于是
+    #   `del /q 某个临时文件 & dir *.bat` 被反复判成「通配符删除」，
+    #   实测 6 小时内刷出 106 条重复告警，看起来像模型在死循环。
+    #   修复：通配符必须出现在 `del` 自己的命令段内（遇到 & | ; 换行即止）。
+    (r"\bdel\s+(?:/[a-z]+\s+)*[^&|;\n]*\*", "Windows 通配符删除 del *"),
     (r"\b(?:rmdir|rd)\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b",
      "Windows 递归删除目录 rmdir /s"),
     (r"\bDrop\s+(table|database)\b", "SQL 删库"),
