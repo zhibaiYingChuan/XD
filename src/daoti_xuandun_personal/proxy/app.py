@@ -63,7 +63,8 @@ from .listeners import RelayPortListeners
 from .restorer import ContentRestorer
 from .sanitizer import CATEGORY_LABELS, RequestSanitizer
 from .verifier import (
-    OBSERVATION_ONLY_SIGNALS, ResponseVerifier, decide_response_action,
+    OBSERVATION_ONLY_SIGNALS, STRUCTURED_SIGNALS, ResponseVerifier,
+    decide_response_action,
 )
 
 logger = logging.getLogger("xuandun-personal.app")
@@ -3331,19 +3332,40 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
       实测形态：非流式路径传的是 verify_result 对象，而流式路径传 None ——
       同一个函数、两条路径语义相反，且两边各自的单测都是绿的。
     """
+    # ★ 兼容两种入参：findings 列表，或带 .findings 的 VerifyResult。
+    #   调用点既有 `findings or None`，也有直接传 VerifyResult 的历史写法。
+    if findings_or_none is None:
+        findings: List[Any] = []
+    elif isinstance(findings_or_none, (list, tuple, set)):
+        findings = list(findings_or_none)
+    else:
+        findings = list(getattr(findings_or_none, "findings", []) or [])
+
+    if not findings:
+        # 没有发现项：high 仍保守阻断（调用方既然报了 high，就不能放行）；
+        # 其余档位是真正的 pass。
+        return (
+            Action.BLOCK.value if max_sev == "high" else Action.PASS.value
+        )
+
+    cats = {getattr(f, "category", "") for f in findings}
+    # ★★ 2026-11-03：证据分级闸门，必须与 decide_response_action
+    #   的规则四逐字一致。两条路径（verify 内部 / 合并 restorer 后）
+    #   若各写一套，就会出现「verify 判观察、外层判阻断」——
+    #   而两边各自的单测都是绿的。
+    #   放在最前面：它要覆盖 low / medium / high 全部档位，
+    #   否则统计类（low）仍会走下面的 ALERT 分支，继续占用「提示」。
+    if not (cats & STRUCTURED_SIGNALS):
+        return Action.OBSERVE.value
+
     if max_sev == "low":
-        # 有发现项才提示；确实一个发现都没有时才是真的 pass
-        return Action.PASS.value if not findings_or_none else Action.ALERT.value
+        return Action.ALERT.value
     if _verifier is not None:
         try:
             action = _verifier._threshold_for(max_sev)
             # ★ 2026-10-23：与 decide_response_action 同一道观测类闸门。
             #   原实现只按严重度查表，于是「仅记录」类发现只要标了 high
             #   就会阻断 —— 而这类发现的意义是留证据，不是打断对话。
-            cats = {
-                getattr(f, "category", "")
-                for f in (findings_or_none or [])
-            }
             if (
                 action == Action.BLOCK.value
                 and cats

@@ -585,3 +585,89 @@ class TestMorningBlocks20261028:
         ), "同一轮里既造新工具又给出高危命令，必须仍按高危处理"
         assert res.action == "block"
 
+
+class TestEvidenceTiering:
+    """证据分级：文本启发式只观察，结构化证据才阻断。
+
+    ★ 2026-11-03：本机复核出的三条新误报，全部是「AI 在复述检测规则」：
+      · 回答里写「`exec(` 方法调用等几类误报都不会再出现」
+      · 会话摘要里列出 `del /s`、`curl|sh`、`base64 -d | sh` 等规则名
+      · 回答里贴出检测器的正则源码 `r"(?<!\\.)\\beval\\s*\\("`
+    这些字面量对 AI 编程助手是日常输出，不能当成攻击。
+    """
+
+    @staticmethod
+    def _f(cat: str, sev: str = "high") -> vf.VerificationFinding:
+        return vf.VerificationFinding(
+            category=cat, severity=sev, detail="x", evidence="x",
+        )
+
+    def test_prose_mentioning_exec_is_observe(self):
+        """回答里讨论 exec( 的误报修复 → 观察，不是提示。"""
+        action, _ = vf.decide_response_action(
+            "balanced",
+            [
+                self._f("dangerous_content", "medium"),
+                self._f("constraint_violation", "medium"),
+            ],
+        )
+        assert action == Action.OBSERVE.value, (
+            "AI 在回答里讨论 exec( 被判成攻击 —— 这正是误报"
+        )
+
+    def test_regex_source_in_answer_is_observe(self):
+        """回答里贴出检测器正则源码 → 观察。"""
+        action, _ = vf.decide_response_action(
+            "balanced",
+            [
+                self._f("dangerous_content", "medium"),
+                self._f("dangerous_content", "medium"),
+            ],
+        )
+        assert action == Action.OBSERVE.value
+
+    def test_quoting_agents_md_is_observe(self):
+        """回答里引用 AGENTS.md 与配置说明 → 观察，不是注入。"""
+        action, _ = vf.decide_response_action(
+            "balanced",
+            [
+                self._f("toolchain_injection", "high"),
+                self._f("late_delivery", "high"),
+            ],
+        )
+        assert action == Action.OBSERVE.value, (
+            "AI 在报告里引用 AGENTS.md 被判成注入 —— 这正是误报"
+        )
+
+    def test_structured_tool_call_still_blocks(self):
+        """结构化 tool_call 里的危险命令仍然阻断。"""
+        action, _ = vf.decide_response_action(
+            "balanced",
+            [self._f("tool_call_dangerous", "high")],
+        )
+        assert action == Action.BLOCK.value, (
+            "证据分级把真实攻击一起放过了 —— 结构化证据必须仍能阻断"
+        )
+
+    def test_structured_plus_heuristic_still_blocks(self):
+        """结构化证据 + 文本启发式 → 仍阻断。"""
+        action, _ = vf.decide_response_action(
+            "balanced",
+            [
+                self._f("tool_call_dangerous", "high"),
+                self._f("toolchain_injection", "high"),
+            ],
+        )
+        assert action == Action.BLOCK.value
+
+    def test_observe_counts_as_safe_not_suspect(self):
+        """观察必须计入「安全」，不能计入「提示」。"""
+        from daoti_xuandun_personal.storage.db import kpi_contribution
+
+        total, danger, suspect, safe = kpi_contribution(
+            "response_verify", Action.OBSERVE.value, False,
+        )
+        assert (total, danger, suspect, safe) == (1, 0, 0, 1), (
+            "观察没有计入安全 —— total 会与 safe+suspect+danger 对不上"
+        )
+

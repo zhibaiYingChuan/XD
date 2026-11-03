@@ -157,7 +157,12 @@ def kpi_contribution(
         return (0, 0, 0, 0)
     danger = 1 if action == Action.BLOCK.value else 0
     suspect = 1 if action == Action.ALERT.value else 0
-    safe = 1 if action == Action.PASS.value else 0
+    # ★ 2026-11-03：observe（观察）计入 safe，不计入 suspect。
+    #   观察 = 检查过、但没有结构化威胁（文本启发式命中）。
+    #   它必须算「安全通过」，否则 total ≠ safe + suspect + danger，
+    #   用户核对时又会发现数字对不上；同时它绝不能进「提示」，
+    #   否则文本启发式会继续制造用户可见的噪声。
+    safe = 1 if action in (Action.PASS.value, Action.OBSERVE.value) else 0
     total = 1
     # ★★ P1-2（2026-10-29 第三轮审查）：relay = **未经检测的直通**
     #   （防护已暂停 / 未激活只读模式）。它可以算「已转发」，
@@ -635,11 +640,20 @@ class PersonalStorage:
                 "GROUP BY action ORDER BY c DESC"
             ).fetchall()
         }
+        # ★ 2026-11-03：按**域名**聚合，而不是按「域名#Key指纹」。
+        #   同一家中转站配了多个 Key 时，日志里会留下多个指纹键；
+        #   直接 GROUP BY relay_domain 会把同一家拆成多行，
+        #   卡片上「主要中转站（N 条）」的 N 就小于「全部记录」，
+        #   用户核对时必然认为数字造假。
+        #   展示层本来就会剥掉指纹（displayDomain），聚合口径必须与之一致。
         domains = [
-            {"domain": str(r["relay_domain"] or ""), "count": int(r["c"])}
+            {"domain": str(r["d"] or ""), "count": int(r["c"])}
             for r in self._conn.execute(
-                "SELECT relay_domain, COUNT(*) AS c FROM logs "
-                "GROUP BY relay_domain ORDER BY c DESC LIMIT 5"
+                "SELECT CASE WHEN instr(relay_domain, '#') > 0 "
+                "            THEN substr(relay_domain, 1, instr(relay_domain, '#') - 1) "
+                "            ELSE relay_domain END AS d, "
+                "       COUNT(*) AS c "
+                "FROM logs GROUP BY d ORDER BY c DESC LIMIT 5"
             ).fetchall()
         ]
         row = self._conn.execute(

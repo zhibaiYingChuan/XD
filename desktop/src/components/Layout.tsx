@@ -327,7 +327,7 @@ function StatusBar() {
               style={{ textDecoration: 'none', color: 'inherit' }}
               title="查看今天打过码的记录"
             >
-              已打码 <b className="mono">{today.redaction_count}</b> 处
+              今日已打码 <b className="mono">{today.redaction_count}</b> 处
             </Link>
           )}
         </>

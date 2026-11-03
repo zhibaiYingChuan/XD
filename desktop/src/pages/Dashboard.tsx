@@ -696,7 +696,11 @@ export default function Dashboard() {
                 <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
                   {usedLabel}
                   {usedLabel && ' · '}
-                  {primaryRelay.total_calls} 次调用
+                  {/* ★ 2026-11-03：标明「累计」。
+                      这个数来自 relay_reputation（全部时间的响应验证），
+                      与顶部 KPI 的「今日」不是同一口径 ——
+                      不写范围，用户会拿它和「今日检查」对账。 */}
+                  累计 {primaryRelay.total_calls} 次调用
                   {/* ★ 只把「中转站侧」的风险算到中转站头上。
                       旧版这里显示的是 danger_count（总量），
                       实测 19 次里全部是「响应长度突变」——

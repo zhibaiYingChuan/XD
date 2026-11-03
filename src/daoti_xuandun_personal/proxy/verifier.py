@@ -863,6 +863,43 @@ CORROBORATION_REQUIRED_SIGNALS: frozenset = {
     "constraint_violation",
 }
 
+#: ★★ 结构化证据（2026-11-03，证据分级）。
+#:
+#: 只有这些类别才允许产生「阻断」或「提示」。判据的共同点是：
+#: 它们指向**一个具体的动作**，而不是「文本里出现了某个词」。
+#:
+#:   · tool_call_dangerous   —— 结构化 tool_call 参数里就是要执行的命令
+#:   · hidden_instruction    —— HTML 注释 / 零宽字符里的隐藏指令
+#:   · unicode_steganography —— Unicode 隐写
+#:   · system_prompt_inject  —— 护栏判定的提示词注入
+#:   · sensitive_leak        —— 真实凭证泄露（确定性模式）
+#:   · model_downgrade       —— 响应 model 字段与请求不符（协议层）
+#:   · new_external_endpoint —— tool_call 参数里出现请求未提过的外部地址
+#:   · new_dependency        —— tool_call 参数里要写入未声明的依赖
+#:   · placeholder_injection —— 中转站伪造占位符探测原始值
+#:
+#: 其余全部是**文本启发式**：dangerous_content / constraint_violation /
+#: toolchain_injection / security_downgrade / data_exfiltration /
+#: covert_channel / telemetry_smuggle / undeclared_tool / typosquat_package /
+#: content_policy / credential_from_response。
+#:
+#: 为什么必须这样分：玄盾代理的是 AI 编程助手，它每天的工作就是
+#: 写危险命令、讨论安全、贴代码、总结会话。对这类用户，
+#: 「响应里出现危险字面量」是**常态**。文本启发式每加一条，
+#: 就多一个误报面 —— 这就是「每个版本都有新误报」的根因。
+#: 把它们统一降为「观察」后，新增文本判据不再产生用户可见的误报。
+STRUCTURED_SIGNALS: frozenset = frozenset({
+    "tool_call_dangerous",
+    "hidden_instruction",
+    "unicode_steganography",
+    "system_prompt_inject",
+    "sensitive_leak",
+    "model_downgrade",
+    "new_external_endpoint",
+    "new_dependency",
+    "placeholder_injection",
+})
+
 #: 元信号：只描述「什么时候发现的」，不构成独立证据，不计入佐证数量。
 _META_SIGNALS: frozenset = {"late_delivery"}
 
@@ -1107,6 +1144,7 @@ def decide_response_action(
     规则一：整体严重程度取所有 findings 的最大值
     规则二：**只有统计类信号时，永不阻断**
     规则三：**只有内容合规类信号时，永不阻断**（2026-10-04 新增）
+    规则四：**没有结构化证据时，一律降为「观察」**（2026-11-03 新增）
 
     规则二/三为什么放在这里而不是各检测点：
       · 放在各检测点（把 severity 固定为 low）不够 ——
@@ -1116,6 +1154,18 @@ def decide_response_action(
 
     规则二为什么是「只有」而不是「含有统计类就放过」：
       攻击者只要同时制造一次长度突变就能绕过 —— 那是可利用的漏洞。
+
+    ★★ 规则四（2026-11-03，证据分级）
+    ────────────────────────────────────────────────────────────
+    这是「误报永无止境」的根治点。此前每加一条文本判据，
+    就多一个误报面：AI 在回答里写 `exec(`、复述 `del /s`、
+    引用 `AGENTS.md`，都会被当成攻击。而玄盾代理的正是
+    AI 编程助手 —— 这些字面量是它的日常输出。
+
+    现在只有 ``STRUCTURED_SIGNALS``（指向具体动作的证据）才能
+    产生阻断或提示；其余文本启发式一律 ``observe``：
+    记录、可查、不阻断、不计入首页「提示」。
+    这样新增文本判据不再制造用户可见的误报。
 
     这段刻意做成模块级纯函数：测试可以直接调它验证闸门，
     而不必复制一份逻辑（复制 = 测试永远绿 = 假护栏）。
@@ -1131,6 +1181,19 @@ def decide_response_action(
     action = _threshold_for_level(level, max_sev)
 
     categories = {getattr(f, "category", "") for f in findings}
+
+    # ★★ 规则四：没有结构化证据 → 观察。
+    #   放在最前面，是因为它要覆盖「阻断」与「提示」两种结果：
+    #   文本启发式既不该打断对话，也不该占用首页「提示」。
+    if action in (Action.BLOCK.value, Action.ALERT.value):
+        if not (categories & STRUCTURED_SIGNALS):
+            logger.info(
+                "无结构化证据（%s），降为观察：%s",
+                "/".join(sorted(categories)),
+                getattr(findings[0], "detail", ""),
+            )
+            return Action.OBSERVE.value, max_sev
+
     if action == Action.BLOCK.value and categories <= OBSERVATION_ONLY_SIGNALS:
         logger.info(
             "仅有观测类信号（%s），不阻断：%s",

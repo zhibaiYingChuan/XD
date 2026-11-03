@@ -17,7 +17,7 @@ import { invoke, isTauri } from '../lib/tauriShim';
 // ══════════════════════════════════════════════════════════════
 
 export type GuardState = 'protecting' | 'learning' | 'suspect' | 'danger' | 'paused';
-export type LogAction = 'pass' | 'redact' | 'block' | 'alert';
+export type LogAction = 'pass' | 'redact' | 'block' | 'alert' | 'observe';
 export type LogType = 'request_sanitize' | 'response_verify' | 'proxy_error' | 'relay';
 export type Severity = 'low' | 'medium' | 'high';
 export type SecurityLevel = 'lenient' | 'balanced' | 'strict';
@@ -1105,6 +1105,10 @@ export const ACTION_LABELS: Record<LogAction, string> = {
   redact: '已打码',
   block: '已拦截',
   alert: '已告警',
+  // ★ 2026-11-03：观察。
+  //   文本启发式命中（响应里出现危险字面量、约束违背、工具链注入等），
+  //   但没有结构化证据。记录、可查、不阻断、不计入首页「提示」。
+  observe: '观察',
 };
 
 /**
@@ -1523,6 +1527,10 @@ export function humanizeLoadError(raw: string | null | undefined): {
 /** 依据 action + severity 得出徽章样式类 */
 export function actionBadgeClass(entry: { action: LogAction; severity: Severity }): string {
   if (entry.action === 'block') return 'danger';
+  // ★ 2026-11-03：观察必须先于 severity 判断。
+  //   观察日志的 severity 可能是 high（如工具链注入），
+  //   若先按 severity 上色，它会被染成「提示」色 —— 与「不计入提示」自相矛盾。
+  if (entry.action === 'observe') return 'info';
   if (entry.action === 'alert' || entry.severity === 'medium') return 'suspect';
   if (entry.action === 'redact') return 'info';
   return 'safe';

@@ -99,6 +99,9 @@ const ACTION_OPTIONS = [
   { value: '', label: '全部结果' },
   { value: 'block', label: '已拦截' },
   { value: 'alert', label: '已告警' },
+  // ★ 2026-11-03：观察。
+  //   文本启发式命中但没有结构化证据 —— 记录、可查、不阻断、不计入「提示」。
+  { value: 'observe', label: '观察' },
   { value: 'redact', label: '已打码' },
   { value: 'pass', label: '安全' },
 ];
@@ -1201,41 +1204,53 @@ export default function Logs() {
           此前界面上只有分页器需要的一个总数，
           用户想知道「我这些日志都是些什么」只能自己翻。 */}
       {stats && stats.total > 0 && (
-        <div className="log-overview">
-          <div className="log-overview-item">
-            <span className="log-overview-num mono">{stats.total}</span>
-            {/* ★ 「全部记录」：这个数是**全部时间**的，而状态栏的
-                「今日检查 N 次」只算今天。两者放在同一屏却不标范围，
-                用户自然会拿它们对账，然后发现「对不上」。 */}
-            <span className="log-overview-label">全部记录</span>
-          </div>
-          {stats.marked_safe > 0 && (
+        <>
+          <div className="log-overview">
             <div className="log-overview-item">
-              <span className="log-overview-num mono">{stats.marked_safe}</span>
-              <span className="log-overview-label">已标记误报（不计入首页统计）</span>
+              <span className="log-overview-num mono">{stats.total}</span>
+              {/* ★ 「全部记录」：这个数是**全部时间**的，而状态栏的
+                  「今日检查 N 次」只算今天。两者放在同一屏却不标范围，
+                  用户自然会拿它们对账，然后发现「对不上」。 */}
+              <span className="log-overview-label">全部记录</span>
             </div>
-          )}
-          <div className="log-overview-item">
-            <span className="log-overview-num mono">
-              {Object.entries(stats.by_type)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 2)
-                .map(([k, v]) => `${LOG_TYPE_LABELS[k as LogType] ?? k} ${v}`)
-                .join(' · ')}
-            </span>
-            <span className="log-overview-label">主要构成</span>
-          </div>
-          {stats.top_domains[0] && (
+            {stats.marked_safe > 0 && (
+              <div className="log-overview-item">
+                <span className="log-overview-num mono">{stats.marked_safe}</span>
+                <span className="log-overview-label">已标记误报（不计入首页统计）</span>
+              </div>
+            )}
             <div className="log-overview-item">
-              <span className="log-overview-num mono truncate">
-                {displayDomain(stats.top_domains[0].domain) || '—'}
+              <span className="log-overview-num mono">
+                {/* ★ 2026-11-03：不再只取前 2 类。
+                    只显示前 2 类时，各分类之和会小于「全部记录」——
+                    用户把卡片上的数字相加，得到的却是另一个数，
+                    只能认为统计造假。日志类型是固定的小集合，
+                    全部列出即可让「构成之和 == 全部记录」成立。 */}
+                {Object.entries(stats.by_type)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([k, v]) => `${LOG_TYPE_LABELS[k as LogType] ?? k} ${v}`)
+                  .join(' · ')}
               </span>
-              <span className="log-overview-label">
-                主要中转站（{stats.top_domains[0].count} 条）
-              </span>
+              <span className="log-overview-label">主要构成</span>
             </div>
-          )}
-        </div>
+            {stats.top_domains[0] && (
+              <div className="log-overview-item">
+                <span className="log-overview-num mono truncate">
+                  {displayDomain(stats.top_domains[0].domain) || '—'}
+                </span>
+                <span className="log-overview-label">
+                  主要中转站（{stats.top_domains[0].count} 条）
+                </span>
+              </div>
+            )}
+          </div>
+          {/* ★ 2026-11-03：概览是**全部时间**累计，而上方状态栏是**今日**。
+              两者同屏却不标范围，用户必然拿它们对账，然后得出「数字造假」。
+              这里把口径写在卡片下面：历史归历史、今日归今日。 */}
+          <div className="faint" style={{ fontSize: 12, marginTop: -8, marginBottom: 16 }}>
+            以上为全部时间累计；上方状态栏的「今日检查」只统计今天。
+          </div>
+        </>
       )}
 
       {/* 工具栏 */}

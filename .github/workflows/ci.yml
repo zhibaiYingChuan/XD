@@ -66,6 +66,15 @@ jobs:
       - name: Assert version consistency
         run: python .github/scripts/sync_version.py --check
 
+      # ★★ 2026-11-03：误报回归门禁。
+      #   每条已复核的误报都固化在 test_false_positive_regressions.py 里。
+      #   单独跑一遍是为了「失败时一眼看出是误报回归」——
+      #   混在 800 条测试里，红了的名字不会告诉任何人它在防什么。
+      #   这一步红了就不允许发版：新判据把已知误报带回来了。
+      - name: False-positive regression gate
+        run: python -m pytest tests/test_false_positive_regressions.py -q --no-header -p no:cacheprovider
+        timeout-minutes: 5
+
       # ★ 门禁 1-4 仍在本地 CI（.github/workflows/ci.yml 完整版，未公开）运行。
       #   这里只跑「不依赖未公开资源」的那部分，
       #   避免公开仓库 clone 后因缺文件而恒红 ——
