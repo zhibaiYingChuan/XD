@@ -43,18 +43,28 @@ export default function UpdateNotice() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const aliveRef = useRef(true);
+  // ★ 2026-11-03：focus 与 visibilitychange 可能在同一秒内连续触发，
+  //   而一次检查最长 15 秒。没有这个闸门会并发发起多次检查，
+  //   网络差时还会叠出多个弹窗。
+  const checkingRef = useRef(false);
 
   // ── 启动时静默检查一次；窗口重新获得焦点时按 6 小时间隔复查 ──
   const runCheck = useCallback(async () => {
-    const result = await checkForUpdate();
-    if (!aliveRef.current) return;
-    // ★ 先记账再判结果：失败也要记，否则网络长期不通时
-    //   每次启动都要先卡一次检查超时，用户只感觉「启动变慢了」。
-    //   但失败会标记出来，下一次按 30 分钟而不是 24 小时重试。
-    markAutoChecked(Date.now(), result.kind !== 'unavailable');
-    if (result.kind === 'available' && !isVersionSkipped(result.version)) {
-      setInfo(result);
-      setVisible(true);
+    if (checkingRef.current) return;
+    checkingRef.current = true;
+    try {
+      const result = await checkForUpdate();
+      if (!aliveRef.current) return;
+      // ★ 先记账再判结果：失败也要记，否则网络长期不通时
+      //   每次启动都要先卡一次检查超时，用户只感觉「启动变慢了」。
+      //   但失败会标记出来，下一次按 30 分钟而不是 24 小时重试。
+      markAutoChecked(Date.now(), result.kind !== 'unavailable');
+      if (result.kind === 'available' && !isVersionSkipped(result.version)) {
+        setInfo(result);
+        setVisible(true);
+      }
+    } finally {
+      checkingRef.current = false;
     }
   }, []);
 
