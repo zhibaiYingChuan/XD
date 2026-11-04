@@ -1744,9 +1744,9 @@ def create_app() -> FastAPI:
                     {
                         "direction": origin.get("direction"),
                         "direction_label": (
-                            "中转站返回内容"
+                            "中转站返回的内容"
                             if origin.get("direction") == "response"
-                            else "请求侧（你的输入或工具返回）"
+                            else "你的输入或工具返回"
                         ),
                         "role": origin.get("role") or "",
                         "time": _dt.datetime.fromtimestamp(
@@ -1760,27 +1760,30 @@ def create_app() -> FastAPI:
         if response_side:
             verdict = {
                 "code": "response_side",
-                "label": "凭证首次出现在中转站返回的内容里",
+                "label": "这枚凭证第一次出现在中转站的返回里",
                 "note": (
-                    "本次日志涉及的凭证，在台账里首次出现于中转站返回的内容，"
-                    "此前的请求从未发送过它。可要求对方说明该凭证的来源。"
-                    "若你曾让模型生成示例凭证，请先排除这一可能。"
+                    "你之前的请求从没发过它，它却出现在中转站返回的内容里。"
+                    "可以拿这份记录去问中转站：这枚凭证是从哪来的。"
+                    "如果你让模型生成过示例凭证，请先排除这种情况。"
                 ),
             }
         elif any(h["first_seen"] for h in hits):
             verdict = {
                 "code": "request_side",
-                "label": "凭证首次出现在请求侧",
+                "label": "这枚凭证是你这边发出去的",
                 "note": (
-                    "本次日志涉及的凭证，在台账里首次出现于你这边的输入或工具返回，"
-                    "不是中转站返回的。"
+                    "它第一次出现在你的输入或工具返回里，不是中转站带进来的。"
+                    "中转站没有引入它。"
                 ),
             }
         else:
             verdict = {
                 "code": "unknown",
-                "label": "无凭证来源记录",
-                "note": "这条日志没有可回查的凭证指纹（可能是老版本写入的记录）。",
+                "label": "这条记录没有涉及凭证",
+                "note": (
+                    "这条记录里没有银行卡、API Key、密码这类敏感信息，"
+                    "所以没有来源可查。只有涉及凭证的记录才会显示来源。"
+                ),
             }
 
         return {

@@ -654,12 +654,13 @@ function DetailDrawer({
                 </div>
               )}
 
-              {/* ★ 2026-10-23：凭证来源。
-                  用户要的不是「你拦了什么」，而是「这枚 token 到底是谁放进来的」——
-                  响应侧先出现才是能拿去问中转站的证据；请求侧先出现说明是自己这边带进来的。 */}
-              {evidence && evidence.hits.length > 0 && (
+              {/* ★ 2026-11-04：凭证来源。
+                  用大白话回答「这枚敏感信息是谁带进来的」。
+                  没有凭证时也要显示结论，不能整块消失 ——
+                  用户会以为功能坏了。 */}
+              {evidence && (
                 <div className="mt-24">
-                  <div className="field-label">凭证来源</div>
+                  <div className="field-label">凭证来源（这枚敏感信息是谁带进来的）</div>
                   <div
                     style={{
                       fontSize: 12,
@@ -681,7 +682,7 @@ function DetailDrawer({
                       </span>
                       <span className="detail-val">
                         <div>
-                          首次出现：{h.first_seen!.direction_label}
+                          第一次出现在：{h.first_seen!.direction_label}
                           {h.first_seen!.role ? ` · ${h.first_seen!.role}` : ''}
                         </div>
                         <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
@@ -689,16 +690,16 @@ function DetailDrawer({
                           {h.evidence ? ` · ${h.evidence}` : ''}
                         </div>
                         <div className="mono faint" style={{ fontSize: 10, marginTop: 2 }}>
-                          指纹 {h.fingerprint.slice(0, 16)}…
+                          凭证指纹 {h.fingerprint.slice(0, 16)}…（用于核对，不含原文）
                         </div>
                       </span>
                     </div>
                   ))}
 
                   <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
-                    指纹是 SHA-256，对方可用原文复核；导出的证据不含凭证原文。
-                    若判定为「中转站返回内容」，这份证据可以用来说明
-                    「这枚凭证不是我这轮发出去的」。
+                    这里只记录凭证的「指纹」，不保存原文。指纹就像快递单号：
+                    同一个凭证的指纹一定相同，不同凭证一定不同。
+                    如果判定为「中转站返回」，这份记录可以证明这枚凭证不是你发出去的。
                   </div>
 
                   <div className="flex items-center gap-8 mt-8">

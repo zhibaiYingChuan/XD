@@ -331,6 +331,85 @@ class TestBankcardFalsePositive:
         assert r.action == Action.BLOCK.value, "真实 16 位卡号必须仍然阻断"
 
 
+class TestBankcardNetworkMismatch:
+    """卡组织前缀与长度不匹配时，不得当成银行卡。
+
+    ★ 2026-11-04 实测误报：用户消息里 3 个 15–16 位数字全部通过 Luhn，
+      被当成 3 张银行卡整条阻断，但用户确认没有输入任何卡号。
+      其中：
+        · 15 位、53 开头 —— MasterCard 必须是 16 位
+        · 16 位、16 开头 —— 16 不属于任何卡组织前缀
+      Luhn 只校验校验位，不校验「这是不是卡」。
+    """
+
+    @staticmethod
+    def _luhn_valid(prefix: str, length: int) -> str:
+        body = prefix + "0" * (length - len(prefix) - 1)
+        for d in range(10):
+            cand = body + str(d)
+            total = 0
+            for i, c in enumerate(reversed(cand)):
+                x = int(c)
+                if i % 2 == 1:
+                    x *= 2
+                    if x > 9:
+                        x -= 9
+                total += x
+            if total % 10 == 0:
+                return cand
+        raise AssertionError(f"未找到 {prefix}/{length} 的 Luhn 合法数字")
+
+    def _blocked(self, text: str) -> bool:
+        s = RequestSanitizer(level="balanced")
+        s.set_category_enabled("bankcard", True)
+        return s.sanitize(text).action == Action.BLOCK.value
+
+    def test_mastercard_prefix_wrong_length_not_blocked(self):
+        """53 开头但只有 15 位 —— MasterCard 必须是 16 位。"""
+        num = self._luhn_valid("5374", 15)
+        assert not self._blocked(f"编号 {num}"), (
+            "15 位、53 开头的数字被当成 MasterCard 阻断"
+        )
+
+    def test_unknown_prefix_not_blocked(self):
+        """16 开头不属于任何卡组织。"""
+        num = self._luhn_valid("1613", 16)
+        assert not self._blocked(f"编号 {num}"), (
+            "16 开头的 16 位数字被当成银行卡阻断"
+        )
+
+    def test_valid_mastercard_still_blocked(self):
+        """53 开头 + 16 位 —— 合法 MasterCard，必须仍阻断。"""
+        num = self._luhn_valid("5317", 16)
+        assert self._blocked(f"卡号 {num}"), "合法 MasterCard 不再阻断"
+
+    def test_amex_still_blocked(self):
+        """34 开头 + 15 位 —— 合法 Amex。"""
+        num = self._luhn_valid("3782", 15)
+        assert self._blocked(f"卡号 {num}"), "合法 Amex 不再阻断"
+
+    def test_unionpay_still_blocked(self):
+        """62 开头 + 16 位 —— 合法银联。"""
+        num = self._luhn_valid("6222", 16)
+        assert self._blocked(f"卡号 {num}"), "合法银联卡不再阻断"
+
+    def test_valid_card_without_context_not_blocked(self):
+        """格式合法但附近没有卡号语境 —— 不当作卡。
+
+        ★ 2026-11-04：长文本里的订单号、日志 ID 也可能符合卡组织格式。
+          没有「卡号 / card / CVV」等语境时，不能整条阻断。
+        """
+        num = self._luhn_valid("5317", 16)
+        assert not self._blocked(f"订单编号 {num} 已生成"), (
+            "无卡号语境的合法格式数字被当成银行卡阻断"
+        )
+
+    def test_standalone_card_still_blocked(self):
+        """数字独占一行 —— 视为卡号，必须阻断。"""
+        num = self._luhn_valid("5317", 16)
+        assert self._blocked(num), "独占一行的卡号不再阻断"
+
+
 class TestActivationCodeIsAllowed:
     ACTIVATION = (
         "XDACT-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
