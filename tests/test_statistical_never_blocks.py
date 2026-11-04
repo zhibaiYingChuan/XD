@@ -150,7 +150,6 @@ class TestRealAttacksStillBlock:
         "sensitive_leak",
         "hidden_instruction",
         "model_downgrade",
-        "tool_call_dangerous",
     ])
     def test_real_attack_still_blocked(self, category):
         findings = [_finding(category)]

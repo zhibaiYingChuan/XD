@@ -435,6 +435,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                         severity="high",
                         detail=f'Tool Call "{tool_name}" 参数包含{label}：{m.group(0)[:40]}',
                         evidence=_mask_evidence(args_text, m.start()),
+                        signal=label,
                     )
                 )
 
@@ -480,6 +481,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                         severity="high",
                         detail=f'Tool Call "{tool_name}" 试图{label}：{m.group(0)[:40]}',
                         evidence=_mask_evidence(args_text, m.start()),
+                        signal=label,
                     )
                 )
 
@@ -507,6 +509,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                         severity="high",
                         detail=f'Tool Call "{tool_name}" 请求{label}：{m.group(0)[:60]}',
                         evidence=_mask_evidence(args_text, m.start()),
+                        signal=label,
                     )
                 )
 
@@ -900,6 +903,20 @@ STRUCTURED_SIGNALS: frozenset = frozenset({
     "placeholder_injection",
 })
 
+#: ★★ 2026-11-04：同一 category 下「只观察」的判据名。
+#:
+#: tool_call_dangerous 里混着两类完全不同的东西：
+#:   · 破坏性命令（rm -rf / mkfs / dd / format / del /s）—— 不可逆，必须阻断
+#:   · 网络/动态代码（python -c 拉数据 / eval / exec）—— AI 编程助手的日常，
+#:     只观察
+#: 用 signal 区分，而不是把整个 category 降级 ——
+#: 否则「rm -rf /」也会被放过，那是把误报修成漏报。
+_OBSERVE_ONLY_TOOL_SIGNALS: frozenset = frozenset({
+    "Python 内联执行网络/动态代码",
+    "动态代码执行 eval",
+    "动态代码执行 exec",
+})
+
 #: 元信号：只描述「什么时候发现的」，不构成独立证据，不计入佐证数量。
 _META_SIGNALS: frozenset = {"late_delivery"}
 
@@ -1186,11 +1203,30 @@ def decide_response_action(
     #   放在最前面，是因为它要覆盖「阻断」与「提示」两种结果：
     #   文本启发式既不该打断对话，也不该占用首页「提示」。
     if action in (Action.BLOCK.value, Action.ALERT.value):
-        if not (categories & STRUCTURED_SIGNALS):
+        structured = categories & STRUCTURED_SIGNALS
+        if not structured:
             logger.info(
                 "无结构化证据（%s），降为观察：%s",
                 "/".join(sorted(categories)),
                 getattr(findings[0], "detail", ""),
+            )
+            return Action.OBSERVE.value, max_sev
+        # ★★ 2026-11-04：结构化证据全是「网络/动态代码」类 → 观察。
+        #   AI 编程助手每天都要跑 `python -c` 拉数据、写 `eval/exec`，
+        #   这是正常工作，不是中转站注入的攻击。
+        #   破坏性命令（rm -rf / mkfs / dd / format / del /s）不在这个集合里，
+        #   仍然阻断 —— 否则就是把误报修成漏报。
+        structured_findings = [
+            f for f in findings
+            if getattr(f, "category", "") in STRUCTURED_SIGNALS
+        ]
+        if structured_findings and all(
+            getattr(f, "signal", "") in _OBSERVE_ONLY_TOOL_SIGNALS
+            for f in structured_findings
+        ):
+            logger.info(
+                "结构化证据均为网络/动态代码类（%s），降为观察",
+                "/".join(sorted({getattr(f, "signal", "") for f in structured_findings})),
             )
             return Action.OBSERVE.value, max_sev
 

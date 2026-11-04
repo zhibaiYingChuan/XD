@@ -64,7 +64,7 @@ from .restorer import ContentRestorer
 from .sanitizer import CATEGORY_LABELS, RequestSanitizer
 from .verifier import (
     OBSERVATION_ONLY_SIGNALS, STRUCTURED_SIGNALS, ResponseVerifier,
-    decide_response_action,
+    _OBSERVE_ONLY_TOOL_SIGNALS, decide_response_action,
 )
 
 logger = logging.getLogger("xuandun-personal.app")
@@ -1760,30 +1760,41 @@ def create_app() -> FastAPI:
         if response_side:
             verdict = {
                 "code": "response_side",
-                "label": "这枚凭证第一次出现在中转站的返回里",
+                "label": "这枚证据第一次出现在中转站的返回里",
                 "note": (
                     "你之前的请求从没发过它，它却出现在中转站返回的内容里。"
-                    "可以拿这份记录去问中转站：这枚凭证是从哪来的。"
-                    "如果你让模型生成过示例凭证，请先排除这种情况。"
+                    "可以拿这份记录去问中转站：这枚内容是从哪来的。"
+                    "如果你让模型生成过示例内容，请先排除这种情况。"
                 ),
             }
         elif any(h["first_seen"] for h in hits):
             verdict = {
                 "code": "request_side",
-                "label": "这枚凭证是你这边发出去的",
+                "label": "这枚证据是你这边发出去的",
                 "note": (
                     "它第一次出现在你的输入或工具返回里，不是中转站带进来的。"
                     "中转站没有引入它。"
                 ),
             }
+        elif hits:
+            # ★ 2026-11-04：证据来源不再只覆盖「敏感信息」。
+            #   危险命令、占位符、约束违背等告警同样要给出证据 ——
+            #   用户要的是「这条判定是怎么来的」，不是「有没有银行卡」。
+            #   这类证据没有跨轮次指纹，但本次响应里的原文片段足以核对。
+            verdict = {
+                "code": "response_only",
+                "label": "这条记录的证据来自本次响应",
+                "note": (
+                    "本次响应里出现了下面这些内容，玄盾据此判定。"
+                    "它们没有跨轮次的指纹记录，所以无法判断是不是中转站引入的；"
+                    "你可以对照「发现了什么」里的原文片段自行核实。"
+                ),
+            }
         else:
             verdict = {
                 "code": "unknown",
-                "label": "这条记录没有涉及凭证",
-                "note": (
-                    "这条记录里没有银行卡、API Key、密码这类敏感信息，"
-                    "所以没有来源可查。只有涉及凭证的记录才会显示来源。"
-                ),
+                "label": "这条记录没有可展示的证据",
+                "note": "这条记录没有留下可回查的内容片段。",
             }
 
         return {
@@ -3361,8 +3372,24 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
     if not (cats & STRUCTURED_SIGNALS):
         return Action.OBSERVE.value
 
+    # ★★ 2026-11-04：结构化证据全是「网络/动态代码」类 → 观察。
+    #   与 decide_response_action 的规则逐字一致。
+    structured_findings = [
+        f for f in findings
+        if getattr(f, "category", "") in STRUCTURED_SIGNALS
+    ]
+    if structured_findings and all(
+        getattr(f, "signal", "") in _OBSERVE_ONLY_TOOL_SIGNALS
+        for f in structured_findings
+    ):
+        return Action.OBSERVE.value
+
     if max_sev == "low":
-        return Action.ALERT.value
+        # ★ 2026-11-04：低危发现一律「观察」，不再计入「提示」。
+        #   低危包括统计类异常（长度/结构突变）和「本会话没脱敏过却出现
+        #   占位符字样」这类只说明「值得看一眼」的情况。
+        #   把它们算成「提示」会让首页长期挂着噪声，用户会学会忽略它。
+        return Action.OBSERVE.value
     if _verifier is not None:
         try:
             action = _verifier._threshold_for(max_sev)

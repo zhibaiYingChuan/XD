@@ -207,6 +207,11 @@ class VerificationFinding:
     # ★ 2026-10-23：凭证指纹（SHA-256）。只有「凭证类」发现才有值。
     #   证据包靠它回查台账，回答「这枚凭证第一次出现在哪一侧」。
     fingerprint: str = ""
+    # ★ 2026-11-04：具体判据名（如「Python 内联执行网络/动态代码」）。
+    #   同一 category 下不同判据的危险程度不同：
+    #   「rm -rf」要阻断，「python -c 拉数据」只观察。
+    #   决策闸门靠它区分，而不是靠 detail 字符串匹配。
+    signal: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -662,6 +662,8 @@ class TestMorningBlocks20261028:
             f.category == "undeclared_tool" and f.severity == "high"
             for f in res.findings
         ), "同一轮里既造新工具又给出高危命令，必须仍按高危处理"
+        # ★ 2026-11-04：rm -rf 属于破坏性命令，仍阻断；
+        #   只有「网络/动态代码」类才降为观察。
         assert res.action == "block"
 
 
@@ -718,22 +720,33 @@ class TestEvidenceTiering:
             "AI 在报告里引用 AGENTS.md 被判成注入 —— 这正是误报"
         )
 
-    def test_structured_tool_call_still_blocks(self):
-        """结构化 tool_call 里的危险命令仍然阻断。"""
-        action, _ = vf.decide_response_action(
-            "balanced",
-            [self._f("tool_call_dangerous", "high")],
+    def test_tool_call_dangerous_is_observe(self):
+        """AI 自己发起的「网络/动态代码」工具调用 → 观察，不是提示。
+
+        ★ 2026-11-04：玄盾代理的是 AI 编程助手，它每天都要跑
+          `python -c` 拉数据、写 `eval/exec`。这类调用是用户的正常工作，
+          不是中转站注入的攻击。
+        """
+        f = self._f("tool_call_dangerous", "high")
+        f.signal = "Python 内联执行网络/动态代码"
+        action, _ = vf.decide_response_action("balanced", [f])
+        assert action == Action.OBSERVE.value, (
+            "AI 自己跑脚本被判成攻击 —— 这正是误报"
         )
-        assert action == Action.BLOCK.value, (
-            "证据分级把真实攻击一起放过了 —— 结构化证据必须仍能阻断"
-        )
+
+    def test_destructive_tool_call_still_blocks(self):
+        """破坏性命令（rm -rf）仍然阻断 —— 不能把误报修成漏报。"""
+        f = self._f("tool_call_dangerous", "high")
+        f.signal = "递归删除命令 rm -rf"
+        action, _ = vf.decide_response_action("balanced", [f])
+        assert action == Action.BLOCK.value, "rm -rf 不再阻断"
 
     def test_structured_plus_heuristic_still_blocks(self):
         """结构化证据 + 文本启发式 → 仍阻断。"""
         action, _ = vf.decide_response_action(
             "balanced",
             [
-                self._f("tool_call_dangerous", "high"),
+                self._f("hidden_instruction", "high"),
                 self._f("toolchain_injection", "high"),
             ],
         )

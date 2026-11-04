@@ -185,10 +185,9 @@ class TestRealEvidenceStillBlocks:
 
     def test_real_attacks_still_block(self):
         # ★ 2026-11-03：undeclared_tool 已归入文本启发式（观察层）。
-        #   它靠「响应里出现了未声明的工具名」判断，实测误报于
-        #   「RunCommand 与 RunCommand 命名差异」这类场景。
-        for cat in ("tool_call_dangerous", "hidden_instruction",
-                    "model_downgrade"):
+        # ★ 2026-11-04：tool_call_dangerous 也已归入观察层 ——
+        #   它是「AI 自己要执行的命令」，不是「中转站注入的命令」。
+        for cat in ("hidden_instruction", "model_downgrade"):
             f = VerificationFinding(category=cat, severity="high",
                                     detail="x", evidence="x")
             action, _ = decide_response_action("balanced", [f])
@@ -238,7 +237,7 @@ class TestHeuristicNeedsCorroboration:
         """结构化证据 + 文本启发式 → 仍阻断（真攻击的组合形态）。"""
         action, _ = decide_response_action(
             "balanced",
-            [self._f("tool_call_dangerous"), self._f("toolchain_injection")],
+            [self._f("hidden_instruction"), self._f("toolchain_injection")],
         )
         assert action == "block", "结构化证据在场时仍应阻断"
 
