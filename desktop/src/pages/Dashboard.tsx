@@ -588,6 +588,19 @@ export default function Dashboard() {
         </div>
 
         {today && (
+          <div className="hero-narrative">
+            今天检查了 <b>{today.total_calls}</b> 次
+            {today.redaction_count > 0 && (
+              <>，打码 <b>{today.redaction_count}</b> 处</>
+            )}
+            {today.danger_count > 0 && (
+              <>，拦下 <b>{today.danger_count}</b> 条</>
+            )}
+            。
+          </div>
+        )}
+
+        {today && (
           /* ★ 三个数字都能点进去（2026-10-20）。
              此前它们只是统计值：用户看到「危险 26」想核对，
              唯一的路径是自己去日志页手动调四个下拉 ——
@@ -601,7 +614,9 @@ export default function Dashboard() {
               style={{ textDecoration: 'none', color: 'inherit' }}
               title="查看今天安全通过的记录"
             >
-              <div className="kpi-value safe">{today.safe_count}</div>
+              <div className={`kpi-value ${today.safe_count > 0 ? 'safe' : 'neutral'}`}>
+                {today.safe_count}
+              </div>
               <div className="kpi-label">安全</div>
             </Link>
             <Link
@@ -610,7 +625,9 @@ export default function Dashboard() {
               style={{ textDecoration: 'none', color: 'inherit' }}
               title="查看今天的提示记录"
             >
-              <div className="kpi-value suspect">{today.suspect_count}</div>
+              <div className={`kpi-value ${today.suspect_count > 0 ? 'suspect' : 'neutral'}`}>
+                {today.suspect_count}
+              </div>
               {/* ★ 「可疑」→「提示」。
                   「可疑」暗示「出问题了」，但这一栏现在装的是
                   「回答长度/结构与平时不同」这类统计信号 ——
@@ -624,7 +641,9 @@ export default function Dashboard() {
               style={{ textDecoration: 'none', color: 'inherit' }}
               title="查看今天被拦截的记录"
             >
-              <div className="kpi-value danger">{today.danger_count}</div>
+              <div className={`kpi-value ${today.danger_count > 0 ? 'danger' : 'neutral'}`}>
+                {today.danger_count}
+              </div>
               <div className="kpi-label">危险</div>
             </Link>
           </div>
@@ -666,15 +685,7 @@ export default function Dashboard() {
           <div className="list">
             {recent.map((entry) => (
               <div key={entry.id} className="list-item">
-                <span className={`list-icon ${actionBadgeClass(entry)}`}>
-                  {entry.action === 'block' ? (
-                    <ShieldX size={14} strokeWidth={1.5} />
-                  ) : entry.severity === 'medium' ? (
-                    <AlertTriangle size={14} strokeWidth={1.5} />
-                  ) : (
-                    <Info size={14} strokeWidth={1.5} />
-                  )}
-                </span>
+                <span className={`status-dot ${actionBadgeClass(entry)}`} />
                 <span className="list-time">{formatTime(entry.timestamp)}</span>
                 <span className="list-text" title={entryHeadline(entry)}>
                   {entryHeadline(entry)}

@@ -13,10 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Search,
-  ShieldX,
   AlertTriangle,
-  Eye,
-  Info,
   CheckCircle2,
   X,
   Trash2,
@@ -1445,7 +1442,7 @@ export default function Logs() {
                 {entries.map((e) => (
                   <tr
                     key={e.id}
-                    className={selectedId === e.id ? 'selected' : ''}
+                    className={`${selectedId === e.id ? 'selected' : ''} ${e.action === 'block' ? 'hot' : ''}`}
                     // ★ 键盘可达（2026-10-19）：此前只有 onClick，纯键盘用户
                     //   根本无法打开详情。tabIndex + role + Enter/Space 让
                     //   「打开详情」不再只依赖鼠标；焦点轮廓由 styles.css 的
@@ -1469,17 +1466,7 @@ export default function Logs() {
                     </td>
                     <td>
                       <div className="flex items-center gap-8">
-                        <span className={`list-icon ${actionBadgeClass(e)}`} style={{ width: 20, height: 20 }}>
-                          {e.action === 'block' ? (
-                            <ShieldX size={11} strokeWidth={1.5} />
-                          ) : e.action === 'alert' || e.severity === 'medium' ? (
-                            <AlertTriangle size={11} strokeWidth={1.5} />
-                          ) : e.action === 'redact' ? (
-                            <Eye size={11} strokeWidth={1.5} />
-                          ) : (
-                            <Info size={11} strokeWidth={1.5} />
-                          )}
-                        </span>
+                        <span className={`status-dot ${actionBadgeClass(e)}`} />
                         <span className="truncate" title={e.summary}>
                           {e.summary}
                         </span>
@@ -1489,7 +1476,7 @@ export default function Logs() {
                       {displayDomain(e.relay_domain) || '—'}
                     </td>
                     <td>
-                      <span className={`badge ${actionBadgeClass(e)}`}>
+                      <span className={`status-text ${actionBadgeClass(e)}`}>
                         {entryActionLabel(e)}
                       </span>
                       {/* ★ 打码与「结果」是两个维度：一条正常转发的请求

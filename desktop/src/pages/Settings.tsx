@@ -202,6 +202,38 @@ export default function Settings() {
   //   用户会看到「下载并安装」又出现，以为没装上而反复点。
   const [updateDone, setUpdateDone] = useState(false);
 
+  // 页内导航的当前区块高亮：滚到哪一段，对应的 tab 就亮起来。
+  // 没有它，7 个 tab 只是一排灰字，用户不知道自己在哪一段。
+  const [activeSection, setActiveSection] = useState('sec-guard');
+  useEffect(() => {
+    if (!config) return;
+    const ids = [
+      'sec-guard',
+      'sec-level',
+      'sec-proxy',
+      'sec-redact',
+      'sec-engine',
+      'sec-update',
+      'sec-storage',
+    ];
+    const els = ids
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => Boolean(el));
+    if (!els.length) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        // 取最靠上的可见区块：同时有多段可见时，用户正在读的是上面那段
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]) setActiveSection(visible[0].target.id);
+      },
+      { rootMargin: '-72px 0px -55% 0px', threshold: 0 },
+    );
+    els.forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, [config]);
+
   // 已配置列表的加载刻意**不并入**上面的 load()：
   // 那是配置页的主数据，一旦它失败（引擎未起），
   // 切换列表也会跟着空掉，而两者本不该互相拖累。
@@ -1010,7 +1042,7 @@ export default function Settings() {
         ].map(([id, label]) => (
           <button
             key={id}
-            className="btn ghost sm"
+            className={`anchor-tab ${activeSection === id ? 'active' : ''}`}
             onClick={() =>
               document
                 .getElementById(id)

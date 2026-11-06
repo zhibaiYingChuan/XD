@@ -449,7 +449,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
         {/* 步骤 4：完成 */}
         {step === 3 && (
           <>
-            <div className="wizard-icon" style={{ background: 'linear-gradient(135deg, #00D4AA, #2B5FD7)' }}>
+            <div className="wizard-icon" style={{ background: 'var(--xd-primary)' }}>
               <CheckCircle2 size={30} strokeWidth={1.5} />
             </div>
             <h1 className="wizard-title">配置完成</h1>

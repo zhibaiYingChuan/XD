@@ -7,13 +7,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  Shield,
   LayoutDashboard,
   FileText,
   Settings as SettingsIcon,
   HelpCircle,
   KeyRound,
 } from 'lucide-react';
+import { TitleBar } from './TitleBar';
 import { api, STATE_LABELS, currentProxyPort, syncProxyPort } from '../services/api';
 import type { StateResponse, LicenseStatus } from '../services/api';
 import { getAppVersion, isTauri, setTrayState, type TrayState } from '../lib/tauriShim';
@@ -46,7 +46,10 @@ function deriveTrayState(
   if (!reachable || s === 'paused') {
     return { state: 'paused', detail: s === 'paused' ? '防护已暂停' : '本地代理未运行' };
   }
-  if (!today) return { state: 'safe', detail: '正在建立基线' };
+  // ★ 学习中 = 还没产生任何判定，托盘不能显示绿色。
+  //   绿色在托盘里只有一个含义：正在防护。基线未建立时显示绿色，
+  //   等于告诉用户「已经安全了」，而实际上一次检测都还没发生。
+  if (!today) return { state: 'paused', detail: '正在建立基线' };
 
   if (today.danger_count > 0) {
     return { state: 'danger', detail: `今日已阻断 ${today.danger_count} 次` };
@@ -63,9 +66,13 @@ function deriveTrayState(
   // ★★ P1-2：只读态（未激活）下的这些次数全是「未经检测的直通」，
   //   说成「已检查」就是账本说谎 —— 托盘与状态栏都不能这么写。
   if (readOnly) {
+    // ★ 未激活 = 只转发不检测，托盘必须是灰的。
+    //   原先这里返回 safe（绿色），而绿色在托盘里只代表「正在防护」——
+    //   未激活的用户会看到一个绿色图标，以为自己在被保护。
+    //   这是安全产品最不能犯的错：对用户谎报状态。
     return {
-      state: 'safe',
-      detail: `今日已转发 ${today.total_calls} 次（未经检测）`,
+      state: 'paused',
+      detail: `未激活，今日仅转发 ${today.total_calls} 次（未经检测）`,
     };
   }
   return { state: 'safe', detail: `今日已检查 ${today.total_calls} 次` };
@@ -386,62 +393,57 @@ export default function Layout() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="sidebar-brand-icon">
-            <Shield size={18} strokeWidth={1.5} />
+      {/* 自绘标题栏：品牌区与侧栏同宽，视觉上连成一条竖线 */}
+      <TitleBar />
+
+      <div className="app-body">
+        <aside className="sidebar">
+          <nav className="sidebar-nav">
+            {NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.end}
+                  // title：窄窗口折叠成图标栏后靠它提示每个图标是什么，导航仍然可辨识。
+                  title={item.label}
+                  className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                >
+                  <Icon size={17} strokeWidth={1.5} />
+                  {/* 标签单独包一层：窄窗口（≤900px）折叠为图标栏时由 CSS 隐藏文字，
+                      避免图标栏被挤爆。见 styles.css 的响应式断点。 */}
+                  <span className="nav-item-label">{item.label}</span>
+                </NavLink>
+              );
+            })}
+            <NavLink
+              to="/activate"
+              title="激活"
+              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            >
+              <KeyRound size={17} strokeWidth={1.5} />
+              <span className="nav-item-label">激活</span>
+              {license && !license.activated && (
+                <span className="badge suspect" style={{ marginLeft: 'auto' }}>
+                  未激活
+                </span>
+              )}
+            </NavLink>
+          </nav>
+
+          <div className="sidebar-footer">
+            {version && <span>v{version}</span>}
+            <span className="faint">本地运行</span>
           </div>
-          <div className="sidebar-brand-text">
-            <div className="sidebar-brand-title">道体·玄盾</div>
-            <div className="sidebar-brand-sub">个人版</div>
-          </div>
+        </aside>
+
+        <div className="main-area">
+          <StatusBar />
+          <main className="page-content" ref={mainRef}>
+            <Outlet />
+          </main>
         </div>
-
-        <nav className="sidebar-nav">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                // title：窄窗口折叠成图标栏后靠它提示每个图标是什么，导航仍然可辨识。
-                title={item.label}
-                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              >
-                <Icon size={17} strokeWidth={1.5} />
-                {/* 标签单独包一层：窄窗口（≤900px）折叠为图标栏时由 CSS 隐藏文字，
-                    避免图标栏被挤爆。见 styles.css 的响应式断点。 */}
-                <span className="nav-item-label">{item.label}</span>
-              </NavLink>
-            );
-          })}
-          <NavLink
-            to="/activate"
-            title="激活"
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          >
-            <KeyRound size={17} strokeWidth={1.5} />
-            <span className="nav-item-label">激活</span>
-            {license && !license.activated && (
-              <span className="badge suspect" style={{ marginLeft: 'auto' }}>
-                未激活
-              </span>
-            )}
-          </NavLink>
-        </nav>
-
-        <div className="sidebar-footer">
-          {version && <span>v{version}</span>}
-          <span className="faint">本地运行</span>
-        </div>
-      </aside>
-
-      <div className="main-area">
-        <StatusBar />
-        <main className="page-content" ref={mainRef}>
-          <Outlet />
-        </main>
       </div>
     </div>
   );
