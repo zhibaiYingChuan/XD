@@ -146,7 +146,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             bundle: nsis
             bundle_glob: '*.exe'
-          - os: macos-14
+          # ★ 2026-11-06：macos-14 已无法分配（报
+          #   「The configuration 'macos-14-arm64-us-default' is not supported」，
+          #   1 秒即失败，与构建内容无关）。改用 macos-latest。
+          - os: macos-latest
             name: macOS arm64
             art: mac-arm64
             target: aarch64-apple-darwin
