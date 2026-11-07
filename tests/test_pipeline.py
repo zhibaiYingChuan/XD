@@ -94,7 +94,7 @@ def test_sanitizer_redact() -> None:
     check("打码数量=2", r.redaction_count == 2, f"实际={r.redaction_count}")
     check("原文不再含手机号", "13812345678" not in r.sanitized_text)
     check("原文不再含邮箱", "zhang.san@example.com" not in r.sanitized_text)
-    check("含占位符 ⟦XD_1⟧", "⟦XD_1⟧" in r.sanitized_text, r.sanitized_text)
+    check("含占位符 ⟦KH_1⟧", "⟦KH_1⟧" in r.sanitized_text, r.sanitized_text)
 
     # 幂等性：同一文本重复脱敏结果一致
     r2 = s.sanitize("联系我 13812345678 或发邮件 zhang.san@example.com")
@@ -250,7 +250,7 @@ def test_restorer() -> None:
     check("恢复后无异常", len(anomalies) == 0, str(anomalies))
 
     # 中转站伪造占位符（未登记编号）
-    _, anomalies2 = restorer.restore("unknown_session", "结果 ⟦XD_99⟧")
+    _, anomalies2 = restorer.restore("unknown_session", "结果 ⟦KH_99⟧")
     check("未登记占位符被识别为异常", len(anomalies2) >= 1, f"anomalies={anomalies2}")
 
 
@@ -330,7 +330,7 @@ def test_full_pipeline() -> None:
 
 def main() -> int:
     print("=" * 70)
-    print("  道体·玄盾 个人版 — 三层检测管道验证")
+    print("  道体·勘合 个人版 — 三层检测管道验证")
     print("=" * 70)
 
     test_sanitizer_block()

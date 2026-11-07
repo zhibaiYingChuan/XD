@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "道体·玄盾 个人版",
+  "productName": "道体·勘合 个人版",
   "version": "0.1.39-alpha",
   "identifier": "com.daoti.xuandun-personal",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "道体·玄盾 个人版",
+        "title": "道体·勘合 个人版",
         "width": 1100,
         "height": 720,
         "minWidth": 900,
@@ -40,7 +40,7 @@
     "homepage": "https://sfang.cc",
     "category": "Utility",
     "shortDescription": "保护个人用户的 AI 数据安全",
-    "longDescription": "道体·玄盾个人版在你的电脑和 AI 中转站之间建立一道本地安检站，检查每一笔进出的数据。",
+    "longDescription": "道体·勘合个人版在你的电脑和 AI 中转站之间建立一道本地安检站，检查每一笔进出的数据。",
     "windows": {
       "nsis": {
         "languages": ["SimpChinese", "English"],
@@ -58,7 +58,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://sfang.cc/xd/downloads/latest.json"
+        "https://sfang.cc/download/downloads/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZEMDA4QUI5QThEMTgzQzMKUldURGc5R291WW9BL1ZMNDgxRDFqOUwrYkhpbUNJOVRTUnUxL3FFRHdFVENPRlNsOWUwMlRPZDMK",
       "windows": {

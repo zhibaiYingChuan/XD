@@ -819,7 +819,7 @@ def verify(
         # 签名不符 / 格式损坏 / alg 不匹配都落这里。
         # ★ 措辞刻意含糊：不说「签名无效」，减少反编译者
         #   从错误文案推断出「这里是验签点」。
-        return VerifyResult(False, "bad_signature", "激活码无效，请确认是玄盾官方发出的码")
+        return VerifyResult(False, "bad_signature", "激活码无效，请确认是勘合官方发出的码")
 
     # 签名已通过 → payload 可信，可安全取出 jti（供下方过期判定与吊销检查共用）。
     jti = str(claims.get("jti", ""))

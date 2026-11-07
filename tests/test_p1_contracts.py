@@ -392,7 +392,7 @@ class TestPrivateKeyGateIsContentBased:
 
     def test_detects_pem_header_in_text(self):
         mod = _load_module(SCAN_SECRETS, "scan_secrets_probe")
-        # ★ 头部必须拼出来：本机玄盾会把"像私钥"的字面量替换成占位符
+        # ★ 头部必须拼出来：本机勘合会把"像私钥"的字面量替换成占位符
         header = ("-----BEGIN " + "RSA " + "PRIVATE" + " KEY" + "-----").encode()
         assert mod.scan_bytes("notes.md", header + b"\nAAAA\n"), (
             "PEM 私钥粘进文本文件时未被检出"
@@ -507,7 +507,7 @@ class TestBuildJobEgressIsEnforced:
 class TestLocalProxyOfflineIsRecoverable:
     """P1-30：引擎没起来时，用户必须能就地恢复。
 
-    此前只写「请确认玄盾代理已启动（127.0.0.1:端口）」+「重试」——
+    此前只写「请确认勘合代理已启动（127.0.0.1:端口）」+「重试」——
     那是一句用户无法执行的指令：他不知道引擎是什么、怎么启动，
     也不知道「端口被别的程序占了」「改过端口没重启」这两种常见原因。
     """
@@ -556,7 +556,7 @@ class TestLocalProxyOfflineIsRecoverable:
 class TestMultiRelayMultiPortConsistency:
     """多中转站 + 多端口：主端口正常、某一家入口失效时不能静默。
 
-    玄盾是「一个进程监听多个端口」：主端口 + 每家中转站一个专属端口。
+    勘合是「一个进程监听多个端口」：主端口 + 每家中转站一个专属端口。
     这带来两类**只看主端口发现不了**的失效：
       ① 保存配置时某个专属端口绑不上 —— 后端照旧保存，只在 port_errors 里说明；
       ② 引擎重启后某个专属端口仍绑不上 —— 界面上完全没痕迹。

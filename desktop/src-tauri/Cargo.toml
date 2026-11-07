@@ -1,7 +1,7 @@
 [package]
 name = "xuandun-personal"
 version = "0.1.39-alpha"
-description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据安全"
+description = "道体·勘合 个人版 — 保护个人用户在使用 AI 中转站时的数据安全"
 authors = ["Daoti Team"]
 edition = "2021"
 rust-version = "1.77"

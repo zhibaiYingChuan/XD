@@ -36,7 +36,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-PRODUCT = "道体·玄盾 个人版（XuanDun Personal）"
+PRODUCT = "道体·勘合 个人版（XuanDun Personal）"
 VENDOR = "DaoTi Research（独立研究者 知白）"
 POSITIONING = (
     "本地 AI 防护网关：在本机 127.0.0.1 上监听，对用户与 AI 服务之间"

@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "daoti-xuandun-personal"
 version = "0.1.39a0"
-description = "道体·玄盾 个人版 — 保护个人用户在使用 AI 中转站时的数据与执行安全"
+description = "道体·勘合 个人版 — 保护个人用户在使用 AI 中转站时的数据与执行安全"
 readme = "README.md"
 requires-python = ">=3.11"
 # ★ 保留自定义许可证标识：道体研究许可证 v1.0 不是 OSI 认可的 SPDX ID，

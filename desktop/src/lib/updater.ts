@@ -58,7 +58,7 @@ const UPDATE_STALL_TIMEOUT_MS = 120_000;
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
 
 /** 手动下载页：与 tauri.conf.json 的更新端点同一自有站点。 */
-export const DOWNLOAD_PAGE_URL = 'https://sfang.cc/xuandun/personal';
+export const DOWNLOAD_PAGE_URL = 'https://sfang.cc/kanhe/personal';
 
 /** 把底层网络错误翻译成「用户能照做」的一句话。 */
 function describeCheckFailure(e: unknown): string {
@@ -212,7 +212,7 @@ const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /**
  * 应用一直开着时的复查间隔。
  *
- * ★ 2026-11-03：此前只在启动后查一次。用户把玄盾挂在后台好几天，
+ * ★ 2026-11-03：此前只在启动后查一次。用户把勘合挂在后台好几天，
  *   期间发的新版本永远收不到提示 —— 直到他主动重启。
  *   现在窗口重新获得焦点时也查一次，但至少间隔 6 小时，仍不轮询。
  */
@@ -279,7 +279,7 @@ export function shouldAutoCheck(
  * 记录一次自动检查的结果。
  *
  * ★ 必须连失败一起记：否则网络长期不通时，每次启动都要先卡一次检查超时，
- *   而用户对此毫无感知，只觉得「玄盾启动变慢了」。
+ *   而用户对此毫无感知，只觉得「勘合启动变慢了」。
  * ★ 但失败要标记出来：下一次按 30 分钟而不是 24 小时重试。
  */
 export function markAutoChecked(now: number = Date.now(), ok: boolean = true): void {

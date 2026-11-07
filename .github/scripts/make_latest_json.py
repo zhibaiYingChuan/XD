@@ -92,12 +92,19 @@ def main() -> int:
     if not art.is_dir():
         raise SystemExit(f"artifacts 目录不存在: {art}")
 
-    repo = os.environ.get("GITHUB_REPOSITORY", "zhibaiYingChuan/XD")
     tag = os.environ.get("GITHUB_REF_NAME", "")
     if not tag.startswith("v"):
         raise SystemExit(f"当前 ref 不是版本 tag: {tag!r}")
 
-    base = f"https://github.com/{repo}/releases/download/{tag}"
+    # ★ 2026-11-08：更新包下载地址必须指向自有站点，不再指向 GitHub。
+    #   tauri.conf.json 的 updater.endpoints 已经是
+    #   https://sfang.cc/download/downloads/latest.json，
+    #   清单里的 url 若仍写 GitHub，客户端检查能通、下载却要绕回 GitHub ——
+    #   国内网络下这一步经常失败，等于自动更新形同虚设。
+    #   可用 UPDATE_BASE_URL 覆盖（灰度 / 镜像站），默认走自有站点。
+    base = os.environ.get(
+        "UPDATE_BASE_URL", "https://sfang.cc/download/downloads"
+    ).rstrip("/")
     files = [p for p in art.rglob("*") if p.is_file()]
 
     platforms: dict[str, dict[str, str]] = {}

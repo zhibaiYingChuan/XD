@@ -211,13 +211,13 @@ def _backup_corrupt_config(raw_text: str, err: Exception) -> Optional[Path]:
 class RelayConfig:
     """中转站配置（个人版核心配置）。
 
-    ★ 这里**不**包含 model 字段：玄盾监控的是 API，不是某个模型。
-      请求里的 model 原样透传给中转站，玄盾不改写它。
+    ★ 这里**不**包含 model 字段：勘合监控的是 API，不是某个模型。
+      请求里的 model 原样透传给中转站，勘合不改写它。
 
     ★★ v0.1.0：从「单条」扩为「多条 + 一个当前启用项」。
       动机是一个真实的坑：转发时**总是**用这份配置里的 api_key
       （见 app.py::_forward_to_relay），所以
-      「AI 工具里填 A 家、玄盾里配 B 家」时，
+      「AI 工具里填 A 家、勘合里配 B 家」时，
       用户以为在用 A 扣费，实际扣的是 B —— 账单打错且无人知晓。
 
       为什么不做「多中转站轮询/负载均衡」：
@@ -401,7 +401,7 @@ class RelayConfig:
           否则用当前启用项 —— 后者是兼容老配置的回退。
 
           刻意**不做**「匹配不到就报错」：
-          用户可能刚在别处换了 Key，还没同步到玄盾，
+          用户可能刚在别处换了 Key，还没同步到勘合，
           此时直接拒绝会让整个 AI 工具不可用，
           而静默用当前启用项只是延续现状（不会更糟）。
         """
@@ -558,7 +558,7 @@ class PersonalConfig:
                 if _coerce_port(raw) == self.server.port:
                     errors.append(
                         f"中转站「{name}」的端口 {self.server.port} "
-                        "与玄盾主端口相同，请换一个（例如 18801）"
+                        "与勘合主端口相同，请换一个（例如 18801）"
                     )
         return errors
 

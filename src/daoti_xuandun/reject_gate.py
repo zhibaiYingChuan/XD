@@ -441,7 +441,7 @@ class EndogenousDomainAwareness:
         self._session_query_internal_score: dict = {}
 
         # ── 双梯形镜像递归网络（Rust + PyO3 原生扩展） ──
-        # 玄盾灵魂级底层算法。对"不确定/边界模糊"请求增加递归轨迹分析，
+        # 勘合灵魂级底层算法。对"不确定/边界模糊"请求增加递归轨迹分析，
         # 输出递归置信度和轨迹振荡度，作为 fused_anomaly 的增强信号。
         # 角色扮演/组合策略类攻击会产生高振荡、不收敛的递归轨迹。
         self._bilateral: Optional[object] = None

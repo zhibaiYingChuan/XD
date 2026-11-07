@@ -425,7 +425,7 @@ def reload_engine_from_disk(page, be: Backend):
         page.evaluate("() => window.__TAURI_INTERNALS__.invoke('restart_engine')")
     except Exception as e:
         return (f"!! 引擎重启失败（{type(e).__name__}: {e}）—— "
-                f"内存中可能仍是占位中转站，请手动重启玄盾")
+                f"内存中可能仍是占位中转站，请手动重启勘合")
 
     # 等引擎真正换上「还原后的配置」。
     #
@@ -450,7 +450,7 @@ def reload_engine_from_disk(page, be: Backend):
         else:
             clean_streak = 0
         page.wait_for_timeout(500)
-    return "!! 引擎重启后 60s 内未稳定读到「未配置中转站」，请手动重启玄盾"
+    return "!! 引擎重启后 60s 内未稳定读到「未配置中转站」，请手动重启勘合"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -616,7 +616,7 @@ def complete_wizard(page):
     #
     # ★ 只有「接入地址」与「API Key」两项。
     #   向导曾还有「模型名称」输入框（#ob-model），已在 2026-09-29 移除：
-    #   模型由调用方在请求里给出，玄盾配置模型会覆盖请求里的 model，
+    #   模型由调用方在请求里给出，勘合配置模型会覆盖请求里的 model，
     #   使「模型是否被中转站偷换」失去比对基准。
     #   本脚本若不跟着删掉那一行，向导这一步必然失败，
     #   而失败原因是测试在填一个不存在的框 —— 会把它误记成产品缺陷。
@@ -911,7 +911,7 @@ def test_unreachable_label(page, be: Backend):
     branch = _re.sub(r"(?m)^\s*//.*$", "", branch)
     # 降级分支里不许出现「防护中」「学习中」这类"一切正常"的措辞
     lying = [w for w in ("防护中", "学习中", "今日已检查") if w in branch]
-    has_honest = "本地代理未运行" in branch and ("请确认玄盾代理已启动" in branch)
+    has_honest = "本地代理未运行" in branch and ("请确认勘合代理已启动" in branch)
     rec("T3b 引擎失效时状态栏诚实",
         has_honest and not lying,
         f"诚实文案={'有' if has_honest else '无'}，谎报措辞={lying or '无'}")
@@ -1990,10 +1990,10 @@ def test_relay_test_button(page, be: Backend):
         return
     rec("T8 测试连接能给出结论", True, f"面板={panel[:120]!r}")
 
-    # ★ 用户必须能看到「玄盾实际会请求的地址」：
+    # ★ 用户必须能看到「勘合实际会请求的地址」：
     #   地址填错的症状是 404，而用户无从知道自己填的形态被拼成了什么。
     #   摆出这一行，配置这一步就能核对，不必等到用不了再猜。
-    rec("T8 结论里给出实际请求地址", "玄盾请求的地址" in panel,
+    rec("T8 结论里给出实际请求地址", "勘合请求的地址" in panel,
         f"面板={panel[:200]!r}")
 
     # ★ 诚实性核心：占位地址是 RFC 2606 保留域，永远不可解析。
@@ -2134,7 +2134,7 @@ def assert_isolated_profile():
 
 def main():
     print("=" * 74)
-    print(" 玄盾个人版 — 桌面端 CDP 回归测试")
+    print(" 勘合个人版 — 桌面端 CDP 回归测试")
     print("=" * 74)
 
     # ★ 先落定隔离档案：本脚本自己会用这些值定位配置/引擎，
@@ -2221,7 +2221,7 @@ def main():
                 # 返回 2 而非继续：没有引擎就没有独立事实源，
                 # 所有「界面是否诚实」的断言都会退化成自说自话。
                 print(f"[FATAL] 本地代理（127.0.0.1:{be.port}）无响应，无法取得对照事实源。")
-                print("  请确认玄盾引擎已启动（应用启动后会自动拉起）。")
+                print("  请确认勘合引擎已启动（应用启动后会自动拉起）。")
                 return 2
             try:
                 real_port = page.evaluate(
@@ -2427,7 +2427,7 @@ def main():
             if guard.has_placeholder(be):
                 restore_notes.append(
                     "!! 仍检测到占位中转站残留，但 CDP 可能已断开，"
-                    "请手动重启玄盾"
+                    "请手动重启勘合"
                 )
         except Exception:
             pass

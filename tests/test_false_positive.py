@@ -365,7 +365,7 @@ def run_content_cases(title, cases, fn, expect_hit):
 
 def main():
     print("=" * 78)
-    print("  玄盾个人版 — 真实误报回归集")
+    print("  勘合个人版 — 真实误报回归集")
     print("=" * 78)
     print("样本取自真实工程与教学场景，不为通过判据而回避触发条件。")
     print("判据若在此误报，即为真误报。")

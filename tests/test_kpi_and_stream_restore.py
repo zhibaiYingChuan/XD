@@ -16,7 +16,7 @@
   · P0-2 流式响应里的脱敏占位符不还原
       chunk 在 yield 时以占位符原样发出，restore() 只改了服务端 full 变量，
       对已发给客户端的字节无效。Claude Code / Cursor 全走流式，
-      用户会看到 ⟦XD_n⟧，工具调用参数也带着占位符被执行。
+      用户会看到 ⟦KH_n⟧，工具调用参数也带着占位符被执行。
 
 判据一律落在**真实调用点**：KPI 走真实的 storage 重算路径，
 流式还原走真实的 /v1/chat/completions 端点。
@@ -353,12 +353,12 @@ PHONE = "13812345678"
 
 
 class TestStreamRestoresPlaceholders:
-    """客户端收到的字节里不得出现 ⟦XD_ 占位符。"""
+    """客户端收到的字节里不得出现 ⟦KH_ 占位符。"""
 
     def test_placeholder_restored_in_complete_frame(self, tmp_path, monkeypatch):
         # 上游把占位符「原样回显」—— 真实模型经常这么做
         frame1 = (
-            'data: {"choices":[{"delta":{"content":"你的手机号是 ⟦XD_1⟧"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"你的手机号是 ⟦KH_1⟧"}}]}\n\n'
         )
         frame2 = "data: [DONE]\n\n"
         out = _collect_stream(
@@ -367,7 +367,7 @@ class TestStreamRestoresPlaceholders:
             user_text=f"我的手机号是 {PHONE}",
         )
 
-        assert "⟦XD_".encode("utf-8") not in out, (
+        assert "⟦KH_".encode("utf-8") not in out, (
             "客户端收到了未还原的脱敏占位符 —— "
             "流式路径把占位符原样透传了"
         )
@@ -380,11 +380,11 @@ class TestStreamRestoresPlaceholders:
     ):
         """占位符正好跨 chunk 边界被切断，也必须被拼回并还原。"""
         frame1 = (
-            'data: {"choices":[{"delta":{"content":"你的手机号是 ⟦XD_1⟧"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"你的手机号是 ⟦KH_1⟧"}}]}\n\n'
         )
         raw = frame1.encode("utf-8")
         # 在占位符「⟦XD」与「_1⟧」之间切开，制造跨 chunk 的截断
-        cut = raw.index("⟦XD_1⟧".encode("utf-8")) + len("⟦XD".encode("utf-8"))
+        cut = raw.index("⟦KH_1⟧".encode("utf-8")) + len("⟦XD".encode("utf-8"))
         chunks = [raw[:cut], raw[cut:], "data: [DONE]\n\n".encode("utf-8")]
 
         out = _collect_stream(
@@ -392,7 +392,7 @@ class TestStreamRestoresPlaceholders:
             user_text=f"我的手机号是 {PHONE}",
         )
 
-        assert "⟦XD_".encode("utf-8") not in out, (
+        assert "⟦KH_".encode("utf-8") not in out, (
             "跨 chunk 被切断的占位符没有被拼回还原 —— "
             "残留缓冲没有生效"
         )

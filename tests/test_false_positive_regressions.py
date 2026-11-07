@@ -9,7 +9,7 @@
      不构成「指示客户端执行」，只该记观测项；
   2. 真正执行命令的工具（Bash/PowerShell）参数里出现危险命令，仍然拦；
   3. 正文里「提到」eval( 不算违背约束；给出代码块才算；
-  4. 玄盾自己的激活码（XDACT- 前缀的 JWT）不再被自家 JWT 规则拦下；
+  4. 勘合自己的激活码（XDACT- 前缀的 JWT）不再被自家 JWT 规则拦下；
   5. 模型名的日期快照后缀（-1017）不得判成降级（历史 36 条误报的根因）。
 """
 
@@ -554,7 +554,7 @@ class TestMorningBlocks20261028:
 
     # ── #7928 / #7496（第二项）：`.env` 作为过滤关键字出现 ≠ 去读它 ──
     def test_dotenv_as_keyword_list_is_observation(self):
-        cmd = "python -c \"for k in ('XD_1','企业版','.env','key','pem'): pass\""
+        cmd = "python -c \"for k in ('KH_1','企业版','.env','key','pem'): pass\""
         findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
         assert not any(f.category == "tool_call_dangerous" for f in findings), (
             "仓库体检脚本把 .env 当关键字，被判成读取环境变量文件"
@@ -585,7 +585,7 @@ class TestMorningBlocks20261028:
     def test_placeholder_without_redaction_is_low(self):
         r = ContentRestorer()
         r.begin_session("s-7501")
-        _, anomalies = r.restore("s-7501", "占位符的格式是 ⟦XD_1⟧ 这样")
+        _, anomalies = r.restore("s-7501", "占位符的格式是 ⟦KH_1⟧ 这样")
         assert anomalies and anomalies[0].severity == "low", (
             "AI 在回答里讨论占位符格式，被判成中转站伪造占位符并阻断"
         )
@@ -596,9 +596,9 @@ class TestMorningBlocks20261028:
         r.register(
             "s-redacted",
             [RedactionRecord(index=1, category="phone",
-                             original="13800000000", redacted="⟦XD_1⟧")],
+                             original="13800000000", redacted="⟦KH_1⟧")],
         )
-        _, anomalies = r.restore("s-redacted", "⟦XD_9⟧")
+        _, anomalies = r.restore("s-redacted", "⟦KH_9⟧")
         assert anomalies and anomalies[0].severity == "high", (
             "本会话确实脱敏过，却出现未登记编号 —— 这是伪造探测，必须仍然阻断"
         )
@@ -723,7 +723,7 @@ class TestEvidenceTiering:
     def test_tool_call_dangerous_is_observe(self):
         """AI 自己发起的「网络/动态代码」工具调用 → 观察，不是提示。
 
-        ★ 2026-11-04：玄盾代理的是 AI 编程助手，它每天都要跑
+        ★ 2026-11-04：勘合代理的是 AI 编程助手，它每天都要跑
           `python -c` 拉数据、写 `eval/exec`。这类调用是用户的正常工作，
           不是中转站注入的攻击。
         """

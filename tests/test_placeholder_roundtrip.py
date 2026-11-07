@@ -6,7 +6,7 @@
 这一组锁的是「脱敏之后还能不能干活」：
 
   1. 同一个值，在同一会话内**编号稳定** —— 跨轮次、跨消息都是同一个号。
-     按位置编号时，模型复述上一轮的 ⟦XD_3⟧ 会被本轮 3 号（另一个值）顶掉，
+     按位置编号时，模型复述上一轮的 ⟦KH_3⟧ 会被本轮 3 号（另一个值）顶掉，
      还原出来的是**另一个秘密**，静默写错。
   2. 不同会话的编号空间互相独立 —— 两个 AI 工具同时开，不能串号。
   3. 非流式响应的还原结果必须**无条件写回**，且要覆盖 tool_calls.arguments。
@@ -98,7 +98,7 @@ class TestSanitizerStableIds:
         assert len({rec.index for rec in res.records}) == 1, (
             "同一个邮箱出现了两个编号 —— 模型会把它们当成两个不同的东西"
         )
-        assert res.sanitized_text.count(f"⟦XD_{res.records[0].index}⟧") == 2
+        assert res.sanitized_text.count(f"⟦KH_{res.records[0].index}⟧") == 2
 
     def test_id_survives_across_requests(self):
         r = ContentRestorer()
@@ -107,7 +107,7 @@ class TestSanitizerStableIds:
         first = sz.sanitize(EMAIL, vault=r.vault, session_id=sid)
         second = sz.sanitize(f"再确认一次：{EMAIL2} / {EMAIL}", vault=r.vault, session_id=sid)
         idx_email = first.records[0].index
-        assert f"⟦XD_{idx_email}⟧" in second.sanitized_text, (
+        assert f"⟦KH_{idx_email}⟧" in second.sanitized_text, (
             "同一个邮箱在下一轮换了编号 —— 模型复述旧编号会被顶替成别的值"
         )
 
@@ -123,7 +123,7 @@ class TestRestorer:
         sid = r.begin_session("s1")
         idx = r.vault.intern(sid, EMAIL, "email")
         r.clear_after_response(sid)     # 现在是 no-op，仅为兼容旧调用点
-        out, anomalies = r.restore(sid, f"你的邮箱是 ⟦XD_{idx}⟧")
+        out, anomalies = r.restore(sid, f"你的邮箱是 ⟦KH_{idx}⟧")
         assert EMAIL in out
         assert not anomalies
 
@@ -131,8 +131,8 @@ class TestRestorer:
         """本会话从未脱敏时：换不出任何值，只记录，不指控「伪造」。"""
         r = ContentRestorer()
         sid = r.begin_session("s1")
-        out, anomalies = r.restore(sid, "⟦XD_42⟧")
-        assert out == "⟦XD_42⟧", "未知编号被还原了 —— 中转站可以借此探测真实值"
+        out, anomalies = r.restore(sid, "⟦KH_42⟧")
+        assert out == "⟦KH_42⟧", "未知编号被还原了 —— 中转站可以借此探测真实值"
         assert anomalies and anomalies[0].severity == "low", (
             "本会话没有可置换的原始值，按 high 阻断会把「讨论占位符格式」判成攻击"
         )
@@ -142,8 +142,8 @@ class TestRestorer:
         r = ContentRestorer()
         sid = r.begin_session("s2")
         r.vault.intern(sid, EMAIL, "email")
-        out, anomalies = r.restore(sid, "⟦XD_9999⟧")
-        assert out == "⟦XD_9999⟧", "未登记编号不得被还原"
+        out, anomalies = r.restore(sid, "⟦KH_9999⟧")
+        assert out == "⟦KH_9999⟧", "未登记编号不得被还原"
         assert anomalies and anomalies[0].severity == "high"
 
     def test_restore_payload_rewrites_content(self):
@@ -152,7 +152,7 @@ class TestRestorer:
         idx = r.vault.intern(sid, EMAIL, "email")
         payload = {
             "choices": [{"message": {"role": "assistant",
-                                     "content": f"已记录：⟦XD_{idx}⟧"}}]
+                                     "content": f"已记录：⟦KH_{idx}⟧"}}]
         }
         restored, stats = app_mod._restore_payload(payload, r, sid)
         assert restored["choices"][0]["message"]["content"] == f"已记录：{EMAIL}"
@@ -163,7 +163,7 @@ class TestRestorer:
         r = ContentRestorer()
         sid = r.begin_session("s1")
         idx = r.vault.intern(sid, EMAIL, "email")
-        ph = f"⟦XD_{idx}⟧"
+        ph = f"⟦KH_{idx}⟧"
         arguments = json.dumps({"path": "/tmp/a.conf", "content": f"mail={ph}"})
         payload = {
             "choices": [{
@@ -190,9 +190,9 @@ class TestRestorer:
         idx = r.vault.intern(sid, PHONE, "phone")
         payload = {
             "content": [
-                {"type": "text", "text": f"手机号 ⟦XD_{idx}⟧"},
+                {"type": "text", "text": f"手机号 ⟦KH_{idx}⟧"},
                 {"type": "tool_use", "id": "t1", "name": "save",
-                 "input": {"phone": f"⟦XD_{idx}⟧"}},
+                 "input": {"phone": f"⟦KH_{idx}⟧"}},
             ]
         }
         restored, _ = app_mod._restore_payload(payload, r, sid)
@@ -205,7 +205,7 @@ class TestRestorer:
         sid = r.begin_session("s1")
         tricky = 'p"a\\ss'
         idx = r.vault.intern(sid, tricky, "custom")
-        frame = 'data: {"choices":[{"delta":{"content":"\\u27e6XD_%d\\u27e7"}}]}\n\n' % idx
+        frame = 'data: {"choices":[{"delta":{"content":"\\u27e6KH_%d\\u27e7"}}]}\n\n' % idx
 
         escaped = r.is_escaped_form(frame)
         assert escaped, "转义形态没有被识别"
@@ -248,7 +248,7 @@ class TestRequestToolCallsAreSanitized:
         )
         args = body["messages"][1]["tool_calls"][0]["function"]["arguments"]
         assert EMAIL not in args, "工具调用参数里的邮箱被原样发给了中转站"
-        assert "⟦XD_" in args
+        assert "⟦KH_" in args
         assert records, "脱敏记录为空，日志里看不到这次打码"
 
     def test_anthropic_tool_use_input(self):
@@ -272,7 +272,7 @@ class TestRequestToolCallsAreSanitized:
         )
         value = body["messages"][1]["content"][0]["input"]["content"]
         assert EMAIL not in value
-        assert "⟦XD_" in value
+        assert "⟦KH_" in value
 
     def test_user_message_still_blocks(self):
         """用户本轮亲手贴密钥，仍然必须被拦住（不能被「只打码」吞掉）。"""

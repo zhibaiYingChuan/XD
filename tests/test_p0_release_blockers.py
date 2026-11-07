@@ -6,7 +6,7 @@
 十条 P0 的共同特征：**界面上一切正常，底层已经坏了**。
 所以这里的判据不看「有没有某段代码」，而是看真实调用点的结果：
 
-  P0-1 引擎身份：/health 必须能证明「对面是玄盾」，桌面端才能把 Key 交出去
+  P0-1 引擎身份：/health 必须能证明「对面是勘合」，桌面端才能把 Key 交出去
   P0-2 就绪语义：/− 存储或检测器缺失时不能再回 ok
   P0-3 建表异常：锁等待/只读盘不得被当成「库损坏」而整库隔离
   P0-4 截断冒充成功：响应体读到一半失败，不能当作 200 空内容通过
@@ -298,7 +298,7 @@ class TestEngineIdentity:
         """Rust 侧必须比对身份，不匹配即拒绝。"""
         src = LIB_RS.read_text(encoding="utf-8")
         assert "instance" in src, "Rust 未校验引擎身份标记"
-        assert "不是玄盾引擎" in src or "非本机引擎" in src or "身份" in src, (
+        assert "不是勘合引擎" in src or "非本机引擎" in src or "身份" in src, (
             "拒绝外部进程时没有可读的提示"
         )
 

@@ -65,7 +65,7 @@ class _V1Only:
                             "type": "not_found",
                             "message": (
                                 "这个端口只接对话请求（/v1/...）。"
-                                "配置与日志在玄盾里查看。"
+                                "配置与日志在勘合里查看。"
                             ),
                         }
                     },
@@ -99,7 +99,7 @@ class RelayPortListeners:
     """额外入口端口的生命周期管理（同一事件循环内增删）。
 
     ★ 只由 ``proxy.app.run()`` 创建一次；测试里 create_app() 不会创建它，
-      所以端口相关接口在没有监听器时会明确告知「需要重启玄盾」，
+      所以端口相关接口在没有监听器时会明确告知「需要重启勘合」，
       而不是假装保存成功。
     """
 
@@ -145,7 +145,7 @@ class RelayPortListeners:
 
     async def _start(self, port: int) -> Optional[str]:
         if port == self._main_port:
-            return f"端口 {port} 是玄盾主入口，请换一个（例如 18801）"
+            return f"端口 {port} 是勘合主入口，请换一个（例如 18801）"
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:

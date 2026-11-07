@@ -10,7 +10,7 @@
 
 关键约束（安全底线）：
 1. 原始敏感值**只存于本地 DB**，绝不写入任何外发内容或日志
-2. 脱敏占位符使用 `⟦XD_{index}⟧` 格式，数学字母括号避免与原文冲突
+2. 脱敏占位符使用 `⟦KH_{index}⟧` 格式，数学字母括号避免与原文冲突
 3. 脱敏必须**幂等**——同一段文本重复脱敏产生相同结果
 4. 命中阻断类敏感信息时**绝不**降级为打码（防止半泄露）
 
@@ -374,7 +374,7 @@ class RequestSanitizer:
     使用示例：
         sanitizer = RequestSanitizer(level=SecurityLevel.BALANCED)
         result = sanitizer.sanitize("我的手机号是 13812345678")
-        # result.sanitized_text = "我的手机号是 ⟦XD_0⟧"
+        # result.sanitized_text = "我的手机号是 ⟦KH_0⟧"
         # result.redaction_count == 1
     """
 
@@ -484,13 +484,13 @@ class RequestSanitizer:
                   整轮阻断会让对话直接中断，而且这段内容留在历史里，
                   之后每轮都会被再拦一次 —— 用户看到的是「聊到一半突然
                   一直发不出去」。打码同样能保证 token 不外发
-                  （中转站只看到 ⟦XD_n⟧），但不打断对话。
+                  （中转站只看到 ⟦KH_n⟧），但不打断对话。
                   用户自己打的字仍按阻断处理：那是「正要贴密钥」的时刻，
                   必须让他停下来。
             vault: 可选 ``PlaceholderVault``。传入后占位符编号由保险箱
                 按「会话 + 值」分配 —— 同一个值跨轮次、跨消息都是同一个
                 编号。★ 这是还原能跨轮次工作的前提：按位置编号时，
-                模型复述上一轮的 ⟦XD_3⟧ 会被本轮 3 号（另一个值）顶掉，
+                模型复述上一轮的 ⟦KH_3⟧ 会被本轮 3 号（另一个值）顶掉，
                 静默替换成错误的秘密。
             session_id: 与 vault 配套的会话标识。
 
@@ -615,7 +615,7 @@ class RequestSanitizer:
             if not self._enabled_categories.get(rule.category, True):
                 continue
             for start, end, value in rule.find(text):
-                # ★★ 2026-10-27：放行玄盾自己的激活码。
+                # ★★ 2026-10-27：放行勘合自己的激活码。
                 #
                 #   激活码本身就是 RS256 JWT（`XDACT-` + 三段式），
                 #   JWT 规则必然命中，于是「用户把自家激活码贴进对话」

@@ -178,7 +178,7 @@ class TestWriteToolEnvMention:
 
     ★ 线上实例（2026-10-22 03:40）：AI 用 Write 写一份环境变量审计文档，
       内容里提到「68 个被读取的环境变量，其中 2 个未在 .env.example 登记」，
-      玄盾判成「Tool Call "Write" 试图读取环境变量文件」→ 高危 → 拦截。
+      勘合判成「Tool Call "Write" 试图读取环境变量文件」→ 高危 → 拦截。
       用户的实际诉求只是让它写文档 —— 典型误报。
     """
 
@@ -462,7 +462,7 @@ class TestFrontendAlignment:
 # 这不是误报（token 是真的），但处置过重：
 #   · 对话被硬切断，用户不知道为什么；
 #   · 那段工具返回留在历史里，之后每轮都会被再拦一次。
-# 打码同样能保证 token 不外发（中转站只看到 ⟦XD_n⟧），且不打断对话。
+# 打码同样能保证 token 不外发（中转站只看到 ⟦KH_n⟧），且不打断对话。
 #
 # 判据锁两件事：
 #   1. 工具返回（role=tool）→ 打码放行；用户自己打的字 → 仍然阻断
@@ -498,7 +498,7 @@ class TestToolResultCredentialsAreRedacted:
         content = body["messages"][0]["content"]
         assert records, "工具返回里的 JWT 完全没有被处理 —— 会原样发出去"
         assert JWT_SAMPLE not in content, "打码后原文仍在请求体里"
-        assert "⟦XD_" in content, "没有写入占位符，中转站仍能看到原文"
+        assert "⟦KH_" in content, "没有写入占位符，中转站仍能看到原文"
 
     def test_user_message_still_blocks(self):
         """反向自证：用户自己贴 JWT 仍要拦，且拦得住。
@@ -536,7 +536,7 @@ class TestToolResultCredentialsAreRedacted:
         app_mod._sanitize_messages_inplace(body, _sz("strict"))
         content = body["messages"][0]["content"]
         assert "r5iexxxx@example.com" not in content
-        assert "⟦XD_" in content
+        assert "⟦KH_" in content
 
 
 class TestHistoryNeverDeadlocksTheConversation:
@@ -579,7 +579,7 @@ class TestHistoryNeverDeadlocksTheConversation:
         ]}
         app_mod._sanitize_messages_inplace(body, _sz())
         assert JWT_SAMPLE not in body["messages"][2]["content"]
-        assert "⟦XD_" in body["messages"][2]["content"]
+        assert "⟦KH_" in body["messages"][2]["content"]
 
     def test_last_user_message_still_blocks(self):
         """★ 反向自证：本轮输入里的 token 仍然要拦。"""

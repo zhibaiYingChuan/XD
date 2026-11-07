@@ -131,7 +131,7 @@ class LogType(str, Enum):
 class RedactionRecord:
     """单条敏感信息脱敏记录。
 
-    脱敏占位符格式：`⟦XD_{index}⟧`（用数学字母括号避免与原文冲突）
+    脱敏占位符格式：`⟦KH_{index}⟧`（用数学字母括号避免与原文冲突）
     """
 
     index: int                        # 占位符编号（用于恢复）
@@ -148,12 +148,12 @@ class RedactionRecord:
     @staticmethod
     def placeholder(index: int) -> str:
         """生成脱敏占位符。"""
-        return f"⟦XD_{index}⟧"
+        return f"⟦KH_{index}⟧"
 
     @staticmethod
     def parse_placeholder(text: str) -> Optional[int]:
         """从占位符文本解析出编号，非占位符返回 None。"""
-        if not (text.startswith("⟦XD_") and text.endswith("⟧")):
+        if not (text.startswith("⟦KH_") and text.endswith("⟧")):
             return None
         try:
             return int(text[5:-1])

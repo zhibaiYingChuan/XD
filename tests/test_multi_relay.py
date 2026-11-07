@@ -309,7 +309,7 @@ class TestKeyIdentifiesTheRelay:
     def test_resolve_upstream_falls_back_to_active(self):
         """★ 未命中时回退到当前启用项，而不是报错。
 
-        用户可能在别处换了 Key、还没同步到玄盾。
+        用户可能在别处换了 Key、还没同步到勘合。
         此时拒绝服务会让整个 AI 工具不可用，
         静默延续现状只是「不更好」，不会更糟。
         """
@@ -1317,7 +1317,7 @@ class TestDedicatedPortRouting:
         """★★ 从 B 的端口进来、带着 A 的 Key —— 必须发给 B。
 
         这才是这个功能的全部意义：IDE 里填的 Key 常常是占位串，
-        真正决定账单归属的是用户在玄盾里为端口指定的那一家。
+        真正决定账单归属的是用户在勘合里为端口指定的那一家。
         """
         cfg = _two_relays()
         cfg.others[0]["port"] = 18801

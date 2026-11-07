@@ -5,7 +5,7 @@
 // 系统托盘 — 个人版唯一的「我被保护了」感知通道
 //
 // ── 为什么必须有托盘（产品定位：透明防火墙）─────────────────
-// 玄盾的核心承诺是「响应侧自动拦截」，而用户对中转站返回了什么完全无感。
+// 勘合的核心承诺是「响应侧自动拦截」，而用户对中转站返回了什么完全无感。
 // 若用户关掉窗口进程就退出，防护会静默失效 —— 这是比「缺少可视化」严重得多的
 // 问题：承诺在用户不知情时不再成立，且没有任何信号提示。
 // 因此托盘必须承担三件事：
@@ -303,9 +303,9 @@ fn apply<R: Runtime>(app: &AppHandle<R>) {
     let (st, detail) = app.state::<TrayController>().effective();
     let _ = tray.set_icon(Some(brand_image(32, st.rgb())));
     let _ = tray.set_tooltip(Some(if detail.is_empty() {
-        format!("道体·玄盾 个人版 — {}", st.label())
+        format!("道体·勘合 个人版 — {}", st.label())
     } else {
-        format!("道体·玄盾 个人版 — {}：{}", st.label(), detail)
+        format!("道体·勘合 个人版 — {}：{}", st.label(), detail)
     }));
     let _ = app.emit(EVENT_TRAY_STATE, st.as_str());
 }
@@ -325,7 +325,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let resume = MenuItem::with_id(app, "resume", "恢复防护", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "打开安全日志", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "退出玄盾", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出勘合", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
@@ -342,7 +342,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(brand_image(32, TrayState::Safe.rgb()))
-        .tooltip("道体·玄盾 个人版 — 防护中")
+        .tooltip("道体·勘合 个人版 — 防护中")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {

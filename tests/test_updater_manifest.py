@@ -25,10 +25,10 @@ SCRIPT = REPO / ".github" / "scripts" / "make_latest_json.py"
 
 def _seed(art: Path, *, exe=True, mac=True, linux=True, sig=True) -> None:
     files = {
-        "win": ("玄盾_0.1.18-alpha_x64-setup.exe", "SIG_WIN"),
-        "mac": ("玄盾.app.tar.gz", "SIG_MAC"),
+        "win": ("勘合_0.1.18-alpha_x64-setup.exe", "SIG_WIN"),
+        "mac": ("勘合.app.tar.gz", "SIG_MAC"),
         # ★ Linux 的更新包就是 AppImage 本身（Tauri 不产 .AppImage.tar.gz）
-        "linux": ("玄盾_0.1.18-alpha_amd64.AppImage", "SIG_LINUX"),
+        "linux": ("勘合_0.1.18-alpha_amd64.AppImage", "SIG_LINUX"),
     }
     for key, (name, signature) in files.items():
         enabled = {"win": exe, "mac": mac, "linux": linux}[key]

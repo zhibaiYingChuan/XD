@@ -54,7 +54,7 @@ _LEVEL_OVERHEAD = {
 
 @dataclass
 class XuanDunConfig:
-    """道体玄盾全局配置对象。
+    """道体勘合全局配置对象。
 
     所有随机性由配置中的 key 种子驱动，确保可重现。
     动态自适应机制无需预训练，开箱即用，在线演化。
@@ -123,7 +123,7 @@ class XuanDunConfig:
     luoshu_poisoning_similarity_threshold: float = 0.88
 
     # ── 双梯形镜像递归网络参数（Rust + PyO3 原生扩展） ──
-    # 玄盾灵魂级底层算法：多层双向递归迭代，捕捉角色扮演/组合策略攻击的
+    # 勘合灵魂级底层算法：多层双向递归迭代，捕捉角色扮演/组合策略攻击的
     # 隐藏意图偏移，输出递归置信度和轨迹振荡度作为 fused_anomaly 的增强信号
     bilateral_num_layers: int = 3       # 递归层数（默认3层）
     bilateral_state_dim: int = 64       # 状态向量维度（默认64维）

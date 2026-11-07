@@ -107,7 +107,7 @@ _actual_port: Optional[int] = None
 
 # ★ 专属入口端口的监听器（2026-10-22）。只在 run() 里创建。
 #   测试/浏览器预览模式下为 None —— 端口接口据此明确提示
-#   「需要重启玄盾」，而不是假装保存成功却没人监听。
+#   「需要重启勘合」，而不是假装保存成功却没人监听。
 _relay_listeners: Optional[RelayPortListeners] = None
 
 # 授权结论的短 TTL 缓存：(许可证文件 mtime, 判定时刻, 是否启用防护)。
@@ -125,7 +125,7 @@ def _days_to_start_ts(days: Optional[int]) -> Optional[float]:
 
     ★ 2026-10-20：原实现是 ``now - days * 86400``（滚动 24 小时窗口），
       而界面把它标成「今天」、首页 KPI 又按自然日累计 ——
-      两者必然对不上：上午打开玄盾，「今日检查 26 次」点进去，
+      两者必然对不上：上午打开勘合，「今日检查 26 次」点进去，
       列表里还会带出昨天下午的记录。用户核对后只能认为数字是假的。
       按自然日切分后，「今天」真的从今天 00:00 起算，
       与 daily_stats / 首页 KPI 同一口径。
@@ -181,7 +181,7 @@ _ENGINE_INSTANCE_SALT = b"xuandun-engine/v1"
 
 
 def _engine_instance_id() -> str:
-    """引擎身份标记：由管理令牌派生，用于向桌面端证明「我就是玄盾」。
+    """引擎身份标记：由管理令牌派生，用于向桌面端证明「我就是勘合」。
 
     ★★ P0-1（2026-10-28）：为什么「健康」不等于「可信」
     ────────────────────────────────────────────────────────────
@@ -363,7 +363,7 @@ def create_app() -> FastAPI:
         "XUANDUN_ENABLE_DOCS", ""
     ).strip().lower() in ("1", "true")
     app = FastAPI(
-        title="道体·玄盾 个人版",
+        title="道体·勘合 个人版",
         description="保护个人用户在使用 AI 中转站时的数据安全",
         version=_PKG_VERSION,
         lifespan=lifespan,
@@ -404,7 +404,7 @@ def create_app() -> FastAPI:
                 return JSONResponse(
                     status_code=401,
                     content={
-                        "detail": "管理接口鉴权失败：请从玄盾桌面端操作"
+                        "detail": "管理接口鉴权失败：请从勘合桌面端操作"
                     },
                 )
         return await call_next(request)
@@ -418,7 +418,7 @@ def create_app() -> FastAPI:
     # 它 401 短路时直接返回，响应不经过 CORS，**401 上没有
     # access-control-allow-origin**；浏览器于是把 401 读成 CORS 失败
     # （fetch 先抛 TypeError），`api.ts` 里那两段 401 文案成了死代码，
-    # 用户看到的是「无法连接到玄盾本地服务」——一个不可诊断的故障。
+    # 用户看到的是「无法连接到勘合本地服务」——一个不可诊断的故障。
     #
     # 现在顺序反过来：CORS 最外层，任何响应（含 401/403/500）都会带上
     # CORS 头；OPTIONS 预检也由它直接应答，不再走到守卫。
@@ -449,7 +449,7 @@ def create_app() -> FastAPI:
     #   未激活就完全拒绝代理，等于把用户挡在门外。若他其实已经付过钱
     #   只是码过期了或机器换了，用户会彻底无法使用，投诉成本极高。
     #   只读模式下界面、日志、设置全部可用，只是不再执行脱敏与拦截 ——
-    #   用户仍能看清玄盾在做什么，价值可感知。
+    #   用户仍能看清勘合在做什么，价值可感知。
     #
     # ★ 但「验不了」不等于「没激活」
     #   验签组件故障（缺公钥 / 缺 jwt 依赖）时把用户降级成只读，
@@ -599,7 +599,7 @@ def create_app() -> FastAPI:
         #   不计入 KPI 三档，只作为事实留痕）。
         if not str((target_relay or {}).get("base_url") or "").strip():
             message = (
-                "还没有配置中转站地址：请打开玄盾「设置」，"
+                "还没有配置中转站地址：请打开勘合「设置」，"
                 "填入中转站地址与 API Key 后再使用"
             )
             logger.warning(
@@ -757,7 +757,7 @@ def create_app() -> FastAPI:
             _restorer.register(restore_session, redaction_records)
 
         # ══════ 请求基线（★ v0.1.0）══════
-        # 必须在转发前捕获。请求体是原样透传的（玄盾不改写 model），
+        # 必须在转发前捕获。请求体是原样透传的（勘合不改写 model），
         # 因此基线里的 model 就是用户真正请求的模型，
         # 「模型降级」判据才可能发现中转站的偷换行为。
         request_baseline = build_baseline(body)
@@ -809,8 +809,8 @@ def create_app() -> FastAPI:
                                 target: Optional[Dict[str, Any]] = None):
         """转发请求到中转站（请求体原样透传，不改写 model）。
 
-        ★ 玄盾监控的是 API，不是某个模型 —— 请求里的 model 属于用户
-          与中转站之间的约定，玄盾无权也无必要改写它。曾有一版用配置里的
+        ★ 勘合监控的是 API，不是某个模型 —— 请求里的 model 属于用户
+          与中转站之间的约定，勘合无权也无必要改写它。曾有一版用配置里的
           「默认模型」覆盖请求 model，后果是：用户明明发的是 A 模型，
           中转站收到的是 B；而请求基线里记的也是被改写的 B，
           于是「模型降级」判据（中转站偷偷换模型）永远发现不了真降级。
@@ -1035,7 +1035,7 @@ def create_app() -> FastAPI:
         # ★★ 2026-10-27 修复：还原结果必须**无条件**写回。
         #   原实现把写回放在 `if restore_anomalies:` 里面 —— 只有当出现
         #   「中转站伪造占位符」这类异常时才写回，而正常还原（绝大多数
-        #   情况）被直接丢弃。后果：非流式客户端拿到的永远是 ⟦XD_n⟧，
+        #   情况）被直接丢弃。后果：非流式客户端拿到的永远是 ⟦KH_n⟧，
         #   模型拿着占位符既不能执行也不能理解，整条「脱敏→还原」链路
         #   等于断在这里。而流式路径是对的，所以这个 bug 极难复现。
         #
@@ -1154,14 +1154,14 @@ def create_app() -> FastAPI:
             pending = ""
             # 增量解码器：多字节 UTF-8 字符被 chunk 切断时也能正确拼回。
             # 逐 chunk `decode(errors="ignore")` 会把半截汉字直接丢掉，
-            # 而占位符 `⟦XD_n⟧` 全由多字节字符组成，正是高发场景。
+            # 而占位符 `⟦KH_n⟧` 全由多字节字符组成，正是高发场景。
             decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
 
             def _restore_out(seg: str) -> str:
                 """还原一段即将转发的 SSE 文本里的脱敏占位符。
 
-                ★ 兼容两种形态：占位符字面量（⟦XD_n⟧）与 JSON 转义形态
-                  （`\\u27e6XD_n\\u27e7`）。后者在中转站以
+                ★ 兼容两种形态：占位符字面量（⟦KH_n⟧）与 JSON 转义形态
+                  （`\\u27e6KH_n\\u27e7`）。后者在中转站以
                   ensure_ascii=True 序列化时出现；不做归一化则正则匹配不到，
                   占位符仍会原样透传给客户端。
 
@@ -1178,7 +1178,7 @@ def create_app() -> FastAPI:
                     return seg
                 escaped = _restorer.is_escaped_form(seg)
                 normalized = _restorer.normalize_escaped(seg) if escaped else seg
-                if "⟦XD_" not in normalized:
+                if "⟦KH_" not in normalized:
                     return seg
                 return _restorer.restore(
                     restore_session, normalized, json_escape=escaped
@@ -1199,7 +1199,7 @@ def create_app() -> FastAPI:
                     #   占位符以原样发出；`restore()` 只改了服务端 full 变量，
                     #   对已发给客户端的字节无效 —— 注释却写「流结束时恢复」，
                     #   与实现相反。用户（Claude Code / Cursor 全走流式）
-                    #   因此看到 ⟦XD_n⟧，工具调用参数也带着占位符被执行。
+                    #   因此看到 ⟦KH_n⟧，工具调用参数也带着占位符被执行。
                     #   现在先按完整 SSE 帧切分，还原后再转发。
                     pending += text
                     frames, pending = _split_sse_frames(pending)
@@ -1785,7 +1785,7 @@ def create_app() -> FastAPI:
                 "code": "response_only",
                 "label": "这条记录的证据来自本次响应",
                 "note": (
-                    "本次响应里出现了下面这些内容，玄盾据此判定。"
+                    "本次响应里出现了下面这些内容，勘合据此判定。"
                     "它们没有跨轮次的指纹记录，所以无法判断是不是中转站引入的；"
                     "你可以对照「发现了什么」里的原文片段自行核实。"
                 ),
@@ -2185,7 +2185,7 @@ def create_app() -> FastAPI:
             return _result(
                 False,
                 "address",
-                f"地址可能不对：玄盾请求的 {base}/chat/completions 返回 {status}。"
+                f"地址可能不对：勘合请求的 {base}/chat/completions 返回 {status}。"
                 f"请对照中转站后台的「接入地址」核对",
                 status=status,
                 raw=resp.text,
@@ -2479,7 +2479,7 @@ def create_app() -> FastAPI:
             taken = relay_cfg.assigned_ports()
             if port == _config.server.port:
                 errors.append(
-                    f"端口 {port} 是玄盾主端口，请换一个（例如 18801）")
+                    f"端口 {port} 是勘合主端口，请换一个（例如 18801）")
             elif port in taken:
                 errors.append(
                     f"端口 {port} 已经给了「{taken[port]}」，请换一个")
@@ -2561,7 +2561,7 @@ def create_app() -> FastAPI:
             if port == _config.server.port:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"端口 {port} 是玄盾主端口，请换一个（例如 18801）")
+                    detail=f"端口 {port} 是勘合主端口，请换一个（例如 18801）")
             for other_id, other_port in _relay_port_map(relay_cfg).items():
                 if other_port == port and other_id != want:
                     raise HTTPException(
@@ -2584,7 +2584,7 @@ def create_app() -> FastAPI:
                 # 没有监听器（引擎不是由 run() 启动）时不能假装已生效
                 raise HTTPException(
                     status_code=503,
-                    detail="引擎还没准备好接收新端口，请重启玄盾后再试")
+                    detail="引擎还没准备好接收新端口，请重启勘合后再试")
             errs = await _sync_relay_ports(desired)
             # ★ P1-6：只对本次要申请的那个端口判失败，历史失败仅告警。
             failure = _port_failure_for(errs, port, "设置专属端口")
@@ -3075,10 +3075,10 @@ def _split_sse_frames(buf: str) -> Tuple[List[str], str]:
 
     ★★ 为什么流式路径要按帧缓冲（2026-10-19 修复）
     ────────────────────────────────────────────────────────────
-    第三层脱敏恢复（把 `⟦XD_n⟧` 还原为原始值）只能对**完整**的占位符
+    第三层脱敏恢复（把 `⟦KH_n⟧` 还原为原始值）只能对**完整**的占位符
     生效：占位符若正好被 chunk 边界切断（前半在一个 chunk、
     后半在下一个），逐 chunk 还原就会漏掉它，客户端收到的是
-    `⟦XD_` 原样透传 —— 而 Claude Code / Cursor 全走流式，
+    `⟦KH_` 原样透传 —— 而 Claude Code / Cursor 全走流式，
     等于这些用户每次都看到占位符、工具调用参数也带着占位符被执行。
 
     因此这里先按 SSE 的空行分隔符（`\n\n` / `\r\n\r\n`）切出完整帧，
@@ -3782,7 +3782,7 @@ def _late_block_advice(findings: List[Any]) -> str:
     hit = _pick_explainable_finding(findings)
     reason = getattr(hit, "detail", "") if hit is not None else ""
     return (
-        f"玄盾中断了这次响应（{reason or '命中高危判定'}）。"
+        f"勘合中断了这次响应（{reason or '命中高危判定'}）。"
         "注意：流式响应在判定完成前已有部分内容发给了 AI 工具，"
         "因此这次属于**事后告警**，不是拦截成功。"
         "请勿采信或执行刚才收到的内容；建议把 AI 工具地址改回模型厂商官方地址重试。"
@@ -3829,7 +3829,7 @@ def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
     #   把结论说得比证据更重。改为只陈述「这次响应被拦下」，
     #   并把误报出口写清楚。
     advice = (
-        f"玄盾拦下了这次响应（{reason}）。"
+        f"勘合拦下了这次响应（{reason}）。"
         "这次返回的内容触发了危险判定，所以没有交给 AI 工具。"
         "如果任务还没完成，建议把 AI 工具的 API 地址改回模型厂商官方地址继续做，"
         "或在设置页换一家中转站后重试。这段对话在换地址前无法继续。"
@@ -3893,7 +3893,7 @@ def _shift_placeholders(text: str, records: List[Any], base: int) -> str:
 
     sanitizer 每条消息独立编号从 1 开始，而 restorer 是按会话
     统一映射还原的 —— 编号必须在整个请求内唯一，否则第二条消息的
-    ⟦XD_1⟧ 会覆盖第一条的记录。
+    ⟦KH_1⟧ 会覆盖第一条的记录。
     """
     if base == 0:
         return text
@@ -4227,7 +4227,7 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
 
     ★★ 这是多中转站里最关键的一步。
       原实现无条件用配置里的 api_key 覆盖 Authorization，
-      于是「AI 工具里填 A 家、玄盾里配 B 家」时，
+      于是「AI 工具里填 A 家、勘合里配 B 家」时，
       用户以为在用 A 扣费，实际扣的是 B ——
       账单打错，而且两边都不知道。
 
@@ -4243,7 +4243,7 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
       AI 工具里填的 Key 常常是占位串（很多 IDE 只校验非空），
       按 Key 识别会全部落到「当前启用项」——
       用户明明把 B 家的地址填进了工具，实际扣的却是 A 家的钱。
-      端口是用户在玄盾里亲手指定给某一家的事实，优先级最高。
+      端口是用户在勘合里亲手指定给某一家的事实，优先级最高。
 
     ★ 不做自动故障转移、不做轮询：
       探活是真实 HTTP 请求，本机平均延迟 13 秒，
@@ -5097,7 +5097,7 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
 
     parser = argparse.ArgumentParser(
         prog="daoti_xuandun_personal.proxy.app",
-        description="道体·玄盾 个人版 — 本地代理",
+        description="道体·勘合 个人版 — 本地代理",
     )
     parser.add_argument("--host", default=None, help="监听地址（仅允许本地）")
     parser.add_argument("--port", type=int, default=None, help="监听端口（默认 18765）")
@@ -5142,7 +5142,7 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
     )
 
     print("=" * 64)
-    print("  道体·玄盾 个人版 — 本地代理")
+    print("  道体·勘合 个人版 — 本地代理")
     print("=" * 64)
     print(f"  监听地址:  http://{actual_host}:{actual_port}")
     print(f"  中转站:    {config.relay.base_url or '(未配置，请先在设置中填写)'}")

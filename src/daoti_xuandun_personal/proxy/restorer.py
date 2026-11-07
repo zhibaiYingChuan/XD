@@ -14,7 +14,7 @@
 响应后整表清空。三个后果：
 
 1. 同一值跨轮换号 → 模型无法复用引用；
-2. 编号每轮从 1 重排 → 模型复述上一轮的 ``⟦XD_3⟧`` 时，
+2. 编号每轮从 1 重排 → 模型复述上一轮的 ``⟦KH_3⟧`` 时，
    本轮 3 号可能是另一个值，还原出**错误的秘密**；
 3. 响应后清空 → 模型把占位符留到下一轮就再也还原不了。
 
@@ -40,7 +40,7 @@ from .vault import PlaceholderVault
 logger = logging.getLogger("xuandun-personal.restorer")
 
 # 占位符匹配模式
-_PLACEHOLDER_PATTERN = re.compile(r"⟦XD_(\d+)⟧")
+_PLACEHOLDER_PATTERN = re.compile(r"⟦KH_(\d+)⟧")
 # 中转站以 ensure_ascii=True 序列化时出现的形式
 _ESCAPED_OPEN = "\\u27e6"
 _ESCAPED_CLOSE = "\\u27e7"
@@ -113,7 +113,7 @@ class ContentRestorer:
             session_id: 会话标识
             text: 中转站返回的文本（若来源是 SSE 帧，则已做过转义归一）
             json_escape: 还原出来的值是否需要重新做 JSON 字符串转义。
-                ★ 当上游以 ``\\u27e6XD_1\\u27e7`` 的转义形态发送占位符时，
+                ★ 当上游以 ``\\u27e6KH_1\\u27e7`` 的转义形态发送占位符时，
                   本方法会先把转义还原成字面量再替换；此时被替换进去的
                   原始值如果含引号/反斜杠/换行，会直接撑破外层 JSON。
                   流式路径必须传 True。
@@ -121,7 +121,7 @@ class ContentRestorer:
         Returns:
             (restored_text, anomalies)
         """
-        if not text or "⟦XD_" not in text:
+        if not text or "⟦KH_" not in text:
             return text, []
 
         anomalies: List[VerificationFinding] = []
@@ -144,7 +144,7 @@ class ContentRestorer:
             if not self._vault.has_session(session_id) or self._vault.size(session_id) == 0:
                 # ★★ 2026-10-28（误报修复，日志 #7501）：
                 #   本会话从未脱敏过 → vault 是空的 → `resolve()` 必然返回
-                #   None，任何占位符都换不出原始值。此时正文里的 `⟦XD_n⟧`
+                #   None，任何占位符都换不出原始值。此时正文里的 `⟦KH_n⟧`
                 #   只可能是模型在**复述/举例**（实测是 AI 在回答里讨论
                 #   占位符格式本身，证据还落在 SSE 的 `data:` 行首）。
                 #   按 high 阻断等于把「讨论该格式」判成「伪造探测」，
@@ -186,7 +186,7 @@ class ContentRestorer:
 
     def has_placeholders(self, text: str) -> bool:
         """判断文本中是否含占位符（快速预检，两种形态都认）。"""
-        return bool(text) and ("⟦XD_" in text or _ESCAPED_OPEN in text)
+        return bool(text) and ("⟦KH_" in text or _ESCAPED_OPEN in text)
 
     def count_placeholders(self, text: str) -> int:
         """统计占位符数量（字面量形态）。"""

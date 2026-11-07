@@ -304,7 +304,7 @@ class TestCorsIsOutermost:
     ★ 原顺序：先加 CORS，再用 @app.middleware 加守卫 → 守卫在外层，
       401 短路不经过 CORS。浏览器于是把 401 读成 CORS 失败
       （fetch 先抛 TypeError），前端那两段 401 文案成了死代码，
-      用户只看到「无法连接到玄盾本地服务」。
+      用户只看到「无法连接到勘合本地服务」。
     """
 
     ORIGIN = "http://localhost:1420"

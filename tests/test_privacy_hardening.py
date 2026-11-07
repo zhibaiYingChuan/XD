@@ -142,7 +142,7 @@ class TestRedactionAtRest:
         lid = _log(client.store)
         client.store.insert_redactions(lid, "s1", [
             RedactionRecord(index=1, category="api_key",
-                            original=self.SECRET, redacted="⟦XD_1⟧"),
+                            original=self.SECRET, redacted="⟦KH_1⟧"),
         ])
         row = client.store.get_redactions(lid)[0]
         assert self.SECRET not in row["original"], (
@@ -158,7 +158,7 @@ class TestRedactionAtRest:
                 "(session_id, log_id, redaction_idx, category, original,"
                 " redacted, start_pos, end_pos, created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                ("s1", lid, 1, "api_key", self.SECRET, "⟦XD_1⟧",
+                ("s1", lid, 1, "api_key", self.SECRET, "⟦KH_1⟧",
                  0, len(self.SECRET), time.time()),
             )
         client.store._mask_legacy_redactions()
@@ -188,7 +188,7 @@ class TestClearOldLogsScope:
         for lid in (old, new):
             client.store.insert_redactions(lid, "s1", [
                 RedactionRecord(index=1, category="phone",
-                                original="13800138000", redacted="⟦XD_1⟧"),
+                                original="13800138000", redacted="⟦KH_1⟧"),
             ])
 
         deleted = client.store.clear_logs(now - 5 * 86400)

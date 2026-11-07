@@ -349,9 +349,9 @@ class TestRedactionFilterIsReal:
         log_id = self._add(store, 2, "打码后被清除明细")
         store.insert_redactions(log_id, "sess-clear", [
             RedactionRecord(index=1, category="phone",
-                            original="13800138000", redacted="⟦XD_1⟧"),
+                            original="13800138000", redacted="⟦KH_1⟧"),
             RedactionRecord(index=2, category="phone",
-                            original="13900139000", redacted="⟦XD_2⟧"),
+                            original="13900139000", redacted="⟦KH_2⟧"),
         ])
         store.clear_redactions_for_session("sess-clear")
         assert store.get_redactions(log_id) == [], "前置条件：明细应已清除"
@@ -461,7 +461,7 @@ def test_days_filter_uses_natural_day():
     """「今天」必须从今天 00:00 起算，而不是滚动 24 小时。
 
     ★ 首页 KPI 按自然日累计。若日志筛选按 now-24h，
-      每天上午打开玄盾点「今日检查 N 次」都会带出昨天下午的记录，
+      每天上午打开勘合点「今日检查 N 次」都会带出昨天下午的记录，
       用户核对后只会认为数字是假的。
     """
     import datetime as dt

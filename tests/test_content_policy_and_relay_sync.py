@@ -55,7 +55,7 @@ from daoti_xuandun_personal.proxy.verifier import (  # noqa: E402
 # 用户报的那条日志的内容形态（会话总结 + 讨论安全话题）
 SESSION_SUMMARY = (
     "# 会话总结\n\n## 1. Primary Request and Intent\n"
-    "本轮用户指令围绕玄盾工具：日志筛选失效、误报率偏高、"
+    "本轮用户指令围绕勘合工具：日志筛选失效、误报率偏高、"
     "以及中转站是否会绕过检测。用户希望理解系统提示词被拦截的原因，"
     "并确认是否存在漏洞利用风险。\n"
 )
