@@ -1571,7 +1571,11 @@ class ResponseVerifier:
     _INJECTION_CONTENT_RE = re.compile(
         r"(?:ignore|disregard|forget)\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)\s+"
         r"(?:instructions?|rules?|prompts?)"
-        r"|忽略(?:之前|以上|前面|所有|此前)的?(?:指令|规则|限制|提示)"
+        # ★ 2026-11-08：补「的所有」这一层。原正则只认「忽略之前的指令」，
+        #   而实测最常见的写法是「忽略之前的所有指令」—— 中间多一个「所有」
+        #   就整条漏掉。护栏其实已经判了 high/block，是这里没认出来，
+        #   于是被降级成 content_policy 丢弃（提示词注入 65% 的 4 条缺口全在这）。
+        r"|忽略(?:之前|以上|前面|所有|此前)的?(?:所有|全部)?的?(?:指令|规则|限制|提示)"
         r"|(?:追加|添加|写入|插入).{0,12}(?:系统提示|系统指令|system\s*prompt)"
         r"|(?:reveal|show|print|output).{0,12}(?:system\s*prompt|your\s+instructions?)"
         r"|(?:复述|输出|告诉我).{0,8}(?:系统提示|开发者设定|内部规则|初始指令)"
