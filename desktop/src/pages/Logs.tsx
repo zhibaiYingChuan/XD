@@ -46,6 +46,7 @@ import {
 import { useToast } from '../components/Toast';
 import { copyToClipboard, downloadText } from '../lib/tauriShim';
 import { confirmDialog } from '../lib/confirm';
+import { useI18n, t } from '../i18n';
 
 const PAGE_SIZE = 20;
 const SEARCH_DEBOUNCE = 300;
@@ -136,8 +137,8 @@ function maskOriginal(value: string): string {
   const s = (value || '').trim();
   if (!s) return '';
   if (s.includes('⟪')) return s;
-  if (s.length <= 6) return `${s.slice(0, 1)}…（共 ${s.length} 位）`;
-  return `${s.slice(0, 3)}…${s.slice(-3)}（共 ${s.length} 位）`;
+  if (s.length <= 6) return `${s.slice(0, 1)}…${t('（共')} ${s.length} ${t('位）')}`;
+  return `${s.slice(0, 3)}…${s.slice(-3)}${t('（共')} ${s.length} ${t('位）')}`;
 }
 
 /**
@@ -183,6 +184,7 @@ function DetailDrawer({
   position?: { index: number; total: number };
 }) {
   const toast = useToast();
+  const { t } = useI18n();
   const [detail, setDetail] = useState<LogDetail | null>(null);
   // ★ 2026-10-23：证据包（凭证指纹 + 首次出现方向）。
   //   与详情并行拉取：证据包失败不该让整个抽屉打不开。
@@ -230,7 +232,7 @@ function DetailDrawer({
         if (!cancelled) setDetail(d);
       } catch (e) {
         if (!cancelled) {
-          toast.error(`加载详情失败：${e instanceof Error ? e.message : String(e)}`);
+          toast.error(`${t('加载详情失败：')}${e instanceof Error ? e.message : String(e)}`);
           onCloseRef.current();
         }
       } finally {
@@ -240,7 +242,7 @@ function DetailDrawer({
     return () => {
       cancelled = true;
     };
-  }, [logId, toast]);
+  }, [logId, toast, t]);
 
   // 证据包：独立 effect，与详情并行；失败可单独重试（P1-15）
   useEffect(() => {
@@ -323,11 +325,11 @@ function DetailDrawer({
   const handleCopy = async () => {
     if (!detail) return;
     const text = [
-      `时间: ${formatDateTime(detail.entry.timestamp)}`,
-      `类型: ${LOG_TYPE_LABELS[detail.entry.log_type]}`,
-      `中转站: ${displayDomain(detail.entry.relay_domain)}`,
-      `结果: ${entryActionLabel(detail.entry)}`,
-      `摘要: ${detail.entry.summary}`,
+      `${t('时间')}: ${formatDateTime(detail.entry.timestamp)}`,
+      `${t('类型')}: ${t(LOG_TYPE_LABELS[detail.entry.log_type])}`,
+      `${t('中转站')}: ${displayDomain(detail.entry.relay_domain)}`,
+      `${t('结果')}: ${entryActionLabel(detail.entry)}`,
+      `${t('摘要')}: ${detail.entry.summary}`,
       '',
       ...findings.map((f: { detail?: string }, i: number) => `${i + 1}. ${f.detail ?? ''}`),
     ].join('\n');
@@ -336,7 +338,7 @@ function DetailDrawer({
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } else {
-      toast.error('复制失败');
+      toast.error(t('复制失败'));
     }
   };
 
@@ -345,7 +347,7 @@ function DetailDrawer({
     if (!evidence) return;
     const ok = await copyToClipboard(JSON.stringify(evidence, null, 2));
     toast[ok ? 'success' : 'error'](
-      ok ? '证据已复制，可直接发给对方' : '复制失败',
+      ok ? t('证据已复制，可直接发给对方') : t('复制失败'),
     );
   };
 
@@ -357,7 +359,7 @@ function DetailDrawer({
       JSON.stringify(evidence, null, 2),
       'application/json',
     );
-    toast[ok ? 'success' : 'error'](ok ? '证据已导出' : '导出失败');
+    toast[ok ? 'success' : 'error'](ok ? t('证据已导出') : t('导出失败'));
   };
 
   const handleMarkSafe = async () => {
@@ -365,11 +367,11 @@ function DetailDrawer({
     setMarking(true);
     try {
       await api.markLogSafe(logId);
-      toast.success('已标记为误报，今日「危险/提示」计数已减去这一条');
+      toast.success(t('已标记为误报，今日「危险/提示」计数已减去这一条'));
       onMarkedSafe();
       onClose();
     } catch (e) {
-      toast.error(`标记失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('标记失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setMarking(false);
     }
@@ -380,11 +382,11 @@ function DetailDrawer({
     setMarking(true);
     try {
       await api.unmarkLogSafe(logId);
-      toast.success('已撤销标记，计数已加回');
+      toast.success(t('已撤销标记，计数已加回'));
       onMarkedSafe();
       onClose();
     } catch (e) {
-      toast.error(`撤销失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('撤销失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setMarking(false);
     }
@@ -397,15 +399,15 @@ function DetailDrawer({
     //   而界面上没有任何挽回入口。
     // ★ 原生 window.confirm 在 Tauri 2.7 上弹不出来（见 lib/confirm.ts），
     //   统一走应用内确认框；必须 await，否则还没等用户答复就往下走了。
-    if (!(await confirmDialog('确定删除这条日志吗？\n\n此操作不可恢复。'))) return;
+    if (!(await confirmDialog(t('确定删除这条日志吗？\n\n此操作不可恢复。')))) return;
     setDeleting(true);
     try {
       await api.deleteLog(logId);
-      toast.success('日志已删除');
+      toast.success(t('日志已删除'));
       onDeleted();
       onClose();
     } catch (e) {
-      toast.error(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('删除失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setDeleting(false);
     }
@@ -418,20 +420,20 @@ function DetailDrawer({
         className="drawer"
         role="dialog"
         aria-modal="true"
-        aria-label="日志详情"
+        aria-label={t('日志详情')}
         ref={drawerRef}
       >
         <div className="drawer-header">
           {/* tabIndex=-1：仅为可编程聚焦用，不进入 Tab 顺序；
               配合上面的 mount 效果让焦点落在标题上。 */}
           <span className="drawer-title" ref={titleRef} tabIndex={-1}>
-            日志详情
+            {t('日志详情')}
             {position && (
               <span
                 className="faint"
                 style={{ fontSize: 11, marginLeft: 8, fontWeight: 400 }}
               >
-                本页 {position.index} / {position.total}
+                {t('本页')} {position.index} / {position.total}
               </span>
             )}
           </span>
@@ -440,8 +442,8 @@ function DetailDrawer({
               className="btn ghost"
               onClick={onPrev}
               disabled={!onPrev}
-              aria-label="上一条"
-              title="上一条（←）"
+              aria-label={t('上一条')}
+              title={t('上一条（←）')}
             >
               <ChevronLeft size={16} strokeWidth={1.5} />
             </button>
@@ -449,12 +451,12 @@ function DetailDrawer({
               className="btn ghost"
               onClick={onNext}
               disabled={!onNext}
-              aria-label="下一条"
-              title="下一条（→）"
+              aria-label={t('下一条')}
+              title={t('下一条（→）')}
             >
               <ChevronRight size={16} strokeWidth={1.5} />
             </button>
-            <button className="btn ghost" onClick={onClose} aria-label="关闭">
+            <button className="btn ghost" onClick={onClose} aria-label={t('关闭')}>
               <X size={16} strokeWidth={1.5} />
             </button>
           </div>
@@ -464,24 +466,24 @@ function DetailDrawer({
           {loading || !detail ? (
             <div className="loading">
               <span className="spinner" />
-              加载中...
+              {t('加载中...')}
             </div>
           ) : (
             <>
               <div className="detail-row">
-                <span className="detail-key">时间</span>
+                <span className="detail-key">{t('时间')}</span>
                 <span className="detail-val mono">{formatDateTime(detail.entry.timestamp)}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">类型</span>
-                <span className="detail-val">{LOG_TYPE_LABELS[detail.entry.log_type]}</span>
+                <span className="detail-key">{t('类型')}</span>
+                <span className="detail-val">{t(LOG_TYPE_LABELS[detail.entry.log_type])}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">中转站</span>
+                <span className="detail-key">{t('中转站')}</span>
                 <span className="detail-val mono">{displayDomain(detail.entry.relay_domain) || '—'}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">结果</span>
+                <span className="detail-key">{t('结果')}</span>
                 <span className="detail-val">
                   <span className={`badge ${actionBadgeClass(detail.entry)}`}>
                     {entryActionLabel(detail.entry)}
@@ -490,7 +492,7 @@ function DetailDrawer({
               </div>
               {detail.entry.model && (
                 <div className="detail-row">
-                  <span className="detail-key">请求模型</span>
+                  <span className="detail-key">{t('请求模型')}</span>
                   <span className="detail-val mono">{detail.entry.model}</span>
                 </div>
               )}
@@ -500,7 +502,7 @@ function DetailDrawer({
                   只能凭感觉判断是不是误报。 */}
               {detail.entry.response_model && (
                 <div className="detail-row">
-                  <span className="detail-key">返回模型</span>
+                  <span className="detail-key">{t('返回模型')}</span>
                   <span
                     className="detail-val mono"
                     style={{
@@ -518,7 +520,7 @@ function DetailDrawer({
               {detail.entry.marked_safe && (
                 <div className="alert safe mt-16" style={{ marginBottom: 0 }}>
                   <CheckCircle2 size={17} strokeWidth={1.5} className="alert-icon" />
-                  <div>你已将此条标记为<b>误报</b>，今日「危险/提示」计数已减去这一条。</div>
+                  <div>{t('你已将此条标记为')}<b>{t('误报')}</b>{t('，今日「危险/提示」计数已减去这一条。')}</div>
                 </div>
               )}
 
@@ -528,7 +530,7 @@ function DetailDrawer({
                       「规则」是实现视角；用户关心的是「出了什么事」。
                       统计类命中额外标出「不影响使用」——
                       否则用户看到红色就以为防护坏了。 */}
-                  <div className="field-label">发现了什么</div>
+                  <div className="field-label">{t('发现了什么')}</div>
                   {findings.map((f: { category?: string; detail?: string; severity?: string; evidence?: string }, i: number) => {
                     const explain = explainFinding(f);
                     const advisory = f.category === 'length_anomaly'
@@ -554,7 +556,7 @@ function DetailDrawer({
                                   : 'var(--xd-text-dim)',
                           }}
                         >
-                          {f.severity === 'high' ? '高危' : f.severity === 'medium' ? '中危' : '低危'}
+                          {f.severity === 'high' ? t('高危') : f.severity === 'medium' ? t('中危') : t('低危')}
                         </span>
                       </span>
                       <span className="detail-val">
@@ -573,7 +575,7 @@ function DetailDrawer({
                         )}
                         {explain?.action && (
                           <div style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7, color: 'var(--xd-suspect)' }}>
-                            怎么办：{explain.action}
+                            {t('怎么办：')}{explain.action}
                           </div>
                         )}
                         {advisory && (
@@ -581,7 +583,7 @@ function DetailDrawer({
                             className="faint"
                             style={{ fontSize: 11, marginTop: 2, color: 'var(--xd-text-dim)' }}
                           >
-                            这类检查只作记录，不会拦下你的对话。
+                            {t('这类检查只作记录，不会拦下你的对话。')}
                           </div>
                         )}
                         {/* ★ 只给命中处附近那一小块（2026-10-22）：
@@ -590,7 +592,7 @@ function DetailDrawer({
                         {focus && (
                           <div style={{ marginTop: 6 }}>
                             <div className="mono faint" style={{ fontSize: 11, lineHeight: 1.7 }}>
-                              命中的地方：{focus.before}
+                              {t('命中的地方：')}{focus.before}
                               {focus.match && (
                                 <mark
                                   style={{
@@ -610,13 +612,13 @@ function DetailDrawer({
                                 className="faint"
                                 style={{ fontSize: 11, cursor: 'pointer', listStyle: 'none' }}
                               >
-                                看完整片段和引擎原文
+                                {t('看完整片段和引擎原文')}
                               </summary>
                               <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
-                                引擎原文：{f.detail}
+                                {t('引擎原文：')}{f.detail}
                               </div>
                               <div className="mono faint" style={{ fontSize: 11 }}>
-                                完整片段：{f.evidence}
+                                {t('完整片段：')}{f.evidence}
                               </div>
                             </details>
                           </div>
@@ -634,9 +636,9 @@ function DetailDrawer({
                 <div className="alert danger mt-16" style={{ marginBottom: 0 }}>
                   <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
                   <div>
-                    <b>证据包加载失败</b>
+                    <b>{t('证据包加载失败')}</b>
                     <div className="mt-8" style={{ fontSize: 12 }}>
-                      这不代表「这条记录没有凭证来源」，只是这次没取到。
+                      {t('这不代表「这条记录没有凭证来源」，只是这次没取到。')}
                     </div>
                     <div className="mono faint mt-8" style={{ fontSize: 11 }}>
                       {evidenceError}
@@ -645,7 +647,7 @@ function DetailDrawer({
                       className="btn ghost sm mt-8"
                       onClick={() => setEvidenceRetry((n) => n + 1)}
                     >
-                      重试
+                      {t('重试')}
                     </button>
                   </div>
                 </div>
@@ -656,7 +658,7 @@ function DetailDrawer({
                   告警同样要给出证据。用户要的是「这条判定是怎么来的」。 */}
               {evidence && (
                 <div className="mt-24">
-                  <div className="field-label">证据来源（这条判定是怎么来的）</div>
+                  <div className="field-label">{t('证据来源（这条判定是怎么来的）')}</div>
                   <div
                     style={{
                       fontSize: 12,
@@ -674,7 +676,7 @@ function DetailDrawer({
                   {evidence.hits.slice(0, 6).map((h, i) => (
                     <div className="detail-row" key={`${h.fingerprint}-${i}`}>
                       <span className="detail-key" style={{ width: 68 }}>
-                        {CATEGORY_LABELS[h.category] ?? h.category}
+                        {CATEGORY_LABELS[h.category] ? t(CATEGORY_LABELS[h.category]) : h.category}
                       </span>
                       <span className="detail-val">
                         {h.detail && (
@@ -689,18 +691,18 @@ function DetailDrawer({
                         )}
                         {h.first_seen ? (
                           <div className="faint" style={{ fontSize: 11, marginTop: 2 }}>
-                            第一次出现在：{h.first_seen.direction_label}
+                            {t('第一次出现在：')}{h.first_seen.direction_label}
                             {h.first_seen.role ? ` · ${h.first_seen.role}` : ''}
                             {' · '}{h.first_seen.time}
                           </div>
                         ) : (
                           <div className="faint" style={{ fontSize: 11, marginTop: 2 }}>
-                            来自本次响应，没有跨轮次指纹
+                            {t('来自本次响应，没有跨轮次指纹')}
                           </div>
                         )}
                         {h.fingerprint && (
                           <div className="mono faint" style={{ fontSize: 10, marginTop: 2 }}>
-                            指纹 {h.fingerprint.slice(0, 16)}…（用于核对，不含原文）
+                            {t('指纹')} {h.fingerprint.slice(0, 16)}…{t('（用于核对，不含原文）')}
                           </div>
                         )}
                       </span>
@@ -708,17 +710,17 @@ function DetailDrawer({
                   ))}
 
                   <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
-                    这里只记录证据的「指纹」和打码片段，不保存原文。指纹就像快递单号：
-                    同一个内容指纹一定相同，不同内容一定不同。
-                    如果判定为「中转站返回」，这份记录可以证明这枚内容不是你发出去的。
+                    {t('这里只记录证据的「指纹」和打码片段，不保存原文。指纹就像快递单号：')}
+                    {t('同一个内容指纹一定相同，不同内容一定不同。')}
+                    {t('如果判定为「中转站返回」，这份记录可以证明这枚内容不是你发出去的。')}
                   </div>
 
                   <div className="flex items-center gap-8 mt-8">
                     <button className="btn ghost sm" onClick={() => void handleCopyEvidence()}>
-                      复制证据
+                      {t('复制证据')}
                     </button>
                     <button className="btn ghost sm" onClick={handleExportEvidence}>
-                      导出 JSON
+                      {t('导出 JSON')}
                     </button>
                   </div>
                 </div>
@@ -726,7 +728,7 @@ function DetailDrawer({
 
               {detail.entry.text_preview && (
                 <div className="mt-24">
-                  <div className="field-label">内容片段</div>
+                  <div className="field-label">{t('内容片段')}</div>
                   <div className="code-block">{detail.entry.text_preview}</div>
                 </div>
               )}
@@ -740,8 +742,8 @@ function DetailDrawer({
                   detail.redactions.map((r) => `${r.category}|${r.original}`),
                 ).size;
                 const countLabel = unique === detail.redactions.length
-                  ? `本次 ${unique} 处`
-                  : `本次 ${unique} 个值 / 共 ${detail.redactions.length} 处`;
+                  ? `${t('本次')} ${unique} ${t('处')}`
+                  : `${t('本次')} ${unique} ${t('个值')} / ${t('共')} ${detail.redactions.length} ${t('处')}`;
                 return (
                 <div className="mt-24">
                   {/* ★ 标题必须区分「这两件事是不是一回事」（2026-10-20）。
@@ -752,25 +754,25 @@ function DetailDrawer({
                   <div className="field-label">
                     {detail.entry.log_type === 'request_sanitize'
                       && detail.entry.action === 'block'
-                      ? `拦截依据（${countLabel}）`
-                      : `脱敏记录（${countLabel}）`}
+                      ? `${t('拦截依据')}（${countLabel}）`
+                      : `${t('脱敏记录')}（${countLabel}）`}
                   </div>
                   {/* ★ 2026-10-22：用户反馈「怎么脱了几千条」。
                       真实情况是同一段历史每轮请求都会重新过一遍，
                       所以同 6 个邮箱能被算成 18 处、再乘上百轮。
-                      不写清楚这一点，数字看起来就像玄盾在乱标。 */}
+                      不写清楚这一点，数字看起来就像勘合在乱标。 */}
                   <div
                     className="faint"
                     style={{ fontSize: 11, marginBottom: 6, lineHeight: 1.7, color: 'var(--xd-text-dim)' }}
                   >
-                    只算这一次请求；同一个值出现多次只算一个。
-                    同一段对话历史在后面每轮都会重新数一遍，所以累计数会随轮数涨 ——
-                    几千条通常是同一批内容被反复计算，不是几千个不同的东西。
+                    {t('只算这一次请求；同一个值出现多次只算一个。')}
+                    {t('同一段对话历史在后面每轮都会重新数一遍，所以累计数会随轮数涨 ——')}
+                    {t('几千条通常是同一批内容被反复计算，不是几千个不同的东西。')}
                   </div>
                   {detail.redactions.map((r) => (
                     <div key={r.id} className="detail-row">
                       <span className="detail-key" style={{ width: 68 }}>
-                        {CATEGORY_LABELS[r.category] ?? r.category}
+                        {CATEGORY_LABELS[r.category] ? t(CATEGORY_LABELS[r.category]) : r.category}
                       </span>
                       <span className="detail-val">
                         <div className="mono" style={{ color: 'var(--xd-safe)' }}>
@@ -791,8 +793,8 @@ function DetailDrawer({
                   <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
                     {detail.entry.log_type === 'request_sanitize'
                       && detail.entry.action === 'block'
-                      ? '这里显示的是打过码的片段（只保留开头、结尾和长度），原文没有离开你的电脑。若确认是误报，点下方「标记为误报」。'
-                      : '这些是本次请求里被替换掉的内容，与上面判定的原因无关。只保留开头、结尾和长度，原文没有离开你的电脑。'}
+                      ? t('这里显示的是打过码的片段（只保留开头、结尾和长度），原文没有离开你的电脑。若确认是误报，点下方「标记为误报」。')
+                      : t('这些是本次请求里被替换掉的内容，与上面判定的原因无关。只保留开头、结尾和长度，原文没有离开你的电脑。')}
                   </div>
                 </div>
                 );
@@ -805,12 +807,12 @@ function DetailDrawer({
                 && (detail.entry.redaction_count ?? 0) > 0 && (
                 <div className="mt-24">
                   <div className="field-label">
-                    脱敏记录（{detail.entry.redaction_count} 处）
+                    {t('脱敏记录')}（{detail.entry.redaction_count} {t('处')}）
                   </div>
                   <div className="faint" style={{ fontSize: 11, lineHeight: 1.7 }}>
-                    本次请求有 {detail.entry.redaction_count} 处内容被打码。
-                    原始值在响应还原后已按隐私策略清除，本地不再保留明文；
-                    这条日志上只保留「打了几处」这个计数。
+                    {t('本次请求有')} {detail.entry.redaction_count} {t('处内容被打码。')}
+                    {t('原始值在响应还原后已按隐私策略清除，本地不再保留明文；')}
+                    {t('这条日志上只保留「打了几处」这个计数。')}
                   </div>
                 </div>
               )}
@@ -825,7 +827,7 @@ function DetailDrawer({
             ) : (
               <Copy size={15} strokeWidth={1.5} />
             )}
-            {copied ? '已复制' : '复制详情'}
+            {copied ? t('已复制') : t('复制详情')}
           </button>
           {detail?.entry.marked_safe ? (
             <button
@@ -834,7 +836,7 @@ function DetailDrawer({
               disabled={loading || marking}
             >
               <ShieldCheck size={15} strokeWidth={1.5} />
-              {marking ? '撤销中...' : '撤销标记'}
+              {marking ? t('撤销中...') : t('撤销标记')}
             </button>
           ) : (
             /* ★ 只对「已拦截 / 已告警」显示标记按钮（2026-10-20）。
@@ -847,13 +849,13 @@ function DetailDrawer({
                 disabled={loading || marking}
               >
                 <ShieldOff size={15} strokeWidth={1.5} />
-                {marking ? '标记中...' : '标记为误报'}
+                {marking ? t('标记中...') : t('标记为误报')}
               </button>
             )
           )}
           <button className="btn danger" onClick={handleDelete} disabled={loading || deleting}>
             <Trash2 size={15} strokeWidth={1.5} />
-            {deleting ? '删除中...' : '删除'}
+            {deleting ? t('删除中...') : t('删除')}
           </button>
         </div>
       </aside>
@@ -867,6 +869,7 @@ function DetailDrawer({
 
 export default function Logs() {
   const toast = useToast();
+  const { t } = useI18n();
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -1062,10 +1065,10 @@ export default function Logs() {
         r.content,
         r.filename.endsWith('.json') ? 'application/json' : 'text/csv',
       );
-      if (ok) toast.success(`已导出 ${r.filename}`);
-      else toast.error('导出失败，无法写入文件');
+      if (ok) toast.success(`${t('已导出')} ${r.filename}`);
+      else toast.error(t('导出失败，无法写入文件'));
     } catch (e) {
-      toast.error(`导出失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('导出失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setExporting(false);
     }
@@ -1074,18 +1077,18 @@ export default function Logs() {
   const handleClearAll = async () => {
     if (clearing) return;
     // ★ 同上：原生 confirm 不可用，走应用内确认框。
-    if (!(await confirmDialog('确定清空全部安全日志吗？\n\n此操作不可恢复。\n（脱敏记录会一并删除，本地不留存任何原始敏感值）'))) {
+    if (!(await confirmDialog(t('确定清空全部安全日志吗？\n\n此操作不可恢复。\n（脱敏记录会一并删除，本地不留存任何原始敏感值）')))) {
       return;
     }
     setClearing(true);
     try {
       const r = await api.clearLogs(0);
-      toast.success(`已清空 ${r.deleted} 条日志`);
+      toast.success(`${t('已清空')} ${r.deleted} ${t('条日志')}`);
       setOffset(0);
       load();
       loadStats();
     } catch (e) {
-      toast.error(`清空失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('清空失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setClearing(false);
     }
@@ -1104,27 +1107,27 @@ export default function Logs() {
     try {
       const probe = await api.countFilteredLogs(currentFilters);
       if (probe.matched === 0) {
-        toast.error('当前筛选条件下没有可删除的记录');
+        toast.error(t('当前筛选条件下没有可删除的记录'));
         return;
       }
       const all = !currentFilters.log_type && !currentFilters.action
         && !currentFilters.search && !currentFilters.days
         && currentFilters.marked_safe === undefined;
-      const scope = all ? '全部日志' : '当前筛选结果';
+      const scope = all ? t('全部日志') : t('当前筛选结果');
       // ★ 同上：原生 confirm 不可用，走应用内确认框。
       if (!(await confirmDialog(
-        `将删除${scope}中的 ${probe.matched} 条记录。\n\n`
-        + '此操作不可恢复（脱敏记录会一并删除）。\n'
-        + '确定继续吗？',
+        `${t('将删除')}${scope}${t('中的')} ${probe.matched} ${t('条记录。')}\n\n`
+        + `${t('此操作不可恢复（脱敏记录会一并删除）。')}\n`
+        + t('确定继续吗？'),
       ))) {
         return;
       }
       const r = await api.deleteFilteredLogs(currentFilters);
-      toast.success(`已删除 ${r.deleted} 条记录`);
+      toast.success(`${t('已删除')} ${r.deleted} ${t('条记录')}`);
       setOffset(0);
       load();
     } catch (e) {
-      toast.error(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('删除失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setDeleting(false);
     }
@@ -1159,32 +1162,32 @@ export default function Logs() {
   //   就会再次变成「数字对不上」。
   const scopeText = useMemo(() => {
     const parts: string[] = [];
-    const t = TIME_OPTIONS.find((o) => o.value === days);
-    if (t) parts.push(t.label);
+    const timeOpt = TIME_OPTIONS.find((o) => o.value === days);
+    if (timeOpt) parts.push(t(timeOpt.label));
     const ty = TYPE_OPTIONS.find((o) => o.value === logType);
-    if (ty) parts.push(ty.label);
+    if (ty) parts.push(t(ty.label));
     const ac = ACTION_OPTIONS.find((o) => o.value === action);
-    if (ac) parts.push(ac.label);
+    if (ac) parts.push(t(ac.label));
     const mk = MARKED_OPTIONS.find((o) => o.value === markedFilter);
-    if (mk) parts.push(mk.label);
-    if (excludeType) parts.push('不含转发中断');
-    if (debouncedSearch) parts.push(`搜索「${debouncedSearch}」`);
-    return parts.join(' · ') || '全部记录';
-  }, [days, logType, action, markedFilter, excludeType, debouncedSearch]);
+    if (mk) parts.push(t(mk.label));
+    if (excludeType) parts.push(t('不含转发中断'));
+    if (debouncedSearch) parts.push(`${t('搜索')}「${debouncedSearch}」`);
+    return parts.join(' · ') || t('全部记录');
+  }, [days, logType, action, markedFilter, excludeType, debouncedSearch, t]);
 
   return (
     <div>
       <div className="page-header flex items-center justify-between">
         <div>
-          <h1 className="page-title">安全日志</h1>
+          <h1 className="page-title">{t('安全日志')}</h1>
           <p className="page-subtitle">
-            记录每一次请求转发与响应验证，所有数据仅存于本机
+            {t('记录每一次请求转发与响应验证，所有数据仅存于本机')}
           </p>
         </div>
         <div className="btn-row">
           <button className="btn secondary" onClick={handleExport} disabled={total === 0 || exporting}>
             <Download size={15} strokeWidth={1.5} />
-            {exporting ? '导出中...' : '导出'}
+            {exporting ? t('导出中...') : t('导出')}
           </button>
           {/* ★ 按筛选删除（2026-10-03）。
               此前只有「清空全部」一条路：想清理筛选结果就只能全清，
@@ -1195,7 +1198,7 @@ export default function Logs() {
             disabled={total === 0 || deleting || clearing}
           >
             <Filter size={15} strokeWidth={1.5} />
-            {deleting ? '处理中...' : '删除筛选结果'}
+            {deleting ? t('处理中...') : t('删除筛选结果')}
           </button>
           {/* ★ 「清空」与「导出 / 删除筛选结果」此前是三个一模一样的灰色按钮。
               它不可恢复且会清掉全部记录，必须与普通操作在视觉上分开 ——
@@ -1207,7 +1210,7 @@ export default function Logs() {
             disabled={total === 0 || clearing || deleting}
           >
             <Trash2 size={15} strokeWidth={1.5} />
-            {clearing ? '清空中...' : '清空'}
+            {clearing ? t('清空中...') : t('清空')}
           </button>
         </div>
       </div>
@@ -1223,12 +1226,12 @@ export default function Logs() {
               {/* ★ 「全部记录」：这个数是**全部时间**的，而状态栏的
                   「今日检查 N 次」只算今天。两者放在同一屏却不标范围，
                   用户自然会拿它们对账，然后发现「对不上」。 */}
-              <span className="log-overview-label">全部记录</span>
+              <span className="log-overview-label">{t('全部记录')}</span>
             </div>
             {stats.marked_safe > 0 && (
               <div className="log-overview-item">
                 <span className="log-overview-num mono">{stats.marked_safe}</span>
-                <span className="log-overview-label">已标记误报（不计入首页统计）</span>
+                <span className="log-overview-label">{t('已标记误报（不计入首页统计）')}</span>
               </div>
             )}
             <div className="log-overview-item">
@@ -1240,10 +1243,10 @@ export default function Logs() {
                     全部列出即可让「构成之和 == 全部记录」成立。 */}
                 {Object.entries(stats.by_type)
                   .sort((a, b) => b[1] - a[1])
-                  .map(([k, v]) => `${LOG_TYPE_LABELS[k as LogType] ?? k} ${v}`)
+                  .map(([k, v]) => `${t(LOG_TYPE_LABELS[k as LogType] ?? k)} ${v}`)
                   .join(' · ')}
               </span>
-              <span className="log-overview-label">主要构成</span>
+              <span className="log-overview-label">{t('主要构成')}</span>
             </div>
             {stats.top_domains[0] && (
               <div className="log-overview-item">
@@ -1251,7 +1254,7 @@ export default function Logs() {
                   {displayDomain(stats.top_domains[0].domain) || '—'}
                 </span>
                 <span className="log-overview-label">
-                  主要中转站（{stats.top_domains[0].count} 条）
+                  {t('主要中转站')}（{stats.top_domains[0].count} {t('条')}）
                 </span>
               </div>
             )}
@@ -1260,7 +1263,7 @@ export default function Logs() {
               两者同屏却不标范围，用户必然拿它们对账，然后得出「数字造假」。
               这里把口径写在卡片下面：历史归历史、今日归今日。 */}
           <div className="faint" style={{ fontSize: 12, marginTop: -8, marginBottom: 16 }}>
-            以上为全部时间累计；上方状态栏的「今日检查」只统计今天。
+            {t('以上为全部时间累计；上方状态栏的「今日检查」只统计今天。')}
           </div>
         </>
       )}
@@ -1270,8 +1273,8 @@ export default function Logs() {
         <div className="filter-scope">
           <Filter size={13} strokeWidth={1.5} />
           <span>
-            当前条件：{scopeText} —— 共 <b className="mono">{loading ? '…' : total}</b> 条
-            {action === 'redact' && '（「已打码」按处计数，这里按条列出）'}
+            {t('当前条件：')}{scopeText} —— {t('共')} <b className="mono">{loading ? '…' : total}</b> {t('条')}
+            {action === 'redact' && t('（「已打码」按处计数，这里按条列出）')}
           </span>
         </div>
       )}
@@ -1292,17 +1295,17 @@ export default function Logs() {
           <input
             className="input"
             style={{ paddingLeft: 34 }}
-            placeholder="搜索摘要或内容片段..."
+            placeholder={t('搜索摘要或内容片段...')}
             // ★ 搜索框有图标、无可见 label，必须补 aria-label，
             //   否则读屏用户只会听到「编辑框」，不知道搜的是什么。
-            aria-label="搜索日志"
+            aria-label={t('搜索日志')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
         <select
           className="select"
-          aria-label="按类型筛选"
+          aria-label={t('按类型筛选')}
           value={logType}
           onChange={(e) => {
             setLogType(e.target.value);
@@ -1311,13 +1314,13 @@ export default function Logs() {
         >
           {TYPE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
-              {o.label}
+              {t(o.label)}
             </option>
           ))}
         </select>
         <select
           className="select"
-          aria-label="按结果筛选"
+          aria-label={t('按结果筛选')}
           value={action}
           onChange={(e) => {
             setAction(e.target.value);
@@ -1326,13 +1329,13 @@ export default function Logs() {
         >
           {ACTION_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
-              {o.label}
+              {t(o.label)}
             </option>
           ))}
         </select>
         <select
           className="select"
-          aria-label="按时间范围筛选"
+          aria-label={t('按时间范围筛选')}
           value={days}
           onChange={(e) => {
             setDays(e.target.value);
@@ -1341,13 +1344,13 @@ export default function Logs() {
         >
           {TIME_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
-              {o.label}
+              {t(o.label)}
             </option>
           ))}
         </select>
         <select
           className="select"
-          aria-label="按误报标记筛选"
+          aria-label={t('按误报标记筛选')}
           value={markedFilter}
           onChange={(e) => {
             setMarkedFilter(e.target.value);
@@ -1356,14 +1359,14 @@ export default function Logs() {
         >
           {MARKED_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
-              {o.label}
+              {t(o.label)}
             </option>
           ))}
         </select>
         {/* ★ 只有动过筛选才出现：平时不占位置，动过之后一眼就能回到默认。 */}
         {hasFilters && (
           <button className="btn ghost sm" onClick={resetFilters}>
-            重置筛选
+            {t('重置筛选')}
           </button>
         )}
       </div>
@@ -1372,21 +1375,21 @@ export default function Logs() {
         <div className="alert danger">
           <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
           <div>
-            <b>加载日志失败</b>
+            <b>{t('加载日志失败')}</b>
             <div className="mt-8">{loadErr.message}</div>
             <details className="mt-8">
               <summary
                 className="faint"
                 style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
               >
-                技术细节
+                {t('技术细节')}
               </summary>
               <div className="mono faint" style={{ fontSize: 12, marginTop: 4 }}>
                 {loadErr.detail}
               </div>
             </details>
             <button className="btn ghost sm mt-8" onClick={load}>
-              重试
+              {t('重试')}
             </button>
           </div>
         </div>
@@ -1411,14 +1414,14 @@ export default function Logs() {
             </div>
             <div className="empty-text">
               {loading
-                ? '加载中...'
+                ? t('加载中...')
                 : debouncedSearch
-                  ? '未找到匹配的日志，试试其他关键词'
+                  ? t('未找到匹配的日志，试试其他关键词')
                   : hasFilters
                     /* ★ 筛出 0 条时要说清是「筛选没命中」，而不是「没有日志」——
                         两者对用户的下一步动作完全不同。 */
-                    ? '当前筛选条件下没有记录，点「重置筛选」回到全部'
-                    : '暂无日志记录 — 使用 AI 工具发起一次对话后即可看到'}
+                    ? t('当前筛选条件下没有记录，点「重置筛选」回到全部')
+                    : t('暂无日志记录 — 使用 AI 工具发起一次对话后即可看到')}
             </div>
           </div>
         </div>
@@ -1431,11 +1434,11 @@ export default function Logs() {
             <table className="table">
               <thead>
                 <tr>
-                  <th style={{ width: 96 }}>时间</th>
-                  <th style={{ width: 92 }}>类型</th>
-                  <th>内容</th>
-                  <th style={{ width: 150 }}>中转站</th>
-                  <th style={{ width: 78 }}>结果</th>
+                  <th style={{ width: 96 }}>{t('时间')}</th>
+                  <th style={{ width: 92 }}>{t('类型')}</th>
+                  <th>{t('内容')}</th>
+                  <th style={{ width: 150 }}>{t('中转站')}</th>
+                  <th style={{ width: 78 }}>{t('结果')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -1449,7 +1452,7 @@ export default function Logs() {
                     //   .table tbody tr:focus-visible 负责勾出来。
                     tabIndex={0}
                     role="button"
-                    aria-label={`查看日志详情：${e.summary}`}
+                    aria-label={`${t('查看日志详情：')}${e.summary}`}
                     onClick={() => setSelectedId(e.id)}
                     onKeyDown={(ev) => {
                       if (ev.key === 'Enter' || ev.key === ' ') {
@@ -1461,7 +1464,7 @@ export default function Logs() {
                     <td className="mono faint">{formatListTime(e.timestamp)}</td>
                     <td>
                       <span className="faint" style={{ fontSize: 12 }}>
-                        {LOG_TYPE_LABELS[e.log_type]}
+                        {t(LOG_TYPE_LABELS[e.log_type])}
                       </span>
                     </td>
                     <td>
@@ -1484,7 +1487,7 @@ export default function Logs() {
                           列表里却完全看不出来 —— 点「已打码」筛选还筛不到东西。 */}
                       {(e.redaction_count ?? 0) > 0 && (
                         <div className="faint" style={{ fontSize: 10, marginTop: 2 }}>
-                          打码 {e.redaction_count} 处
+                          {t('打码')} {e.redaction_count} {t('处')}
                         </div>
                       )}
                     </td>
@@ -1504,17 +1507,17 @@ export default function Logs() {
             onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
             disabled={offset === 0}
           >
-            上一页
+            {t('上一页')}
           </button>
           <span>
-            {currentPage} / {totalPages}（共 {total} 条）
+            {currentPage} / {totalPages}（{t('共')} {total} {t('条')}）
           </span>
           <button
             className="btn ghost sm"
             onClick={() => setOffset(offset + PAGE_SIZE)}
             disabled={offset + PAGE_SIZE >= total}
           >
-            下一页
+            {t('下一页')}
           </button>
         </div>
       )}

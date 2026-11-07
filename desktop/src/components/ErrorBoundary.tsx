@@ -8,6 +8,7 @@ import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { ShieldAlert, RotateCcw } from 'lucide-react';
 import { currentProxyPort } from '../services/api';
+import { t } from '../i18n';
 
 interface Props {
   children: ReactNode;
@@ -25,7 +26,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    console.error('[玄盾个人版] 未捕获错误:', error, info.componentStack);
+    console.error('[勘合个人版] 未捕获错误:', error, info.componentStack);
   }
 
   render() {
@@ -34,20 +35,20 @@ export default class ErrorBoundary extends Component<Props, State> {
     return (
       <div className="error-screen">
         <ShieldAlert size={48} strokeWidth={1.5} color="var(--xd-danger)" />
-        <div className="error-title">应用遇到问题</div>
+        <div className="error-title">{t('应用遇到问题')}</div>
         <div className="muted" style={{ maxWidth: 420 }}>
-          玄盾个人版遇到了意外错误。你可以尝试重新加载，如果问题持续存在，
-          请检查本地代理（127.0.0.1:{currentProxyPort()}）是否正常运行。
+          {t('勘合个人版遇到了意外错误。你可以尝试重新加载，如果问题持续存在，')}
+          {t('请检查本地代理（127.0.0.1:')}{currentProxyPort()}{t('）是否正常运行。')}
         </div>
         <details className="error-detail">
           <summary className="faint" style={{ cursor: 'pointer', fontSize: 12 }}>
-            错误详情
+            {t('错误详情')}
           </summary>
           <div className="code-block mt-8">{this.state.error.message}</div>
         </details>
         <button className="btn mt-16" onClick={() => window.location.reload()}>
           <RotateCcw size={15} strokeWidth={1.5} />
-          重新加载
+          {t('重新加载')}
         </button>
       </div>
     );

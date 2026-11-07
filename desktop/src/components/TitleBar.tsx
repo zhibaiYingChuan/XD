@@ -22,6 +22,7 @@ import { useEffect, useState } from 'react';
 import { Minus, Square, Copy, X } from 'lucide-react';
 import { BrandMark } from './BrandMark';
 import { isTauri } from '../lib/tauriShim';
+import { useI18n } from '../i18n';
 
 async function currentWindow() {
   const mod = await import('@tauri-apps/api/window');
@@ -29,6 +30,7 @@ async function currentWindow() {
 }
 
 export function TitleBar() {
+  const { t } = useI18n();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -64,8 +66,8 @@ export function TitleBar() {
     <header className="titlebar">
       <div className="titlebar-brand" data-tauri-drag-region>
         <BrandMark size={18} />
-        <span className="titlebar-title">玄盾</span>
-        <span className="titlebar-sub">个人版</span>
+        <span className="titlebar-title">{t('勘合')}</span>
+        <span className="titlebar-sub">{t('个人版')}</span>
       </div>
 
       {/* 拖拽区：双击最大化由 Tauri 的 drag-region 处理 */}
@@ -75,8 +77,8 @@ export function TitleBar() {
         <button
           type="button"
           className="titlebar-btn"
-          title="最小化"
-          aria-label="最小化"
+          title={t('最小化')}
+          aria-label={t('最小化')}
           onClick={() => act((w) => w.minimize())}
         >
           <Minus size={14} strokeWidth={1.5} />
@@ -84,8 +86,8 @@ export function TitleBar() {
         <button
           type="button"
           className="titlebar-btn"
-          title={maximized ? '还原' : '最大化'}
-          aria-label={maximized ? '还原' : '最大化'}
+          title={maximized ? t('还原') : t('最大化')}
+          aria-label={maximized ? t('还原') : t('最大化')}
           onClick={() => act((w) => w.toggleMaximize())}
         >
           {maximized ? (
@@ -97,8 +99,8 @@ export function TitleBar() {
         <button
           type="button"
           className="titlebar-btn close"
-          title="关闭"
-          aria-label="关闭"
+          title={t('关闭')}
+          aria-label={t('关闭')}
           onClick={() => act((w) => w.close())}
         >
           <X size={15} strokeWidth={1.5} />

@@ -46,7 +46,7 @@ import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/ta
 import { checkForUpdate, type UpdateCheck } from '../lib/updater';
 import { parseUpdateNotes } from '../lib/updateNotes';
 import { confirmDialog } from '../lib/confirm';
-import { useI18n } from '../i18n';
+import { useI18n, t } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 常量
@@ -99,10 +99,10 @@ const CATEGORY_ORDER = [
  *   他才知道该去核对地址，而不是怀疑自己的 Key 或网络。
  */
 function describeRelayStatus(status: number): string {
-  if (status === 401 || status === 403) return `${status}（Key 被拒绝）`;
-  if (status === 404) return `${status}（接口不存在）`;
-  if (status === 429) return `${status}（请求太频繁）`;
-  if (status >= 500) return `${status}（对方服务器出错）`;
+  if (status === 401 || status === 403) return `${status}${t('（Key 被拒绝）')}`;
+  if (status === 404) return `${status}${t('（接口不存在）')}`;
+  if (status === 429) return `${status}${t('（请求太频繁）')}`;
+  if (status >= 500) return `${status}${t('（对方服务器出错）')}`;
   return String(status);
 }
 
@@ -359,8 +359,8 @@ export default function Settings() {
       // ★ 原生 confirm 在 Tauri 2.7 上不可用（见 lib/confirm.ts），
       //   统一走应用内确认框；必须 await，否则还没等用户答复就重启了。
       !(await confirmDialog(
-        '确定重启引擎吗？\n\n'
-          + '重启期间正在进行的对话会短暂中断，请稍候片刻。',
+        `${t('确定重启引擎吗？')}\n\n`
+          + t('重启期间正在进行的对话会短暂中断，请稍候片刻。'),
       ))
     ) {
       return;
@@ -370,14 +370,14 @@ export default function Settings() {
       await api.restartEngine();
       // 重启完成后立刻刷新：状态与版本都可能已变。
       await loadEngine(true);
-      if (mountedRef.current) toast.success('引擎已重启');
+      if (mountedRef.current) toast.success(t('引擎已重启'));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // ★ 失败后同样刷新一次：Rust 侧会把失败原因写进 startup_error，
       //   刷新后区块里能长期看到它，而不是只剩一句转瞬即逝的 toast。
       await loadEngine(true);
       if (mountedRef.current) {
-        toast.error(`重启失败：${msg}。可尝试重新打开勘合。`);
+        toast.error(`${t('重启失败：')}${msg}${t('。可尝试重新打开勘合。')}`);
       }
     } finally {
       if (mountedRef.current) setRestarting(false);
@@ -407,18 +407,18 @@ export default function Settings() {
           setKeyDraft('');
           setRelayTest(null);
         }
-        if (mountedRef.current) toast.success(`已切换到「${name}」`);
+        if (mountedRef.current) toast.success(`${t('已切换到')}「${name}」`);
       } catch (e) {
         if (mountedRef.current) {
           toast.error(
-            `切换失败：${e instanceof Error ? e.message : String(e)}`,
+            `${t('切换失败：')}${e instanceof Error ? e.message : String(e)}`,
           );
         }
       } finally {
         if (mountedRef.current) setSwitching(false);
       }
     },
-    [switching, toast, load, loadConfigured],
+    [switching, toast, load, loadConfigured, t],
   );
 
   // ★ v0.1.0：新增一家到列表（不设为启用）。
@@ -431,11 +431,11 @@ export default function Settings() {
     // 但后端那道守卫不能省 —— 前端校验可以被绕过，
     // 而掩码 Key 落盘的后果是静默且不可逆的。
     if (!baseUrl) {
-      toast.error('请填写中转站地址');
+      toast.error(t('请填写中转站地址'));
       return;
     }
     if (!key) {
-      toast.error('请填写 API Key');
+      toast.error(t('请填写 API Key'));
       return;
     }
     // 端口选填：留空 = 不单独分配。填了就先在前端挡一道，
@@ -443,13 +443,13 @@ export default function Settings() {
     const portText = newRelay.port.trim();
     const port = portText ? Number(portText) : 0;
     if (portText && (!Number.isInteger(port) || port < 1024 || port > 65535)) {
-      toast.error('端口要填 1024–65535 之间的数字，或者留空表示不单独分配');
+      toast.error(t('端口要填 1024–65535 之间的数字，或者留空表示不单独分配'));
       return;
     }
     setAddingBusy(true);
     try {
       const r = await api.addRelay({
-        name: name || '未命名', base_url: baseUrl, api_key: key, port,
+        name: name || t('未命名'), base_url: baseUrl, api_key: key, port,
       });
       // ★ 刻意**不**调 load()：新增不改变当前启用项，
       //   顶部那堆输入框不该被清掉 —— 用户填到一半的地址还在。
@@ -459,20 +459,20 @@ export default function Settings() {
       if (mountedRef.current) {
         toast.success(
           r.port
-            ? `已添加，现在共 ${r.total} 家；这家的入口是 ${r.proxy_url}`
-            : `已添加，现在共 ${r.total} 家`,
+            ? `${t('已添加，现在共')} ${r.total} ${t('家；这家的入口是')} ${r.proxy_url}`
+            : `${t('已添加，现在共')} ${r.total} ${t('家')}`,
         );
       }
     } catch (e) {
       if (mountedRef.current) {
         toast.error(
-          `添加失败：${e instanceof Error ? e.message : String(e)}`,
+          `${t('添加失败：')}${e instanceof Error ? e.message : String(e)}`,
         );
       }
     } finally {
       if (mountedRef.current) setAddingBusy(false);
     }
-  }, [addingBusy, newRelay, toast, loadConfigured]);
+  }, [addingBusy, newRelay, toast, loadConfigured, t]);
 
   /**
    * 保存某一家专属入口端口（空 = 取消分配）。
@@ -485,7 +485,7 @@ export default function Settings() {
     const raw = portEditing.value.trim();
     const port = raw ? Number(raw) : 0;
     if (raw && (!Number.isInteger(port) || port < 1024 || port > 65535)) {
-      toast.error('端口要填 1024–65535 之间的数字，或者留空表示不单独分配');
+      toast.error(t('端口要填 1024–65535 之间的数字，或者留空表示不单独分配'));
       return;
     }
     setPortBusy(true);
@@ -496,25 +496,25 @@ export default function Settings() {
       if (mountedRef.current) {
         toast.success(
           r.port
-            ? `「${name}」的专属入口已就绪：${r.proxy_url}`
-            : `已取消「${name}」的专属端口`,
+            ? `${t('「')}${name}${t('」的专属入口已就绪：')}${r.proxy_url}`
+            : `${t('已取消「')}${name}${t('」的专属端口')}`,
         );
       }
     } catch (e) {
       if (mountedRef.current) {
         toast.error(
-          `端口没设上：${e instanceof Error ? e.message : String(e)}`,
+          `${t('端口没设上：')}${e instanceof Error ? e.message : String(e)}`,
         );
       }
     } finally {
       if (mountedRef.current) setPortBusy(false);
     }
-  }, [portBusy, portEditing, toast, loadConfigured]);
+  }, [portBusy, portEditing, toast, loadConfigured, t]);
 
   const copyRelayUrl = useCallback(async (url: string) => {
     const ok = await copyToClipboard(url);
-    toast[ok ? 'success' : 'error'](ok ? '入口地址已复制' : '复制失败');
-  }, [toast]);
+    toast[ok ? 'success' : 'error'](ok ? t('入口地址已复制') : t('复制失败'));
+  }, [toast, t]);
 
   /** 从列表移除一家。当前启用项不给按钮，后端也会拒。 */
   const dropRelay = useCallback(
@@ -526,8 +526,8 @@ export default function Settings() {
       if (
         // ★ 原生 confirm 不可用，走应用内确认框。
         !(await confirmDialog(
-          `确定移除「${name}」吗？\n\n`
-            + '将删除该中转站的地址与 Key，此操作不可恢复。',
+          `${t('确定移除「')}${name}${t('」吗？')}\n\n`
+            + t('将删除该中转站的地址与 Key，此操作不可恢复。'),
         ))
       ) {
         return;
@@ -536,18 +536,18 @@ export default function Settings() {
       try {
         await api.removeRelay(id);
         await loadConfigured();
-        if (mountedRef.current) toast.success(`已移除「${name}」`);
+        if (mountedRef.current) toast.success(`${t('已移除「')}${name}${t('」')}`);
       } catch (e) {
         if (mountedRef.current) {
           toast.error(
-            `移除失败：${e instanceof Error ? e.message : String(e)}`,
+            `${t('移除失败：')}${e instanceof Error ? e.message : String(e)}`,
           );
         }
       } finally {
         if (mountedRef.current) setSwitching(false);
       }
     },
-    [switching, toast, loadConfigured],
+    [switching, toast, loadConfigured, t],
   );
 
   // ── 通用保存 ──
@@ -568,7 +568,7 @@ export default function Settings() {
         if (mountedRef.current) setPortErrors(failed.length ? errs : null);
         if (failed.length) {
           toast.error(
-            `配置已保存，但有 ${failed.length} 个专属端口没有起来：`
+            `${t('配置已保存，但有')} ${failed.length} ${t('个专属端口没有起来：')}`
             + failed.map((p) => `${p}（${errs[p]}）`).join('；'),
           );
           return true;
@@ -577,7 +577,7 @@ export default function Settings() {
         return true;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        toast.error(`保存失败：${msg}`);
+        toast.error(`${t('保存失败：')}${msg}`);
         // 失败时回滚到服务端真实状态
         await load();
         return false;
@@ -585,7 +585,7 @@ export default function Settings() {
         if (mountedRef.current) setSaving(false);
       }
     },
-    [config, saving, toast, load],
+    [config, saving, toast, load, t],
   );
 
   // ── A. 防护开关 ──
@@ -597,7 +597,7 @@ export default function Settings() {
     setConfig({ ...config, guard: { ...config.guard, [key]: !current } });
     const ok = await save(
       { guard: { ...config.guard, [key]: !current } as PersonalConfig['guard'] },
-      `${label}已${!current ? '开启' : '关闭'}`,
+      `${label}${t(!current ? '已开启' : '已关闭')}`,
     );
     if (!ok) await load();
   };
@@ -607,7 +607,7 @@ export default function Settings() {
     if (!config || config.guard.security_level === level) return;
     await save(
       { guard: { ...config.guard, security_level: level } },
-      `安全级别已切换为「${SECURITY_LEVELS.find((l) => l.value === level)?.title}」`,
+      `${t('安全级别已切换为「')}${t(SECURITY_LEVELS.find((l) => l.value === level)?.title ?? '')}${t('」')}`,
     );
   };
 
@@ -625,12 +625,12 @@ export default function Settings() {
     if (!config) return;
     const raw = portInput.trim();
     if (!raw) {
-      setPortError('请输入端口号');
+      setPortError(t('请输入端口号'));
       return;
     }
     const port = Number(raw);
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-      setPortError('端口需在 1024–65535 之间');
+      setPortError(t('端口需在 1024–65535 之间'));
       return;
     }
     if (port === config.server.port) {
@@ -638,13 +638,13 @@ export default function Settings() {
       //   这里明确回一句「无需修改」，把「静默无反应」变成一次可确认的反馈。
       setPortError(null);
       setPortInput('');
-      toast.info('端口未变，无需修改');
+      toast.info(t('端口未变，无需修改'));
       return;
     }
     const oldPort = config.server.port;
     const ok = await save(
       { server: { ...config.server, port } },
-      `端口已改为 ${port}`,
+      `${t('端口已改为')} ${port}`,
     );
     if (ok) {
       setPortError(null);
@@ -652,9 +652,9 @@ export default function Settings() {
       // 必须告知「当前仍在用旧端口」——否则用户会直接去改 AI 工具配置，
       // 填了新地址却连不上，误以为勘合坏了。
       toast.info(
-        `当前仍运行在 ${oldPort}：请右键托盘图标选「退出勘合」再重新打开，`
-        + '新端口才会生效（点窗口右上角 × 只是隐藏到托盘，不算退出；'
-        + '「重启引擎」也不会改变端口）',
+        `${t('当前仍运行在')} ${oldPort}${t('：请右键托盘图标选「退出勘合」再重新打开，')}`
+        + t('新端口才会生效（点窗口右上角 × 只是隐藏到托盘，不算退出；')
+        + t('「重启引擎」也不会改变端口）'),
       );
     }
   };
@@ -671,17 +671,17 @@ export default function Settings() {
     if (days > 0) {
       // ★ 原生 confirm 不可用，走应用内确认框。
       const ok = await confirmDialog(
-        `将只保留最近 ${days} 天的日志，更早的记录会立即删除且不可恢复。\n\n`
-        + '脱敏明细会随日志一起删除。确定继续吗？',
+        `${t('将只保留最近')} ${days} ${t('天的日志，更早的记录会立即删除且不可恢复。')}\n\n`
+        + t('脱敏明细会随日志一起删除。确定继续吗？'),
       );
       if (!ok) return;
     }
     const saved = await save(
       { storage: { log_retention_days: days } },
-      days > 0 ? `已设置：只保留最近 ${days} 天的日志` : '已设置：日志永久保留',
+      days > 0 ? `${t('已设置：只保留最近')} ${days} ${t('天的日志')}` : t('已设置：日志永久保留'),
     );
     if (saved && days > 0) {
-      toast.info('超出保留期的记录已清理，且不可恢复');
+      toast.info(t('超出保留期的记录已清理，且不可恢复'));
     }
   };
 
@@ -710,10 +710,10 @@ export default function Settings() {
       // 若它迟迟不返回，锁不释放就等于「永久停在 100%」。
       if (mountedRef.current) {
         setUpdateDone(true);
-        toast.success('更新已安装，应用即将重启');
+        toast.success(t('更新已安装，应用即将重启'));
       }
     } catch (e) {
-      toast.error(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('更新失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       if (mountedRef.current) setUpdateBusy(false);
     }
@@ -791,7 +791,7 @@ export default function Settings() {
     // 先前那份「基于旧配置」的结论就不再对应用户看到的东西了。
     testSeqRef.current += 1;
     setRelayTest(null);
-    const ok = await save({ relay: payload }, '中转站配置已保存并立即生效');
+    const ok = await save({ relay: payload }, t('中转站配置已保存并立即生效'));
     if (ok) {
       // 保存成功后 api_key 会被掩码，需重新拉取
       setKeyDraft('');
@@ -817,7 +817,7 @@ export default function Settings() {
     setRelayTest(null);
     const ok = await save(
       { relay: payload },
-      '中转站配置已保存并立即生效 — 请留意其数据留存行为',
+      t('中转站配置已保存并立即生效 — 请留意其数据留存行为'),
     );
     setRelayRisk(null);
     if (ok) {
@@ -839,7 +839,7 @@ export default function Settings() {
     if (!config) return;
     const baseUrl = config.relay.base_url.trim();
     if (!baseUrl) {
-      toast.error('请先填写中转站地址');
+      toast.error(t('请先填写中转站地址'));
       return;
     }
     // ★ 请求序号：探针最长可达 45s，期间用户可以改地址、改 Key。
@@ -877,10 +877,10 @@ export default function Settings() {
           status: null,
           model_count: null,
           elapsed_ms: 0,
-          message: `测试未能完成：${detail}。请检查中转站地址与网络后重试`,
+          message: `${t('测试未能完成：')}${detail}${t('。请检查中转站地址与网络后重试')}`,
           raw: '',
         });
-        toast.error('测试未能完成，请查看下方结论');
+        toast.error(t('测试未能完成，请查看下方结论'));
       }
     } finally {
       // ★★ 2026-10-29（第三轮审查 04-IR）：这里必须**无条件**复位。
@@ -897,9 +897,9 @@ export default function Settings() {
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-      toast.success('代理地址已复制');
+      toast.success(t('代理地址已复制'));
     } else {
-      toast.error('复制失败');
+      toast.error(t('复制失败'));
     }
   };
 
@@ -907,7 +907,7 @@ export default function Settings() {
   const toggleCategory = async (cat: string) => {
     if (!config) return;
     const next = { ...config.guard.enabled_categories, [cat]: !config.guard.enabled_categories[cat] };
-    await save({ guard: { ...config.guard, enabled_categories: next } }, '脱敏设置已更新');
+    await save({ guard: { ...config.guard, enabled_categories: next } }, t('脱敏设置已更新'));
   };
 
   // ── 自定义关键词 ──
@@ -915,13 +915,13 @@ export default function Settings() {
     const kw = newKeyword.trim();
     if (!kw || !config) return;
     if (config.guard.custom_keywords.includes(kw)) {
-      toast.error('该关键词已存在');
+      toast.error(t('该关键词已存在'));
       return;
     }
     setNewKeyword('');
     await save(
       { guard: { ...config.guard, custom_keywords: [...config.guard.custom_keywords, kw] } },
-      `已添加关键词「${kw}」`,
+      `${t('已添加关键词「')}${kw}${t('」')}`,
     );
   };
 
@@ -929,15 +929,15 @@ export default function Settings() {
     if (!config) return;
     await save(
       { guard: { ...config.guard, custom_keywords: config.guard.custom_keywords.filter((k) => k !== kw) } },
-      `已移除关键词「${kw}」`,
+      `${t('已移除关键词「')}${kw}${t('」')}`,
     );
   };
 
   const resetKeywords = async () => {
     if (!config || config.guard.custom_keywords.length === 0) return;
     // ★ 原生 confirm 不可用，走应用内确认框。
-    if (!(await confirmDialog('确定清空全部自定义关键词吗？'))) return;
-    await save({ guard: { ...config.guard, custom_keywords: [] } }, '已清空自定义关键词');
+    if (!(await confirmDialog(t('确定清空全部自定义关键词吗？')))) return;
+    await save({ guard: { ...config.guard, custom_keywords: [] } }, t('已清空自定义关键词'));
   };
 
   // ★ P1-10：这里必须显示「当前实际运行」的端口，而不是 config.server.port。
@@ -952,13 +952,13 @@ export default function Settings() {
   const engineView: { label: string; badge: string } = !engine
     ? engineError
       // ★ P1-17：「读取失败」必须是独立状态，否则界面永远停在「读取中…」
-      ? { label: '读取失败', badge: 'danger' }
-      : { label: '读取中…', badge: 'neutral' }
+      ? { label: t('读取失败'), badge: 'danger' }
+      : { label: t('读取中…'), badge: 'neutral' }
     : engine.startup_error
-      ? { label: '启动失败', badge: 'danger' }
+      ? { label: t('启动失败'), badge: 'danger' }
       : engine.running
-        ? { label: '运行中', badge: 'safe' }
-        : { label: '已停止', badge: 'neutral' };
+        ? { label: t('运行中'), badge: 'safe' }
+        : { label: t('已停止'), badge: 'neutral' };
 
   // ══════════════════════════════════════════════════════════
   // 渲染
@@ -1028,9 +1028,9 @@ export default function Settings() {
         <div className="alert danger" style={{ marginBottom: 16 }}>
           <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
           <div style={{ minWidth: 0, flex: 1 }}>
-            <b>有专属端口没有起来</b>
+            <b>{t('有专属端口没有起来')}</b>
             <div className="mt-8">
-              配置已保存，但下面这些入口现在连不上：
+              {t('配置已保存，但下面这些入口现在连不上：')}
             </div>
             <div className="mt-8 mono" style={{ fontSize: 12 }}>
               {Object.entries(portErrors).map(([port, why]) => (
@@ -1038,13 +1038,13 @@ export default function Settings() {
               ))}
             </div>
             <div className="mt-8 faint" style={{ fontSize: 12 }}>
-              到下面「多中转站」给这家换一个端口即可，改完立即生效（不用重启应用）。
+              {t('到下面「多中转站」给这家换一个端口即可，改完立即生效（不用重启应用）。')}
             </div>
             <button
               className="btn ghost sm mt-8"
               onClick={() => setPortErrors(null)}
             >
-              知道了
+              {t('知道了')}
             </button>
           </div>
         </div>
@@ -1073,20 +1073,20 @@ export default function Settings() {
                 ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
             }
           >
-            {label}
+            {t(label)}
           </button>
         ))}
       </div>
 
       {/* ═══ A. 防护开关 ═══ */}
       <div className="card" id="sec-guard">
-        <div className="card-title">防护开关</div>
+        <div className="card-title">{t('防护开关')}</div>
 
         <div className="switch-row">
           <div>
-            <div className="switch-label">响应验证</div>
+            <div className="switch-label">{t('响应验证')}</div>
             <div className="switch-desc">
-              检查中转站返回的内容是否被篡改（恶意工具调用、隐藏指令等）
+              {t('检查中转站返回的内容是否被篡改（恶意工具调用、隐藏指令等）')}
             </div>
           </div>
           <label className="switch">
@@ -1094,7 +1094,7 @@ export default function Settings() {
               type="checkbox"
               checked={config.guard.enable_response_verify}
               disabled={saving}
-              onChange={() => toggleGuard('enable_response_verify', '响应验证')}
+              onChange={() => toggleGuard('enable_response_verify', t('响应验证'))}
             />
             <span className="switch-slider" />
           </label>
@@ -1102,9 +1102,9 @@ export default function Settings() {
 
         <div className="switch-row">
           <div>
-            <div className="switch-label">请求脱敏</div>
+            <div className="switch-label">{t('请求脱敏')}</div>
             <div className="switch-desc">
-              发送前自动遮住 API 密钥、手机号等，回答回来后自动还原成原文
+              {t('发送前自动遮住 API 密钥、手机号等，回答回来后自动还原成原文')}
             </div>
           </div>
           <label className="switch">
@@ -1112,7 +1112,7 @@ export default function Settings() {
               type="checkbox"
               checked={config.guard.enable_request_sanitize}
               disabled={saving}
-              onChange={() => toggleGuard('enable_request_sanitize', '请求脱敏')}
+              onChange={() => toggleGuard('enable_request_sanitize', t('请求脱敏'))}
             />
             <span className="switch-slider" />
           </label>
@@ -1120,15 +1120,15 @@ export default function Settings() {
 
         <div className="switch-row">
           <div>
-            <div className="switch-label">中转站评估</div>
-            <div className="switch-desc">评估中转站可信度，看它是否保留你的对话、是否在已知的恶意名单里</div>
+            <div className="switch-label">{t('中转站评估')}</div>
+            <div className="switch-desc">{t('评估中转站可信度，看它是否保留你的对话、是否在已知的恶意名单里')}</div>
           </div>
           <label className="switch">
             <input
               type="checkbox"
               checked={config.guard.enable_reputation}
               disabled={saving}
-              onChange={() => toggleGuard('enable_reputation', '中转站评估')}
+              onChange={() => toggleGuard('enable_reputation', t('中转站评估'))}
             />
             <span className="switch-slider" />
           </label>
@@ -1137,7 +1137,7 @@ export default function Settings() {
 
       {/* ═══ B. 安全级别 ═══ */}
       <div className="card" id="sec-level">
-        <div className="card-title">安全级别</div>
+        <div className="card-title">{t('安全级别')}</div>
         <div className="radio-cards">
           {SECURITY_LEVELS.map((lv) => (
             <label
@@ -1152,8 +1152,8 @@ export default function Settings() {
                 onChange={() => changeLevel(lv.value)}
               />
               <div>
-                <div className="radio-title">{lv.title}</div>
-                <div className="radio-desc">{lv.desc}</div>
+                <div className="radio-title">{t(lv.title)}</div>
+                <div className="radio-desc">{t(lv.desc)}</div>
               </div>
             </label>
           ))}
@@ -1162,16 +1162,16 @@ export default function Settings() {
 
       {/* ═══ C. 代理配置 ═══ */}
       <div className="card" id="sec-proxy">
-        <div className="card-title">代理配置</div>
+        <div className="card-title">{t('代理配置')}</div>
 
         <div className="field">
           <label className="field-label" htmlFor="relay-name">
-            中转站名称
+            {t('中转站名称')}
           </label>
           <input
             id="relay-name"
             className="input"
-            placeholder="例如：我的 OpenAI 中转"
+            placeholder={t('例如：我的 OpenAI 中转')}
             value={config.relay.name}
             disabled={saving}
             onChange={(e) => setConfig({ ...config, relay: { ...config.relay, name: e.target.value } })}
@@ -1180,7 +1180,7 @@ export default function Settings() {
 
         <div className="field">
           <label className="field-label" htmlFor="relay-url">
-            中转站地址
+            {t('中转站地址')}
           </label>
           <input
             id="relay-url"
@@ -1198,21 +1198,21 @@ export default function Settings() {
             }}
           />
           <div className="field-hint">
-            粘贴中转站给你的地址即可 —— 带不带 /v1、是否连完整端点一起复制都行，
-            勘合会自动识别
+            {t('粘贴中转站给你的地址即可 —— 带不带 /v1、是否连完整端点一起复制都行，')}
+            {t('勘合会自动识别')}
           </div>
         </div>
 
         <div className="field">
           <label className="field-label" htmlFor="relay-key">
-            中转站 API Key
+            {t('中转站 API Key')}
           </label>
           <input
             id="relay-key"
             className="input mono"
             type="password"
             placeholder={
-              config.relay.api_key ? '留空则保持当前 Key 不变' : '粘贴中转站给你的 API Key'
+              config.relay.api_key ? t('留空则保持当前 Key 不变') : t('粘贴中转站给你的 API Key')
             }
             value={keyDraft}
             disabled={saving || testing}
@@ -1224,8 +1224,8 @@ export default function Settings() {
           />
           <div className="field-hint">
             {config.relay.api_key
-              ? `当前：${config.relay.api_key}（留空则保持不变）`
-              : '尚未配置'}
+              ? `${t('当前：')}${config.relay.api_key}${t('（留空则保持不变）')}`
+              : t('尚未配置')}
           </div>
         </div>
 
@@ -1241,10 +1241,10 @@ export default function Settings() {
               ) : (
                 <PlugZap size={14} strokeWidth={1.5} />
               )}
-              {testing ? '测试中…' : '测试连接'}
+              {testing ? t('测试中…') : t('测试连接')}
             </button>
             <span className="faint" style={{ fontSize: 12 }}>
-              会向该中转站发出一次真实请求，确认地址和 Key 是否可用
+              {t('会向该中转站发出一次真实请求，确认地址和 Key 是否可用')}
             </span>
           </div>
 
@@ -1265,14 +1265,14 @@ export default function Settings() {
               <div style={{ minWidth: 0, flex: 1 }}>
                 <b>{relayTest.message}</b>
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
-                  勘合请求的地址：<span className="mono">{relayTest.request_url}</span>
+                  {t('勘合请求的地址：')}<span className="mono">{relayTest.request_url}</span>
                 </div>
                 {/* ★ 状态码与耗时都翻译成人话：光一个「404」用户不知道意味着什么，
                     「1.2 秒」也比「1234 ms」更贴近体感。 */}
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
                   {relayTest.status !== null
-                    && `对方返回 ${describeRelayStatus(relayTest.status)} · `}
-                  {`用时 ${(relayTest.elapsed_ms / 1000).toFixed(1)} 秒`}
+                    && `${t('对方返回')} ${describeRelayStatus(relayTest.status)} · `}
+                  {`${t('用时')} ${(relayTest.elapsed_ms / 1000).toFixed(1)} ${t('秒')}`}
                 </div>
                 {/* ★ 上游原始响应体：只对排障有用，不该糊在脸上。
                     给个标题、默认折叠起来，愿意核对的人再展开。 */}
@@ -1282,7 +1282,7 @@ export default function Settings() {
                       className="faint"
                       style={{ fontSize: 12, cursor: 'pointer', listStyle: 'none' }}
                     >
-                      对方返回的内容（仅用于排查）
+                      {t('对方返回的内容（仅用于排查）')}
                     </summary>
                     <div
                       className="mono faint"
@@ -1311,16 +1311,16 @@ export default function Settings() {
             <div style={{ minWidth: 0, flex: 1 }}>
               <b>
                 {relayRisk.level === 'malicious'
-                  ? '这家中转站已被列入高危名单'
-                  : '这家中转站存在较高风险'}
+                  ? t('这家中转站已被列入高危名单')
+                  : t('这家中转站存在较高风险')}
               </b>
               <div className="mt-8">
-                你的 AI 对话会经过 <span className="mono">{displayDomain(relayRisk.domain)}</span> 转发，
-                对方能看到全部内容；是否留存、留存多久由对方决定，勘合无法代它保证。
+                {t('你的 AI 对话会经过')} <span className="mono">{displayDomain(relayRisk.domain)}</span> {t('转发，')}
+                {t('对方能看到全部内容；是否留存、留存多久由对方决定，勘合无法代它保证。')}
               </div>
               {relayRisk.notes.length > 0 && (
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
-                  判定依据：
+                  {t('判定依据：')}
                   {relayRisk.notes.map((n) => (
                     <div key={n}>· {n}</div>
                   ))}
@@ -1328,10 +1328,10 @@ export default function Settings() {
               )}
               <div className="btn-row mt-16" style={{ marginBottom: 0 }}>
                 <button className="btn danger" onClick={forceSaveRelay} disabled={saving}>
-                  我了解风险，仍然使用
+                  {t('我了解风险，仍然使用')}
                 </button>
                 <button className="btn secondary" onClick={() => setRelayRisk(null)}>
-                  换个中转站
+                  {t('换个中转站')}
                 </button>
               </div>
             </div>
@@ -1350,7 +1350,7 @@ export default function Settings() {
             // ★ 预检期间也要禁用：否则用户连点会触发多次预检。
             disabled={saving || prechecking}
           >
-            {saving ? '保存中...' : prechecking ? '检测中…' : '保存中转站配置'}
+            {saving ? t('保存中...') : prechecking ? t('检测中…') : t('保存中转站配置')}
           </button>
         )}
 
@@ -1367,14 +1367,14 @@ export default function Settings() {
             多中转站场景下最需要确定的恰恰就是这件事。 */}
         <div className="card relay-section">
           <div className="card-title">
-            <span>已配置的中转站</span>
-            <span className="relay-count">{configured.length} 家</span>
+            <span>{t('已配置的中转站')}</span>
+            <span className="relay-count">{configured.length} {t('家')}</span>
           </div>
 
           {configured.length === 0 ? (
             <div className="relay-empty">
               <Info size={16} strokeWidth={1.5} />
-              <span>还没有配置中转站。在上方填入地址与 Key 后保存即可。</span>
+              <span>{t('还没有配置中转站。在上方填入地址与 Key 后保存即可。')}</span>
             </div>
           ) : (
             <>
@@ -1392,7 +1392,7 @@ export default function Settings() {
                     <div className="relay-card-main">
                       <div className="relay-card-head">
                         <span className="relay-card-name">{r.name}</span>
-                        {r.active && <span className="relay-badge">当前使用中</span>}
+                        {r.active && <span className="relay-badge">{t('当前使用中')}</span>}
                       </div>
                       <div className="relay-card-url mono">
                         {r.normalized_base || r.base_url}
@@ -1407,8 +1407,8 @@ export default function Settings() {
                               className="input mono"
                               style={{ maxWidth: 120 }}
                               inputMode="numeric"
-                              placeholder="如 18801"
-                              aria-label={`${r.name} 的专属端口`}
+                              placeholder={t('如 18801')}
+                              aria-label={`${r.name} ${t('的专属端口')}`}
                               value={portEditing.value}
                               disabled={portBusy}
                               onChange={(e) => setPortEditing({
@@ -1425,38 +1425,38 @@ export default function Settings() {
                               disabled={portBusy}
                               onClick={() => void saveRelayPort(r.id, r.name)}
                             >
-                              {portBusy ? '保存中…' : '保存'}
+                              {portBusy ? t('保存中…') : t('保存')}
                             </button>
                             <button
                               className="btn ghost sm"
                               disabled={portBusy}
                               onClick={() => setPortEditing(null)}
                             >
-                              取消
+                              {t('取消')}
                             </button>
-                            <span className="relay-port-hint">留空 = 不单独分配</span>
+                            <span className="relay-port-hint">{t('留空 = 不单独分配')}</span>
                           </>
                         ) : (
                           <>
                             {r.port > 0 ? (
                               <>
-                                <span className="relay-port-label">专属入口</span>
+                                <span className="relay-port-label">{t('专属入口')}</span>
                                 <span className="relay-port-url mono">{r.proxy_url}</span>
                                 <button
                                   className="btn ghost sm"
                                   onClick={() => void copyRelayUrl(r.proxy_url)}
                                 >
-                                  复制地址
+                                  {t('复制地址')}
                                 </button>
                                 {!r.listening && (
                                   <span className="relay-port-warn">
-                                    这个端口没起来，换一个再试
+                                    {t('这个端口没起来，换一个再试')}
                                   </span>
                                 )}
                               </>
                             ) : (
                               <span className="relay-port-hint">
-                                没单独分配端口（从主端口进来，按 Key 认出是哪家）
+                                {t('没单独分配端口（从主端口进来，按 Key 认出是哪家）')}
                               </span>
                             )}
                             <button
@@ -1466,7 +1466,7 @@ export default function Settings() {
                                 value: r.port ? String(r.port) : '',
                               })}
                             >
-                              {r.port ? '改端口' : '分配端口'}
+                              {r.port ? t('改端口') : t('分配端口')}
                             </button>
                           </>
                         )}
@@ -1480,15 +1480,15 @@ export default function Settings() {
                           disabled={switching}
                           onClick={() => switchTo(r.id, r.name)}
                         >
-                          切到这家
+                          {t('切到这家')}
                         </button>
                         <button
                           className="btn ghost sm"
                           disabled={switching}
-                          aria-label={`移除 ${r.name}`}
+                          aria-label={`${t('移除')} ${r.name}`}
                           onClick={() => dropRelay(r.id, r.name)}
                         >
-                          移除
+                          {t('移除')}
                         </button>
                       </div>
                     )}
@@ -1496,12 +1496,12 @@ export default function Settings() {
                 ))}
               </div>
               <div className="field-hint">
-                请求会按你填的 API Key 自动识别该发给哪家；
-                Key 对不上时用「当前使用中」这家。
-                切换只改默认目标，不会改动任何一家的配置。
+                {t('请求会按你填的 API Key 自动识别该发给哪家；')}
+                {t('Key 对不上时用「当前使用中」这家。')}
+                {t('切换只改默认目标，不会改动任何一家的配置。')}
                 <br />
-                同一个 AI 工具里要同时用两家、两家的模型 ID 又一样时，
-                给其中一家分配「专属端口」，把那个带端口的地址填进工具即可。
+                {t('同一个 AI 工具里要同时用两家、两家的模型 ID 又一样时，')}
+                {t('给其中一家分配「专属端口」，把那个带端口的地址填进工具即可。')}
               </div>
             </>
           )}
@@ -1510,19 +1510,19 @@ export default function Settings() {
           <div className="mt-12">
             {adding ? (
               <div className="relay-add-form">
-                <div className="field-label">添加中转站</div>
+                <div className="field-label">{t('添加中转站')}</div>
                 <input
                   className="input mb-8"
-                  placeholder="显示名（可留空）"
-                  aria-label="新增中转站的显示名"
+                  placeholder={t('显示名（可留空）')}
+                  aria-label={t('新增中转站的显示名')}
                   value={newRelay.name}
                   onChange={(e) => setNewRelay(
                     { ...newRelay, name: e.target.value })}
                 />
                 <input
                   className="input mb-8"
-                  placeholder="中转站地址，如 https://api.example.com"
-                  aria-label="新增中转站的地址"
+                  placeholder={t('中转站地址，如 https://api.example.com')}
+                  aria-label={t('新增中转站的地址')}
                   value={newRelay.base_url}
                   onChange={(e) => setNewRelay(
                     { ...newRelay, base_url: e.target.value })}
@@ -1531,7 +1531,7 @@ export default function Settings() {
                   className="input mb-8 mono"
                   type="password"
                   placeholder="API Key"
-                  aria-label="新增中转站的 API Key"
+                  aria-label={t('新增中转站的 API Key')}
                   value={newRelay.api_key}
                   onChange={(e) => setNewRelay(
                     { ...newRelay, api_key: e.target.value })}
@@ -1540,8 +1540,8 @@ export default function Settings() {
                   className="input mb-8 mono"
                   style={{ maxWidth: 180 }}
                   inputMode="numeric"
-                  placeholder="专属端口（可留空，如 18801）"
-                  aria-label="新增中转站的专属端口"
+                  placeholder={t('专属端口（可留空，如 18801）')}
+                  aria-label={t('新增中转站的专属端口')}
                   value={newRelay.port}
                   onChange={(e) => setNewRelay(
                     { ...newRelay, port: e.target.value.replace(/[^\d]/g, '') })}
@@ -1552,7 +1552,7 @@ export default function Settings() {
                     disabled={addingBusy}
                     onClick={() => void addRelay()}
                   >
-                    {addingBusy ? '添加中…' : '添加到列表'}
+                    {addingBusy ? t('添加中…') : t('添加到列表')}
                   </button>
                   <button
                     className="btn ghost sm"
@@ -1561,16 +1561,16 @@ export default function Settings() {
                       setNewRelay({ name: '', base_url: '', api_key: '', port: '' });
                     }}
                   >
-                    取消
+                    {t('取消')}
                   </button>
                 </div>
                 <div className="field-hint">
-                  添加只是存起来备着，<b>不会</b>切换当前使用中的那家。
+                  {t('添加只是存起来备着，')}<b>{t('不会')}</b>{t('切换当前使用中的那家。')}
                   <br />
-                  如果要在同一个 AI 工具里同时用两家（模型 ID 又一样），
-                  给这家的「专属端口」填一个没被占用的数字（如 18801），
-                  然后把 <span className="mono">http://127.0.0.1:18801/v1</span>{' '}
-                  填进工具里 —— 两家地址不同，工具才肯让你并存。
+                  {t('如果要在同一个 AI 工具里同时用两家（模型 ID 又一样），')}
+                  {t('给这家的「专属端口」填一个没被占用的数字（如 18801），')}
+                  {t('然后把')} <span className="mono">http://127.0.0.1:18801/v1</span>{' '}
+                  {t('填进工具里 —— 两家地址不同，工具才肯让你并存。')}
                 </div>
               </div>
             ) : (
@@ -1580,7 +1580,7 @@ export default function Settings() {
                  既有明确边界又与旁边的说明文字明确区分。 */
               <button className="relay-add-btn" onClick={() => setAdding(true)}>
                 <Plus size={15} strokeWidth={2} />
-                添加另一家中转站
+                {t('添加另一家中转站')}
               </button>
             )}
           </div>
@@ -1588,7 +1588,7 @@ export default function Settings() {
 
         <div className="field">
           <label className="field-label" htmlFor="proxy-port">
-            本地代理端口
+            {t('本地代理端口')}
           </label>
           <div className="flex items-center gap-8">
             <input
@@ -1608,33 +1608,33 @@ export default function Settings() {
               }}
             />
             <button className="btn secondary" onClick={savePort} disabled={saving || !portInput}>
-              更改端口
+              {t('更改端口')}
             </button>
           </div>
           <div className="field-hint" style={portError ? { color: 'var(--xd-danger)' } : undefined}>
             {portError ??
-              `勘合当前运行在 ${currentProxyPort()}。端口被占用时可改成 1024–65535 的其他端口。`
-              + '端口在应用启动时锁定：要右键托盘图标选「退出勘合」再重新打开 ——'
-              + '点窗口右上角 × 只是隐藏到托盘，不算退出；「重启引擎」也不会改变它。'}
+              `${t('勘合当前运行在')} ${currentProxyPort()}${t('。端口被占用时可改成 1024–65535 的其他端口。')}`
+              + t('端口在应用启动时锁定：要右键托盘图标选「退出勘合」再重新打开 ——')
+              + t('点窗口右上角 × 只是隐藏到托盘，不算退出；「重启引擎」也不会改变它。')}
           </div>
         </div>
 
-        <div className="field-label">将你的 AI 工具 API 地址设置为</div>
+        <div className="field-label">{t('将你的 AI 工具 API 地址设置为')}</div>
         <div className="code-box">
           {proxyUrl}
           <button className="btn sm secondary" onClick={handleCopyUrl}>
             {copied ? <Check size={13} strokeWidth={1.5} /> : <Copy size={13} strokeWidth={1.5} />}
-            {copied ? '已复制' : '复制地址'}
+            {copied ? t('已复制') : t('复制地址')}
           </button>
         </div>
         <div className="field-hint">
-          凡是支持自定义 API 地址的工具都能接入（编辑器插件、桌面客户端、自建脚本等）。
+          {t('凡是支持自定义 API 地址的工具都能接入（编辑器插件、桌面客户端、自建脚本等）。')}
           <button
             className="btn ghost sm"
             style={{ padding: '0 4px' }}
             onClick={() => openExternal('https://github.com/zhibaiYingChuan/XD/blob/main/personal/README.md')}
           >
-            查看配置教程
+            {t('查看配置教程')}
             <ExternalLink size={12} strokeWidth={1.5} />
           </button>
         </div>
@@ -1642,7 +1642,7 @@ export default function Settings() {
 
       {/* ═══ D. 敏感信息脱敏 ═══ */}
       <div className="card" id="sec-redact">
-        <div className="card-title">敏感信息脱敏</div>
+        <div className="card-title">{t('敏感信息脱敏')}</div>
         <div className="check-grid mb-16">
           {CATEGORY_ORDER.map((cat) => (
             <label key={cat} className="check-row">
@@ -1652,7 +1652,7 @@ export default function Settings() {
                 disabled={saving}
                 onChange={() => toggleCategory(cat)}
               />
-              <span>{CATEGORY_LABELS[cat] ?? cat}</span>
+              <span>{CATEGORY_LABELS[cat] ? t(CATEGORY_LABELS[cat]) : cat}</span>
             </label>
           ))}
         </div>
@@ -1662,20 +1662,20 @@ export default function Settings() {
             而银行卡（16–19 位数字）与自定义词的误报率明显更高，
             全勾之后正常对话被拦，用户反过来会认为产品不可用。 */}
         <div className="field-hint" style={{ marginTop: 0 }}>
-          银行卡与自定义关键词默认不勾选：前者容易被 16–19 位数字误命中，
-          后者取决于你填的词是否够独特。需要时再勾上。
+          {t('银行卡与自定义关键词默认不勾选：前者容易被 16–19 位数字误命中，')}
+          {t('后者取决于你填的词是否够独特。需要时再勾上。')}
         </div>
 
-        <div className="field-label mt-24">自定义关键词</div>
+        <div className="field-label mt-24">{t('自定义关键词')}</div>
         <div className="field-hint mb-8" style={{ marginTop: 0 }}>
-          均衡档：命中后打码再转发；严格档：直接拦截；宽松档：不处理，原样放行。
-          适合填公司内部代号、客户名这类你不想外发的词。
+          {t('均衡档：命中后打码再转发；严格档：直接拦截；宽松档：不处理，原样放行。')}
+          {t('适合填公司内部代号、客户名这类你不想外发的词。')}
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
           <input
             className="input"
-            placeholder="输入关键词后回车添加"
+            placeholder={t('输入关键词后回车添加')}
             value={newKeyword}
             disabled={saving}
             onChange={(e) => setNewKeyword(e.target.value)}
@@ -1685,7 +1685,7 @@ export default function Settings() {
           />
           <button className="btn" onClick={addKeyword} disabled={saving || !newKeyword.trim()}>
             <Plus size={15} strokeWidth={1.5} />
-            添加
+            {t('添加')}
           </button>
         </div>
 
@@ -1693,11 +1693,11 @@ export default function Settings() {
           <div className="mt-16">
             <div className="flex items-center justify-between mb-8">
               <span className="faint" style={{ fontSize: 12 }}>
-                已添加 {config.guard.custom_keywords.length} 个
+                {t('已添加')} {config.guard.custom_keywords.length} {t('个')}
               </span>
               <button className="btn ghost sm" onClick={resetKeywords} disabled={saving}>
                 <RotateCcw size={13} strokeWidth={1.5} />
-                清空
+                {t('清空')}
               </button>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -1709,7 +1709,7 @@ export default function Settings() {
                     style={{ padding: '0 2px' }}
                     onClick={() => removeKeyword(kw)}
                     disabled={saving}
-                    aria-label={`移除 ${kw}`}
+                    aria-label={`${t('移除')} ${kw}`}
                   >
                     <X size={12} strokeWidth={1.5} />
                   </button>
@@ -1719,7 +1719,7 @@ export default function Settings() {
           </div>
         ) : (
           <div className="faint mt-16" style={{ fontSize: 12 }}>
-            尚未添加自定义关键词
+            {t('尚未添加自定义关键词')}
           </div>
         )}
       </div>
@@ -1730,7 +1730,7 @@ export default function Settings() {
           重开桌面端甚至重装。这块补上「看得见原因 + 能自助重启」两步。 */}
       <div className="card" id="sec-engine">
         <div className="card-title">
-          <span>运行状态</span>
+          <span>{t('运行状态')}</span>
           {isTauri() && (
             <span className={`badge ${engineView.badge}`}>{engineView.label}</span>
           )}
@@ -1740,17 +1740,17 @@ export default function Settings() {
           // 浏览器预览模式没有本地引擎进程，命令无从执行：
           // 只给一句说明，不渲染状态与重启按钮，避免出现按不动的死控件。
           <div className="field-hint" style={{ marginTop: 0 }}>
-            运行状态仅在桌面版可查看 —— 浏览器预览模式没有本地引擎进程。
+            {t('运行状态仅在桌面版可查看 —— 浏览器预览模式没有本地引擎进程。')}
           </div>
         ) : (
           <>
             <div className="detail-row">
-              <div className="detail-key">引擎状态</div>
+              <div className="detail-key">{t('引擎状态')}</div>
               <div className="detail-val">
                 {engineView.label}
                 {engineVersion && (
                   <span className="faint" style={{ fontSize: 12 }}>
-                    {' '}· 版本 {engineVersion}
+                    {' '}· {t('版本')} {engineVersion}
                   </span>
                 )}
               </div>
@@ -1762,13 +1762,13 @@ export default function Settings() {
               <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
                 <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <b>无法读取引擎状态</b>
+                  <b>{t('无法读取引擎状态')}</b>
                   <div className="mt-8">{firstLine(engineError)}</div>
                   <button
                     className="btn ghost sm mt-8"
                     onClick={() => void loadEngine(true)}
                   >
-                    重试
+                    {t('重试')}
                   </button>
                 </div>
               </div>
@@ -1779,7 +1779,7 @@ export default function Settings() {
               <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
                 <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <b>引擎启动失败</b>
+                  <b>{t('引擎启动失败')}</b>
                   <div className="mt-8">{firstLine(engine.startup_error)}</div>
                   {isLongError(engine.startup_error) && (
                     <details className="mt-8">
@@ -1787,7 +1787,7 @@ export default function Settings() {
                         className="faint"
                         style={{ cursor: 'pointer', fontSize: 12, listStyle: 'none' }}
                       >
-                        查看完整错误
+                        {t('查看完整错误')}
                       </summary>
                       <div
                         className="mono faint"
@@ -1812,10 +1812,10 @@ export default function Settings() {
                 ) : (
                   <RefreshCw size={14} strokeWidth={1.5} />
                 )}
-                {restarting ? '重启中…' : '重启引擎'}
+                {restarting ? t('重启中…') : t('重启引擎')}
               </button>
               <span className="faint" style={{ fontSize: 12 }}>
-                引擎无响应或启动失败时，可在这里重启（不会改变监听端口）
+                {t('引擎无响应或启动失败时，可在这里重启（不会改变监听端口）')}
               </span>
             </div>
           </>
@@ -1824,9 +1824,9 @@ export default function Settings() {
 
       {/* ═══ F. 软件更新 ═══ */}
       <div className="card" id="sec-update">
-        <div className="card-title">软件更新</div>
+        <div className="card-title">{t('软件更新')}</div>
         <div className="field">
-          <div className="field-label">当前版本</div>
+          <div className="field-label">{t('当前版本')}</div>
           <div className="mono">{appVersion || '—'}</div>
         </div>
         <div className="btn-row mt-8">
@@ -1840,7 +1840,7 @@ export default function Settings() {
               strokeWidth={1.5}
               className={updateBusy && updateCheck?.kind !== 'available' ? 'spin-icon' : undefined}
             />
-            {updateBusy && updateCheck?.kind !== 'available' ? '检查中…' : '检查更新'}
+            {updateBusy && updateCheck?.kind !== 'available' ? t('检查中…') : t('检查更新')}
           </button>
           {updateCheck?.kind === 'available' && (
             <button
@@ -1850,10 +1850,10 @@ export default function Settings() {
             >
               <Download size={14} strokeWidth={1.5} />
               {updateDone
-                ? '已安装，等待重启…'
+                ? t('已安装，等待重启…')
                 : updateBusy
-                  ? `下载安装中 ${updatePct}%`
-                  : `下载并安装 v${updateCheck.version}`}
+                  ? `${t('下载安装中')} ${updatePct}%`
+                  : `${t('下载并安装')} v${updateCheck.version}`}
             </button>
           )}
           {/* ★ P1-9：直连 GitHub 失败时（国内网络常见）必须给一条可走的路。
@@ -1865,14 +1865,14 @@ export default function Settings() {
               onClick={() => void openExternal(updateCheck.downloadUrl as string)}
             >
               <ExternalLink size={14} strokeWidth={1.5} />
-              打开下载页
+              {t('打开下载页')}
             </button>
           )}
         </div>
 
         {updateCheck?.kind === 'latest' && (
           <div className="field-hint">
-            已是最新版本（v{updateCheck.current}）。
+            {t('已是最新版本（v')}{updateCheck.current}）。
           </div>
         )}
         {updateCheck?.kind === 'unavailable' && (
@@ -1880,10 +1880,10 @@ export default function Settings() {
         )}
         {updateCheck?.kind === 'available' && (
           <div className="field-hint">
-            发现新版本 <b>v{updateCheck.version}</b>（当前 v{updateCheck.current}）。
-            更新包会用内置公钥验签，验不过不会安装；安装完成后应用会自动重启。
+            {t('发现新版本')} <b>v{updateCheck.version}</b>{t('（当前 v')}{updateCheck.current}）。
+            {t('更新包会用内置公钥验签，验不过不会安装；安装完成后应用会自动重启。')}
             <div className="mt-8 faint" style={{ fontSize: 12 }}>
-              下载若连续 2 分钟没有进展，会停下来并提示重试（不会永久卡住）。
+              {t('下载若连续 2 分钟没有进展，会停下来并提示重试（不会永久卡住）。')}
             </div>
             {(() => {
               // ★ 与启动弹窗同一套「人话化」解析：这里是用户主动来查的，
@@ -1901,16 +1901,16 @@ export default function Settings() {
           </div>
         )}
         {!isTauri() && (
-          <div className="field-hint">浏览器预览模式不支持自动更新。</div>
+          <div className="field-hint">{t('浏览器预览模式不支持自动更新。')}</div>
         )}
       </div>
 
       {/* ═══ G. 日志与存储 ═══ */}
       <div className="card" id="sec-storage">
-        <div className="card-title">日志与存储</div>
+        <div className="card-title">{t('日志与存储')}</div>
         <div className="field">
           <label className="field-label" htmlFor="log-retention">
-            日志保留
+            {t('日志保留')}
           </label>
           <select
             id="log-retention"
@@ -1919,15 +1919,15 @@ export default function Settings() {
             disabled={saving}
             onChange={(e) => void handleRetentionChange(Number(e.target.value))}
           >
-            <option value={0}>永久保留（默认）</option>
-            <option value={30}>最近 30 天</option>
-            <option value={90}>最近 90 天</option>
-            <option value={180}>最近 180 天</option>
-            <option value={365}>最近 365 天</option>
+            <option value={0}>{t('永久保留（默认）')}</option>
+            <option value={30}>{t('最近 30 天')}</option>
+            <option value={90}>{t('最近 90 天')}</option>
+            <option value={180}>{t('最近 180 天')}</option>
+            <option value={365}>{t('最近 365 天')}</option>
           </select>
           <div className="field-hint">
-            超出保留期的日志与脱敏明细会被删除，<b>不可恢复</b>。
-            默认「永久保留」，不会主动删除任何记录。
+            {t('超出保留期的日志与脱敏明细会被删除，')}<b>{t('不可恢复')}</b>。
+            {t('默认「永久保留」，不会主动删除任何记录。')}
           </div>
         </div>
       </div>

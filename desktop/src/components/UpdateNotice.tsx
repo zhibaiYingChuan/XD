@@ -31,11 +31,13 @@ import {
   type AvailableUpdate,
 } from '../lib/updater';
 import { FALLBACK_NOTE, parseUpdateNotes } from '../lib/updateNotes';
+import { useI18n } from '../i18n';
 
 /** 启动后延迟多久检查：先让界面渲染完，不要和首屏抢网络与 CPU。 */
 const AUTO_CHECK_DELAY_MS = 4_000;
 
 export default function UpdateNotice() {
+  const { t } = useI18n();
   const [info, setInfo] = useState<AvailableUpdate | null>(null);
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -161,10 +163,10 @@ export default function UpdateNotice() {
       >
         <div className="modal-title" id="xd-update-title">
           <Sparkles size={18} strokeWidth={1.6} />
-          有新版本 v{info.version}
+          {t('有新版本')} v{info.version}
         </div>
         <div className="modal-text">
-          你现在用的是 v{info.current}。这一版改了什么：
+          {t('你现在用的是')} v{info.current}{t('。这一版改了什么：')}
         </div>
 
         <ul className="modal-notes">
@@ -174,30 +176,30 @@ export default function UpdateNotice() {
         </ul>
 
         <div className="field-hint">
-          更新包会用内置公钥验签，验不过不会安装；安装完成后应用自动重启。
+          {t('更新包会用内置公钥验签，验不过不会安装；安装完成后应用自动重启。')}
         </div>
 
         {busy && (
           <div className="update-progress">
             <div className="update-progress-bar" style={{ width: `${pct}%` }} />
             <span className="update-progress-text">
-              {done ? '安装完成，正在重启…' : `正在下载并安装 ${pct}%`}
+              {done ? t('安装完成，正在重启…') : `${t('正在下载并安装')} ${pct}%`}
             </span>
           </div>
         )}
 
         {error && (
           <div className="alert danger" style={{ marginTop: 12 }}>
-            更新没有完成：{error}
+            {t('更新没有完成：')}{error}
             <div className="mt-8">
-              你可以稍后再试，或手动下载：
+              {t('你可以稍后再试，或手动下载：')}
               <button
                 className="btn ghost"
                 style={{ marginLeft: 8 }}
                 onClick={() => void openExternal(DOWNLOAD_PAGE_URL)}
               >
                 <ExternalLink size={14} strokeWidth={1.5} />
-                打开下载页
+                {t('打开下载页')}
               </button>
             </div>
           </div>
@@ -205,14 +207,14 @@ export default function UpdateNotice() {
 
         <div className="modal-actions mt-16">
           <button className="btn ghost" onClick={handleSkip} disabled={busy}>
-            跳过这个版本
+            {t('跳过这个版本')}
           </button>
           <button className="btn secondary" onClick={handleLater} disabled={busy}>
-            以后再说
+            {t('以后再说')}
           </button>
           <button className="btn" onClick={() => void handleInstall()} disabled={busy || done}>
             <Download size={14} strokeWidth={1.5} />
-            {done ? '正在重启…' : busy ? `更新中 ${pct}%` : '立即更新'}
+            {done ? t('正在重启…') : busy ? `${t('更新中')} ${pct}%` : t('立即更新')}
           </button>
         </div>
       </div>

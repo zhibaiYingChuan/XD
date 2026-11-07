@@ -18,7 +18,7 @@ import { api, STATE_LABELS, currentProxyPort, syncProxyPort } from '../services/
 import type { StateResponse, LicenseStatus } from '../services/api';
 import { getAppVersion, isTauri, setTrayState, type TrayState } from '../lib/tauriShim';
 import { useBootDeadline } from './EngineOffline';
-import { useI18n } from '../i18n';
+import { useI18n, t } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 侧边导航（产品文档：4 个页面）
@@ -49,10 +49,10 @@ function deriveTrayState(
   // ★ 学习中 = 还没产生任何判定，托盘不能显示绿色。
   //   绿色在托盘里只有一个含义：正在防护。基线未建立时显示绿色，
   //   等于告诉用户「已经安全了」，而实际上一次检测都还没发生。
-  if (!today) return { state: 'paused', detail: '正在建立基线' };
+  if (!today) return { state: 'paused', detail: t('正在建立基线') };
 
   if (today.danger_count > 0) {
-    return { state: 'danger', detail: `今日已阻断 ${today.danger_count} 次` };
+    return { state: 'danger', detail: `${t('今日已阻断')} ${today.danger_count} ${t('次')}` };
   }
   if (today.suspect_count > 0) {
     /* ★ 统计类信号不再把状态染成黄色「可疑」。
@@ -61,7 +61,7 @@ function deriveTrayState(
        之前只要有统计命中就显示「可疑」，等于把正常的编程对话
        报成「可疑」，用户要么被无谓惊吓、要么学会忽略这个信号。
        现在它只作为右侧的计数出现（见下方 status-stat）。 */
-    return { state: 'safe', detail: `今日 ${today.suspect_count} 条提示` };
+    return { state: 'safe', detail: `${t('今日')} ${today.suspect_count} ${t('条提示')}` };
   }
   // ★★ P1-2：只读态（未激活）下的这些次数全是「未经检测的直通」，
   //   说成「已检查」就是账本说谎 —— 托盘与状态栏都不能这么写。
@@ -72,10 +72,10 @@ function deriveTrayState(
     //   这是安全产品最不能犯的错：对用户谎报状态。
     return {
       state: 'paused',
-      detail: `未激活，今日仅转发 ${today.total_calls} 次（未经检测）`,
+      detail: `${t('未激活，今日仅转发')} ${today.total_calls} ${t('次（未经检测）')}`,
     };
   }
-  return { state: 'safe', detail: `今日已检查 ${today.total_calls} 次` };
+  return { state: 'safe', detail: `${t('今日已检查')} ${today.total_calls} ${t('次')}` };
 }
 
 /** 缺失的检测层翻译成人话（后端给的是代码名）。 */
@@ -85,10 +85,10 @@ const MISSING_LAYER_LABELS: Record<string, string> = {
 };
 
 function describeMissingLayers(layers?: string[]): string {
-  if (!layers || layers.length === 0) return '检测规则回退到内置最小集';
+  if (!layers || layers.length === 0) return t('检测规则回退到内置最小集');
   return layers
-    .map((l) => MISSING_LAYER_LABELS[l] ?? l)
-    .join('、') + ' 未启用';
+    .map((l) => t(MISSING_LAYER_LABELS[l] ?? l))
+    .join(t('、')) + t(' 未启用');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -289,7 +289,7 @@ function StatusBar() {
             to="/logs?days=1&marked=exclude"
             className="status-stat"
             style={{ textDecoration: 'none', color: 'inherit' }}
-            title="查看今天参与统计的记录（不含已标记误报与转发中断）"
+            title={t('查看今天参与统计的记录（不含已标记误报与转发中断）')}
           >
             {/* ★★ P1-2：只读态下这个数字是「已转发」，不是「已检查」。
                 两句话同时出现在屏幕上（「不做防护」+「已检查 N 次」）
@@ -309,7 +309,7 @@ function StatusBar() {
               to="/logs?days=1&action=block&marked=exclude"
               className="status-stat"
               style={{ textDecoration: 'none', color: 'var(--xd-danger)' }}
-              title="查看今天被拦截的记录（已排除标记为误报的）"
+              title={t('查看今天被拦截的记录（已排除标记为误报的）')}
             >
               {t('危险')} <b className="mono">{today.danger_count}</b>
             </Link>
@@ -323,7 +323,7 @@ function StatusBar() {
               to="/logs?days=1&action=alert&marked=exclude"
               className="status-stat"
               style={{ textDecoration: 'none', color: 'var(--xd-suspect)' }}
-              title="查看今天的提示记录（已排除标记为误报的）"
+              title={t('查看今天的提示记录（已排除标记为误报的）')}
             >
               {t('提示')} <b className="mono">{today.suspect_count}</b>
             </Link>
@@ -333,7 +333,7 @@ function StatusBar() {
               to="/logs?days=1&action=redact"
               className="status-stat"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天打过码的记录"
+              title={t('查看今天打过码的记录')}
             >
               {t('今日已打码')} <b className="mono">{today.redaction_count}</b> {t('处')}
             </Link>

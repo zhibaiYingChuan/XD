@@ -274,7 +274,7 @@ export default function Dashboard() {
       // ★ 原生 window.confirm 在 Tauri 2.7 上弹不出来（见 lib/confirm.ts），
       //   统一走应用内确认框；必须 await，否则还没等用户答复就暂停了。
       const ok = await confirmDialog(
-        '确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。',
+        t('确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。'),
       );
       if (!ok) return;
     }
@@ -282,11 +282,13 @@ export default function Dashboard() {
     try {
       await api.pause(durationMin);
       toast.info(
-        durationMin > 0 ? `防护已暂停 ${durationMin} 分钟` : '防护已永久暂停，直到手动恢复',
+        durationMin > 0
+          ? `${t('防护已暂停')} ${durationMin} ${t('分钟')}`
+          : t('防护已永久暂停，直到手动恢复'),
       );
       await load();
     } catch (e) {
-      toast.error(`暂停失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('暂停失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -297,10 +299,10 @@ export default function Dashboard() {
     setBusy(true);
     try {
       await api.resume();
-      toast.success('防护已恢复');
+      toast.success(t('防护已恢复'));
       await load();
     } catch (e) {
-      toast.error(`恢复失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('恢复失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -313,24 +315,24 @@ export default function Dashboard() {
     try {
       const d = await api.getDiagnostics();
       const report = [
-        '道体·勘合 个人版 — 诊断报告',
-        `版本: ${d.version}`,
+        t('道体·勘合 个人版 — 诊断报告'),
+        `${t('版本')}: ${d.version}`,
         // ★ P2-4 修复：原硬编码 127.0.0.1:18765，
         //   用户改过端口后报告会给出错误的排查指引
-        `代理端口: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
-        `中转站: ${displayDomain(d.relay_domain) || '(未配置)'}`,
-        `安全级别: ${d.verifier?.level ?? '-'}`,
-        `企业版护栏: ${d.verifier?.guardrail_available ? '已加载' : '未加载'}`,
-        `日志总数: ${d.storage?.total_logs ?? 0}`,
-        `已知中转站: ${d.reputation?.total_relays ?? 0}`,
+        `${t('代理端口')}: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
+        `${t('中转站')}: ${displayDomain(d.relay_domain) || t('(未配置)')}`,
+        `${t('安全级别')}: ${d.verifier?.level ?? '-'}`,
+        `${t('企业版护栏')}: ${d.verifier?.guardrail_available ? t('已加载') : t('未加载')}`,
+        `${t('日志总数')}: ${d.storage?.total_logs ?? 0}`,
+        `${t('已知中转站')}: ${d.reputation?.total_relays ?? 0}`,
         '',
-        '（本报告不含任何对话内容与 API 密钥）',
+        t('（本报告不含任何对话内容与 API 密钥）'),
       ].join('\n');
       const ok = await copyToClipboard(report);
-      if (ok) toast.success('诊断报告已复制到剪贴板');
-      else toast.error('复制失败，请手动截图');
+      if (ok) toast.success(t('诊断报告已复制到剪贴板'));
+      else toast.error(t('复制失败，请手动截图'));
     } catch (e) {
-      toast.error(`生成诊断报告失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('生成诊断报告失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -343,8 +345,8 @@ export default function Dashboard() {
     const ok = await copyToClipboard(
       `http://127.0.0.1:${currentProxyPort()}/v1`,
     );
-    if (ok) toast.success('代理地址已复制，粘贴到 AI 工具的 API 地址');
-    else toast.error('复制失败，请手动选中地址');
+    if (ok) toast.success(t('代理地址已复制，粘贴到 AI 工具的 API 地址'));
+    else toast.error(t('复制失败，请手动选中地址'));
   };
 
   // ══════════════════════════════════════════════════════════
@@ -430,9 +432,9 @@ export default function Dashboard() {
     : 0;
   const usedLabel =
     usedDays >= 1
-      ? `已使用 ${usedDays} 天`
+      ? `${t('已使用')} ${usedDays} ${t('天')}`
       : primaryRelay
-        ? '今天开始使用'
+        ? t('今天开始使用')
         : '';
 
   // ── 评分扣分明细 ──
@@ -481,22 +483,22 @@ export default function Dashboard() {
     ? [
         {
           key: 'malicious',
-          label: '命中已知恶意中转站库',
-          detail: '信誉直接归零',
+          label: t('命中已知恶意中转站库'),
+          detail: t('信誉直接归零'),
           points: primaryRelay.known_malicious ? primaryRelay.score : 0,
           hit: primaryRelay.known_malicious,
         },
         {
           key: 'watermark',
-          label: '检测到数据保留迹象',
-          detail: `响应中出现中转站自述留存 · ${SCORE_WEIGHTS.watermark} 分`,
+          label: t('检测到数据保留迹象'),
+          detail: `${t('响应中出现中转站自述留存')} · ${SCORE_WEIGHTS.watermark} ${t('分')}`,
           points: primaryRelay.watermark_detected ? SCORE_WEIGHTS.watermark : 0,
           hit: primaryRelay.watermark_detected,
         },
         {
           key: 'pattern',
-          label: '域名高风险模式',
-          detail: `这个域名是老手常用来行骗的免费域名 · 扣 ${SCORE_WEIGHTS.suspiciousPattern} 分`,
+          label: t('域名高风险模式'),
+          detail: `${t('这个域名是老手常用来行骗的免费域名')} · ${t('扣')} ${SCORE_WEIGHTS.suspiciousPattern} ${t('分')}`,
           points: primaryRelay.notes.some((n) => n.startsWith('高风险模式'))
             ? SCORE_WEIGHTS.suspiciousPattern
             : 0,
@@ -504,7 +506,7 @@ export default function Dashboard() {
         },
         {
           key: 'behavior',
-          label: '中转站侧问题响应占比',
+          label: t('中转站侧问题响应占比'),
           // ★ 说人话：把「危险 N 次（权重 2）+ 可疑 M 次」这种带权重的算式
           //   翻译成用户能对上号的叙述。relayRisk 即 danger+suspect 的实际命中条数；
           //   扣分用 Number(toFixed(1)) 抹掉无意义的尾随 .0（如 4.0 → 4）。
@@ -512,10 +514,10 @@ export default function Dashboard() {
           // ★ 2026-10-20：原名「可疑内容」把危险也算进去，
           //   与 KPI 的「危险 / 提示」两栏对不上；改为「被判为危险或提示」。
           detail:
-            `${primaryRelay.total_calls} 次调用里有 ${relayRisk} 次被判为危险或提示`
-            + `（危险的按双倍算）`
-            + `→ 扣 ${Number(behaviorPenalty.toFixed(1))} 分`
-            + `（最多扣 ${SCORE_WEIGHTS.behaviorMax}）`,
+            `${primaryRelay.total_calls} ${t('次调用里有')} ${relayRisk} ${t('次被判为危险或提示')}`
+            + t('（危险的按双倍算）')
+            + `${t('→ 扣')} ${Number(behaviorPenalty.toFixed(1))} ${t('分')}`
+            + `${t('（最多扣')} ${SCORE_WEIGHTS.behaviorMax}${t('）')}`,
           points: Number(behaviorPenalty.toFixed(1)),
           hit: relayRisk > 0,
         },
@@ -615,7 +617,7 @@ export default function Dashboard() {
               to="/logs?days=1&action=pass&marked=exclude&exclude=proxy_error"
               className="kpi"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天安全通过的记录"
+              title={t('查看今天安全通过的记录')}
             >
               <div className={`kpi-value ${today.safe_count > 0 ? 'safe' : 'neutral'}`}>
                 {today.safe_count}
@@ -626,7 +628,7 @@ export default function Dashboard() {
               to="/logs?days=1&action=alert&marked=exclude&exclude=proxy_error"
               className="kpi"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天的提示记录"
+              title={t('查看今天的提示记录')}
             >
               <div className={`kpi-value ${today.suspect_count > 0 ? 'suspect' : 'neutral'}`}>
                 {today.suspect_count}
@@ -642,7 +644,7 @@ export default function Dashboard() {
               to="/logs?days=1&action=block&marked=exclude&exclude=proxy_error"
               className="kpi"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天被拦截的记录"
+              title={t('查看今天被拦截的记录')}
             >
               <div className={`kpi-value ${today.danger_count > 0 ? 'danger' : 'neutral'}`}>
                 {today.danger_count}
@@ -687,8 +689,8 @@ export default function Dashboard() {
               <div key={entry.id} className="list-item">
                 <span className={`status-dot ${actionBadgeClass(entry)}`} />
                 <span className="list-time">{formatTime(entry.timestamp)}</span>
-                <span className="list-text" title={entryHeadline(entry)}>
-                  {entryHeadline(entry)}
+                <span className="list-text" title={t(entryHeadline(entry))}>
+                  {t(entryHeadline(entry))}
                 </span>
               </div>
             ))}
@@ -740,15 +742,15 @@ export default function Dashboard() {
                   {(primaryRelay.self_danger_count ?? 0) > 0 && (
                     <>
                       {' · '}
-                      <span title="这些请求在发往中转站之前就被拦下了，中转站从未收到">
-                        你有 {primaryRelay.self_danger_count} 次操作被拦截
+                      <span title={t('这些请求在发往中转站之前就被拦下了，中转站从未收到')}>
+                        {t('你有')} {primaryRelay.self_danger_count} {t('次操作被拦截')}
                       </span>
                     </>
                   )}
                   {primaryRelay.watermark_detected && (
                     <>
                       {' · '}
-                      <span style={{ color: 'var(--xd-suspect)' }}>检测到数据保留迹象</span>
+                      <span style={{ color: 'var(--xd-suspect)' }}>{t('检测到数据保留迹象')}</span>
                     </>
                   )}
                 </div>
@@ -801,9 +803,9 @@ export default function Dashboard() {
                   <>
                     <div className="table" style={{ marginBottom: 12 }}>
                       <div className="rep-row rep-row-head">
-                        <span>扣分项</span>
-                        <span className="faint">依据</span>
-                        <span style={{ textAlign: 'right' }}>扣分</span>
+                        <span>{t('扣分项')}</span>
+                        <span className="faint">{t('依据')}</span>
+                        <span style={{ textAlign: 'right' }}>{t('扣分')}</span>
                       </div>
                       {repDeductions.map((d) => (
                         <div key={d.key} className="rep-row">
@@ -815,8 +817,8 @@ export default function Dashboard() {
                         </div>
                       ))}
                       <div className="rep-row rep-row-total">
-                        <span>当前信誉分</span>
-                        <span className="faint">满分 100</span>
+                        <span>{t('当前信誉分')}</span>
+                        <span className="faint">{t('满分')} 100</span>
                         <span style={{ textAlign: 'right' }}>{primaryRelay.score}</span>
                       </div>
                     </div>
@@ -831,13 +833,13 @@ export default function Dashboard() {
                     )}
 
                     <div className="faint" style={{ fontSize: 12, lineHeight: 1.7, marginTop: 8 }}>
-                      平均响应延迟{' '}
+                      {t('平均响应延迟')}{' '}
                       <span className="mono">
                         {primaryRelay.latency_samples > 0
                           ? `${Math.round(primaryRelay.avg_latency_ms)} ms`
-                          : '暂无样本'}
+                          : t('暂无样本')}
                       </span>
-                      （{primaryRelay.latency_samples} 次采样）
+                      （{primaryRelay.latency_samples} {t('次采样')}）
                     </div>
                   </>
                 )}
