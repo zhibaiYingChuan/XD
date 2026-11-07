@@ -18,6 +18,7 @@ import { api, STATE_LABELS, currentProxyPort, syncProxyPort } from '../services/
 import type { StateResponse, LicenseStatus } from '../services/api';
 import { getAppVersion, isTauri, setTrayState, type TrayState } from '../lib/tauriShim';
 import { useBootDeadline } from './EngineOffline';
+import { useI18n } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 侧边导航（产品文档：4 个页面）
@@ -29,7 +30,6 @@ const NAV_ITEMS = [
   { to: '/settings', label: '设置', icon: SettingsIcon, end: false },
   { to: '/help', label: '帮助', icon: HelpCircle, end: false },
 ];
-
 /**
  * 由引擎状态 + 今日统计推导托盘持续态。
  *
@@ -96,6 +96,7 @@ function describeMissingLayers(layers?: string[]): string {
 // ══════════════════════════════════════════════════════════════
 
 function StatusBar() {
+  const { t } = useI18n();
   const [state, setState] = useState<StateResponse | null>(null);
   const [reachable, setReachable] = useState(true);
   // ★ 是否**曾经**连上过：区分「冷启动还没起来」与「用着用着挂了」。
@@ -197,8 +198,8 @@ function StatusBar() {
       return (
         <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot learning" />
-          <span className="status-label">正在启动本地代理…</span>
-          <span className="status-meta">首次启动需要几秒</span>
+          <span className="status-label">{t('正在启动本地代理…')}</span>
+          <span className="status-meta">{t('首次启动需要几秒')}</span>
         </div>
       );
     }
@@ -206,11 +207,11 @@ function StatusBar() {
       <div className="status-bar" role="status" aria-live="polite">
         <span className="status-dot paused" />
         <span className="status-label" style={{ color: 'var(--xd-danger)' }}>
-          本地代理未运行
+          {t('本地代理未运行')}
         </span>
         <span className="status-meta">
-          端口 127.0.0.1:{currentProxyPort()} 没有响应 ·
-          可重启引擎，或看「设置 → 运行状态」里的原因
+          {t('端口')} 127.0.0.1:{currentProxyPort()} {t('没有响应')} ·{' '}
+          {t('可重启引擎，或看「设置 → 运行状态」里的原因')}
         </span>
         {isTauri() && (
           <button
@@ -218,11 +219,11 @@ function StatusBar() {
             onClick={() => void handleRestartEngine()}
             disabled={restarting}
           >
-            {restarting ? '正在重启…' : '重启引擎'}
+            {restarting ? t('正在重启…') : t('重启引擎')}
           </button>
         )}
         <Link className="btn ghost sm" to="/settings#sec-engine">
-          查看原因
+          {t('查看原因')}
         </Link>
       </div>
     );
@@ -241,10 +242,10 @@ function StatusBar() {
           改为一个读屏专用的 live 区域，只承载**状态文案**：
           它的文本仅在 state 真正切换时才变化，故只在状态变化时播报。 */}
       <span className="sr-only" aria-live="polite">
-        {s ? STATE_LABELS[s] : '读取中'}
+        {s ? t(STATE_LABELS[s]) : t('读取中')}
       </span>
       <span className={`status-dot ${s ?? 'learning'}`} />
-      <span className="status-label">{s ? STATE_LABELS[s] : '读取中'}</span>
+      <span className="status-label">{s ? t(STATE_LABELS[s]) : t('读取中')}</span>
       {state?.message && <span className="status-meta">{state.message}</span>}
 
       {/* ★ 只读模式必须显式说出来。
@@ -252,7 +253,7 @@ function StatusBar() {
           不说就是谎报「正在保护你」。 */}
       {state?.read_only && (
         <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
-          未激活，当前为只读模式（不执行拦截）
+          {t('未激活，当前为只读模式（不执行拦截）')}
         </span>
       )}
 
@@ -262,7 +263,7 @@ function StatusBar() {
           样式复用上面那条只读提示（同一档：还没开始正确保护，不是故障）。 */}
       {state?.degraded && (
         <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
-          降级运行：{describeMissingLayers(state.guardrail_missing_layers)}
+          {t('降级运行：')}{describeMissingLayers(state.guardrail_missing_layers)}
         </span>
       )}
 
@@ -295,11 +296,11 @@ function StatusBar() {
                 等于账本说谎，用户只会得出一个错误结论。 */}
             {state?.read_only ? (
               <>
-                今日已转发 <b className="mono">{today.total_calls}</b> 次（未经检测）
+                {t('今日已转发')} <b className="mono">{today.total_calls}</b> {t('次（未经检测）')}
               </>
             ) : (
               <>
-                今日检查 <b className="mono">{today.total_calls}</b> 次
+                {t('今日检查')} <b className="mono">{today.total_calls}</b> {t('次')}
               </>
             )}
           </Link>
@@ -310,7 +311,7 @@ function StatusBar() {
               style={{ textDecoration: 'none', color: 'var(--xd-danger)' }}
               title="查看今天被拦截的记录（已排除标记为误报的）"
             >
-              危险 <b className="mono">{today.danger_count}</b>
+              {t('危险')} <b className="mono">{today.danger_count}</b>
             </Link>
           )}
           {today.suspect_count > 0 && (
@@ -324,7 +325,7 @@ function StatusBar() {
               style={{ textDecoration: 'none', color: 'var(--xd-suspect)' }}
               title="查看今天的提示记录（已排除标记为误报的）"
             >
-              提示 <b className="mono">{today.suspect_count}</b>
+              {t('提示')} <b className="mono">{today.suspect_count}</b>
             </Link>
           )}
           {today.redaction_count > 0 && (
@@ -334,7 +335,7 @@ function StatusBar() {
               style={{ textDecoration: 'none', color: 'inherit' }}
               title="查看今天打过码的记录"
             >
-              今日已打码 <b className="mono">{today.redaction_count}</b> 处
+              {t('今日已打码')} <b className="mono">{today.redaction_count}</b> {t('处')}
             </Link>
           )}
         </>
@@ -348,6 +349,7 @@ function StatusBar() {
 // ══════════════════════════════════════════════════════════════
 
 export default function Layout() {
+  const { t } = useI18n();
   const location = useLocation();
   // ★ 初值为空而不是硬编码版本（2026-10-20）：
   //   取到真实版本前不显示，避免发布后首帧闪一下上个版本号。
@@ -407,26 +409,26 @@ export default function Layout() {
                   to={item.to}
                   end={item.end}
                   // title：窄窗口折叠成图标栏后靠它提示每个图标是什么，导航仍然可辨识。
-                  title={item.label}
+                  title={t(item.label)}
                   className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
                 >
                   <Icon size={17} strokeWidth={1.5} />
                   {/* 标签单独包一层：窄窗口（≤900px）折叠为图标栏时由 CSS 隐藏文字，
                       避免图标栏被挤爆。见 styles.css 的响应式断点。 */}
-                  <span className="nav-item-label">{item.label}</span>
+                  <span className="nav-item-label">{t(item.label)}</span>
                 </NavLink>
               );
             })}
             <NavLink
               to="/activate"
-              title="激活"
+              title={t('激活')}
               className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
             >
               <KeyRound size={17} strokeWidth={1.5} />
-              <span className="nav-item-label">激活</span>
+              <span className="nav-item-label">{t('激活')}</span>
               {license && !license.activated && (
                 <span className="badge suspect" style={{ marginLeft: 'auto' }}>
-                  未激活
+                  {t('未激活')}
                 </span>
               )}
             </NavLink>
@@ -434,7 +436,7 @@ export default function Layout() {
 
           <div className="sidebar-footer">
             {version && <span>v{version}</span>}
-            <span className="faint">本地运行</span>
+            <span className="faint">{t('本地运行')}</span>
           </div>
         </aside>
 

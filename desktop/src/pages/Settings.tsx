@@ -46,6 +46,7 @@ import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/ta
 import { checkForUpdate, type UpdateCheck } from '../lib/updater';
 import { parseUpdateNotes } from '../lib/updateNotes';
 import { confirmDialog } from '../lib/confirm';
+import { useI18n } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 常量
@@ -128,6 +129,7 @@ function isLongError(text: string): boolean {
 
 export default function Settings() {
   const toast = useToast();
+  const { t, lang, setLang } = useI18n();
   const [config, setConfig] = useState<PersonalConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -349,7 +351,7 @@ export default function Settings() {
    *
    * ★ 必须二次确认：重启要先停进程、再拉起并等就绪（最长 60 秒），
    *   期间正在进行的对话会中断。改成「点了就走」的话，用户在对话途中
-   *   手滑点到就会莫名断线，还以为是玄盾坏了。
+   *   手滑点到就会莫名断线，还以为是勘合坏了。
    */
   const handleRestartEngine = async () => {
     if (restarting) return;
@@ -375,7 +377,7 @@ export default function Settings() {
       //   刷新后区块里能长期看到它，而不是只剩一句转瞬即逝的 toast。
       await loadEngine(true);
       if (mountedRef.current) {
-        toast.error(`重启失败：${msg}。可尝试重新打开玄盾。`);
+        toast.error(`重启失败：${msg}。可尝试重新打开勘合。`);
       }
     } finally {
       if (mountedRef.current) setRestarting(false);
@@ -648,9 +650,9 @@ export default function Settings() {
       setPortError(null);
       setPortInput('');
       // 必须告知「当前仍在用旧端口」——否则用户会直接去改 AI 工具配置，
-      // 填了新地址却连不上，误以为玄盾坏了。
+      // 填了新地址却连不上，误以为勘合坏了。
       toast.info(
-        `当前仍运行在 ${oldPort}：请右键托盘图标选「退出玄盾」再重新打开，`
+        `当前仍运行在 ${oldPort}：请右键托盘图标选「退出勘合」再重新打开，`
         + '新端口才会生效（点窗口右上角 × 只是隐藏到托盘，不算退出；'
         + '「重启引擎」也不会改变端口）',
       );
@@ -828,9 +830,9 @@ export default function Settings() {
    * 真实连通性测试。
    *
    * ★ 为什么不能只靠「保存」来发现地址错：
-   *   地址填错的症状是 404，而玄盾对上游错误是原样透传的 ——
+   *   地址填错的症状是 404，而勘合对上游错误是原样透传的 ——
    *   用户只会在真正发对话时看到一个 404，然后去怀疑中转站、
-   *   怀疑 Key、怀疑网络。这里把「玄盾实际请求的地址」摆出来，
+   *   怀疑 Key、怀疑网络。这里把「勘合实际请求的地址」摆出来，
    *   让用户在配置这一步就能核对。
    */
   const handleTestRelay = async () => {
@@ -966,22 +968,22 @@ export default function Settings() {
     return (
       <div className="loading">
         <span className="spinner" />
-        加载设置...
+        {t('加载设置...')}
       </div>
     );
   }
 
   if (loadError || !config) {
-    // ★ P1-30：与首页共用同一份引导。此前这里只写「请确认玄盾代理已启动
+    // ★ P1-30：与首页共用同一份引导。此前这里只写「请确认勘合代理已启动
     //   （127.0.0.1:xxx）」+「重试」—— 用户照做不了，只能反复点重试。
     return (
       <div>
         <div className="page-header">
-          <h1 className="page-title">设置</h1>
+          <h1 className="page-title">{t('设置')}</h1>
         </div>
         <EngineOffline error={loadError} onRetried={() => load()} />
         <button className="btn secondary mt-8" onClick={() => load()}>
-          重试
+          {t('重试')}
         </button>
       </div>
     );
@@ -990,10 +992,32 @@ export default function Settings() {
   return (
     <div style={{ maxWidth: 720 }}>
       <div className="page-header">
-        <h1 className="page-title">设置</h1>
+        <h1 className="page-title">{t('设置')}</h1>
         <p className="page-subtitle">
-          所有检测都在本机完成；玄盾自身不上传任何数据（对话仍会发给你配置的中转站）
+          {t('所有检测都在本机完成；勘合自身不上传任何数据（对话仍会发给你配置的中转站）')}
         </p>
+      </div>
+
+      {/* 语言：跟随系统首次决定，之后可手动切换并记住 */}
+      <div className="card" id="sec-language">
+        <div className="card-title">{t('语言')}</div>
+        <div className="field-hint">
+          {t('界面语言会立即切换，并记住你的选择。')}
+        </div>
+        <div className="btn-row mt-8">
+          <button
+            className={`btn ${lang === 'zh' ? '' : 'secondary'}`}
+            onClick={() => setLang('zh')}
+          >
+            中文
+          </button>
+          <button
+            className={`btn ${lang === 'en' ? '' : 'secondary'}`}
+            onClick={() => setLang('en')}
+          >
+            English
+          </button>
+        </div>
       </div>
 
       {/* ★ P1-30b：专属端口没起来时的常驻提示。
@@ -1175,7 +1199,7 @@ export default function Settings() {
           />
           <div className="field-hint">
             粘贴中转站给你的地址即可 —— 带不带 /v1、是否连完整端点一起复制都行，
-            玄盾会自动识别
+            勘合会自动识别
           </div>
         </div>
 
@@ -1207,7 +1231,7 @@ export default function Settings() {
 
         {/* ★ 真实连通性测试。
             地址填错的症状是 404，用户在真正发对话之前无从发现自己
-            填的是完整端点、少了一层或路径不对。这里把「玄盾实际会请求的
+            填的是完整端点、少了一层或路径不对。这里把「勘合实际会请求的
             地址」摆出来，让配置这一步就能核对，而不是等用不了再猜。 */}
         <div className="field">
           <div className="btn-row" style={{ marginTop: 0, alignItems: 'center' }}>
@@ -1241,7 +1265,7 @@ export default function Settings() {
               <div style={{ minWidth: 0, flex: 1 }}>
                 <b>{relayTest.message}</b>
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
-                  玄盾请求的地址：<span className="mono">{relayTest.request_url}</span>
+                  勘合请求的地址：<span className="mono">{relayTest.request_url}</span>
                 </div>
                 {/* ★ 状态码与耗时都翻译成人话：光一个「404」用户不知道意味着什么，
                     「1.2 秒」也比「1234 ms」更贴近体感。 */}
@@ -1292,7 +1316,7 @@ export default function Settings() {
               </b>
               <div className="mt-8">
                 你的 AI 对话会经过 <span className="mono">{displayDomain(relayRisk.domain)}</span> 转发，
-                对方能看到全部内容；是否留存、留存多久由对方决定，玄盾无法代它保证。
+                对方能看到全部内容；是否留存、留存多久由对方决定，勘合无法代它保证。
               </div>
               {relayRisk.notes.length > 0 && (
                 <div className="mt-8 faint" style={{ fontSize: 12 }}>
@@ -1589,8 +1613,8 @@ export default function Settings() {
           </div>
           <div className="field-hint" style={portError ? { color: 'var(--xd-danger)' } : undefined}>
             {portError ??
-              `玄盾当前运行在 ${currentProxyPort()}。端口被占用时可改成 1024–65535 的其他端口。`
-              + '端口在应用启动时锁定：要右键托盘图标选「退出玄盾」再重新打开 ——'
+              `勘合当前运行在 ${currentProxyPort()}。端口被占用时可改成 1024–65535 的其他端口。`
+              + '端口在应用启动时锁定：要右键托盘图标选「退出勘合」再重新打开 ——'
               + '点窗口右上角 × 只是隐藏到托盘，不算退出；「重启引擎」也不会改变它。'}
           </div>
         </div>

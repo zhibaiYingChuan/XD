@@ -18,6 +18,7 @@ import Help from './pages/Help';
 import Activate from './pages/Activate';
 import { api } from './services/api';
 import type { PersonalConfig } from './services/api';
+import { LangProvider, useI18n } from './i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 首次启动判定
@@ -26,6 +27,7 @@ import type { PersonalConfig } from './services/api';
 const ONBOARDING_KEY = 'xuandun-personal-onboarded';
 
 function AppRoutes() {
+  const { t } = useI18n();
   const [checking, setChecking] = useState(true);
   const [needOnboarding, setNeedOnboarding] = useState(false);
 
@@ -66,7 +68,7 @@ function AppRoutes() {
     return (
       <div className="loading" style={{ height: '100vh' }}>
         <span className="spinner" />
-        正在启动...
+        {t('正在启动...')}
       </div>
     );
   }
@@ -97,11 +99,13 @@ function AppRoutes() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <ToastProvider>
-        <HashRouter>
-          <AppRoutes />
-        </HashRouter>
-      </ToastProvider>
+      <LangProvider>
+        <ToastProvider>
+          <HashRouter>
+            <AppRoutes />
+          </HashRouter>
+        </ToastProvider>
+      </LangProvider>
     </ErrorBoundary>
   );
 }
