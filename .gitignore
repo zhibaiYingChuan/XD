@@ -371,6 +371,8 @@ __pycache__/
 !tests/test_activation_webui.py
 # test_redteam_attack.py 依赖这个本地辅助模块；只入库测试、不入库它，CI 会 ImportError
 !tests/redteam_relay_attack.py
+# 中位数样本基准测试：可复现的拦截率 / 误报率口径，必须随码走
+!tests/benchmark_personal.py
 
 # ★ 2026-10-29（第三轮审查 P1 批次）：健壮性 / 可见性 / 契约回归。
 #   覆盖：配置顶层非对象、只读态 KPI 口径、降级可见、CORS 与鉴权顺序、

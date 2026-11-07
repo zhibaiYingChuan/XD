@@ -328,7 +328,7 @@ def _is_pattern_mention(text: str, m: "re.Match") -> bool:
 
     ★★ 2026-10-28 实测（日志 #7496 / #7928）：
       被判「试图读取 .env」的两条 Shell 命令，实际都是**过滤条件**：
-        for k in ('XD_1','企业版','.env','key','pem','.db','.log'):  ...
+        for k in ('KH_1','企业版','.env','key','pem','.db','.log'):  ...
         ... -match 'pem|token|secrets|\\.env|\\.db|\\.log' ...
       `.env` 在这些位置只是「要找哪些文件」的关键字，一个字节都没被读出。
       旧判据只看「参数里出现了 .env 字样」，于是一次仓库体检就被打断 ——
@@ -350,7 +350,7 @@ def _is_pattern_mention(text: str, m: "re.Match") -> bool:
     quote = before
     if quote in ("'", '"') and after == quote:
         # 引号完整包裹的短字面量：两侧同为分隔符才是「并列清单里的元素」
-        #   ('XD_1','企业版','.env','key')  → 左 , 右 ,   → 关键字清单
+        #   ('KH_1','企业版','.env','key')  → 左 , 右 ,   → 关键字清单
         #   {"file_path": ".env"}           → 左 : 右 }   → 独立路径值
         #   cat ".env"                      → 左 空格      → 独立路径值
         pre = text[:start - 1].rstrip()
@@ -823,7 +823,7 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 #: ────────────────────────────────────────────────────────────
 #: 企业版护栏的「违规语义方向 / 高危违规模式」判的是
 #: **模型自己说了什么**（输出里有没有敏感词），
-#: 而玄盾要管的是**中转站做了什么**（有没有篡改请求/响应）。
+#: 而勘合要管的是**中转站做了什么**（有没有篡改请求/响应）。
 #: 两者毫无关系：模型在讨论安全话题时必然出现「绕过/漏洞/攻击」，
 #: 把这算成中转站的罪证，唯一后果是让用户弃用一个没问题的服务商 ——
 #: 而那恰恰是本模块一直在避免的事（见 tracker._RELAY_ATTRIBUTABLE
@@ -838,7 +838,7 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 #: ★ dangerous_content 为什么也要在这里
 #: ────────────────────────────────────────────────────────────
 #: 它是「响应正文/代码块里出现了危险命令」——判据来源是**模型自己的输出**，
-#: 而本产品的核心用户正用玄盾代理 Claude Code / Cursor。
+#: 而本产品的核心用户正用勘合代理 Claude Code / Cursor。
 #: 让 AI 写一段含 `rm -rf` 的脚本、贴一段用 `eval(` 的代码，
 #: 都是正常诉求；把这些一律阻断，等于把产品的主战场变成雷区。
 #: 真正指向「中转站在指示客户端执行」的是结构化 tool_calls
@@ -886,7 +886,7 @@ CORROBORATION_REQUIRED_SIGNALS: frozenset = {
 #: covert_channel / telemetry_smuggle / undeclared_tool / typosquat_package /
 #: content_policy / credential_from_response。
 #:
-#: 为什么必须这样分：玄盾代理的是 AI 编程助手，它每天的工作就是
+#: 为什么必须这样分：勘合代理的是 AI 编程助手，它每天的工作就是
 #: 写危险命令、讨论安全、贴代码、总结会话。对这类用户，
 #: 「响应里出现危险字面量」是**常态**。文本启发式每加一条，
 #: 就多一个误报面 —— 这就是「每个版本都有新误报」的根因。
@@ -1176,7 +1176,7 @@ def decide_response_action(
     ────────────────────────────────────────────────────────────
     这是「误报永无止境」的根治点。此前每加一条文本判据，
     就多一个误报面：AI 在回答里写 `exec(`、复述 `del /s`、
-    引用 `AGENTS.md`，都会被当成攻击。而玄盾代理的正是
+    引用 `AGENTS.md`，都会被当成攻击。而勘合代理的正是
     AI 编程助手 —— 这些字面量是它的日常输出。
 
     现在只有 ``STRUCTURED_SIGNALS``（指向具体动作的证据）才能
@@ -1456,7 +1456,7 @@ class ResponseVerifier:
             #   是出站脱敏 + 响应验真，不是内容审查。
             #
             #   原实现给它标 medium 并落成一条「提示」：用户看到的是
-            #   「玄盾提示了你 39 次」，点进去全是自己的技术总结
+            #   「勘合提示了你 39 次」，点进去全是自己的技术总结
             #   （实测稳定版 39 条误报全出在这里），既不可解释，
             #   又把真正重要的伤害信号淹没。边界归位后这里直接返回。
             return findings
@@ -1540,6 +1540,8 @@ class ResponseVerifier:
     _SENSITIVE_LEAK_RE = re.compile(
         r"(?:(?<![A-Za-z0-9_])sk-[A-Za-z0-9\-_]{20,}|"
         r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}|"
+        r"(?<![A-Za-z0-9])AIza[0-9A-Za-z\-_]{35}|"
+        r"(?i:azure[_a-z]*key\s*[:=]\s*\S{20,})|"
         r"-----BEGIN\s+\w*\s*PRIVATE KEY-----|"
         r"eyJ[A-Za-z0-9\-_]{8,}\.eyJ)",
     )
@@ -1558,6 +1560,33 @@ class ResponseVerifier:
         r"|(?:我|本模型)(?:被|收到的)?(?:要求|指示|指令|设定)(?:是|为|如下)"
         r"|you\s+are\s+(?:an?\s+)?(?:AI|assistant)\s+(?:programmed|instructed|told)",
         re.IGNORECASE,
+    )
+
+    # ★ 2026-11-08：护栏判了高危阻断，但 reason 是通用文案
+    #   （「输出内容命中高危违规模式」）。旧逻辑要求 reason 里出现
+    #   「提示词 / 注入」才归类，于是这类命中被直接丢弃 ——
+    #   实测 6 条典型注入里 4 条被漏掉。
+    #   这里补一层「正文特征」判据：只有正文确实像指令注入才归类，
+    #   避免把内容合规类命中（辱骂、暴力）也算成中转站篡改。
+    _INJECTION_CONTENT_RE = re.compile(
+        r"(?:ignore|disregard|forget)\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)\s+"
+        r"(?:instructions?|rules?|prompts?)"
+        r"|忽略(?:之前|以上|前面|所有|此前)的?(?:指令|规则|限制|提示)"
+        r"|(?:追加|添加|写入|插入).{0,12}(?:系统提示|系统指令|system\s*prompt)"
+        r"|(?:reveal|show|print|output).{0,12}(?:system\s*prompt|your\s+instructions?)"
+        r"|(?:复述|输出|告诉我).{0,8}(?:系统提示|开发者设定|内部规则|初始指令)"
+        r"|you\s+are\s+now\s+(?:DAN|unrestricted)"
+        r"|你现在是(?:无限制|不受限制)",
+        re.IGNORECASE,
+    )
+
+    # ★ 2026-11-08：护栏判了 medium/redact 时，正文若含真实格式的
+    #   身份证 / 手机号 / 邮箱，归为 sensitive_leak（中危告警，不阻断）。
+    #   只在护栏已判风险时启用，避免对每条正常回答都扫一遍。
+    _PII_LEAK_RE = re.compile(
+        r"(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])"
+        r"|(?<!\d)1[3-9]\d{9}(?!\d)"
+        r"|\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
     )
 
     @classmethod
@@ -1608,10 +1637,27 @@ class ResponseVerifier:
         if cls._SENSITIVE_LEAK_RE.search(content):
             return "sensitive_leak"
 
+        # ①.5 护栏已判风险，且正文含真实格式的身份证 / 手机号 / 邮箱。
+        #    ★ 2026-11-08：企业版护栏对这三类会判 medium/redact，
+        #      旧逻辑在 ④ 把 redact 一律降为 content_policy（不产生 finding），
+        #      于是响应侧完全看不到它们。这里只在「护栏已判风险」时补判，
+        #      避免对每条正常回答都扫一遍。
+        if risk in ("high", "medium") and cls._PII_LEAK_RE.search(content):
+            return "sensitive_leak"
+
         # ② 护栏明确判的是「内容合规」→ 与中转站无关。
         #    放在提示词判据之前：模型在正常对话里提到
         #    「系统提示词」这几个字，不该被解读成中转站篡改。
         if any(k in reason_text for k in _CONTENT_POLICY_REASON_MARKS):
+            # ★ 2026-11-08：通用文案「高危违规模式」既可能是内容合规，
+            #   也可能是指令注入。正文确实像指令注入时优先归为
+            #   system_prompt_inject，否则仍按内容合规处理（不产生 finding）。
+            if (
+                risk == "high"
+                and action == "block"
+                and cls._INJECTION_CONTENT_RE.search(content)
+            ):
+                return "system_prompt_inject"
             return "content_policy"
 
         # ③ 护栏 reason 指向提示词/指令泄露 → system_prompt_inject。
@@ -1622,6 +1668,19 @@ class ResponseVerifier:
             if cls._PROMPT_DISCLOSURE_RE.search(content):
                 return "system_prompt_inject"
             return "content_policy"
+
+        # ③.5 护栏判了高危阻断，但 reason 是通用文案。
+        #    ★ 2026-11-08：企业版护栏对「忽略之前所有指令」这类文本
+        #      返回 high/block，reason 却是「输出内容命中高危违规模式」，
+        #      不含「提示词 / 注入」字样 —— 旧逻辑因此直接丢弃。
+        #      这里用正文特征补判：只有确实像指令注入才归类，
+        #      内容合规类（辱骂、暴力）仍走 content_policy。
+        if (
+            risk == "high"
+            and action == "block"
+            and cls._INJECTION_CONTENT_RE.search(content)
+        ):
+            return "system_prompt_inject"
 
         # ④ 护栏只是要求「打码」→ 归内容合规（仅记录），不指控中转站。
         #
