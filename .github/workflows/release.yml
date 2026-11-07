@@ -1365,16 +1365,16 @@ jobs:
           while IFS= read -r -d '' f; do
             b="${f##*/}"
             case "$b" in
-              *setup.exe.sig)        n="xuandun-personal_${VER}_x64-setup.exe.sig" ;;
-              *setup.exe)            n="xuandun-personal_${VER}_x64-setup.exe" ;;
-              *.app.tar.gz.sig)      n="xuandun-personal_${VER}_aarch64.app.tar.gz.sig" ;;
-              *.app.tar.gz)          n="xuandun-personal_${VER}_aarch64.app.tar.gz" ;;
-              *.dmg)                 n="xuandun-personal_${VER}_aarch64.dmg" ;;
-              *.AppImage.tar.gz.sig) n="xuandun-personal_${VER}_amd64.AppImage.tar.gz.sig" ;;
-              *.AppImage.tar.gz)     n="xuandun-personal_${VER}_amd64.AppImage.tar.gz" ;;
-              *.AppImage.sig)        n="xuandun-personal_${VER}_amd64.AppImage.sig" ;;
-              *.AppImage)            n="xuandun-personal_${VER}_amd64.AppImage" ;;
-              *.deb)                 n="xuandun-personal_${VER}_amd64.deb" ;;
+              *setup.exe.sig)        n="kanhe-personal_${VER}_x64-setup.exe.sig" ;;
+              *setup.exe)            n="kanhe-personal_${VER}_x64-setup.exe" ;;
+              *.app.tar.gz.sig)      n="kanhe-personal_${VER}_aarch64.app.tar.gz.sig" ;;
+              *.app.tar.gz)          n="kanhe-personal_${VER}_aarch64.app.tar.gz" ;;
+              *.dmg)                 n="kanhe-personal_${VER}_aarch64.dmg" ;;
+              *.AppImage.tar.gz.sig) n="kanhe-personal_${VER}_amd64.AppImage.tar.gz.sig" ;;
+              *.AppImage.tar.gz)     n="kanhe-personal_${VER}_amd64.AppImage.tar.gz" ;;
+              *.AppImage.sig)        n="kanhe-personal_${VER}_amd64.AppImage.sig" ;;
+              *.AppImage)            n="kanhe-personal_${VER}_amd64.AppImage" ;;
+              *.deb)                 n="kanhe-personal_${VER}_amd64.deb" ;;
               *) continue ;;
             esac
             cp "$f" "dist/$n"
@@ -1584,3 +1584,120 @@ jobs:
           body_path: dist/RELEASE_NOTES.md
           files: |
             dist/*
+
+      # ══════════════════════════════════════════════════════════
+      # 上传到自有下载站 sfang.cc
+      # ══════════════════════════════════════════════════════════
+      #
+      # ★ 为什么必须做这一步：
+      #   tauri.conf.json 的 updater.endpoints 指向
+      #   https://sfang.cc/download/downloads/latest.json，
+      #   而 make_latest_json.py 生成的下载 URL 也指向同一目录。
+      #   如果只上传到 GitHub Releases，客户端「检查到新版本」后
+      #   去 sfang.cc 下载会 404 —— 自动更新形同虚设。
+      #
+      # ★ 需要的仓库 Secrets（Settings → Secrets and variables → Actions）：
+      #   SFANG_SFTP_HOST   服务器地址，如 sfang.cc
+      #   SFANG_SFTP_USER   SSH 用户名
+      #   SFANG_SFTP_KEY    SSH 私钥（OpenSSH 格式，含 BEGIN/END 行）
+      #   SFANG_SFTP_PORT   可选，默认 22
+      #   SFANG_SFTP_PATH   可选，默认 /wwwroot/sfang.cc/download/downloads
+      #                     Windows OpenSSH 也可写成 /C:/wwwroot/... 或
+      #                     C:/wwwroot/sfang.cc/download/downloads
+      #
+      # ★ 上传内容：dist/ 下全部文件（安装包、.sig、latest.json、
+      #   checksums-sha256.txt、RELEASE_NOTES.md）。
+      #   旧版本文件不自动删除 —— 还在用旧版的用户仍需要能下载到
+      #   对应版本的更新包；如需只保留最新版，见文末的可选清理步骤。
+      - name: Upload release assets to sfang.cc
+        shell: bash
+        env:
+          SFTP_HOST: ${{ secrets.SFANG_SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFANG_SFTP_USER }}
+          SFTP_KEY: ${{ secrets.SFANG_SFTP_KEY }}
+          SFTP_PORT: ${{ secrets.SFANG_SFTP_PORT }}
+          SFTP_PATH: ${{ secrets.SFANG_SFTP_PATH }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SFTP_HOST:-}" ] || [ -z "${SFTP_USER:-}" ] || [ -z "${SFTP_KEY:-}" ]; then
+            echo "::error::缺少 SFANG_SFTP_HOST / SFANG_SFTP_USER / SFANG_SFTP_KEY，无法上传到 sfang.cc"
+            exit 1
+          fi
+          PORT="${SFTP_PORT:-22}"
+          REMOTE="${SFTP_PATH:-/wwwroot/sfang.cc/download/downloads}"
+
+          VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
+                | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                | head -1)
+          test -n "$VER" || { echo "::error::无法读取版本号"; exit 1; }
+
+          KEY_FILE="$RUNNER_TEMP/sfang_deploy_key"
+          printf '%s\n' "$SFTP_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$PORT" -H "$SFTP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # 逐文件 put：sftp 的 put 对通配符支持因版本而异，
+          # 显式列出每个文件最稳。
+          BATCH="$RUNNER_TEMP/sftp-batch.txt"
+          {
+            echo "-mkdir \"$REMOTE\""
+            echo "cd \"$REMOTE\""
+            for f in dist/*; do
+              [ -f "$f" ] || continue
+              echo "put \"$f\""
+            done
+            echo "bye"
+          } > "$BATCH"
+
+          echo "上传到 $SFTP_USER@$SFTP_HOST:$REMOTE（端口 $PORT）"
+          sftp -b "$BATCH" -i "$KEY_FILE" -P "$PORT" \
+            -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$SFTP_USER@$SFTP_HOST"
+
+          # 回读验证：上传成功 ≠ 线上可下载。
+          # 服务器可能有缓存，最多重试 6 次（约 30 秒）。
+          for i in 1 2 3 4 5 6; do
+            if curl -fsSL "https://sfang.cc/download/downloads/latest.json?t=$(date +%s)" \
+                 | grep -q "\"version\": \"$VER\""; then
+              echo "PASS：线上 latest.json 已是 $VER"
+              exit 0
+            fi
+            echo "第 $i 次回读未更新，5 秒后重试…"
+            sleep 5
+          done
+          echo "::error::上传后线上 latest.json 仍不是 $VER，请检查服务器路径与缓存"
+          exit 1
+
+      # ★ 可选：只保留最新版本的安装包。
+      #   默认关闭 —— 还在用旧版的用户需要能下载到对应版本的更新包。
+      #   需要开启时，在仓库 Variables 里设 SFANG_PRUNE_OLD=1。
+      #   通过 SSH 在服务器上执行 PowerShell，删除除当前版本外的
+      #   kanhe-personal_* 文件（保留 latest.json / checksums 等）。
+      - name: Prune old installers on sfang.cc (optional)
+        if: vars.SFANG_PRUNE_OLD == '1'
+        shell: bash
+        env:
+          SFTP_HOST: ${{ secrets.SFANG_SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFANG_SFTP_USER }}
+          SFTP_KEY: ${{ secrets.SFANG_SFTP_KEY }}
+          SFTP_PORT: ${{ secrets.SFANG_SFTP_PORT }}
+          SFTP_PATH: ${{ secrets.SFANG_SFTP_PATH }}
+        run: |
+          set -euo pipefail
+          PORT="${SFTP_PORT:-22}"
+          REMOTE="${SFTP_PATH:-/wwwroot/sfang.cc/download/downloads}"
+          VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
+                | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                | head -1)
+          KEY_FILE="$RUNNER_TEMP/sfang_deploy_key"
+          printf '%s\n' "$SFTP_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$PORT" -H "$SFTP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # Windows 路径转 PowerShell 形式
+          WIN_PATH=$(printf '%s' "$REMOTE" | sed 's|^/\([A-Za-z]\)/|\1:/|')
+          ssh -i "$KEY_FILE" -p "$PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$SFTP_USER@$SFTP_HOST" \
+            "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIN_PATH' -Filter 'kanhe-personal_*' -File | Where-Object { \$_.Name -notlike '*$VER*' } | Remove-Item -Force\""
+          echo "PASS：已清理 $WIN_PATH 下非 $VER 的旧安装包"
