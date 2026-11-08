@@ -75,7 +75,18 @@ def normalize_relay_base(base_url: str) -> str:
 
 
 def mask_relay_key(api_key: str) -> str:
-    """掩码显示 API Key。"""
+    """掩码显示 API Key。
+
+    ★★ P1-5（2026-10-29 第三轮审查）：**空 Key 必须返回空串**。
+      原实现对空串也走短 Key 分支返回 ``"***"``，而 ``"***"`` 是真值 ——
+      于是设置页的「当前：…」把它当成已配置的 Key 回显出来，
+      而真正该走的「尚未配置」分支成了永远到不了的死代码。
+      用户看到「当前：***（留空则保持不变）」会以为自己配过 Key，
+      之后每一次请求 401 都不会让他想到 Key 其实一直是空的。
+      空就是空：界面据此显示「尚未配置」，语义与后端一致。
+    """
+    if not api_key:
+        return ""
     if len(api_key) <= 8:
         return "***"
     return f"{api_key[:4]}{_MASK_MARK}{api_key[-4:]}"
@@ -200,13 +211,13 @@ def _backup_corrupt_config(raw_text: str, err: Exception) -> Optional[Path]:
 class RelayConfig:
     """中转站配置（个人版核心配置）。
 
-    ★ 这里**不**包含 model 字段：玄盾监控的是 API，不是某个模型。
-      请求里的 model 原样透传给中转站，玄盾不改写它。
+    ★ 这里**不**包含 model 字段：勘合监控的是 API，不是某个模型。
+      请求里的 model 原样透传给中转站，勘合不改写它。
 
     ★★ v0.1.0：从「单条」扩为「多条 + 一个当前启用项」。
       动机是一个真实的坑：转发时**总是**用这份配置里的 api_key
       （见 app.py::_forward_to_relay），所以
-      「AI 工具里填 A 家、玄盾里配 B 家」时，
+      「AI 工具里填 A 家、勘合里配 B 家」时，
       用户以为在用 A 扣费，实际扣的是 B —— 账单打错且无人知晓。
 
       为什么不做「多中转站轮询/负载均衡」：
@@ -390,7 +401,7 @@ class RelayConfig:
           否则用当前启用项 —— 后者是兼容老配置的回退。
 
           刻意**不做**「匹配不到就报错」：
-          用户可能刚在别处换了 Key，还没同步到玄盾，
+          用户可能刚在别处换了 Key，还没同步到勘合，
           此时直接拒绝会让整个 AI 工具不可用，
           而静默用当前启用项只是延续现状（不会更糟）。
         """
@@ -507,13 +518,37 @@ class PersonalConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
 
-    def validate(self) -> List[str]:
-        """全量校验，返回所有错误。"""
+    def validate(self, only: Optional[List[str]] = None) -> List[str]:
+        """校验配置，返回错误列表（空表示通过）。
+
+        Args:
+            only: 只校验这些分片（``relay`` / ``guard`` / ``server`` /
+                  ``storage``）；``None`` = 全量。
+
+        ★★ 2026-10-29（第三轮审查 P0-3）：加 ``only`` 的直接原因是
+          一次真实的「守卫堵死正常路径」——
+          首启向导允许「先跳过，进主界面看看」（Onboarding.tsx），
+          此时 relay 是空的；而 update_config 无条件做**全量**校验，
+          于是用户改安全级别、改端口、改日志保留天数**全部 400**，
+          报的还是与他操作无关的「中转站地址不能为空」。
+
+          校验的语义应当是「这次要写的东西是否合法」，
+          不是「整份配置是否完美」。其它调用方（启动、加中转站、
+          切换）保持全量，行为不变。
+        """
+        scopes = (
+            {"relay", "guard", "server", "storage"}
+            if only is None
+            else set(only)
+        )
         errors: List[str] = []
-        errors.extend(self.server.validate())
-        errors.extend(self.guard.validate())
-        errors.extend(self.storage.validate())
-        if self.relay.enabled:
+        if "server" in scopes:
+            errors.extend(self.server.validate())
+        if "guard" in scopes:
+            errors.extend(self.guard.validate())
+        if "storage" in scopes:
+            errors.extend(self.storage.validate())
+        if "relay" in scopes and self.relay.enabled:
             errors.extend(self.relay.validate())
             # ★ 专属端口不能与主端口相同：主端口已有唯一语义
             #   （按 Key 识别 / 未识别用当前启用项），
@@ -523,7 +558,7 @@ class PersonalConfig:
                 if _coerce_port(raw) == self.server.port:
                     errors.append(
                         f"中转站「{name}」的端口 {self.server.port} "
-                        "与玄盾主端口相同，请换一个（例如 18801）"
+                        "与勘合主端口相同，请换一个（例如 18801）"
                     )
         return errors
 
@@ -560,6 +595,26 @@ class PersonalConfig:
         except json.JSONDecodeError as e:
             # ★ M2：先备份再降级，避免后续 save() 把这唯一的原始数据覆盖掉
             _backup_corrupt_config(raw_text, e)
+            return PersonalConfig()
+
+        # ★★ P1-1（2026-10-29 第三轮审查）：**JSON 合法但顶层不是对象**。
+        #   `[]` / `null` / `"x"` 都能通过 json.loads，却在下面
+        #   `raw.get("relay", {})` 处抛 AttributeError ——
+        #   它不落进上面的 JSONDecodeError 分支，也不落进下面的
+        #   TypeError 分支（外层没有 except AttributeError），
+        #   于是引擎启动时直接崩掉：界面永远起不来、配置页也打不开，
+        #   而磁盘上的文件其实完全可读。
+        #
+        #   处理方式与「JSON 解析失败」一致：**先备份再降级为默认配置**。
+        #   不能只 `return PersonalConfig()` —— 那会让用户此后任何一次
+        #   保存都把这份还看得懂的原始内容覆盖掉，连人工抢救的机会都没了。
+        if not isinstance(raw, dict):
+            _backup_corrupt_config(
+                raw_text,
+                ValueError(
+                    f"配置文件顶层必须是 JSON 对象，实际是 {type(raw).__name__}"
+                ),
+            )
             return PersonalConfig()
 
         try:

@@ -11,13 +11,14 @@
 */
 
 import { invoke, isTauri } from '../lib/tauriShim';
+import { t } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 类型定义
 // ══════════════════════════════════════════════════════════════
 
 export type GuardState = 'protecting' | 'learning' | 'suspect' | 'danger' | 'paused';
-export type LogAction = 'pass' | 'redact' | 'block' | 'alert';
+export type LogAction = 'pass' | 'redact' | 'block' | 'alert' | 'observe';
 export type LogType = 'request_sanitize' | 'response_verify' | 'proxy_error' | 'relay';
 export type Severity = 'low' | 'medium' | 'high';
 export type SecurityLevel = 'lenient' | 'balanced' | 'strict';
@@ -45,6 +46,26 @@ export interface StateResponse {
    *   否则用户会以为防护在正常工作。
    */
   read_only?: boolean;
+  /**
+   * 今日「已转发但未经检测」的次数（P1-2）。
+   *
+   * ★ today.total_calls 里混着「检测过的」与「直通的」两类记录，
+   *   单看它回答不了「这里面有多少次其实没检测」。
+   *   只读态下两者相等；正常防护时这个数通常是 0。
+   */
+  unchecked_forwarded?: number;
+  /** 降级运行（护栏缺失 / 规则回退到内置最小集）。P1-3 */
+  degraded?: boolean;
+  /** 具体缺了哪几层检测（护栏缺失时非空）。P1-3 */
+  guardrail_missing_layers?: string[];
+  /** 规则来源：file = 规则文件已加载；builtin_fallback = 回退内置最小集 */
+  rules_source?: string;
+  /** 授权校验结论（P1-3）：ok=false 表示只读；reason 说明降级原因 */
+  license_check?: {
+    ok: boolean;
+    read_only: boolean;
+    reason: string;
+  };
 }
 
 export interface DailyStat {
@@ -131,7 +152,7 @@ export interface LogDetail {
 /**
  * 单条日志的可对外证据包（2026-10-23）。
  *
- * 回答的是「这枚凭证从哪来」，而不是「玄盾拦了什么」：
+ * 回答的是「这枚凭证从哪来」，而不是「勘合拦了什么」：
  * 同一个指纹在台账里首次出现的方向，决定了它是
  * 用户这边带进来的，还是中转站返回的。
  */
@@ -270,9 +291,9 @@ export interface RelayTestResult {
   ok: boolean;
   /** ok / auth / address / unreachable / timeout / http */
   kind: 'ok' | 'auth' | 'address' | 'unreachable' | 'timeout' | 'http';
-  /** 玄盾规范化之后实际使用的接入地址 —— 用户要核对的就是它 */
+  /** 勘合规范化之后实际使用的接入地址 —— 用户要核对的就是它 */
   address: string;
-  /** 玄盾真正会打到的完整路径 */
+  /** 勘合真正会打到的完整路径 */
   request_url: string;
   status: number | null;
   model_count: number | null;
@@ -465,7 +486,8 @@ export function setAdminToken(token: string | null): void {
 export async function initAdminToken(): Promise<void> {
   if (!isTauri()) return;
   try {
-    setAdminToken(await invoke<string>('get_admin_token'));
+    // ★ P1-9：启动路径上的 IPC 更要紧 —— 它卡住就没有任何页面可用
+    setAdminToken(await invokeBounded<string>('get_admin_token', undefined, TIMEOUT.FAST));
   } catch {
     /* 忽略：缺令牌只会影响浏览器回退通道 */
   }
@@ -485,7 +507,7 @@ function baseHeaders(): Record<string, string> {
  */
 function unauthorizedMessage(path: string): string {
   return (
-    `${path} → 401：管理接口仅限玄盾桌面端访问。` +
+    `${path} → 401：管理接口仅限勘合桌面端访问。` +
     '若你在浏览器里预览，请先关闭正在运行的桌面端，' +
     '或以不设置 XUANDUN_ADMIN_TOKEN 的方式手动启动引擎。'
   );
@@ -493,18 +515,52 @@ function unauthorizedMessage(path: string): string {
 
 // 注意：显式标注为 Record 而非 as const 字面量类型，
 // 否则 TS 会把 FAST 收窄成字面量 5000，导致默认值参数类型不兼容。
-const TIMEOUT: Record<'FAST' | 'NORMAL' | 'PROBE', number> = {
+const TIMEOUT: Record<'FAST' | 'NORMAL' | 'PROBE' | 'RESTART', number> = {
   FAST: 5_000,      // 状态查询、配置读写
   NORMAL: 15_000,   // 列表查询、模式切换
   // ★ 真实网络探测：引擎侧最坏情况（/models 失败后再打业务端点）约 36s。
   //   必须比引擎侧宽，否则是前端先超时、用户拿到超时错误而非探测结论。
   PROBE: 50_000,
+  // ★ P1-9：重启引擎要杀进程 + 等新进程起来，比普通 IPC 慢；
+  //   但仍必须有上界 —— 否则「重启中…」可以永久停在按钮上。
+  //   ★ 必须 > Rust 侧 wait_engine_ready 的 60 秒上限：
+  //     比它短的话，前端先报超时、引擎随后才起来，用户会看到
+  //     「重启失败」而实际成功了 —— 谎报失败与谎报成功一样有害。
+  RESTART: 70_000,
 };
 
 class ApiTimeoutError extends Error {
   constructor(public path: string, public timeoutMs: number) {
     super(`${path} 请求超时（${timeoutMs / 1000}s）`);
     this.name = 'ApiTimeoutError';
+  }
+}
+
+/**
+ * 给 Tauri IPC 调用加一个**上界**（P1-9，2026-10-29）。
+ *
+ * ★ 为什么必须有：invoke 走的是本机 IPC，Rust 侧若在某个 await 上
+ *   永久挂住（等锁、等子进程、等一个不会返回的 channel），
+ *   前端拿到的是一个永远 pending 的 Promise —— 界面不会报错，
+ *   按钮也不会复位，用户只能重开页面。
+ *   超时后抛出 ApiTimeoutError，调用方按「失败」处理即可复位各种 busy 态。
+ */
+async function invokeBounded<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+  timeoutMs = TIMEOUT.NORMAL,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new ApiTimeoutError(`ipc:${cmd}`, timeoutMs)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([invoke<T>(cmd, args), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -543,7 +599,11 @@ function extractErrorMessage(data: unknown, fallback: string): string {
     }
     if (v && typeof v === 'object') {
       const obj = v as Record<string, unknown>;
-      for (const key of ['msg', 'message', 'detail']) {
+      // ★★ 2026-10-29（P0-4）：`errors` 是引擎一批 400 出口的形态
+      //   （`{"detail": {"errors": ["中转站地址不能为空", ...]}}`）。
+      //   原来只认 msg/message/detail，于是这类校验错误一律退化成
+      //   「HTTP 400 Bad Request」，用户不知道该改哪一项。
+      for (const key of ['msg', 'message', 'detail', 'errors']) {
         if (key in obj) {
           const got = pick(obj[key]);
           if (got) return got;
@@ -648,7 +708,12 @@ async function call<T>(
   if (isTauri()) {
     // ★ P0-2/P0-3 修复：Tauri 命令需要顶层参数（如 id），
     //   不能只塞进 payload，否则 Rust 侧反序列化失败
-    return invoke<T>(tauriCmd, { ...(tauriArgs ?? {}), payload: body ?? {} });
+    // ★ P1-9：IPC 同样要有上界，否则卡住的命令会让界面永久停在 busy 态
+    return invokeBounded<T>(
+      tauriCmd,
+      { ...(tauriArgs ?? {}), payload: body ?? {} },
+      timeoutMs,
+    );
   }
   switch (httpMethod) {
     case 'GET':
@@ -710,7 +775,8 @@ export const api = {
    */
   getEngineStatus: async (): Promise<EngineStatus | null> => {
     if (!isTauri()) return null;
-    return invoke<EngineStatus>('get_engine_status');
+    // ★ P1-9：IPC 必须有上界（Rust 侧等锁时这条命令可能永不返回）
+    return invokeBounded<EngineStatus>('get_engine_status', undefined, TIMEOUT.FAST);
   },
   /**
    * 重启引擎（Rust 侧「先停后起」，全程持锁保证原子性）。
@@ -722,7 +788,9 @@ export const api = {
     if (!isTauri()) {
       throw new Error('重启引擎仅在桌面版可用');
     }
-    await invoke<void>('restart_engine');
+    // ★ P1-9：重启比普通命令慢，但仍要有上界 ——
+    //   否则「重启中…」可以永久停在按钮上。
+    await invokeBounded<void>('restart_engine', undefined, TIMEOUT.RESTART);
   },
 
   // ── 日志 ──
@@ -959,8 +1027,10 @@ export const api = {
   getActivePort: async () => {
     if (isTauri()) {
       try {
-        const mod = await import('@tauri-apps/api/core');
-        return (await mod.invoke<number>('get_active_port')) ?? DEFAULT_PROXY_PORT;
+        // ★ P1-9：同样要有上界，否则启动时首帧会一直卡在「正在启动」
+        return (await invokeBounded<number>(
+          'get_active_port', undefined, TIMEOUT.FAST,
+        )) ?? DEFAULT_PROXY_PORT;
       } catch {
         /* 回退用配置端口 */
       }
@@ -992,15 +1062,15 @@ export const api = {
   //   返回一个假的「未激活」—— 假的未激活会让人以为码坏了。
   getLicenseStatus: async (): Promise<LicenseStatus> => {
     requireTauriFor('getLicenseStatus');
-    return invoke<LicenseStatus>('get_license_status');
+    return invokeBounded<LicenseStatus>('get_license_status', undefined, TIMEOUT.FAST);
   },
   activate: async (code: string): Promise<LicenseStatus> => {
     requireTauriFor('activate');
-    return invoke<LicenseStatus>('activate_license', { code });
+    return invokeBounded<LicenseStatus>('activate_license', { code }, TIMEOUT.NORMAL);
   },
   clearLicense: async (): Promise<LicenseStatus> => {
     requireTauriFor('clearLicense');
-    return invoke<LicenseStatus>('clear_license');
+    return invokeBounded<LicenseStatus>('clear_license', undefined, TIMEOUT.NORMAL);
   },
   /**
    * 生成换绑请求串。
@@ -1011,7 +1081,7 @@ export const api = {
    */
   buildRebindRequest: async (code: string): Promise<RebindRequest> => {
     requireTauriFor('buildRebindRequest');
-    return invoke<RebindRequest>('build_rebind_request', { code });
+    return invokeBounded<RebindRequest>('build_rebind_request', { code }, TIMEOUT.NORMAL);
   },
 };
 
@@ -1036,6 +1106,10 @@ export const ACTION_LABELS: Record<LogAction, string> = {
   redact: '已打码',
   block: '已拦截',
   alert: '已告警',
+  // ★ 2026-11-03：观察。
+  //   文本启发式命中（响应里出现危险字面量、约束违背、工具链注入等），
+  //   但没有结构化证据。记录、可查、不阻断、不计入首页「提示」。
+  observe: '观察',
 };
 
 /**
@@ -1051,9 +1125,9 @@ export function entryActionLabel(entry: {
   action: LogAction;
 }): string {
   if (entry.log_type === 'proxy_error') {
-    return entry.action === 'alert' ? '未送达' : (ACTION_LABELS[entry.action] ?? entry.action);
+    return entry.action === 'alert' ? t('未送达') : t(ACTION_LABELS[entry.action] ?? entry.action);
   }
-  return ACTION_LABELS[entry.action] ?? entry.action;
+  return t(ACTION_LABELS[entry.action] ?? entry.action);
 }
 
 export const LOG_TYPE_LABELS: Record<LogType, string> = {
@@ -1093,7 +1167,7 @@ export const SEVERITY_LABELS: Record<Severity, string> = {
  *   「响应长度突然变长：本次 23851 字符，偏离历史均值 1742 达 124.0σ」
  *   「第 3 处 · API 密钥 · 位于 用户提问 · 第 41673-41693 字符」
  * 普通用户看不懂 σ 是什么，也看不到第 41673 个字符在哪 ——
- * 于是日志对他只有「玄盾说有问题，但不知道是什么问题」这一信息量，
+ * 于是日志对他只有「勘合说有问题，但不知道是什么问题」这一信息量，
  * 于是「误报」几乎成了默认结论。
  *
  * 这里给出「是什么问题 + 这意味着什么 + 你该怎么做」三段。
@@ -1143,10 +1217,10 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     // ★ 2026-10-04 改：原文案是「本不该外发给你的敏感信息…
     //   可能来自其他用户或被缓存污染，建议换中转站」——
     //   但这条日志实际多来自护栏的「命中敏感模式，已打码」，
-    //   即玄盾**已经处理过**的内容（常常是用户自己发出去的密钥）。
+    //   即勘合**已经处理过**的内容（常常是用户自己发出去的密钥）。
     //   把「已打码」说成「泄露他人数据、建议换站」，
     //   会让人白白弃用一个没问题的中转站。
-    meaning: '可能是你自己发出去的内容（比如密钥、手机号），也可能是中转站带回来的。玄盾已按规则处理过。若确认不是你的内容，再检查中转站。',
+    meaning: '可能是你自己发出去的内容（比如密钥、手机号），也可能是中转站带回来的。勘合已按规则处理过。若确认不是你的内容，再检查中转站。',
   },
   hidden_instruction: {
     title: '回答里藏了不给你看的指令',
@@ -1154,14 +1228,14 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
   },
   request_blocked: {
     title: '你的提问里有不能外发的内容',
-    meaning: '玄盾拦下了这次请求。删掉相关内容后重试即可。',
+    meaning: '勘合拦下了这次请求。删掉相关内容后重试即可。',
   },
   content_policy: {
     // ★ 2026-10-22：个人版把「企业版护栏要求打码」的命中归到这一类，
     //   所以这句要同时说清「谁判的」和「会不会影响用」。
     title: '内容检查提了一句，不影响使用',
     meaning:
-      '玄盾内置的通用内容检查（与企业版共用同一套规则）觉得这段里有敏感内容。它偏保守，技术文档里的密钥示例、变量名都可能被点到。只作记录，不会拦你。',
+      '勘合内置的通用内容检查（与企业版共用同一套规则）觉得这段里有敏感内容。它偏保守，技术文档里的密钥示例、变量名都可能被点到。只作记录，不会拦你。',
   },
   dangerous_content: {
     // ★ 2026-10-04 新增：与「结构化 tool_call 危险参数」分开。
@@ -1249,19 +1323,22 @@ export function explainFinding(f: {
       if (label.includes('环境变量')) {
         if (writeTool) {
           return {
-            title: `AI 正在写文件，内容里提到了 ${hit}`,
-            meaning:
-              '它不是在读你的 .env，而是准备把带这个字样的内容写进文件。玄盾按最坏情况处理：万一里面夹着真实密钥，就会跟着这次写入离开你的电脑。',
-            action:
+            title: `${t('AI 正在写文件，内容里提到了')} ${hit}`,
+            meaning: t(
+              '它不是在读你的 .env，而是准备把带这个字样的内容写进文件。勘合按最坏情况处理：万一里面夹着真实密钥，就会跟着这次写入离开你的电脑。',
+            ),
+            action: t(
               '如果只是变量名、示例文件（如 .env.example）或文档说明，确认里面没有真实密钥后，点「标记为误报」即可；以后这类内容用占位符代替真实值，就不会再被拦。',
+            ),
             hit,
           };
         }
         return {
-          title: `AI 要读你的环境变量文件（${hit}）`,
-          meaning:
+          title: `${t('AI 要读你的环境变量文件')}（${hit}）`,
+          meaning: t(
             '.env 里通常放着密钥和账号。读它本身不算攻击，但内容一旦被发到别处，密钥就跟着泄露了。',
-          action: '确认这是你自己要它做的；不想让它碰，就在对话里直接说明不要读取 .env。',
+          ),
+          action: t('确认这是你自己要它做的；不想让它碰，就在对话里直接说明不要读取 .env。'),
           hit,
         };
       }
@@ -1269,18 +1346,18 @@ export function explainFinding(f: {
       // ② 凭据类文件
       if (/私钥|凭证|账户|配置|登录|授权/.test(label)) {
         return {
-          title: `AI 想碰你的登录凭据（${hit}）`,
-          meaning: `这类文件里是能直接登录你账号的东西（${label}）。一旦被带出去，对方可以冒充你操作。`,
-          action: '不是你主动要求的话，建议这次拒绝执行，并检查该中转站。',
+          title: `${t('AI 想碰你的登录凭据')}（${hit}）`,
+          meaning: `${t('这类文件里是能直接登录你账号的东西')}（${label}）。${t('一旦被带出去，对方可以冒充你操作。')}`,
+          action: t('不是你主动要求的话，建议这次拒绝执行，并检查该中转站。'),
           hit,
         };
       }
 
       // ③ 危险命令
       return {
-        title: 'AI 准备执行一条会破坏东西的命令',
-        meaning: `命中：${label}。这类命令一旦跑起来，文件或数据可能就回不来了。`,
-        action: '确认这是你要它做的；如果只是文档或示例里出现这句话，点「标记为误报」即可。',
+        title: t('AI 准备执行一条会破坏东西的命令'),
+        meaning: `${t('命中：')}${label}。${t('这类命令一旦跑起来，文件或数据可能就回不来了。')}`,
+        action: t('确认这是你要它做的；如果只是文档或示例里出现这句话，点「标记为误报」即可。'),
         hit: hit || undefined,
       };
     }
@@ -1288,17 +1365,19 @@ export function explainFinding(f: {
 
   const base = FINDING_LABELS[category];
   if (category === 'sensitive_leak') {
-    // ★ 2026-10-22 更正：这类命中来自**玄盾自己复用的企业版输出护栏**，
+    // ★ 2026-10-22 更正：这类命中来自**勘合自己复用的企业版输出护栏**，
     //   不是中转站那边的东西。上一版文案写成「中转站那边判的」，
     //   属于把自家组件的结论甩给别人 —— 用户一眼就看出来了。
     //   现在如实说明来源，并解释它为什么容易误判技术文档。
     if ((f.detail ?? '').startsWith('[企业版护栏]')) {
       return {
-        title: '玄盾的内容检查觉得这段像敏感信息',
-        meaning:
-          '这条来自玄盾内置的通用内容检查（与企业版共用同一套规则）。它偏保守：技术文档里的密钥示例、变量名、字段名都可能被判成敏感内容。',
-        action:
+        title: t('勘合的内容检查觉得这段像敏感信息'),
+        meaning: t(
+          '这条来自勘合内置的通用内容检查（与企业版共用同一套规则）。它偏保守：技术文档里的密钥示例、变量名、字段名都可能被判成敏感内容。',
+        ),
+        action: t(
           '内容已按规则打码，没有拦你。确认不是真实密钥就当噪音忽略，或点「标记为误报」。',
+        ),
       };
     }
   }
@@ -1309,26 +1388,30 @@ export function explainFinding(f: {
     if (withDeclared) {
       const used = withDeclared[1].trim();
       return {
-        title: `回答里用了你没声明过的工具：${used}`,
-        meaning: `这次你只声明了 ${withDeclared[2]} 个工具（${withDeclared[3].trim()}），返回的却是上面那个名字。中转站凭空造调用是一种可能；但客户端改了工具名、网关加前缀，也会得到同样的结果。`,
-        action:
+        title: `${t('回答里用了你没声明过的工具：')}${used}`,
+        meaning: `${t('这次你只声明了')} ${withDeclared[2]} ${t('个工具')}（${withDeclared[3].trim()}），${t('返回的却是上面那个名字。中转站凭空造调用是一种可能；但客户端改了工具名、网关加前缀，也会得到同样的结果。')}`,
+        action: t(
           '展开技术细节对一下两个名字：只是写法不同（如 read_file 与 readFile）就点「标记为误报」；名字完全不认识，再检查中转站。',
+        ),
         hit: used,
       };
     }
     const bare = /响应却返回了工具调用[：:](.+)$/.exec(detail);
     if (bare) {
       return {
-        title: `你没开工具，回答里却冒出了工具调用：${bare[1].trim()}`,
-        meaning:
+        title: `${t('你没开工具，回答里却冒出了工具调用：')}${bare[1].trim()}`,
+        meaning: t(
           '这轮请求里没有任何工具可用，返回内容却带着工具调用。可能是中转站塞进来的，也可能是客户端把工具列表漏发了。',
-        action: '先确认你的客户端这一轮确实没开工具；确认没开，再检查中转站。',
+        ),
+        action: t('先确认你的客户端这一轮确实没开工具；确认没开，再检查中转站。'),
         hit: bare[1].trim(),
       };
     }
   }
 
-  return base ? { ...base } : null;
+  return base
+    ? { ...base, title: t(base.title), meaning: t(base.meaning) }
+    : null;
 }
 
 /**
@@ -1410,9 +1493,9 @@ export function formatUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  if (d > 0) return `${d} 天 ${h} 小时`;
-  if (h > 0) return `${h} 小时 ${m} 分`;
-  return `${m} 分钟`;
+  if (d > 0) return `${d} ${t('天')} ${h} ${t('小时')}`;
+  if (h > 0) return `${h} ${t('小时')} ${m} ${t('分钟')}`;
+  return `${m} ${t('分钟')}`;
 }
 
 /**
@@ -1432,28 +1515,32 @@ export function humanizeLoadError(raw: string | null | undefined): {
   detail: string;
 } {
   const text = (raw ?? '').trim();
-  const howTo = '点「重试」；若持续失败请重启玄盾。';
+  const howTo = t('点「重试」；若持续失败请重启勘合。');
   const status = /HTTP (\d{3})/.exec(text);
   if (status) {
     return {
-      message: `无法连接到玄盾本地服务（错误 ${status[1]}）。${howTo}`,
+      message: `${t('无法连接到勘合本地服务（错误')} ${status[1]}）。${howTo}`,
       detail: text,
     };
   }
   // 超时（ApiTimeoutError 的文案含「超时」）与网络不可达分开说，
   // 两者的排查方向不同：前者是服务没响应，后者是根本没连上。
   if (text.includes('超时')) {
-    return { message: `连接玄盾本地服务超时。${howTo}`, detail: text };
+    return { message: `${t('连接勘合本地服务超时。')}${howTo}`, detail: text };
   }
   return {
-    message: `无法连接到玄盾本地服务。${howTo}`,
-    detail: text || '（无更多信息）',
+    message: `${t('无法连接到勘合本地服务。')}${howTo}`,
+    detail: text || t('（无更多信息）'),
   };
 }
 
 /** 依据 action + severity 得出徽章样式类 */
 export function actionBadgeClass(entry: { action: LogAction; severity: Severity }): string {
   if (entry.action === 'block') return 'danger';
+  // ★ 2026-11-03：观察必须先于 severity 判断。
+  //   观察日志的 severity 可能是 high（如工具链注入），
+  //   若先按 severity 上色，它会被染成「提示」色 —— 与「不计入提示」自相矛盾。
+  if (entry.action === 'observe') return 'info';
   if (entry.action === 'alert' || entry.severity === 'medium') return 'suspect';
   if (entry.action === 'redact') return 'info';
   return 'safe';

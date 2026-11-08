@@ -146,6 +146,8 @@ def kpi_contribution(
         （见 app.py 的 _proxy_error / _log_upstream_error）—— 连 total 也不计。
       · 其余类型（response_verify / request_sanitize / relay）每行计 1 次
         total，并按 action 归入 danger / suspect / safe 之一。
+      · ★ relay（未检测直通，暂停 / 未激活）只计 total，**不计 safe**：
+        它回答的是「转发了几次」，不是「检查过几次且安全」。
       · marked_safe=1：用户已确认是误报，不再计入风险档。
         与 _adjust_daily_stats_for_mark 的历史行为保持一致 ——
         只有 block / alert 被标记时才连 total 一起回退；
@@ -155,8 +157,27 @@ def kpi_contribution(
         return (0, 0, 0, 0)
     danger = 1 if action == Action.BLOCK.value else 0
     suspect = 1 if action == Action.ALERT.value else 0
-    safe = 1 if action == Action.PASS.value else 0
+    # ★ 2026-11-03：observe（观察）计入 safe，不计入 suspect。
+    #   观察 = 检查过、但没有结构化威胁（文本启发式命中）。
+    #   它必须算「安全通过」，否则 total ≠ safe + suspect + danger，
+    #   用户核对时又会发现数字对不上；同时它绝不能进「提示」，
+    #   否则文本启发式会继续制造用户可见的噪声。
+    safe = 1 if action in (Action.PASS.value, Action.OBSERVE.value) else 0
     total = 1
+    # ★★ P1-2（2026-10-29 第三轮审查）：relay = **未经检测的直通**
+    #   （防护已暂停 / 未激活只读模式）。它可以算「已转发」，
+    #   但绝不能算「已检查且安全」。
+    #
+    #   原口径把它按 action=pass 记进 safe，于是只读用户的首页
+    #   同时读到两句话：「未激活，不做防护」和「今日已检查 N 次、安全 N」——
+    #   数字本身在说谎，信誉分也被「安全通过」污染。
+    #
+    #   ★ 为什么改在纯函数里而不是只在录入处扣掉：删除日志会触发
+    #     _recompute_daily_stats，它逐行调用本函数。若只在录入侧扣，
+    #     用户删一条日志就会让「安全」凭空涨回来 —— 那正是这个函数
+    #     被抽出来要消灭的那种口径分叉。
+    if log_type == LogType.RELAY.value:
+        safe = 0
     if marked_safe:
         # 与 _adjust_daily_stats_for_mark 同一口径：
         # 只有 block / alert 被标记时才回退（pass 标记无意义，维持原样）。
@@ -619,11 +640,20 @@ class PersonalStorage:
                 "GROUP BY action ORDER BY c DESC"
             ).fetchall()
         }
+        # ★ 2026-11-03：按**域名**聚合，而不是按「域名#Key指纹」。
+        #   同一家中转站配了多个 Key 时，日志里会留下多个指纹键；
+        #   直接 GROUP BY relay_domain 会把同一家拆成多行，
+        #   卡片上「主要中转站（N 条）」的 N 就小于「全部记录」，
+        #   用户核对时必然认为数字造假。
+        #   展示层本来就会剥掉指纹（displayDomain），聚合口径必须与之一致。
         domains = [
-            {"domain": str(r["relay_domain"] or ""), "count": int(r["c"])}
+            {"domain": str(r["d"] or ""), "count": int(r["c"])}
             for r in self._conn.execute(
-                "SELECT relay_domain, COUNT(*) AS c FROM logs "
-                "GROUP BY relay_domain ORDER BY c DESC LIMIT 5"
+                "SELECT CASE WHEN instr(relay_domain, '#') > 0 "
+                "            THEN substr(relay_domain, 1, instr(relay_domain, '#') - 1) "
+                "            ELSE relay_domain END AS d, "
+                "       COUNT(*) AS c "
+                "FROM logs GROUP BY d ORDER BY c DESC LIMIT 5"
             ).fetchall()
         ]
         row = self._conn.execute(
@@ -743,7 +773,7 @@ class PersonalStorage:
           实测：标记前后 today 统计一模一样，
           于是用户以为「这条已经不算风险了」，
           首页的「危险 N」却纹丝不动，
-          唯一的解释就是「玄盾在骗我」或「玄盾坏了」。
+          唯一的解释就是「勘合在骗我」或「勘合坏了」。
           一个防篡改产品的统计如果不能被用户纠正，
           那它给出的每个数字都值得怀疑。
         """
@@ -885,7 +915,7 @@ class PersonalStorage:
              删日志不会碰它，于是「今日已检查 N 次」纹丝不动。
              实测：插入 1 条 + 统计，清空后 today 仍是非零。
              而清空按钮的确认框明确写着「此操作不可恢复」，
-             用户清完回首页看到数字没变，只能认为玄盾坏了。
+             用户清完回首页看到数字没变，只能认为勘合坏了。
           ② redaction_records —— 这张表存着**原始敏感值**，
              而 schema 里 log_id 没有任何外键约束，
              所以删日志后原始 API Key / 手机号仍留在库里。

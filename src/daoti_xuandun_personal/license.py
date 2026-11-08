@@ -233,10 +233,45 @@ def _run_macos_serials() -> list:
     return found
 
 
+_MACHINE_CODE_CACHE: dict = {}
+
+
 def machine_code() -> str:
     """采集本机机器码（原始串，不哈希）。
 
-    ★ 这是**唯一**实现。签发工具、引擎验签都从这里取，
+    ★★ 必须先查进程内缓存（2026-10-31）
+    ────────────────────────────────────────────────────────────
+    采集走的是 PowerShell 的 Get-CimInstance，一次 1–3 秒且**同步阻塞**。
+    它此前被 async 端点直接调用，激活页还会并发调两次 —— 实测让
+    uvicorn 的事件循环整整卡住 3.7 秒，期间 /health 不响应，
+    桌面端 2 秒的健康探测连续超时，于是把一台**完全健康**的引擎
+    判成死亡并强制重启（日志：「启动引擎前发现残留旧进程，先回收再拉起」），
+    用户看到的是激活页一直转圈。
+
+    硬件 ID 在进程存活期间不会变，缓存一次即可；真正的「不阻塞事件循环」
+    由调用方用 asyncio.to_thread 保证。
+    """
+    cached = _MACHINE_CODE_CACHE.get("value")
+    if cached:
+        return cached
+    value = _machine_code_uncached()
+    _MACHINE_CODE_CACHE["value"] = value
+    return value
+
+
+def reset_machine_code_cache() -> None:
+    """清空机器码缓存。
+
+    ★ 仅供测试与「硬件变更后强制重算」使用。
+      正常运行时机器码在进程存活期间不会变，缓存是刻意的。
+    """
+    _MACHINE_CODE_CACHE.clear()
+
+
+def _machine_code_uncached() -> str:
+    """真正去系统里采集（慢，1–3 秒）。只在进程内第一次调用时执行。
+
+    ★ 这是唯一的采集实现。签发工具、引擎验签都从这里取，
       Rust 侧不再自行采集（它拿不到稳定的等价手段，
       而两侧各自实现必然漂移 —— 那正是 2026-09-28 线上激活
       失败的根因）。
@@ -784,7 +819,7 @@ def verify(
         # 签名不符 / 格式损坏 / alg 不匹配都落这里。
         # ★ 措辞刻意含糊：不说「签名无效」，减少反编译者
         #   从错误文案推断出「这里是验签点」。
-        return VerifyResult(False, "bad_signature", "激活码无效，请确认是玄盾官方发出的码")
+        return VerifyResult(False, "bad_signature", "激活码无效，请确认是勘合官方发出的码")
 
     # 签名已通过 → payload 可信，可安全取出 jti（供下方过期判定与吊销检查共用）。
     jti = str(claims.get("jti", ""))

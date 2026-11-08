@@ -55,7 +55,7 @@ from daoti_xuandun_personal.proxy.verifier import (  # noqa: E402
 # 用户报的那条日志的内容形态（会话总结 + 讨论安全话题）
 SESSION_SUMMARY = (
     "# 会话总结\n\n## 1. Primary Request and Intent\n"
-    "本轮用户指令围绕玄盾工具：日志筛选失效、误报率偏高、"
+    "本轮用户指令围绕勘合工具：日志筛选失效、误报率偏高、"
     "以及中转站是否会绕过检测。用户希望理解系统提示词被拦截的原因，"
     "并确认是否存在漏洞利用风险。\n"
 )
@@ -184,12 +184,62 @@ class TestRealEvidenceStillBlocks:
         )
 
     def test_real_attacks_still_block(self):
-        for cat in ("tool_call_dangerous", "undeclared_tool",
-                    "hidden_instruction", "model_downgrade"):
+        # ★ 2026-11-03：undeclared_tool 已归入文本启发式（观察层）。
+        # ★ 2026-11-04：tool_call_dangerous 也已归入观察层 ——
+        #   它是「AI 自己要执行的命令」，不是「中转站注入的命令」。
+        for cat in ("hidden_instruction", "model_downgrade"):
             f = VerificationFinding(category=cat, severity="high",
                                     detail="x", evidence="x")
             action, _ = decide_response_action("balanced", [f])
             assert action == "block", f"{cat} 不再阻断"
+
+
+class TestHeuristicNeedsCorroboration:
+    """文本启发式一律降为「观察」，不再阻断、不再计入「提示」。
+
+    ★ 2026-11-03（证据分级）：工具链注入与约束违背都依赖文本共现，
+      实测误报集中在「AI 引用检测器说明」「AI 写 re.exec(s)」。
+      此前「两条启发式同时命中就阻断」仍会误伤 ——
+      因为两条命中可能只是同一段文本的两种解读。
+      现在只有结构化证据（tool_call 参数 / 隐藏指令 / 模型降级 /
+      凭证泄露）才能阻断；文本启发式无论几条都只观察。
+    """
+
+    @staticmethod
+    def _f(cat: str) -> VerificationFinding:
+        return VerificationFinding(
+            category=cat, severity="high", detail="x", evidence="x",
+        )
+
+    def test_single_heuristic_is_observe(self):
+        for cat in ("toolchain_injection", "constraint_violation"):
+            action, _ = decide_response_action("balanced", [self._f(cat)])
+            assert action == "observe", f"单条 {cat} 仍阻断/提示"
+
+    def test_two_heuristics_are_still_observe(self):
+        action, _ = decide_response_action(
+            "balanced",
+            [self._f("toolchain_injection"), self._f("constraint_violation")],
+        )
+        assert action == "observe", (
+            "两条文本启发式同时命中仍被当成攻击 —— "
+            "它们可能只是同一段文本的两种解读"
+        )
+
+    def test_meta_signal_does_not_count_as_corroboration(self):
+        action, _ = decide_response_action(
+            "balanced",
+            [self._f("toolchain_injection"), self._f("late_delivery")],
+        )
+        assert action == "observe", "late_delivery 是元信号，不能当第二条证据"
+
+    def test_structured_plus_heuristic_blocks(self):
+        """结构化证据 + 文本启发式 → 仍阻断（真攻击的组合形态）。"""
+        action, _ = decide_response_action(
+            "balanced",
+            [self._f("hidden_instruction"), self._f("toolchain_injection")],
+        )
+        assert action == "block", "结构化证据在场时仍应阻断"
 
 
 class TestRelayCountsFollowLogs:

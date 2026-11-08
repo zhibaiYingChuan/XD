@@ -1116,9 +1116,13 @@ def test_state_not_read_only_with_valid_code(live_engine, keypair, monkeypatch, 
     import os as _os
 
     code = _issue(priv, "MACHINE-OK", gen=0)
-    path = _os.path.join(
-        _os.getenv("LOCALAPPDATA"), "com.daoti.xuandun-personal", "license.json"
-    )
+    # ★★ 2026-10-29：路径必须走 paths.data_file（受 XUANDUN_DATA_DIR 控制），
+    #   不能硬编码 %LOCALAPPDATA% —— 那样会往开发者真实数据目录写激活码
+    #   （测试污染真实数据），而 conftest 已把数据目录隔离到 tmp 后，
+    #   引擎读的是 tmp，于是这里写的「合法码」引擎根本看不到。
+    from daoti_xuandun_personal import paths as _paths
+
+    path = str(_paths.data_file("license.json"))
     _os.makedirs(_os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         _json.dump({"code": code, "lastSeen": int(time.time())}, f)

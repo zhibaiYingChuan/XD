@@ -78,12 +78,17 @@ class TestMachineCodeDegradation:
         saved = lic._run_windows_serials
         saved_mac = lic._run_macos_serials
         try:
+            # ★ machine_code() 有进程内缓存（避免每次调用都跑 1–3 秒的
+            #   PowerShell 采集）。测试要验证降级路径，必须先清缓存，
+            #   否则拿到的是前面用例算好的真实机器码。
+            lic.reset_machine_code_cache()
             lic._run_windows_serials = lambda: []
             lic._run_macos_serials = lambda: []
             raw = lic.machine_code()
         finally:
             lic._run_windows_serials = saved
             lic._run_macos_serials = saved_mac
+            lic.reset_machine_code_cache()
 
         assert raw, "降级路径返回了空串 —— 这等于取消一码一机"
         assert raw.startswith("hw-unavailable:"), f"未标记降级状态：{raw}"

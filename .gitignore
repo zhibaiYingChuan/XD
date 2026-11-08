@@ -49,6 +49,10 @@ desktop/src-tauri/gen/schemas/
 #   是给 CI/build 占位用的，体积同样巨大，一并排除。
 desktop/src-tauri/resources/
 desktop/engine_main.dist/
+# ★ 2026-10-30：PyInstaller onedir 的产物目录（engine_main/ + _internal/），
+#   体积几十到上百 MB，与 Nuitka 的 .dist 同性质，绝不能入库。
+desktop/engine_main/
+desktop/build/
 desktop/engine_main.build/
 desktop/engine_main.onefile-build/
 *.build/
@@ -103,6 +107,12 @@ tests/__pycache__/
 *.tmp
 _probe*.py
 _tmp*.py
+
+# ★ 2026-10-31：本机交互审计的产物目录（内含引擎/安装包副本，数百 MB）。
+#   它是可复现的运行产物，绝不能被 git add 带进仓库。
+artifacts/
+# 本地隔离实例的启动脚本（只在开发机用）
+run_cdp_isolated.ps1
 
 # 构建期生成的护栏密钥（每次构建都不同，入库等于公开）
 build_secrets.json
@@ -199,7 +209,7 @@ tests/*
 #   补进放行列表：机器码算法、验签、吊销、激活锚点这些用例必须随码走。
 !tests/test_license.py
 # ★ 本轮新增（2026-10-19）：KPI 口径一致性 + 流式占位符还原的回归用例。
-#   这两个缺陷都属于「不报错的静默错误」（统计凭空变化、用户看到 ⟦XD_n⟧），
+#   这两个缺陷都属于「不报错的静默错误」（统计凭空变化、用户看到 ⟦KH_n⟧），
 #   没有测试守着，下次改动很容易再把它们放回来。
 !tests/test_kpi_and_stream_restore.py
 # ★ 本轮新增（2026-10-20）：隐私与本地安全加固的契约测试
@@ -320,19 +330,19 @@ desktop/src-tauri/examples/
 !.github/CODEOWNERS
 !.github/dependabot.yml
 !.github/pull_request_template.md
+# ★ 2026-10-30：每版的「人话更新说明」必须入库。
+#   它是 latest.json 的 notes 与 GitHub Release 正文的共同来源；
+#   不入库 = CI 上 checkout 后没有这个文件 = 应用内更新弹窗永远只有
+#   兜底文案，而流水线只打 warning 不会红 —— 又一个「看起来成功了」。
+!.github/release_notes/
+!.github/release_notes/*.md
 # 完整版门禁配置：含门禁名称与判据，仅本地使用
 .ci-local/
 
-# 内部开发文档（保留在本地）
-# ★ P1-27：架构与开发文档必须随仓库走 —— 否则 clone 之后
-#   既看不懂项目怎么分层，也不知道怎么构建/测试，
-#   而"文档不随码走"必然腐化成过期描述。
-#   只有仍在演进、且含内部判据细节的那两份留在本地。
-docs/*
-!docs/README.md
-!docs/ARCHITECTURE.md
-!docs/DEVELOPMENT.md
-!docs/SECURITY_BOUNDARIES.md
+# 内部开发文档（保留在本地，不入公开仓库）
+# ★ 2026-11-08：按产品要求，开发过程文档不再随公开仓库发布。
+#   架构与构建说明保留在本地 docs/，需要时向维护者索取。
+docs/
 GUARDRAIL.md
 
 # ★ P1-29：企业版文档不属于个人版仓库。
@@ -344,3 +354,28 @@ GUARDRAIL.md
 *_LOG.json
 .venv/
 __pycache__/
+
+# ★★ 2026-10-29（第三轮审查 P0-8）：安全关键测试必须随码走。
+#   本轮审查发现：磁盘上 48 个测试文件、入库只有 30 个，
+#   缺的正是「脱敏还原」「误报回归」「变异检测」「护栏一致性」
+#   这几类最该自动化的判据 —— 于是「本机绿」无法被任何人复核，
+#   CI 也从来没跑过它们。
+!tests/conftest.py
+!tests/test_placeholder_roundtrip.py
+!tests/test_false_positive.py
+!tests/test_mutation_guard.py
+!tests/test_guardrail_parity.py
+!tests/test_redteam_attack.py
+!tests/test_pipeline.py
+!tests/test_activation_audit.py
+!tests/test_activation_webui.py
+# test_redteam_attack.py 依赖这个本地辅助模块；只入库测试、不入库它，CI 会 ImportError
+!tests/redteam_relay_attack.py
+# 中位数样本基准测试：可复现的拦截率 / 误报率口径，必须随码走
+!tests/benchmark_personal.py
+
+# ★ 2026-10-29（第三轮审查 P1 批次）：健壮性 / 可见性 / 契约回归。
+#   覆盖：配置顶层非对象、只读态 KPI 口径、降级可见、CORS 与鉴权顺序、
+#   空 Key 掩码语义、端口失败归属、未配置 relay 的业务端点、更新检查超时、
+#   CI 是否真的构建了前端。这些都是「不报错的静默错误」，必须随码走。
+!tests/test_p1_round3_fixes.py

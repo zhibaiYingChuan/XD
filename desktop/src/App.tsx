@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
+import UpdateNotice from './components/UpdateNotice';
 import { ToastProvider } from './components/Toast';
 import Onboarding from './pages/Onboarding';
 import Dashboard from './pages/Dashboard';
@@ -17,6 +18,7 @@ import Help from './pages/Help';
 import Activate from './pages/Activate';
 import { api } from './services/api';
 import type { PersonalConfig } from './services/api';
+import { LangProvider, useI18n } from './i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 首次启动判定
@@ -25,6 +27,7 @@ import type { PersonalConfig } from './services/api';
 const ONBOARDING_KEY = 'xuandun-personal-onboarded';
 
 function AppRoutes() {
+  const { t } = useI18n();
   const [checking, setChecking] = useState(true);
   const [needOnboarding, setNeedOnboarding] = useState(false);
 
@@ -65,7 +68,7 @@ function AppRoutes() {
     return (
       <div className="loading" style={{ height: '100vh' }}>
         <span className="spinner" />
-        正在启动...
+        {t('正在启动...')}
       </div>
     );
   }
@@ -75,27 +78,34 @@ function AppRoutes() {
   }
 
   return (
-    <Routes>
-      <Route element={<Layout />}>
-        <Route index element={<Dashboard />} />
-        <Route path="logs" element={<Logs />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="activate" element={<Activate />} />
-        <Route path="help" element={<Help />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
+    <>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="logs" element={<Logs />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="activate" element={<Activate />} />
+          <Route path="help" element={<Help />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+      {/* ★ 更新提示挂在路由之外：无论用户在哪个页面，
+          发现新版本都在同一个位置弹出，不随页面切换而重新挂载。 */}
+      <UpdateNotice />
+    </>
   );
 }
 
 export default function App() {
   return (
     <ErrorBoundary>
-      <ToastProvider>
-        <HashRouter>
-          <AppRoutes />
-        </HashRouter>
-      </ToastProvider>
+      <LangProvider>
+        <ToastProvider>
+          <HashRouter>
+            <AppRoutes />
+          </HashRouter>
+        </ToastProvider>
+      </LangProvider>
     </ErrorBoundary>
   );
 }

@@ -295,4 +295,12 @@ class TestNonStreamCleanResponseIsPass:
             "非流式路径把 VerifyResult 对象当成了「有发现」（恒真值），"
             "于是每次正常回答都进「今日提示」，KPI 的「安全」恒为 0"
         )
-        assert store.get_today_stats()["safe_count"] == 1
+        # ★★ P1-2（2026-10-29）：本用例没有授权文件，实际走的是
+        #   「未激活 → 未经检测直通」（log_type=relay）。而 relay 按新口径
+        #   只计「已转发」、不计「安全」—— 一次没检测过的转发不是「安全通过」。
+        #   这里改为断言 total 计上了、风险档为 0，判据仍是
+        #   「干净响应不得被记成风险」。
+        stats = store.get_today_stats()
+        assert stats["total_calls"] == 1
+        assert stats["suspect_count"] == 0 and stats["danger_count"] == 0
+        assert stats["safe_count"] == 0

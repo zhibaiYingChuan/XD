@@ -7,17 +7,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  Shield,
   LayoutDashboard,
   FileText,
   Settings as SettingsIcon,
   HelpCircle,
   KeyRound,
 } from 'lucide-react';
+import { TitleBar } from './TitleBar';
 import { api, STATE_LABELS, currentProxyPort, syncProxyPort } from '../services/api';
 import type { StateResponse, LicenseStatus } from '../services/api';
 import { getAppVersion, isTauri, setTrayState, type TrayState } from '../lib/tauriShim';
 import { useBootDeadline } from './EngineOffline';
+import { useI18n, t } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 侧边导航（产品文档：4 个页面）
@@ -29,7 +30,6 @@ const NAV_ITEMS = [
   { to: '/settings', label: '设置', icon: SettingsIcon, end: false },
   { to: '/help', label: '帮助', icon: HelpCircle, end: false },
 ];
-
 /**
  * 由引擎状态 + 今日统计推导托盘持续态。
  *
@@ -41,14 +41,18 @@ function deriveTrayState(
   s: StateResponse['state'],
   today: StateResponse['today'],
   reachable: boolean,
+  readOnly = false,
 ): { state: TrayState; detail: string } {
   if (!reachable || s === 'paused') {
     return { state: 'paused', detail: s === 'paused' ? '防护已暂停' : '本地代理未运行' };
   }
-  if (!today) return { state: 'safe', detail: '正在建立基线' };
+  // ★ 学习中 = 还没产生任何判定，托盘不能显示绿色。
+  //   绿色在托盘里只有一个含义：正在防护。基线未建立时显示绿色，
+  //   等于告诉用户「已经安全了」，而实际上一次检测都还没发生。
+  if (!today) return { state: 'paused', detail: t('正在建立基线') };
 
   if (today.danger_count > 0) {
-    return { state: 'danger', detail: `今日已阻断 ${today.danger_count} 次` };
+    return { state: 'danger', detail: `${t('今日已阻断')} ${today.danger_count} ${t('次')}` };
   }
   if (today.suspect_count > 0) {
     /* ★ 统计类信号不再把状态染成黄色「可疑」。
@@ -57,9 +61,34 @@ function deriveTrayState(
        之前只要有统计命中就显示「可疑」，等于把正常的编程对话
        报成「可疑」，用户要么被无谓惊吓、要么学会忽略这个信号。
        现在它只作为右侧的计数出现（见下方 status-stat）。 */
-    return { state: 'safe', detail: `今日 ${today.suspect_count} 条提示` };
+    return { state: 'safe', detail: `${t('今日')} ${today.suspect_count} ${t('条提示')}` };
   }
-  return { state: 'safe', detail: `今日已检查 ${today.total_calls} 次` };
+  // ★★ P1-2：只读态（未激活）下的这些次数全是「未经检测的直通」，
+  //   说成「已检查」就是账本说谎 —— 托盘与状态栏都不能这么写。
+  if (readOnly) {
+    // ★ 未激活 = 只转发不检测，托盘必须是灰的。
+    //   原先这里返回 safe（绿色），而绿色在托盘里只代表「正在防护」——
+    //   未激活的用户会看到一个绿色图标，以为自己在被保护。
+    //   这是安全产品最不能犯的错：对用户谎报状态。
+    return {
+      state: 'paused',
+      detail: `${t('未激活，今日仅转发')} ${today.total_calls} ${t('次（未经检测）')}`,
+    };
+  }
+  return { state: 'safe', detail: `${t('今日已检查')} ${today.total_calls} ${t('次')}` };
+}
+
+/** 缺失的检测层翻译成人话（后端给的是代码名）。 */
+const MISSING_LAYER_LABELS: Record<string, string> = {
+  system_prompt_inject: '系统提示词篡改检测',
+  sensitive_leak: '敏感信息泄露检测',
+};
+
+function describeMissingLayers(layers?: string[]): string {
+  if (!layers || layers.length === 0) return t('检测规则回退到内置最小集');
+  return layers
+    .map((l) => t(MISSING_LAYER_LABELS[l] ?? l))
+    .join(t('、')) + t(' 未启用');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -67,6 +96,7 @@ function deriveTrayState(
 // ══════════════════════════════════════════════════════════════
 
 function StatusBar() {
+  const { t } = useI18n();
   const [state, setState] = useState<StateResponse | null>(null);
   const [reachable, setReachable] = useState(true);
   // ★ 是否**曾经**连上过：区分「冷启动还没起来」与「用着用着挂了」。
@@ -139,8 +169,9 @@ function StatusBar() {
 
   // 下发托盘持续态（两段式变色的「持续」段）
   // 只在状态实际变化时下发，避免每 2s 一次无意义的 IPC。
+  // ★ read_only 必须进 key：激活前后同一个数字的说法不同（已检查 / 已转发）。
   const trayKey = reachable
-    ? `${state?.state}|${state?.today?.danger_count}|${state?.today?.suspect_count}|${state?.today?.total_calls}`
+    ? `${state?.state}|${state?.today?.danger_count}|${state?.today?.suspect_count}|${state?.today?.total_calls}|${state?.read_only ? 'ro' : 'ok'}`
     : 'unreachable';
   const lastTrayKey = useRef<string>('');
   useEffect(() => {
@@ -150,6 +181,7 @@ function StatusBar() {
       state?.state ?? 'learning',
       state?.today,
       reachable,
+      state?.read_only ?? false,
     );
     setTrayState(ts, detail);
   }, [trayKey, state, reachable]);
@@ -166,8 +198,8 @@ function StatusBar() {
       return (
         <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot learning" />
-          <span className="status-label">正在启动本地代理…</span>
-          <span className="status-meta">首次启动需要几秒</span>
+          <span className="status-label">{t('正在启动本地代理…')}</span>
+          <span className="status-meta">{t('首次启动需要几秒')}</span>
         </div>
       );
     }
@@ -175,11 +207,11 @@ function StatusBar() {
       <div className="status-bar" role="status" aria-live="polite">
         <span className="status-dot paused" />
         <span className="status-label" style={{ color: 'var(--xd-danger)' }}>
-          本地代理未运行
+          {t('本地代理未运行')}
         </span>
         <span className="status-meta">
-          端口 127.0.0.1:{currentProxyPort()} 没有响应 ·
-          可重启引擎，或看「设置 → 运行状态」里的原因
+          {t('端口')} 127.0.0.1:{currentProxyPort()} {t('没有响应')} ·{' '}
+          {t('可重启引擎，或看「设置 → 运行状态」里的原因')}
         </span>
         {isTauri() && (
           <button
@@ -187,11 +219,11 @@ function StatusBar() {
             onClick={() => void handleRestartEngine()}
             disabled={restarting}
           >
-            {restarting ? '正在重启…' : '重启引擎'}
+            {restarting ? t('正在重启…') : t('重启引擎')}
           </button>
         )}
         <Link className="btn ghost sm" to="/settings#sec-engine">
-          查看原因
+          {t('查看原因')}
         </Link>
       </div>
     );
@@ -210,10 +242,10 @@ function StatusBar() {
           改为一个读屏专用的 live 区域，只承载**状态文案**：
           它的文本仅在 state 真正切换时才变化，故只在状态变化时播报。 */}
       <span className="sr-only" aria-live="polite">
-        {s ? STATE_LABELS[s] : '读取中'}
+        {s ? t(STATE_LABELS[s]) : t('读取中')}
       </span>
       <span className={`status-dot ${s ?? 'learning'}`} />
-      <span className="status-label">{s ? STATE_LABELS[s] : '读取中'}</span>
+      <span className="status-label">{s ? t(STATE_LABELS[s]) : t('读取中')}</span>
       {state?.message && <span className="status-meta">{state.message}</span>}
 
       {/* ★ 只读模式必须显式说出来。
@@ -221,7 +253,26 @@ function StatusBar() {
           不说就是谎报「正在保护你」。 */}
       {state?.read_only && (
         <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
-          未激活，当前为只读模式（不执行拦截）
+          {t('未激活，当前为只读模式（不执行拦截）')}
+        </span>
+      )}
+
+      {/* ★★ P1-3：降级必须可见，而且是**常驻**的（状态栏每页都在）。
+          护栏整包缺失 / 规则回退到内置最小集时，界面原本与「一切正常」
+          完全一样 —— 检测能力缩水是比误报更危险的状态。
+          样式复用上面那条只读提示（同一档：还没开始正确保护，不是故障）。 */}
+      {state?.degraded && (
+        <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
+          {t('降级运行：')}{describeMissingLayers(state.guardrail_missing_layers)}
+        </span>
+      )}
+
+      {/* ★ P1-3：授权校验本身出问题（公钥缺失 / 验签异常）时也要说清楚 ——
+          这时按「已授权」处理是刻意的（不拿我方故障惩罚用户），
+          但用户有权知道这次其实没验过。 */}
+      {state?.license_check?.reason && !state?.license_check?.read_only && (
+        <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
+          {state.license_check.reason}
         </span>
       )}
 
@@ -238,18 +289,29 @@ function StatusBar() {
             to="/logs?days=1&marked=exclude"
             className="status-stat"
             style={{ textDecoration: 'none', color: 'inherit' }}
-            title="查看今天参与统计的记录（不含已标记误报与转发中断）"
+            title={t('查看今天参与统计的记录（不含已标记误报与转发中断）')}
           >
-            今日检查 <b className="mono">{today.total_calls}</b> 次
+            {/* ★★ P1-2：只读态下这个数字是「已转发」，不是「已检查」。
+                两句话同时出现在屏幕上（「不做防护」+「已检查 N 次」）
+                等于账本说谎，用户只会得出一个错误结论。 */}
+            {state?.read_only ? (
+              <>
+                {t('今日已转发')} <b className="mono">{today.total_calls}</b> {t('次（未经检测）')}
+              </>
+            ) : (
+              <>
+                {t('今日检查')} <b className="mono">{today.total_calls}</b> {t('次')}
+              </>
+            )}
           </Link>
           {today.danger_count > 0 && (
             <Link
               to="/logs?days=1&action=block&marked=exclude"
               className="status-stat"
               style={{ textDecoration: 'none', color: 'var(--xd-danger)' }}
-              title="查看今天被拦截的记录（已排除标记为误报的）"
+              title={t('查看今天被拦截的记录（已排除标记为误报的）')}
             >
-              危险 <b className="mono">{today.danger_count}</b>
+              {t('危险')} <b className="mono">{today.danger_count}</b>
             </Link>
           )}
           {today.suspect_count > 0 && (
@@ -261,9 +323,9 @@ function StatusBar() {
               to="/logs?days=1&action=alert&marked=exclude"
               className="status-stat"
               style={{ textDecoration: 'none', color: 'var(--xd-suspect)' }}
-              title="查看今天的提示记录（已排除标记为误报的）"
+              title={t('查看今天的提示记录（已排除标记为误报的）')}
             >
-              提示 <b className="mono">{today.suspect_count}</b>
+              {t('提示')} <b className="mono">{today.suspect_count}</b>
             </Link>
           )}
           {today.redaction_count > 0 && (
@@ -271,9 +333,9 @@ function StatusBar() {
               to="/logs?days=1&action=redact"
               className="status-stat"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天打过码的记录"
+              title={t('查看今天打过码的记录')}
             >
-              已打码 <b className="mono">{today.redaction_count}</b> 处
+              {t('今日已打码')} <b className="mono">{today.redaction_count}</b> {t('处')}
             </Link>
           )}
         </>
@@ -287,6 +349,7 @@ function StatusBar() {
 // ══════════════════════════════════════════════════════════════
 
 export default function Layout() {
+  const { t } = useI18n();
   const location = useLocation();
   // ★ 初值为空而不是硬编码版本（2026-10-20）：
   //   取到真实版本前不显示，避免发布后首帧闪一下上个版本号。
@@ -332,62 +395,57 @@ export default function Layout() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="sidebar-brand-icon">
-            <Shield size={18} strokeWidth={1.5} />
+      {/* 自绘标题栏：品牌区与侧栏同宽，视觉上连成一条竖线 */}
+      <TitleBar />
+
+      <div className="app-body">
+        <aside className="sidebar">
+          <nav className="sidebar-nav">
+            {NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.end}
+                  // title：窄窗口折叠成图标栏后靠它提示每个图标是什么，导航仍然可辨识。
+                  title={t(item.label)}
+                  className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                >
+                  <Icon size={17} strokeWidth={1.5} />
+                  {/* 标签单独包一层：窄窗口（≤900px）折叠为图标栏时由 CSS 隐藏文字，
+                      避免图标栏被挤爆。见 styles.css 的响应式断点。 */}
+                  <span className="nav-item-label">{t(item.label)}</span>
+                </NavLink>
+              );
+            })}
+            <NavLink
+              to="/activate"
+              title={t('激活')}
+              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            >
+              <KeyRound size={17} strokeWidth={1.5} />
+              <span className="nav-item-label">{t('激活')}</span>
+              {license && !license.activated && (
+                <span className="badge suspect" style={{ marginLeft: 'auto' }}>
+                  {t('未激活')}
+                </span>
+              )}
+            </NavLink>
+          </nav>
+
+          <div className="sidebar-footer">
+            {version && <span>v{version}</span>}
+            <span className="faint">{t('本地运行')}</span>
           </div>
-          <div className="sidebar-brand-text">
-            <div className="sidebar-brand-title">道体·玄盾</div>
-            <div className="sidebar-brand-sub">个人版</div>
-          </div>
+        </aside>
+
+        <div className="main-area">
+          <StatusBar />
+          <main className="page-content" ref={mainRef}>
+            <Outlet />
+          </main>
         </div>
-
-        <nav className="sidebar-nav">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                // title：窄窗口折叠成图标栏后靠它提示每个图标是什么，导航仍然可辨识。
-                title={item.label}
-                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              >
-                <Icon size={17} strokeWidth={1.5} />
-                {/* 标签单独包一层：窄窗口（≤900px）折叠为图标栏时由 CSS 隐藏文字，
-                    避免图标栏被挤爆。见 styles.css 的响应式断点。 */}
-                <span className="nav-item-label">{item.label}</span>
-              </NavLink>
-            );
-          })}
-          <NavLink
-            to="/activate"
-            title="激活"
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          >
-            <KeyRound size={17} strokeWidth={1.5} />
-            <span className="nav-item-label">激活</span>
-            {license && !license.activated && (
-              <span className="badge suspect" style={{ marginLeft: 'auto' }}>
-                未激活
-              </span>
-            )}
-          </NavLink>
-        </nav>
-
-        <div className="sidebar-footer">
-          {version && <span>v{version}</span>}
-          <span className="faint">本地运行</span>
-        </div>
-      </aside>
-
-      <div className="main-area">
-        <StatusBar />
-        <main className="page-content" ref={mainRef}>
-          <Outlet />
-        </main>
       </div>
     </div>
   );

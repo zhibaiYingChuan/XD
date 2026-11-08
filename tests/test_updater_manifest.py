@@ -25,10 +25,10 @@ SCRIPT = REPO / ".github" / "scripts" / "make_latest_json.py"
 
 def _seed(art: Path, *, exe=True, mac=True, linux=True, sig=True) -> None:
     files = {
-        "win": ("玄盾_0.1.18-alpha_x64-setup.exe", "SIG_WIN"),
-        "mac": ("玄盾.app.tar.gz", "SIG_MAC"),
+        "win": ("勘合_0.1.18-alpha_x64-setup.exe", "SIG_WIN"),
+        "mac": ("勘合.app.tar.gz", "SIG_MAC"),
         # ★ Linux 的更新包就是 AppImage 本身（Tauri 不产 .AppImage.tar.gz）
-        "linux": ("玄盾_0.1.18-alpha_amd64.AppImage", "SIG_LINUX"),
+        "linux": ("勘合_0.1.18-alpha_amd64.AppImage", "SIG_LINUX"),
     }
     for key, (name, signature) in files.items():
         enabled = {"win": exe, "mac": mac, "linux": linux}[key]
@@ -114,35 +114,94 @@ def test_non_tag_ref_is_rejected(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════
+# 更新说明（用户能看到的「这一版改了什么」）
+# ══════════════════════════════════════════════════════════════
+
+
+def test_notes_come_from_release_notes_file(tmp_path):
+    """latest.json 的 notes 必须是本版的人话说明，不能是占位文案。
+
+    ★ 2026-10-30 取证：此前 notes 取的是 `RELEASE_NOTES` 环境变量，
+      而**没有任何一处设置它** —— 于是每个用户的更新弹窗里都只有
+      一句「见 GitHub Release 说明」，等于客户端从来没拿到过更新内容，
+      而流水线一路绿。这类「看起来成功了」的失效必须由测试盯住。
+    """
+    _seed(tmp_path)
+    r = _run(tmp_path)
+    assert r.returncode == 0, r.stderr
+    data = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    notes = data["notes"]
+
+    assert "见 GitHub Release 说明" not in notes, "notes 又退回了占位文案"
+    assert len(notes.strip()) > 20, f"更新说明过短，等于没写：{notes!r}"
+    assert notes.count("\n- ") >= 2, f"更新说明不是条目式人话：{notes!r}"
+
+
+def test_release_notes_file_exists_for_current_version():
+    """当前版本必须有人话说明文件。
+
+    ★ 缺文件时脚本只打 warning 而不失败（不能让漏写说明阻断发版），
+      所以必须在这里拦住：否则「用户能看到这版改了什么」会静默失效。
+    """
+    import re
+
+    cargo = (REPO / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.M)
+    assert m, "无法从 Cargo.toml 读取版本号"
+    version = m.group(1)
+
+    notes_file = REPO / ".github" / "release_notes" / f"{version}.md"
+    assert notes_file.is_file(), (
+        f"缺少 {notes_file} —— 应用内的更新提示会退化成兜底文案"
+    )
+    body = notes_file.read_text(encoding="utf-8").strip()
+    assert len(body) > 40, "更新说明过短，用户看不出改了什么"
+    assert "- " in body, "更新说明应按条目书写（前端逐条渲染）"
+
+
+# ══════════════════════════════════════════════════════════════
 # 配置与发布链路的结构判据
 # ══════════════════════════════════════════════════════════════
 
 
-def test_tauri_config_enables_updater_but_not_local_signing():
-    """公钥与端点必须在；但 createUpdaterArtifacts 只能在 CI 配置里。
+def test_tauri_config_enables_updater_artifacts_for_every_platform():
+    """公钥与端点必须在；`createUpdaterArtifacts` 也必须开启。
 
-    ★ 若把 createUpdaterArtifacts 写进主配置，本地 `tauri build`
-      会因为缺少 TAURI_SIGNING_PRIVATE_KEY 直接失败 ——
-      这是「为了发版而把日常构建弄坏」。
+    ★ 2026-10-29 改判据：此前它只允许出现在 CI 配置里，
+      理由是「本地没私钥，写进主配置会让 `tauri build` 直接失败」。
+      但实测代价是 Linux AppImage **不产出** `.AppImage.tar.gz` ——
+      更新清单里于是永远没有 `linux-x86_64`，Linux 用户永远收不到更新，
+      而流水线一路绿。这不是「本地便不便利」能换的东西。
+      现在主配置开启、本地构建需注入签名私钥（docs/DEVELOPMENT.md 已写明）。
     """
     conf = json.loads(
         (REPO / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
     )
     updater = conf["plugins"]["updater"]
     assert updater["pubkey"].strip(), "更新公钥为空 —— 客户端无法验签"
+    # ★ 2026-11-03：端点从 GitHub 迁到自有站点 sfang.cc（国内可达性）。
+    #   判据改为「必须是稳定的 latest.json 指针」，不写死域名，
+    #   但禁止写死版本号 —— 那种指针在下一版就会 404。
+    endpoints = updater["endpoints"]
+    assert endpoints, "更新端点为空 —— 客户端不会检查更新"
     assert any(
-        "releases/latest/download/latest.json" in e
-        for e in updater["endpoints"]
-    ), "更新端点不是 releases/latest，指针会失效"
-    assert "createUpdaterArtifacts" not in conf["bundle"], (
-        "主配置开启了 updater 产物 —— 本地构建会被要求提供签名私钥"
+        e.rstrip("/").endswith("/latest.json") for e in endpoints
+    ), f"更新端点必须指向稳定的 latest.json 指针：{endpoints}"
+    assert conf["bundle"].get("createUpdaterArtifacts") is True, (
+        "主配置没开 createUpdaterArtifacts —— Linux 不会产出 .AppImage.tar.gz，"
+        "latest.json 里也就永远没有 linux-x86_64"
     )
 
+    # CI 叠加的同值配置保留：它让「CI 要产出更新签名包」在流水线里可见。
     ci_conf = json.loads(
         (REPO / "desktop/src-tauri/tauri.updater.conf.json")
         .read_text(encoding="utf-8")
     )
     assert ci_conf["bundle"]["createUpdaterArtifacts"] is True
+
+    # ★ 2026-11-08：开发文档已移出公开仓库（docs/ 被 .gitignore 忽略），
+    #   这里不再读取 docs/DEVELOPMENT.md —— 否则 CI 上必然 FileNotFoundError。
+    #   「本地构建需注入签名私钥」这条说明保留在内部文档里，不随仓库发布。
 
 
 def test_release_workflow_signs_and_publishes_manifest():
@@ -168,6 +227,97 @@ def test_release_workflow_signs_and_publishes_manifest():
         "发布资产用了 tar.gz 通配 —— 会把 deb 的 control/data.tar.gz 也发出去"
     )
     assert "**/*.app.tar.gz" in text, "macOS 更新包应只收 *.app.tar.gz"
+
+    # ★ 2026-10-29：Linux 的更新包是 `.AppImage.tar.gz`（大写 A、大写 I），
+    #   与 macOS 的 `*.app.tar.gz` 互不覆盖 —— 上传与改名两处都必须显式写上。
+    #   少了任何一处，更新包都会在到达 release job 之前被丢掉。
+    assert "**/*.AppImage.tar.gz" in text, (
+        "上传清单少了 .AppImage.tar.gz —— Linux 更新包走不到 release job"
+    )
+    assert "*.AppImage.tar.gz.sig)" in text, "改名分支缺 .AppImage.tar.gz.sig"
+    assert "*.AppImage.tar.gz)" in text, "改名分支缺 .AppImage.tar.gz"
+
+    # ★ 版本号必须从 Cargo.toml（SSOT）读，不能硬编码或用 tag 名 ——
+    #   否则资产名与 latest.json 的 version 可能来自两个不同的地方。
+    stage = text.split("Stage release assets with ASCII names", 1)[1]
+    assert "desktop/src-tauri/Cargo.toml" in stage, (
+        "ASCII 改名步骤没从 Cargo.toml 读版本号"
+    )
+    assert "${GITHUB_REF_NAME#v}" not in stage.split("ls -l dist", 1)[0], (
+        "ASCII 改名步骤仍用 tag 名当版本号"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# 发布资产门禁（check_release_assets.py）的三条分支
+# ══════════════════════════════════════════════════════════════
+
+ASSET_GATE = REPO / ".github" / "scripts" / "check_release_assets.py"
+
+
+def _seed_dist(d: Path, *, appimage: bool = True, sig: bool = True) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "xuandun-personal_0.1.27-alpha_x64-setup.exe",
+        "xuandun-personal_0.1.27-alpha_aarch64.dmg",
+        "xuandun-personal_0.1.27-alpha_aarch64.app.tar.gz",
+        "xuandun-personal_0.1.27-alpha_amd64.deb",
+    ):
+        (d / name).write_text("x", encoding="utf-8")
+    if not appimage:
+        return
+    base = "xuandun-personal_0.1.27-alpha_amd64.AppImage"
+    (d / base).write_text("x", encoding="utf-8")
+    if sig:
+        (d / f"{base}.sig").write_text("SIG", encoding="utf-8")
+
+
+def _run_gate(d: Path, *, exempt: bool, notice: Path):
+    env = {k: v for k, v in os.environ.items() if k != "ALLOW_MISSING_APPIMAGE"}
+    if exempt:
+        env["ALLOW_MISSING_APPIMAGE"] = "1"
+    return subprocess.run(
+        [sys.executable, str(ASSET_GATE), str(d), "--notice-out", str(notice)],
+        capture_output=True, text=True, env=env,
+    )
+
+
+def test_asset_gate_passes_when_appimage_update_package_is_complete(tmp_path):
+    """AppImage + 更新包 + 签名齐全 → 放行，且不写豁免提示。"""
+    dist = tmp_path / "dist"
+    _seed_dist(dist)
+    notice = tmp_path / "notice.md"
+    r = _run_gate(dist, exempt=False, notice=notice)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not notice.exists(), "全都齐了却写了缺件提示"
+
+
+def test_asset_gate_blocks_when_appimage_signature_is_missing(tmp_path):
+    """安装包在、更新签名不在 → 未豁免必须 exit 1。
+
+    ★ 2026-10-30 实测更正：Tauri 对 Linux 只产 `.AppImage` 与
+      `.AppImage.sig`，**不产** `.AppImage.tar.gz`（那是 macOS 的形态）。
+      此前按 tar.gz 要求，每一个 Linux 包都被判「缺更新包」，
+      v0.1.28 的发布就卡死在这一条上。真正会让「能装不能升级」的是签名缺失：
+      客户端验不过会静默放弃更新，而 Release 页面看起来一切正常。
+    """
+    dist = tmp_path / "dist"
+    _seed_dist(dist, sig=False)
+    r = _run_gate(dist, exempt=False, notice=tmp_path / "notice.md")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert ".sig" in (r.stdout + r.stderr), "没指出缺的到底是哪个签名"
+
+
+def test_asset_gate_allows_exempted_incomplete_appimage_with_notice(tmp_path):
+    """已豁免 → 放行，但必须写出正文提示（缺件不能被静默吞掉）。"""
+    dist = tmp_path / "dist"
+    _seed_dist(dist, sig=False)
+    notice = tmp_path / "notice.md"
+    r = _run_gate(dist, exempt=True, notice=notice)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::warning" in r.stdout
+    text = notice.read_text(encoding="utf-8")
+    assert "自动更新" in text
 
 
 def test_signature_parser_accepts_all_cli_output_shapes(tmp_path):

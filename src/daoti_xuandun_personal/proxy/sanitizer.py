@@ -10,7 +10,7 @@
 
 关键约束（安全底线）：
 1. 原始敏感值**只存于本地 DB**，绝不写入任何外发内容或日志
-2. 脱敏占位符使用 `⟦XD_{index}⟧` 格式，数学字母括号避免与原文冲突
+2. 脱敏占位符使用 `⟦KH_{index}⟧` 格式，数学字母括号避免与原文冲突
 3. 脱敏必须**幂等**——同一段文本重复脱敏产生相同结果
 4. 命中阻断类敏感信息时**绝不**降级为打码（防止半泄露）
 
@@ -73,9 +73,76 @@ CATEGORY_LABELS: Dict[str, str] = {
 # ══════════════════════════════════════════════════════════════
 
 
+def _card_network_ok(number: str) -> bool:
+    """按卡组织规则校验「前缀 + 长度」是否匹配（ISO/IEC 7812）。
+
+    ★★ 2026-11-04：为什么只做 Luhn 不够
+    ────────────────────────────────────────────────────────────
+    实测误报：用户消息里出现 3 个 15–16 位数字，全部通过 Luhn，
+    被当成 3 张银行卡整条阻断。但其中：
+      · 15 位、53 开头 —— MasterCard 必须是 16 位，不可能是卡
+      · 16 位、16 开头 —— 16 不属于任何卡组织前缀
+    也就是说，**Luhn 只校验「校验位对不对」，不校验「这是不是卡」**。
+    任意 15–19 位数字约有 1/10 概率通过 Luhn，长文本里很容易撞上。
+
+    这里补上卡组织的前缀与长度约束：只有同时满足，
+    才可能是真卡。订单号、时间戳、日志 ID 基本都会被挡掉。
+    """
+    n = len(number)
+    if not number.isdigit():
+        return False
+    p1 = number[0]
+    p2 = number[:2]
+    p3 = number[:3]
+    p4 = number[:4]
+
+    # Visa：13 / 16 / 19 位，4 开头
+    if p1 == "4" and n in (13, 16, 19):
+        return True
+    # MasterCard：16 位，51–55 或 2221–2720
+    if n == 16 and (
+        p2 in {"51", "52", "53", "54", "55"}
+        or (p4.isdigit() and 2221 <= int(p4) <= 2720)
+    ):
+        return True
+    # American Express：15 位，34 / 37
+    if n == 15 and p2 in {"34", "37"}:
+        return True
+    # Discover：16 位，6011 / 65 / 644–649
+    if n == 16 and (
+        p4 == "6011"
+        or p2 == "65"
+        or (p3.isdigit() and 644 <= int(p3) <= 649)
+    ):
+        return True
+    # JCB：16 位，3528–3589
+    if n == 16 and p4.isdigit() and 3528 <= int(p4) <= 3589:
+        return True
+    # UnionPay：16–19 位，62
+    if 16 <= n <= 19 and p2 == "62":
+        return True
+    # Diners Club：14 位，300–305 / 36 / 38
+    if n == 14 and (
+        p2 in {"36", "38"}
+        or (p3.isdigit() and 300 <= int(p3) <= 305)
+    ):
+        return True
+    # Maestro：16–19 位，50 / 56–69
+    if 16 <= n <= 19 and (
+        p2 == "50" or (p2.isdigit() and 56 <= int(p2) <= 69)
+    ):
+        return True
+    return False
+
+
 def _luhn_check(number: str) -> bool:
-    """Luhn 校验（银行卡号，ISO 7812）。"""
+    """银行卡号校验：卡组织前缀 + 长度 + Luhn（ISO 7812）。"""
     if not number.isdigit() or not (13 <= len(number) <= 19):
+        return False
+    # ★ 2026-11-04：先过卡组织规则，再过 Luhn。
+    #   顺序不能反：Luhn 对任意数字都有 1/10 通过率，
+    #   先做它等于让大量非卡数字进入下一步。
+    if not _card_network_ok(number):
         return False
     total = 0
     parity = len(number) % 2
@@ -87,6 +154,45 @@ def _luhn_check(number: str) -> bool:
                 d -= 9
         total += d
     return total % 10 == 0
+
+
+#: 卡号语境词。数字附近出现这些词，才认为用户是在说「卡号」。
+#: ★ 2026-11-04：格式合法还不够 —— 长文本里的订单号、日志 ID
+#:   也可能恰好符合卡组织格式。加一层语境判断，把「碰巧像卡」挡掉。
+_CARD_CONTEXT = re.compile(
+    r"(?:卡号|银行卡|信用卡|借记卡|储蓄卡|银联卡|"
+    r"card\s*(?:no|number)?|credit\s*card|debit\s*card|"
+    r"cvv|cvc|有效期|expiry|expiration)",
+    re.IGNORECASE,
+)
+
+
+def _has_card_context(text: str, start: int, end: int, window: int = 40) -> bool:
+    """数字附近是否有「卡号」语境，或它是否独占一行。
+
+    ★ 为什么需要它（2026-11-04 实测误报）
+    ────────────────────────────────────────────────────────────
+    用户消息里 3 个 15–16 位数字被当成 3 张银行卡整条阻断，
+    但用户确认没有输入任何卡号。格式校验只能挡掉「前缀/长度不对」的，
+    挡不掉「格式完全合法但其实是订单号」的。
+
+    判定口径：
+      · 前后 40 字符内出现「卡号 / 银行卡 / card / CVV / 有效期」→ 是卡
+      · 数字独占一行（前后只有空白或标点）→ 是卡
+      · 其余情况 → 不当作卡，不阻断、不打码
+    """
+    left = text[max(0, start - window):start]
+    right = text[end:end + window]
+    if _CARD_CONTEXT.search(left) or _CARD_CONTEXT.search(right):
+        return True
+
+    # 独占一行：整行去掉首尾空白后，正好就是这个数字
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end].strip()
+    return line == text[start:end]
 
 
 def _cn_id_checksum_valid(id_no: str) -> bool:
@@ -171,7 +277,13 @@ BUILTIN_RULES: List[_Rule] = [
     # ── 强身份信息（一律阻断）──
     _Rule("cn_idcard", "idcard", r"(?<![0-9Xx])\d{17}[\dXx](?![0-9Xx])",
           _cn_id_checksum_valid),
-    _Rule("bankcard", "bankcard", r"(?<!\d)\d{13,19}(?!\d)", _luhn_check),
+    # ★★ 2026-11-03（二次误报）：旧判据 `(?<!\d)\d{13,19}(?!\d)` 会把
+    #   哈希/Base64 里偶然出现的 13 位数字（恰好通过 Luhn）当成银行卡，
+    #   实测把一次正常的构建上传请求整条阻断。
+    #   修复：① 只认 15–19 位（13/14 位卡号早已淘汰，Amex 为 15 位）；
+    #        ② 前后必须是「非字母数字」边界，排除嵌在哈希/Base64/ID 里的数字。
+    _Rule("bankcard", "bankcard",
+          r"(?<![0-9A-Za-z])\d{15,19}(?![0-9A-Za-z])", _luhn_check),
 
     # ── 弱身份信息（按级别打码/阻断）──
     _Rule("cn_phone", "phone", r"(?<!\d)1[3-9]\d{9}(?!\d)"),
@@ -262,7 +374,7 @@ class RequestSanitizer:
     使用示例：
         sanitizer = RequestSanitizer(level=SecurityLevel.BALANCED)
         result = sanitizer.sanitize("我的手机号是 13812345678")
-        # result.sanitized_text = "我的手机号是 ⟦XD_0⟧"
+        # result.sanitized_text = "我的手机号是 ⟦KH_0⟧"
         # result.redaction_count == 1
     """
 
@@ -372,13 +484,13 @@ class RequestSanitizer:
                   整轮阻断会让对话直接中断，而且这段内容留在历史里，
                   之后每轮都会被再拦一次 —— 用户看到的是「聊到一半突然
                   一直发不出去」。打码同样能保证 token 不外发
-                  （中转站只看到 ⟦XD_n⟧），但不打断对话。
+                  （中转站只看到 ⟦KH_n⟧），但不打断对话。
                   用户自己打的字仍按阻断处理：那是「正要贴密钥」的时刻，
                   必须让他停下来。
             vault: 可选 ``PlaceholderVault``。传入后占位符编号由保险箱
                 按「会话 + 值」分配 —— 同一个值跨轮次、跨消息都是同一个
                 编号。★ 这是还原能跨轮次工作的前提：按位置编号时，
-                模型复述上一轮的 ⟦XD_3⟧ 会被本轮 3 号（另一个值）顶掉，
+                模型复述上一轮的 ⟦KH_3⟧ 会被本轮 3 号（另一个值）顶掉，
                 静默替换成错误的秘密。
             session_id: 与 vault 配套的会话标识。
 
@@ -503,7 +615,7 @@ class RequestSanitizer:
             if not self._enabled_categories.get(rule.category, True):
                 continue
             for start, end, value in rule.find(text):
-                # ★★ 2026-10-27：放行玄盾自己的激活码。
+                # ★★ 2026-10-27：放行勘合自己的激活码。
                 #
                 #   激活码本身就是 RS256 JWT（`XDACT-` + 三段式），
                 #   JWT 规则必然命中，于是「用户把自家激活码贴进对话」
@@ -514,6 +626,14 @@ class RequestSanitizer:
                 #   放行不等于不设防：激活码一码一机、绑定硬件，
                 #   泄露到中转站也换不了机器；而拦住它只会让用户没法求助。
                 if rule.category == "jwt" and _is_own_activation_code(text, start):
+                    continue
+                # ★ 2026-11-04：银行卡必须同时满足「格式合法」和「有卡号语境」。
+                #   格式合法但附近没有卡号语境的长数字（订单号、日志 ID、
+                #   时间戳）不当作卡 —— 否则长文本里随便一个数字都能
+                #   触发整条阻断，用户看到的就是「我没输卡号却被拦」。
+                if rule.category == "bankcard" and not _has_card_context(
+                    text, start, end
+                ):
                     continue
                 hits.append((start, end, rule.category, rule.name))
 

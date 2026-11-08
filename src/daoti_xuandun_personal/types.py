@@ -74,6 +74,14 @@ class Action(str, Enum):
     REDACT = "redact"    # 打码（替换后继续）
     BLOCK = "block"      # 阻断
     ALERT = "alert"      # 告警（放行但标记可疑）
+    # ★ 2026-11-03：观察。
+    #   文本启发式命中（响应正文里出现危险字面量、约束违背、工具链注入等），
+    #   但没有结构化证据（tool_call 参数 / 隐藏指令 / 模型降级 / 凭证泄露）。
+    #   这类命中在 AI 编程助手的日常输出里是常态 —— 它本来就在写危险命令、
+    #   讨论安全、贴代码。把它当「提示」会让用户被噪声淹没，
+    #   每加一条文本判据就多一批误报。
+    #   观察 = 记录、可查、不阻断、不计入首页「提示」。
+    OBSERVE = "observe"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -123,7 +131,7 @@ class LogType(str, Enum):
 class RedactionRecord:
     """单条敏感信息脱敏记录。
 
-    脱敏占位符格式：`⟦XD_{index}⟧`（用数学字母括号避免与原文冲突）
+    脱敏占位符格式：`⟦KH_{index}⟧`（用数学字母括号避免与原文冲突）
     """
 
     index: int                        # 占位符编号（用于恢复）
@@ -140,12 +148,12 @@ class RedactionRecord:
     @staticmethod
     def placeholder(index: int) -> str:
         """生成脱敏占位符。"""
-        return f"⟦XD_{index}⟧"
+        return f"⟦KH_{index}⟧"
 
     @staticmethod
     def parse_placeholder(text: str) -> Optional[int]:
         """从占位符文本解析出编号，非占位符返回 None。"""
-        if not (text.startswith("⟦XD_") and text.endswith("⟧")):
+        if not (text.startswith("⟦KH_") and text.endswith("⟧")):
             return None
         try:
             return int(text[5:-1])
@@ -199,6 +207,11 @@ class VerificationFinding:
     # ★ 2026-10-23：凭证指纹（SHA-256）。只有「凭证类」发现才有值。
     #   证据包靠它回查台账，回答「这枚凭证第一次出现在哪一侧」。
     fingerprint: str = ""
+    # ★ 2026-11-04：具体判据名（如「Python 内联执行网络/动态代码」）。
+    #   同一 category 下不同判据的危险程度不同：
+    #   「rm -rf」要阻断，「python -c 拉数据」只观察。
+    #   决策闸门靠它区分，而不是靠 detail 字符串匹配。
+    signal: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

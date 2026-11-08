@@ -130,7 +130,9 @@ _VIOLATION_SIGNALS: Dict[str, List[Tuple[str, str, str]]] = {
     "no_command_execution": [
         (r"\b(?:subprocess\.(?:run|call|Popen|check_output)|os\.system|os\.popen)\b",
          "响应要求执行系统命令", "high"),
-        (r"\bexec\s*\(|\beval\s*\(",
+        # ★ 2026-11-03（二次误报）：`re.exec(s)` / `model.eval()` 是方法调用，
+        #   不是动态代码执行。与 verifier 的修复保持一致，加负向后顾。
+        (r"(?<!\.)\bexec\s*\(|(?<!\.)\beval\s*\(",
          "响应使用动态代码执行", "high"),
     ],
     "no_file_mutation": [
@@ -450,6 +452,84 @@ def _strip_date_suffix(name: str) -> str:
     return _MODEL_MMDD_SUFFIX_RE.sub("", name)
 
 
+# ── 强弱 / 能力标签：出现在后缀里就说明「不是同一个模型」──
+#
+# ★ 这张表是 build-tag 豁免的**唯一刹车**：
+#   只要多出来的部分含其中任何一个词，就仍然按「换模型」处理。
+#   收录的是「换一个词就代表另一个产品」的那些：
+#     mini / lite / flash / air / nano  —— 更弱的型号（降级牟利的主战场）
+#     pro / max / ultra / large         —— 更强的型号
+#     reasoner / thinking / coder / code / math —— 不同能力专线
+#     vision / audio / realtime / omni / image / video / tts / stt —— 不同模态
+#   `-cm`、`-1017`、`-build7` 这类构建/渠道标记不在此列 —— 它们是同一个模型。
+_MODEL_CAPABILITY_TOKENS = frozenset({
+    "mini", "nano", "micro", "small", "tiny", "lite", "light", "air",
+    "flash", "fast", "turbo", "pro", "max", "plus", "ultra", "large",
+    "heavy", "haiku", "sonnet", "opus", "preview", "experimental",
+    "reasoner", "thinking", "instruct", "chat", "coder", "code",
+    "math", "vision", "audio", "realtime", "omni", "image", "video",
+    "tts", "stt", "whisper", "speech", "embed", "embedding", "rerank",
+})
+
+# 日期段：4 位合法月日（1017）或 6-8 位数字（20241017 / 241017）。
+# ★ 之所以不接受任意 4 位数字：那样 `model-a-9999` 就成了逃逸通道
+#   （既有测试专门盯这条），而它并不是一个日期。
+_MODEL_DATE_TOKEN_RE = re.compile(
+    r"^(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d{6,8})$"
+)
+
+# 渠道/构建标记：1-4 位纯字母（cm / hk / sg / dev）。带数字的一律不放行，
+# 因为 `-v2`、`-build7` 这类既可能是构建号，也可能是另一个型号的版本号，
+# 没有足够证据区分时应当继续告警。
+_MODEL_TAG_TOKEN_RE = re.compile(r"^[a-z]{1,4}$")
+
+
+def _is_build_tag_variant(req: str, resp: str) -> bool:
+    """resp 是否是「req + 日期构建标签」（同一模型的不同构建）。
+
+    ★★ 2026-10-30 实测误报（十分钟内十几条，全部标「高危 / 已拦截」）：
+        请求 deepseek/deepseek-v4.1-flash
+        返回 deepseek/deepseek-v4.1-flash-1017-cm
+      末尾的 `-cm` 让原有的 -MMDD 快照规则失配 —— 那条规则只认
+      「以 -MMDD 结尾」，一旦服务商再追加自己的渠道标记就漏掉。
+      而 `-1017-cm` 与 `-1017`、`-2024-11-01` 是同一种东西：
+      同一模型的具体构建批次，不是强弱变化。
+
+    ★ 判据（刻意很窄，宁可漏放也不当逃逸通道）：
+        ① resp 以 req 开头，紧跟一个分隔符；
+        ② 多出来的段里**至少有一段是日期**（合法月日 4 位 / 6-8 位数字）；
+        ③ 其余段只能是 1-4 位纯字母（渠道/构建标记，如 cm / hk / sg）；
+        ④ 任何一段都不得是强弱或能力词。
+      于是：
+        ✓ deepseek-v4.1-flash-1017-cm   （日期 + 渠道标记）
+        ✓ deepseek-v4.1-flash-cm-1017   （顺序反过来同样成立）
+        ✗ gpt-4o-mini                   （没有日期段，且 mini 是更弱的型号）
+        ✗ claude-3-5-sonnet-2           （没有日期段 —— 版本号不等于构建批次）
+        ✗ model-a-9999                  （9999 不是合法月日，是逃逸通道）
+        ✗ gpt-4o-realtime-preview       （能力词，属另一类模型）
+    ★ 反方向（resp 比 req 短）不在此处理：那由归一化剥快照号覆盖，
+      若仍不等，说明请求的确实不是同一个型号，应当继续告警。
+    """
+    if not resp.startswith(req):
+        return False
+    tail = resp[len(req):]
+    if not tail or tail[0] not in "-_.":
+        return False
+    tokens = [t for t in re.split(r"[-_.]", tail) if t]
+    if not tokens:
+        return False
+    if any(t in _MODEL_CAPABILITY_TOKENS for t in tokens):
+        return False
+    has_date = False
+    for t in tokens:
+        if _MODEL_DATE_TOKEN_RE.match(t):
+            has_date = True
+        elif not _MODEL_TAG_TOKEN_RE.match(t):
+            # 既不是日期、也不是短字母标记 —— 形态未知，不享受豁免
+            return False
+    return has_date
+
+
 def _model_compatible(req: str, resp: str) -> bool:
     """判断两个归一化后的模型名是否可能指向同一个模型。
 
@@ -478,6 +558,12 @@ def _model_compatible(req: str, resp: str) -> bool:
     # ★ 只看 4 位「合法月日」后缀，强弱词（mini/haiku/flash/pro）不在此列，
     #   所以「gpt-4o → gpt-4o-mini」这类真降级仍会被判出来。
     if _strip_date_suffix(req) == _strip_date_suffix(resp):
+        return True
+    # 同一模型的构建/渠道标签：deepseek-v4.1-flash-1017-cm ↔ deepseek-v4.1-flash
+    # ★ 2026-10-30：只认 -MMDD **结尾**的规则漏掉了「服务商再追加标记」的
+    #   真实形态，十分钟刷了十几条高危误报。这里按「后缀里有没有强弱词」判，
+    #   而不是枚举后缀长什么样 —— 枚举永远追不上服务商的命名。
+    if _is_build_tag_variant(req, resp):
         return True
     # 同系列合法变体：显式枚举，每一条都要能说出「为什么这是同一个模型」
     return _model_same_family(req, resp)
@@ -987,6 +1073,56 @@ _EXECUTABLE_INJECTION = [
 ]
 
 
+#: 「写入意图」——只有表达「要动这个文件」才算注入。
+#:
+#: ★ 2026-11-03 实测误报：AI 在总结一次项目会话时，正文里同时出现了
+#:   AGENTS.md 与 process.env（描述项目规则），于是被判为
+#:   「针对 AI 编程工具配置文件的注入」。
+#:   根因是旧判据只要求「配置文件名 + 可执行载荷」在 600 字符内共现，
+#:   无法区分「描述/引用这个文件」与「要求写入这个文件」。
+#:   正常回答会提到 AGENTS.md（教学、总结、排障），但不会要求改它。
+_WRITE_INTENT = re.compile(
+    r"(?:写入|写到|写进|写为|创建|新建|修改|改成|改为|追加|添加|加入|加进|"
+    r"加(?:一个|个|入|进|上|\s*[:：])|"
+    r"配置为|设置为|替换|覆盖|保存到|放到|放进|"
+    r"内容如下|配置如下|如下所示|"
+    r"\bwrite\s+(?:to|into)\b|\bcreate\b|\bupdate\b|\bmodify\b|\bappend\b|"
+    r"\badd\s+(?:to|into)\b|\breplace\b|\bsave\s+(?:to|as)\b|"
+    r"\bput\s+(?:it\s+)?in\b)",
+    re.IGNORECASE,
+)
+
+#: 子句边界：中文句号/分号/换行，以及后接空白的英文句号/分号。
+#: 用于把「文件名」与「写入动词」限制在同一子句内，避免跨句误连。
+_CLAUSE_BREAK = re.compile(r"[。！？；\n]|[.!?;](?=\s)")
+
+
+def _has_write_intent_near(content: str, pos: int) -> bool:
+    """判断配置文件出现的位置附近是否表达了「写入/修改」意图。
+
+    ★ 2026-11-03 二次误报：上一版按「行」取上下文，而 AI 复核报告里
+      引用了检测器自己的说明「…（AGENTS.md）…。修改这类文件等于…」，
+      同一行内的「修改」被当成了写入意图。
+      现在按**子句**取上下文（句号/分号/换行分隔），
+      只有与文件名同处一个子句的写入动词才算数。
+    """
+    start = 0
+    for m in _CLAUSE_BREAK.finditer(content, 0, pos):
+        start = m.end()
+    m_end = _CLAUSE_BREAK.search(content, pos)
+    end = m_end.start() if m_end else len(content)
+    clause = content[start:end]
+    if _WRITE_INTENT.search(clause):
+        return True
+    # 文件名单独成行时（如「写入\n.cursor/mcp.json」），允许看上一子句
+    if len(clause.strip()) <= 40:
+        prev_start = 0
+        for m in _CLAUSE_BREAK.finditer(content, 0, start):
+            prev_start = m.end()
+        return bool(_WRITE_INTENT.search(content[prev_start:start]))
+    return False
+
+
 def _check_toolchain_injection(
     baseline: RequestBaseline, content: str
 ) -> List[Dict[str, str]]:
@@ -1013,8 +1149,7 @@ def _check_toolchain_injection(
     # ① 响应中是否出现「工具配置文件」
     file_hits: List[Tuple[str, str, int]] = []
     for pat, label in _TOOLCHAIN_CONFIG_FILES:
-        m = re.search(pat, content, re.IGNORECASE)
-        if m:
+        for m in re.finditer(pat, content, re.IGNORECASE):
             file_hits.append((label, m.group(0), m.start()))
     if not file_hits:
         return []
@@ -1022,14 +1157,16 @@ def _check_toolchain_injection(
     # ② 同一段内容里是否伴随可执行载荷
     payload_hits: List[Tuple[str, str, int]] = []
     for pat, label in _EXECUTABLE_INJECTION:
-        m = re.search(pat, content, re.IGNORECASE)
-        if m:
+        for m in re.finditer(pat, content, re.IGNORECASE):
             payload_hits.append((label, m.group(0)[:30], m.start()))
     if not payload_hits:
         return []
 
     # ③ 配置与载荷相距 600 字符内 —— 视为同一段配置
+    #    且文件附近必须表达「写入/修改」意图：只提到文件名是描述，不是注入
     for flabel, ftext, fpos in file_hits:
+        if not _has_write_intent_near(content, fpos):
+            continue
         for plabel, _, ppos in payload_hits:
             if abs(ppos - fpos) > 600:
                 continue
@@ -1152,7 +1289,7 @@ def _collect_tool_arguments(obj: Any, depth: int = 0) -> str:
 #:   实测用户日志里出现了一个 200 字符、含换行与引号的「工具名」——
 #:   它被判成「响应调用了未声明的工具」并**阻断**了对话，
 #:   而那条 detail 里写的是「你只声明了 27 个工具：…」，
-#:   用户唯一的结论是玄盾认错了。
+#:   用户唯一的结论是勘合认错了。
 #:
 #:   工具名不可能是那个样子：真实工具名都很短、无空白。
 #:   这条校验与来源无关 —— 无论哪个字段漏进长文本都拦得住。
@@ -1235,6 +1372,42 @@ _SEVERITY = {
     "new_external_endpoint": "medium",
     "new_dependency": "medium",
 }
+
+#: 常见公共站点后缀 —— 出现在工具调用参数里不构成「数据外传」证据。
+#:
+#: ★★ 2026-11-03（误报修复）：实测 8 条 new_external_endpoint 全部是
+#:   用户正在调研的站点（aliexpress / shopee / huggingface / modelscope /
+#:   apple 推送 / windows WNS）与本地 127.0.0.1。判据只知道「请求正文里
+#:   没提过这个域名」，不知道用户的意图就是访问它。
+#:   公共站点与内网地址一律不报；只有陌生域名才保持 medium。
+_BENIGN_HOST_SUFFIXES = (
+    "aliexpress.com", "shopee.co", "shopee.com", "lazada.com", "amazon.com",
+    "taobao.com", "tmall.com", "jd.com", "1688.com", "pinduoduo.com",
+    "github.com", "githubusercontent.com", "gitlab.com", "gitee.com",
+    "huggingface.co", "modelscope.cn", "pypi.org", "npmjs.com",
+    "apple.com", "microsoft.com", "windows.com", "google.com",
+    "cloudflare.com", "openai.com", "anthropic.com",
+    "baidu.com", "aliyun.com", "tencent.com", "bilibili.com", "zhihu.com",
+)
+
+
+def _is_benign_host(host: str) -> bool:
+    """该主机是否属于「公共站点 / 内网地址」—— 不构成外传证据。"""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return False
+    # 内网 / 回环：本地开发服务，不是外传
+    if h in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if h.startswith(("10.", "192.168.", "169.254.")):
+        return True
+    if h.startswith("172."):
+        try:
+            if 16 <= int(h.split(".")[1]) <= 31:
+                return True
+        except (IndexError, ValueError):
+            pass
+    return any(h == s or h.endswith("." + s) for s in _BENIGN_HOST_SUFFIXES)
 
 
 def diff_against_baseline(
@@ -1354,17 +1527,25 @@ def diff_against_baseline(
     #   模型在正常回答里写 `requests.get('https://api.example.com')`
     #   是讲解行为，不是执行行为。若把 content 也算进来，
     #   编程场景下几乎每条回答都会命中，误报率不可用。
+    #
+    # ★★ 2026-11-03（误报修复）：公共站点与内网地址不再报。
+    #   实测 8 条全部是用户正在调研的站点（aliexpress / shopee /
+    #   huggingface / modelscope / apple 推送 / windows WNS）与 127.0.0.1。
+    #   判据只知道「请求正文里没提过这个域名」，不知道用户的意图
+    #   就是访问它 —— 这类命中没有任何证据价值，只会淹没真信号。
     new_domains = (
         set(response_facts.get("exec_domains") or [])
         - baseline.request_domains
     )
     new_ips = set(response_facts.get("exec_ips") or []) - baseline.request_ips
-    if new_domains or new_ips:
+    risky_domains = {d for d in new_domains if not _is_benign_host(d)}
+    risky_ips = {i for i in new_ips if not _is_benign_host(i)}
+    if risky_domains or risky_ips:
         parts = []
-        if new_domains:
-            parts.append("域名 " + "、".join(sorted(new_domains)[:5]))
-        if new_ips:
-            parts.append("IP " + "、".join(sorted(new_ips)[:5]))
+        if risky_domains:
+            parts.append("域名 " + "、".join(sorted(risky_domains)[:5]))
+        if risky_ips:
+            parts.append("IP " + "、".join(sorted(risky_ips)[:5]))
         findings.append({
             "category": "new_external_endpoint",
             "severity": _SEVERITY["new_external_endpoint"],

@@ -7,6 +7,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { CheckCircle2, XCircle, Info, X } from 'lucide-react';
+import { t as tr } from '../i18n';
 
 // ══════════════════════════════════════════════════════════════
 // 类型 + Context
@@ -96,7 +97,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <button
                 className="toast-close"
                 onClick={() => remove(t.id)}
-                aria-label="关闭提示"
+                aria-label={tr('关闭提示')}
               >
                 <X size={15} strokeWidth={1.5} />
               </button>

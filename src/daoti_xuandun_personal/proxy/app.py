@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import copy
 import datetime as _dt
@@ -62,7 +63,8 @@ from .listeners import RelayPortListeners
 from .restorer import ContentRestorer
 from .sanitizer import CATEGORY_LABELS, RequestSanitizer
 from .verifier import (
-    OBSERVATION_ONLY_SIGNALS, ResponseVerifier, decide_response_action,
+    OBSERVATION_ONLY_SIGNALS, STRUCTURED_SIGNALS, ResponseVerifier,
+    _OBSERVE_ONLY_TOOL_SIGNALS, decide_response_action,
 )
 
 logger = logging.getLogger("xuandun-personal.app")
@@ -105,7 +107,7 @@ _actual_port: Optional[int] = None
 
 # ★ 专属入口端口的监听器（2026-10-22）。只在 run() 里创建。
 #   测试/浏览器预览模式下为 None —— 端口接口据此明确提示
-#   「需要重启玄盾」，而不是假装保存成功却没人监听。
+#   「需要重启勘合」，而不是假装保存成功却没人监听。
 _relay_listeners: Optional[RelayPortListeners] = None
 
 # 授权结论的短 TTL 缓存：(许可证文件 mtime, 判定时刻, 是否启用防护)。
@@ -123,7 +125,7 @@ def _days_to_start_ts(days: Optional[int]) -> Optional[float]:
 
     ★ 2026-10-20：原实现是 ``now - days * 86400``（滚动 24 小时窗口），
       而界面把它标成「今天」、首页 KPI 又按自然日累计 ——
-      两者必然对不上：上午打开玄盾，「今日检查 26 次」点进去，
+      两者必然对不上：上午打开勘合，「今日检查 26 次」点进去，
       列表里还会带出昨天下午的记录。用户核对后只能认为数字是假的。
       按自然日切分后，「今天」真的从今天 00:00 起算，
       与 daily_stats / 首页 KPI 同一口径。
@@ -179,7 +181,7 @@ _ENGINE_INSTANCE_SALT = b"xuandun-engine/v1"
 
 
 def _engine_instance_id() -> str:
-    """引擎身份标记：由管理令牌派生，用于向桌面端证明「我就是玄盾」。
+    """引擎身份标记：由管理令牌派生，用于向桌面端证明「我就是勘合」。
 
     ★★ P0-1（2026-10-28）：为什么「健康」不等于「可信」
     ────────────────────────────────────────────────────────────
@@ -292,6 +294,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
     )
 
+    # ★★ 2026-11-03：启动时按日志重算一次中转站派生数据。
+    #   检测规则会随版本修正（水印正则收窄、长度基线剔除近空响应、
+    #   公共站点不再算外传），而 relay_reputation 是**累加表** ——
+    #   不重算的话，旧规则留下的误判会一直挂在分数上：
+    #   用户升级后看到的还是 69 分，等于这次修复没生效。
+    #   以 logs 为唯一事实源重算，规则一改就立刻生效。
+    try:
+        _rebuild_reputation_from_logs()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("启动时重算中转站派生数据失败（不影响启动）: %s", e)
+
+    # ★★ 预热机器码缓存（2026-10-31）
+    #   机器码靠 PowerShell 的 Get-CimInstance 采集，一次 1–3 秒且同步阻塞。
+    #   若等用户第一次打开激活页才现算，这几秒会卡在事件循环上，
+    #   /health 跟着不响应，桌面端就会把健康引擎误判成死亡。
+    #   这里在启动阶段用后台线程先算一次，之后所有请求只读缓存。
+    def _warm_machine_code() -> None:
+        try:
+            from .. import license as _lic
+
+            _lic.machine_code()
+            logger.info("机器码已预热（后续调用只读缓存）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("机器码预热失败（不影响启动）: %s", e)
+
+    try:
+        import threading as _threading
+
+        _threading.Thread(
+            target=_warm_machine_code, name="warm-machine-code", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001
+        pass
+
     # ★ 必须报**实际**监听端口，不能报 _config.server.port。
     #   两者在 --port 传参时不相等：run() 解析出的 actual_port 写进了
     #   run() 里的局部 config，而模块级 _config 是 lifespan 里
@@ -327,26 +363,12 @@ def create_app() -> FastAPI:
         "XUANDUN_ENABLE_DOCS", ""
     ).strip().lower() in ("1", "true")
     app = FastAPI(
-        title="道体·玄盾 个人版",
+        title="道体·勘合 个人版",
         description="保护个人用户在使用 AI 中转站时的数据安全",
         version=_PKG_VERSION,
         lifespan=lifespan,
         docs_url="/docs" if _docs_enabled else None,
         openapi_url="/openapi.json" if _docs_enabled else None,
-    )
-
-    # CORS：仅允许本地桌面端（tauri://localhost / http://localhost:1420）
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "http://localhost:1420",
-            "http://127.0.0.1:1420",
-        ],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
     )
 
     # ★★ 本机管理接口鉴权（2026-10-20）
@@ -365,16 +387,55 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _admin_guard(request: Request, call_next):
+        # ★★ P1-4（2026-10-29 第三轮审查）：放行 OPTIONS 预检。
+        #   预检请求不带自定义头（浏览器不允许），必然缺 X-Admin-Token；
+        #   守在这里拦掉它，浏览器连「能不能发这个请求」都问不出来 ——
+        #   前端会把它读成网络故障，而真实原因是 401。
+        #
+        #   ★ 直接回 204 而不是 call_next：带 Origin 但没带
+        #     Access-Control-Request-* 的 OPTIONS 不算预检，会被转到路由上
+        #     拿到 405 —— 浏览器同样问不出结论。OPTIONS 本身没有业务含义，
+        #     统一给一个 2xx，具体允许哪些方法由外层 CORS 的响应头回答。
+        if request.method == "OPTIONS":
+            return Response(status_code=204)
         if _admin_token and request.url.path.startswith("/api/"):
             supplied = request.headers.get("x-admin-token", "")
             if not hmac.compare_digest(supplied, _admin_token):
                 return JSONResponse(
                     status_code=401,
                     content={
-                        "detail": "管理接口鉴权失败：请从玄盾桌面端操作"
+                        "detail": "管理接口鉴权失败：请从勘合桌面端操作"
                     },
                 )
         return await call_next(request)
+
+    # ★★ CORS 必须**最后添加**，才能成为最外层中间件（P1-4，2026-10-29）
+    # ────────────────────────────────────────────────────────────
+    # Starlette 的 add_middleware 是「插入到列表头部」，而中间件栈按
+    # 列表顺序由外向内包裹 —— 后添加的在**外层**。
+    #
+    # 原实现先加 CORS、后用 @app.middleware("http") 加守卫，于是守卫在外层：
+    # 它 401 短路时直接返回，响应不经过 CORS，**401 上没有
+    # access-control-allow-origin**；浏览器于是把 401 读成 CORS 失败
+    # （fetch 先抛 TypeError），`api.ts` 里那两段 401 文案成了死代码，
+    # 用户看到的是「无法连接到勘合本地服务」——一个不可诊断的故障。
+    #
+    # 现在顺序反过来：CORS 最外层，任何响应（含 401/403/500）都会带上
+    # CORS 头；OPTIONS 预检也由它直接应答，不再走到守卫。
+    #
+    # CORS：仅允许本地桌面端（tauri://localhost / http://localhost:1420）
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+        ],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
+    )
 
     # ══════════════════════════════════════════════════════════
     # 中转站代理端点
@@ -388,7 +449,7 @@ def create_app() -> FastAPI:
     #   未激活就完全拒绝代理，等于把用户挡在门外。若他其实已经付过钱
     #   只是码过期了或机器换了，用户会彻底无法使用，投诉成本极高。
     #   只读模式下界面、日志、设置全部可用，只是不再执行脱敏与拦截 ——
-    #   用户仍能看清玄盾在做什么，价值可感知。
+    #   用户仍能看清勘合在做什么，价值可感知。
     #
     # ★ 但「验不了」不等于「没激活」
     #   验签组件故障（缺公钥 / 缺 jwt 依赖）时把用户降级成只读，
@@ -524,6 +585,52 @@ def create_app() -> FastAPI:
             if (_reputation and target_relay) else ""
         )
 
+        # ★★ P1-7（2026-10-29 第三轮审查）：中转站地址还没填时，别假装是
+        #   「上游不可达」。
+        #
+        #   原路径：base_url 为空 → 拼出 "/chat/completions" → httpx 抛
+        #   UnsupportedProtocol → 走 httpx.HTTPError 分支 → 502
+        #   「中转站不可达：Request URL is missing an 'http://' or 'https://'
+        #   protocol.」—— 用户照着这句话去查网络、查中转站，而真正要做的事
+        #   只有一件：去设置页把地址填上。而且这条路径当时**不写日志**，
+        #   日志页里连「请求被拒过」都看不到。
+        #
+        #   现在：400 + 明确类型 + 明确动作，并记一条链路日志（proxy_error
+        #   不计入 KPI 三档，只作为事实留痕）。
+        if not str((target_relay or {}).get("base_url") or "").strip():
+            message = (
+                "还没有配置中转站地址：请打开勘合「设置」，"
+                "填入中转站地址与 API Key 后再使用"
+            )
+            logger.warning(
+                "会话 %s 请求被拒：尚未配置中转站地址（未发出任何上游请求）",
+                session_id,
+            )
+            # ★ 留痕而不是静默：用户事后在日志页必须能看到「这次请求被拒过」。
+            #   与 _proxy_error 同口径（proxy_error / alert / low）——
+            #   它不计入 KPI 三档，也不是「拦截」。
+            if _storage is not None:
+                try:
+                    _storage.insert_log(LogEntry(
+                        log_type=LogType.PROXY_ERROR.value,
+                        relay_domain="",
+                        action=Action.ALERT.value,
+                        severity="low",
+                        model=model,
+                        summary="尚未配置中转站地址，请求未发出",
+                    ))
+                except Exception as e:  # noqa: BLE001 — 留痕失败不阻断响应
+                    logger.warning("未配置中转站的日志写入失败: %s", e)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "type": "relay_not_configured",
+                        "message": message,
+                    }
+                },
+            )
+
         # 防护已暂停 → 直通
         if time.time() < _paused_until:
             return await _relay_passthrough(
@@ -650,7 +757,7 @@ def create_app() -> FastAPI:
             _restorer.register(restore_session, redaction_records)
 
         # ══════ 请求基线（★ v0.1.0）══════
-        # 必须在转发前捕获。请求体是原样透传的（玄盾不改写 model），
+        # 必须在转发前捕获。请求体是原样透传的（勘合不改写 model），
         # 因此基线里的 model 就是用户真正请求的模型，
         # 「模型降级」判据才可能发现中转站的偷换行为。
         request_baseline = build_baseline(body)
@@ -702,8 +809,8 @@ def create_app() -> FastAPI:
                                 target: Optional[Dict[str, Any]] = None):
         """转发请求到中转站（请求体原样透传，不改写 model）。
 
-        ★ 玄盾监控的是 API，不是某个模型 —— 请求里的 model 属于用户
-          与中转站之间的约定，玄盾无权也无必要改写它。曾有一版用配置里的
+        ★ 勘合监控的是 API，不是某个模型 —— 请求里的 model 属于用户
+          与中转站之间的约定，勘合无权也无必要改写它。曾有一版用配置里的
           「默认模型」覆盖请求 model，后果是：用户明明发的是 A 模型，
           中转站收到的是 B；而请求基线里记的也是被改写的 B，
           于是「模型降级」判据（中转站偷偷换模型）永远发现不了真降级。
@@ -928,7 +1035,7 @@ def create_app() -> FastAPI:
         # ★★ 2026-10-27 修复：还原结果必须**无条件**写回。
         #   原实现把写回放在 `if restore_anomalies:` 里面 —— 只有当出现
         #   「中转站伪造占位符」这类异常时才写回，而正常还原（绝大多数
-        #   情况）被直接丢弃。后果：非流式客户端拿到的永远是 ⟦XD_n⟧，
+        #   情况）被直接丢弃。后果：非流式客户端拿到的永远是 ⟦KH_n⟧，
         #   模型拿着占位符既不能执行也不能理解，整条「脱敏→还原」链路
         #   等于断在这里。而流式路径是对的，所以这个 bug 极难复现。
         #
@@ -1021,7 +1128,19 @@ def create_app() -> FastAPI:
         collected: List[str] = []
         total_len = 0
         mid_verified = False
-        state = {"blocked": False, "interrupted": ""}
+        # ★★ 2026-10-29（第三轮审查 P0-1）：
+        #   delivered       —— 是否已经有内容帧交给客户端（决定能不能记 block）
+        #   upstream_done   —— 上游自己的 [DONE] 已被吞掉，由我们统一补一次
+        state = {
+            "blocked": False,
+            "interrupted": "",
+            "delivered": False,
+            "upstream_done": False,
+        }
+        # ★ P0-1：工具调用帧先扣住，验证通过后再交付。
+        #   威胁模型里真正会被「执行」的只有 tool_calls —— 正文只是文本。
+        #   扣住它，就能在「中转站指示客户端执行危险操作」时做到真阻断。
+        held_tool_frames: List[str] = []
         last_verified_len = 0
 
         async def _generator() -> AsyncGenerator[bytes, None]:
@@ -1035,14 +1154,14 @@ def create_app() -> FastAPI:
             pending = ""
             # 增量解码器：多字节 UTF-8 字符被 chunk 切断时也能正确拼回。
             # 逐 chunk `decode(errors="ignore")` 会把半截汉字直接丢掉，
-            # 而占位符 `⟦XD_n⟧` 全由多字节字符组成，正是高发场景。
+            # 而占位符 `⟦KH_n⟧` 全由多字节字符组成，正是高发场景。
             decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
 
             def _restore_out(seg: str) -> str:
                 """还原一段即将转发的 SSE 文本里的脱敏占位符。
 
-                ★ 兼容两种形态：占位符字面量（⟦XD_n⟧）与 JSON 转义形态
-                  （`\\u27e6XD_n\\u27e7`）。后者在中转站以
+                ★ 兼容两种形态：占位符字面量（⟦KH_n⟧）与 JSON 转义形态
+                  （`\\u27e6KH_n\\u27e7`）。后者在中转站以
                   ensure_ascii=True 序列化时出现；不做归一化则正则匹配不到，
                   占位符仍会原样透传给客户端。
 
@@ -1059,7 +1178,7 @@ def create_app() -> FastAPI:
                     return seg
                 escaped = _restorer.is_escaped_form(seg)
                 normalized = _restorer.normalize_escaped(seg) if escaped else seg
-                if "⟦XD_" not in normalized:
+                if "⟦KH_" not in normalized:
                     return seg
                 return _restorer.restore(
                     restore_session, normalized, json_escape=escaped
@@ -1080,12 +1199,26 @@ def create_app() -> FastAPI:
                     #   占位符以原样发出；`restore()` 只改了服务端 full 变量，
                     #   对已发给客户端的字节无效 —— 注释却写「流结束时恢复」，
                     #   与实现相反。用户（Claude Code / Cursor 全走流式）
-                    #   因此看到 ⟦XD_n⟧，工具调用参数也带着占位符被执行。
+                    #   因此看到 ⟦KH_n⟧，工具调用参数也带着占位符被执行。
                     #   现在先按完整 SSE 帧切分，还原后再转发。
                     pending += text
                     frames, pending = _split_sse_frames(pending)
                     for frame in frames:
+                        # ★★ P0-1（2026-10-29）：结束标记由代理统一补发。
+                        #   原来上游的 [DONE] 被原样透传，阻断时我们又补一个 ——
+                        #   客户端会收到**两个** [DONE]，且严格按协议
+                        #   「读到 [DONE] 就收工」的客户端根本读不到后面的
+                        #   阻断帧。这里吞掉上游的，流尾只发一次。
+                        if _is_done_frame(frame):
+                            state["upstream_done"] = True
+                            continue
+                        # ★ P0-1：工具调用帧扣住 —— 它们是唯一会被客户端
+                        #   真正执行的东西。验证通过后才交付。
+                        if _is_tool_call_frame(frame):
+                            held_tool_frames.append(frame)
+                            continue
                         yield _restore_out(frame).encode("utf-8")
+                        state["delivered"] = True
 
                     # 累计到 8KB 后做一次中期验证
                     if (
@@ -1101,29 +1234,22 @@ def create_app() -> FastAPI:
                         findings.extend(result.findings)
                         if result.action == Action.BLOCK.value and result.severity == "high":
                             state["blocked"] = True
-                            # 发送 SSE error 事件后关闭流
-                            # ★★ 与非流式路径共用 _blocked_advice()：
-                            #   两处各写一份文案必然漂移——
-                            #   而漂移的后果是「流式能给出路、非流式只给结论」，
-                            #   用户换 AI 工具后行为就变了，且没人发现。
-                            error_payload = {
-                                "error": {
-                                    "type": "relay_response_blocked",
-                                    **_blocked_advice(result.findings),
-                                }
-                            }
-                            yield (
-                                "data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n"
-                            ).encode("utf-8")
+                            # ★★ 2026-10-29（P0-1）：这条是**事后**阻断 ——
+                            #   中期验证发生在内容已经开始转发之后，
+                            #   所以文案必须如实说「已中断」，
+                            #   不能说「没有交给 AI 工具」（那是假的）。
+                            yield _sse_error_frame(
+                                "relay_response_blocked",
+                                _late_block_advice(result.findings),
+                            )
                             break
                         mid_verified = True
 
-                # ★ 正常结束：把残留缓冲（末尾没有空行收尾的部分）还原后发出。
-                #   被阻断时 pending 不再发出 —— 阻断后不该再吐内容。
-                if not state["blocked"] and pending:
-                    yield _restore_out(pending).encode("utf-8")
-
                 # ★ 流结束：对全文做最终验证 + 第三层脱敏恢复
+                #
+                # ★★ P0-1：残留缓冲与扣住的工具调用帧都**推迟到验证之后**再发
+                #   （原来残留缓冲先发、再验证，于是「验证发现高危」时
+                #   最后一段内容已经给出去了）。
                 if not state["blocked"]:
                     full = "".join(collected)
                     sse_text, sse_tools, sse_model = _extract_sse_frames(full)
@@ -1177,20 +1303,25 @@ def create_app() -> FastAPI:
                             and result.severity == "high"
                         ):
                             state["blocked"] = True
-                            error_payload = {
-                                "error": {
-                                    "type": "relay_response_blocked",
-                                    "message": result.findings[0].detail
-                                    if result.findings else "响应含高危内容",
-                                }
-                            }
-                            yield (
-                                "data: " + json.dumps(
-                                    error_payload, ensure_ascii=False
-                                ) + "\n\n"
-                            ).encode("utf-8")
+                            yield _sse_error_frame(
+                                "relay_response_blocked",
+                                _late_block_advice(result.findings),
+                            )
                         mid_verified = True
                         last_verified_len = total_len
+
+                    # ★★ P0-1：验证通过后才把扣住的工具调用帧与残留缓冲
+                    #   交出去。这一步必须在最终验证之后 —— 放在之前等于
+                    #   「先交付、后判定」，正是本轮要修的形态。
+                    if not state["blocked"]:
+                        for frame in held_tool_frames:
+                            yield _restore_out(frame).encode("utf-8")
+                            state["delivered"] = True
+                        held_tool_frames.clear()
+                        if pending:
+                            yield _restore_out(pending).encode("utf-8")
+                            pending = ""
+                            state["delivered"] = True
             except httpx.HTTPError as e:
                 # ★★ P0-8（2026-10-28）：上游中途断开不能「只是断流」
                 #
@@ -1232,13 +1363,41 @@ def create_app() -> FastAPI:
                 #   两条口径分叉，用户看到的是分叉的那一半）。
                 readable = _extract_sse_content(joined)
                 severity = _max_severity(findings)
-                # ★ 与非流式路径统一：按合并后的最高严重度决定处置，
-                #   而不是「有 findings 就一律 ALERT」——
-                #   否则流式下 high 级发现永远不会被记为 BLOCK，
-                #   信誉分的 danger_count 也就永远不涨。
-                #   ★ 第二个参数同样传「有没有发现」，与非流式路径同一个口径。
+                # ★★ P0-1（2026-10-29）：**事实层必须与真实行为一致**。
+                #
+                #   流式是边收边发的，中期验证/最终验证发现高危时，
+                #   前面那部分内容早已交给了 AI 工具。原实现在这里
+                #   无条件写 action=BLOCK，界面与 KPI 于是都显示
+                #   「已拦截 / 危险 +1」—— 而用户那边早就拿到内容了。
+                #   这不是漏放，是账本说谎：下一次复盘会得出
+                #   「这条被拦住了」的错误结论，也永远发现不了这类攻击。
+                #
+                #   现在的口径：
+                #     · 已经有内容交付过 → alert，并在 detail 里写明
+                #       「内容已送达 + 工具调用是否扣住」，不计入「已拦截」；
+                #     · 没有任何内容交付（例如只有工具调用帧就被拦下）
+                #       → 仍然是 block，因为这次真的没让任何东西落地。
+                late_block = state["blocked"] and state["delivered"]
+                if late_block:
+                    findings.append(
+                        VerificationFinding(
+                            category="late_delivery",
+                            severity="high",
+                            detail=(
+                                "流式响应在判定为高危前已发出部分内容"
+                                + (
+                                    "（工具调用已扣住、未交付给 AI 工具）"
+                                    if held_tool_frames
+                                    else "（本次没有工具调用）"
+                                )
+                                + "；这是事后告警，不计入「已拦截」"
+                            ),
+                        )
+                    )
                 action = (
-                    Action.BLOCK.value
+                    Action.ALERT.value
+                    if late_block
+                    else Action.BLOCK.value
                     if state["blocked"]
                     else _resolve_action(severity, findings or None)
                 )
@@ -1264,10 +1423,11 @@ def create_app() -> FastAPI:
                     _record_reputation(domain, action, latency_ms, readable,
                                        categories=_finding_categories(findings))
 
-            # ★ P0-8：凡由我们主动提前收尾的流（阻断 / 中断），补上 OpenAI
-            #   协议的结束标记。正常读完的上游自己会带 [DONE]，这里不重复补。
-            if state["blocked"] or state["interrupted"]:
-                yield b"data: [DONE]\n\n"
+            # ★★ P0-1：结束标记由代理**统一补发一次**。
+            #   上游自己的 [DONE] 已在转发循环里被吞掉（见 _is_done_frame），
+            #   所以这里无论正常读完 / 阻断 / 中断，都只发一次 ——
+            #   客户端不会收到两个 [DONE]，阻断帧也一定排在它之前。
+            yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
             _generator(),
@@ -1314,6 +1474,59 @@ def create_app() -> FastAPI:
             },
         )
 
+    def _license_check_state() -> Dict[str, Any]:
+        """授权校验的可读结论（供 /api/state 暴露降级原因）。
+
+        ★★ P1-3（2026-10-29 第三轮审查）：授权校验只有两种结局是「正常」的
+          （已授权 / 明确未激活），其余都是**降级**：验签组件缺失、
+          公钥读不出来、授权文件读坏 —— 那些路径一律按「已授权」处理
+          （不能拿我方故障惩罚用户），但界面必须能看见这件事，
+          否则用户看到的仍是「防护中」，而实际根本没校验过。
+        """
+        enabled = _protection_enabled()
+        if not enabled:
+            return {
+                "ok": False,
+                "read_only": True,
+                "reason": "未激活或已过期，当前为只读模式（只转发、不检测）",
+            }
+        try:
+            from .. import license as lic
+
+            if not lic.load_public_key():
+                return {
+                    "ok": True,
+                    "read_only": False,
+                    "reason": "验签组件不可用（公钥缺失），本次按已授权处理",
+                }
+        except Exception as e:  # noqa: BLE001 — 自检本身不能把接口打崩
+            return {
+                "ok": True,
+                "read_only": False,
+                "reason": (
+                    f"授权校验异常（{type(e).__name__}），本次按已授权处理"
+                ),
+            }
+        return {"ok": True, "read_only": False, "reason": ""}
+
+    def _degrade_fields() -> Dict[str, Any]:
+        """降级状态（护栏缺失 / 规则回退到内置最小集）。
+
+        ★★ P1-3：这些值本来只在 verifier.get_stats() 里，
+          而它没有任何 HTTP 出口 —— 于是「护栏整包缺失、少两层检测」
+          在界面上与「一切正常」完全一样。检测能力缩减必须可见，
+          这是比误报更危险的状态。
+        """
+        stats = _verifier.get_stats() if _verifier is not None else {}
+        return {
+            "degraded": bool(stats.get("degraded", False)),
+            "guardrail_missing_layers": list(
+                stats.get("guardrail_missing_layers") or []
+            ),
+            "rules_source": str(stats.get("rules_source") or ""),
+            "license_check": _license_check_state(),
+        }
+
     @app.get("/api/state")
     async def get_state():
         """当前防护状态（首页状态栏）。"""
@@ -1327,6 +1540,9 @@ def create_app() -> FastAPI:
                 "state": "paused",
                 "message": f"防护已暂停，剩余 {remain // 60} 分 {remain % 60} 秒",
                 "paused_remaining_s": remain,
+                # ★ P1-3：暂停态同样要能看到降级 ——「暂停」与「护栏缺失」
+                #   是两件不同的事，前者是用户选的，后者是他不知道的。
+                **_degrade_fields(),
             }
 
         # 今日统计
@@ -1362,7 +1578,14 @@ def create_app() -> FastAPI:
                 message = "等待第一次请求..."
         else:
             state = "protecting"
-            message = f"今日已检查 {today['total_calls']} 次请求"
+            # ★★ P1-2：只读态（未激活）下的 total 全是「未经检测的直通」，
+            #   把它称作「已检查」就是账本说谎 —— 用户会同时读到
+            #   「未激活，不做防护」和「今日已检查 N 次」两句相反的话。
+            message = (
+                f"今日已检查 {today['total_calls']} 次请求"
+                if _protection_enabled()
+                else f"今日已转发 {today['total_calls']} 次（未经检测）"
+            )
 
         return {
             "state": state,
@@ -1375,6 +1598,15 @@ def create_app() -> FastAPI:
             #   仍会照常显示，用户会以为防护在正常工作 ——
             #   而实际上请求都在直通。这是对用户的谎报。
             "read_only": not _protection_enabled(),
+            # ★★ P1-2：「已转发但未经检测」必须能与「已检查」分开数。
+            #   today.total_calls 里混着两类记录（检测过的 + 直通的），
+            #   单看它无法回答「这里面有多少次其实没有检测」。
+            #   这里给一个只数 relay 日志（未检测直通）的独立口径。
+            "unchecked_forwarded": _storage.count_logs(
+                log_type=LogType.RELAY.value, start_ts=_days_to_start_ts(1)
+            ),
+            # ★ P1-3：降级（护栏缺失 / 规则回退）与授权校验结论。
+            **_degrade_fields(),
         }
 
     @app.get("/api/stats")
@@ -1512,9 +1744,9 @@ def create_app() -> FastAPI:
                     {
                         "direction": origin.get("direction"),
                         "direction_label": (
-                            "中转站返回内容"
+                            "中转站返回的内容"
                             if origin.get("direction") == "response"
-                            else "请求侧（你的输入或工具返回）"
+                            else "你的输入或工具返回"
                         ),
                         "role": origin.get("role") or "",
                         "time": _dt.datetime.fromtimestamp(
@@ -1528,27 +1760,41 @@ def create_app() -> FastAPI:
         if response_side:
             verdict = {
                 "code": "response_side",
-                "label": "凭证首次出现在中转站返回的内容里",
+                "label": "这枚证据第一次出现在中转站的返回里",
                 "note": (
-                    "本次日志涉及的凭证，在台账里首次出现于中转站返回的内容，"
-                    "此前的请求从未发送过它。可要求对方说明该凭证的来源。"
-                    "若你曾让模型生成示例凭证，请先排除这一可能。"
+                    "你之前的请求从没发过它，它却出现在中转站返回的内容里。"
+                    "可以拿这份记录去问中转站：这枚内容是从哪来的。"
+                    "如果你让模型生成过示例内容，请先排除这种情况。"
                 ),
             }
         elif any(h["first_seen"] for h in hits):
             verdict = {
                 "code": "request_side",
-                "label": "凭证首次出现在请求侧",
+                "label": "这枚证据是你这边发出去的",
                 "note": (
-                    "本次日志涉及的凭证，在台账里首次出现于你这边的输入或工具返回，"
-                    "不是中转站返回的。"
+                    "它第一次出现在你的输入或工具返回里，不是中转站带进来的。"
+                    "中转站没有引入它。"
+                ),
+            }
+        elif hits:
+            # ★ 2026-11-04：证据来源不再只覆盖「敏感信息」。
+            #   危险命令、占位符、约束违背等告警同样要给出证据 ——
+            #   用户要的是「这条判定是怎么来的」，不是「有没有银行卡」。
+            #   这类证据没有跨轮次指纹，但本次响应里的原文片段足以核对。
+            verdict = {
+                "code": "response_only",
+                "label": "这条记录的证据来自本次响应",
+                "note": (
+                    "本次响应里出现了下面这些内容，勘合据此判定。"
+                    "它们没有跨轮次的指纹记录，所以无法判断是不是中转站引入的；"
+                    "你可以对照「发现了什么」里的原文片段自行核实。"
                 ),
             }
         else:
             verdict = {
                 "code": "unknown",
-                "label": "无凭证来源记录",
-                "note": "这条日志没有可回查的凭证指纹（可能是老版本写入的记录）。",
+                "label": "这条记录没有可展示的证据",
+                "note": "这条记录没有留下可回查的内容片段。",
             }
 
         return {
@@ -1677,7 +1923,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="存储未就绪")
         if not _storage.delete_log(log_id):
             raise HTTPException(status_code=404, detail="日志不存在")
-        _sync_reputation_after_log_delete()
+        _rebuild_reputation_from_logs()
         return {"ok": True, "log_id": log_id}
 
     @app.post("/api/logs/clear")
@@ -1687,7 +1933,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="存储未就绪")
         before_ts = time.time() - before_days * 86400 if before_days > 0 else None
         count = _storage.clear_logs(before_ts)
-        _sync_reputation_after_log_delete()
+        _rebuild_reputation_from_logs()
         return {"ok": True, "deleted": count}
 
     @app.post("/api/logs/delete-filtered")
@@ -1739,7 +1985,7 @@ def create_app() -> FastAPI:
             start_ts=start_ts, marked_safe=marked_safe,
             log_type_not=exclude_log_type,
         )
-        _sync_reputation_after_log_delete()
+        _rebuild_reputation_from_logs()
         logger.info("按筛选条件删除日志 %d 条", deleted)
         return {"ok": True, "deleted": deleted, "dry_run": False}
 
@@ -1939,7 +2185,7 @@ def create_app() -> FastAPI:
             return _result(
                 False,
                 "address",
-                f"地址可能不对：玄盾请求的 {base}/chat/completions 返回 {status}。"
+                f"地址可能不对：勘合请求的 {base}/chat/completions 返回 {status}。"
                 f"请对照中转站后台的「接入地址」核对",
                 status=status,
                 raw=resp.text,
@@ -1988,6 +2234,12 @@ def create_app() -> FastAPI:
             copy.deepcopy(_config.storage),
         )
 
+        # ★★ P0-5（2026-10-29）：形状校验必须**最先**做 —— 连掩码守卫
+        #   自己都会在 `relay_payload.get(...)` 上踩到畸形入参
+        #   （`{"relay": "abc"}` → AttributeError），而它不是 HTTPException，
+        #   原来的回滚分支兜不住，运行态就此被写坏。
+        _require_config_shapes(payload)
+
         if "relay" in payload:
             relay_payload = payload["relay"]
 
@@ -2010,41 +2262,52 @@ def create_app() -> FastAPI:
             #      已经是掩码串（见 config.to_safe_dict）。原实现只守了
             #      顶层 api_key，于是用户**每保存一次配置**就把其余中转站
             #      的真实 Key 全换成 `sk-a…CD⟪…⟫`，切过去必然 401。
-            bad = find_masked_key_in_others(relay_payload.get("others"))
-            if bad is not None:
-                idx, _key = bad
-                logger.warning(
-                    "拒绝保存：第 %d 条中转站的 api_key 是掩码串", idx + 1
+            #
+            #    ★★ 2026-10-29（实测 P0，用户截图）：此后加的守卫是
+            #      「见到掩码就整单拒绝」—— 它挡住了写坏 Key，也把**正常保存**
+            #      一起挡死：只要配过一家中转站，配置页就再也存不了任何东西
+            #      （报「第 1 条中转站配置的 API Key 看起来是脱敏后的串」）。
+            #      现在改为与服务器现有记录对齐：服务端自己发出去的掩码
+            #      视为「未改动」，换回真实 Key；对不上记录才拒绝。
+            if "others" in (relay_payload or {}):
+                merged_others, others_err = reconcile_masked_others(
+                    relay_payload.get("others"), _config.relay.others
                 )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"第 {idx + 1} 条中转站配置的 API Key 看起来是脱敏后的串"
-                        "（含 ****），已拒绝保存。若这不是你填的，"
-                        "说明列表里的 Key 已被掩码污染。"
-                    ),
-                )
+                if others_err:
+                    logger.warning("拒绝保存：%s", others_err)
+                    raise HTTPException(status_code=400, detail=others_err)
+                # ★ 必须写回 payload：下面真正写内存时是从 payload 重新取的
+                #   （relay_payload = payload["relay"]），只改局部变量会被丢掉。
+                payload["relay"] = {**relay_payload, "others": merged_others}
+                relay_payload = payload["relay"]
 
             # ② 顶层 api_key
             #    ★ 必须报错而不是 warning 后 continue：真实 Key 里含 ****
             #      的情况确实存在（部分中转站会这样签发），静默丢弃的后果是
             #      「提示保存成功、实际没生效」—— 用户下一次请求就 401，
             #      且无从关联到这次保存。
+            #    ★ 但「与服务端当前掩码一字不差」的值只可能是回显，
+            #      按「未改动」处理（空串语义），不再误拒正常保存。
             top_key = relay_payload.get("api_key")
             if isinstance(top_key, str) and top_key and is_masked_key(top_key):
-                logger.warning(
-                    "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "这个 API Key 看起来是脱敏后的串（含 ****），"
-                        "已拒绝保存。若这是新填的 Key，请确认复制完整；"
-                        "若不修改 Key，请把该输入框清空后再保存。"
-                    ),
-                )
+                if top_key == _config.relay.mask_key():
+                    payload["relay"] = {**relay_payload, "api_key": ""}
+                    relay_payload = payload["relay"]
+                else:
+                    logger.warning(
+                        "拒绝把掩码值写入 api_key（疑似前端回传了脱敏字段）"
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "这个 API Key 看起来是脱敏后的串（含 ****），"
+                            "已拒绝保存。若这是新填的 Key，请确认复制完整；"
+                            "若不修改 Key，请把该输入框清空后再保存。"
+                        ),
+                    )
 
-        # ③ 全部校验通过后才写内存；任何失败都回滚到快照
+        # ③ 写入（形状已在最前面校验过）
+        # ④ 全部校验通过后才写内存；任何失败都回滚到快照
         try:
             if "relay" in payload:
                 relay_payload = payload["relay"]
@@ -2067,11 +2330,21 @@ def create_app() -> FastAPI:
                     if hasattr(_config.storage, k) and v is not None:
                         setattr(_config.storage, k, v)
 
-            errors = _config.validate()
+            # ★ P0-3：只校验**本次提交的分片**。
+            #   全量校验会让「还没填的空 relay」封死 guard/server/storage
+            #   的保存 —— 跳过首启向导后改任何设置都 400。
+            errors = _config.validate(
+                only=[k for k in ("relay", "guard", "server", "storage")
+                      if k in payload]
+            )
             if errors:
-                raise HTTPException(status_code=400, detail={"errors": errors})
-        except HTTPException:
-            # 校验失败 ⇒ 运行态必须与写入前完全一致
+                raise HTTPException(
+                    status_code=400, detail=_errors_detail(errors)
+                )
+        except Exception:
+            # ★ P0-5：**任何**异常都要回滚，不能只兜 HTTPException。
+            #   校验失败 / 形状异常 / 类型错误混在一起时，
+            #   只要内存被改了一半，后续每个请求都在用坏配置。
             (_config.relay, _config.guard, _config.server, _config.storage) = snapshot
             raise
 
@@ -2206,7 +2479,7 @@ def create_app() -> FastAPI:
             taken = relay_cfg.assigned_ports()
             if port == _config.server.port:
                 errors.append(
-                    f"端口 {port} 是玄盾主端口，请换一个（例如 18801）")
+                    f"端口 {port} 是勘合主端口，请换一个（例如 18801）")
             elif port in taken:
                 errors.append(
                     f"端口 {port} 已经给了「{taken[port]}」，请换一个")
@@ -2223,15 +2496,18 @@ def create_app() -> FastAPI:
 
         # ★ 先起监听再落盘：端口起不来时不应留下一条「看起来已配好」的记录。
         #   失败原因逐条回给界面（谁占用了、换哪个），不要只说「失败」。
+        #
+        # ★★ P1-6（2026-10-29 第三轮审查）：只有**本次要用的这个端口**
+        #   绑不上，才算这次新增失败。其它端口的历史失败只记 warning ——
+        #   否则「上次某个端口被别的软件占着」会连带封死「新增一家」，
+        #   而报错说的是一个与他这次操作无关的端口号。
         if port:
             errs = await _sync_relay_ports(
                 set(relay_cfg.assigned_ports()) | {port})
-            if errs:
+            failure = _port_failure_for(errs, port, "新增中转站")
+            if failure:
                 raise HTTPException(
-                    status_code=400,
-                    detail={"errors": [
-                        errs.get(port) or next(iter(errs.values()))
-                    ]},
+                    status_code=400, detail=_errors_detail([failure]),
                 )
 
         relay_cfg.others = list(relay_cfg.others) + [{
@@ -2285,7 +2561,7 @@ def create_app() -> FastAPI:
             if port == _config.server.port:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"端口 {port} 是玄盾主端口，请换一个（例如 18801）")
+                    detail=f"端口 {port} 是勘合主端口，请换一个（例如 18801）")
             for other_id, other_port in _relay_port_map(relay_cfg).items():
                 if other_port == port and other_id != want:
                     raise HTTPException(
@@ -2301,19 +2577,20 @@ def create_app() -> FastAPI:
                 target["port"] = port
             errors = _config.validate()
             if errors:
-                raise HTTPException(status_code=400, detail={"errors": errors})
+                raise HTTPException(status_code=400, detail=_errors_detail(errors))
 
             desired = set(relay_cfg.assigned_ports())
             if port and _relay_listeners is None:
                 # 没有监听器（引擎不是由 run() 启动）时不能假装已生效
                 raise HTTPException(
                     status_code=503,
-                    detail="引擎还没准备好接收新端口，请重启玄盾后再试")
+                    detail="引擎还没准备好接收新端口，请重启勘合后再试")
             errs = await _sync_relay_ports(desired)
-            if errs:
+            # ★ P1-6：只对本次要申请的那个端口判失败，历史失败仅告警。
+            failure = _port_failure_for(errs, port, "设置专属端口")
+            if failure:
                 raise HTTPException(
-                    status_code=400,
-                    detail={"errors": [errs.get(port) or next(iter(errs.values()))]},
+                    status_code=400, detail=_errors_detail([failure]),
                 )
         except HTTPException:
             relay_cfg.port, relay_cfg.others = snapshot
@@ -2439,7 +2716,10 @@ def create_app() -> FastAPI:
         """
         from .. import license as lic
 
-        raw = lic.machine_code()
+        # ★★ 采集要跑 1–3 秒（PowerShell 的 Get-CimInstance），必须挪出事件循环。
+        #   此前在 async 端点里同步调用，激活页并发调两次卡住事件循环 3.7 秒，
+        #   /health 因此不响应，桌面端把健康引擎误判成死亡并强制重启。
+        raw = await asyncio.to_thread(lic.machine_code)
         return {
             "machineCode": lic.machine_code_hash(raw),
             # 采集不到稳定硬件 ID 时为 true，界面据此提示用户
@@ -2795,10 +3075,10 @@ def _split_sse_frames(buf: str) -> Tuple[List[str], str]:
 
     ★★ 为什么流式路径要按帧缓冲（2026-10-19 修复）
     ────────────────────────────────────────────────────────────
-    第三层脱敏恢复（把 `⟦XD_n⟧` 还原为原始值）只能对**完整**的占位符
+    第三层脱敏恢复（把 `⟦KH_n⟧` 还原为原始值）只能对**完整**的占位符
     生效：占位符若正好被 chunk 边界切断（前半在一个 chunk、
     后半在下一个），逐 chunk 还原就会漏掉它，客户端收到的是
-    `⟦XD_` 原样透传 —— 而 Claude Code / Cursor 全走流式，
+    `⟦KH_` 原样透传 —— 而 Claude Code / Cursor 全走流式，
     等于这些用户每次都看到占位符、工具调用参数也带着占位符被执行。
 
     因此这里先按 SSE 的空行分隔符（`\n\n` / `\r\n\r\n`）切出完整帧，
@@ -3066,19 +3346,56 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
       实测形态：非流式路径传的是 verify_result 对象，而流式路径传 None ——
       同一个函数、两条路径语义相反，且两边各自的单测都是绿的。
     """
+    # ★ 兼容两种入参：findings 列表，或带 .findings 的 VerifyResult。
+    #   调用点既有 `findings or None`，也有直接传 VerifyResult 的历史写法。
+    if findings_or_none is None:
+        findings: List[Any] = []
+    elif isinstance(findings_or_none, (list, tuple, set)):
+        findings = list(findings_or_none)
+    else:
+        findings = list(getattr(findings_or_none, "findings", []) or [])
+
+    if not findings:
+        # 没有发现项：high 仍保守阻断（调用方既然报了 high，就不能放行）；
+        # 其余档位是真正的 pass。
+        return (
+            Action.BLOCK.value if max_sev == "high" else Action.PASS.value
+        )
+
+    cats = {getattr(f, "category", "") for f in findings}
+    # ★★ 2026-11-03：证据分级闸门，必须与 decide_response_action
+    #   的规则四逐字一致。两条路径（verify 内部 / 合并 restorer 后）
+    #   若各写一套，就会出现「verify 判观察、外层判阻断」——
+    #   而两边各自的单测都是绿的。
+    #   放在最前面：它要覆盖 low / medium / high 全部档位，
+    #   否则统计类（low）仍会走下面的 ALERT 分支，继续占用「提示」。
+    if not (cats & STRUCTURED_SIGNALS):
+        return Action.OBSERVE.value
+
+    # ★★ 2026-11-04：结构化证据全是「网络/动态代码」类 → 观察。
+    #   与 decide_response_action 的规则逐字一致。
+    structured_findings = [
+        f for f in findings
+        if getattr(f, "category", "") in STRUCTURED_SIGNALS
+    ]
+    if structured_findings and all(
+        getattr(f, "signal", "") in _OBSERVE_ONLY_TOOL_SIGNALS
+        for f in structured_findings
+    ):
+        return Action.OBSERVE.value
+
     if max_sev == "low":
-        # 有发现项才提示；确实一个发现都没有时才是真的 pass
-        return Action.PASS.value if not findings_or_none else Action.ALERT.value
+        # ★ 2026-11-04：低危发现一律「观察」，不再计入「提示」。
+        #   低危包括统计类异常（长度/结构突变）和「本会话没脱敏过却出现
+        #   占位符字样」这类只说明「值得看一眼」的情况。
+        #   把它们算成「提示」会让首页长期挂着噪声，用户会学会忽略它。
+        return Action.OBSERVE.value
     if _verifier is not None:
         try:
             action = _verifier._threshold_for(max_sev)
             # ★ 2026-10-23：与 decide_response_action 同一道观测类闸门。
             #   原实现只按严重度查表，于是「仅记录」类发现只要标了 high
             #   就会阻断 —— 而这类发现的意义是留证据，不是打断对话。
-            cats = {
-                getattr(f, "category", "")
-                for f in (findings_or_none or [])
-            }
             if (
                 action == Action.BLOCK.value
                 and cats
@@ -3433,6 +3750,59 @@ def _block_evidence(
     return out
 
 
+def _is_done_frame(frame: str) -> bool:
+    """这一帧是不是上游的结束标记 `data: [DONE]`。
+
+    ★★ 2026-10-29（P0-1）：结束标记必须由代理统一发一次。
+      原实现把上游的 [DONE] 原样透传，阻断时又补一个 ——
+      客户端收到两个 [DONE]，且严格按协议「读到 [DONE] 就收工」的
+      客户端根本读不到后面的阻断帧，等于被阻断的内容照样"正常结束"。
+    """
+    return frame.strip().endswith("[DONE]")
+
+
+def _is_tool_call_frame(frame: str) -> bool:
+    """这一帧里是否带 tool_calls 增量。
+
+    ★★ 2026-10-29（P0-1）：威胁模型里**真正会被执行**的只有 tool_calls，
+      正文只是文本。所以流式下把工具调用帧扣住、验证通过后再交付，
+      就能在"中转站指示客户端执行危险操作"时做到真阻断；
+      正文仍然实时转发，不牺牲首字延迟。
+    """
+    return '"tool_calls"' in frame or '"function_call"' in frame
+
+
+def _late_block_advice(findings: List[Any]) -> str:
+    """事后阻断（内容已开始转发）时给用户的说明。
+
+    ★ 必须与 `_blocked_advice` 区分开：那条说"没有交给 AI 工具"，
+      而事后阻断时前半段内容**已经**交过去了。照抄那句就是在撒谎，
+      用户会以为没泄露而不去核查。
+    """
+    hit = _pick_explainable_finding(findings)
+    reason = getattr(hit, "detail", "") if hit is not None else ""
+    return (
+        f"勘合中断了这次响应（{reason or '命中高危判定'}）。"
+        "注意：流式响应在判定完成前已有部分内容发给了 AI 工具，"
+        "因此这次属于**事后告警**，不是拦截成功。"
+        "请勿采信或执行刚才收到的内容；建议把 AI 工具地址改回模型厂商官方地址重试。"
+    )
+
+
+def _pick_explainable_finding(findings: List[Any]):
+    """挑一条"用户看得懂"的发现：优先非统计、非纯观测类。
+
+    ★ 只按"第一条"取会把 `dangerous_content`（文案里自带
+      「仅作记录，不阻断」）当成阻断原因发给用户 —— 于是阻断帧
+      自己宣称"不阻断"。这是 2026-10-29 实测到的原话。
+    """
+    observable = _STATISTICAL_SIGNALS | OBSERVATION_ONLY_SIGNALS
+    for f in findings or []:
+        if getattr(f, "category", "") not in observable:
+            return f
+    return findings[0] if findings else None
+
+
 def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
     """生成阻断时给用户的 error 字段。
 
@@ -3450,12 +3820,7 @@ def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
     「本次长度偏离历史均值 124σ」用户看不懂，说了只会更困惑；
     「中转站调用了你没声明的工具」他能立刻判断对不对。
     """
-    hit = next(
-        (f for f in findings if getattr(f, "category", "") not in _STATISTICAL_SIGNALS),
-        None,
-    )
-    if hit is None:
-        hit = findings[0] if findings else None
+    hit = _pick_explainable_finding(findings)
     reason = getattr(hit, "detail", "") or "响应含高危内容"
 
     # ★ 2026-10-20：不再断言「当前中转站被判定不可信」。
@@ -3464,7 +3829,7 @@ def _blocked_advice(findings: List[Any]) -> Dict[str, Any]:
     #   把结论说得比证据更重。改为只陈述「这次响应被拦下」，
     #   并把误报出口写清楚。
     advice = (
-        f"玄盾拦下了这次响应（{reason}）。"
+        f"勘合拦下了这次响应（{reason}）。"
         "这次返回的内容触发了危险判定，所以没有交给 AI 工具。"
         "如果任务还没完成，建议把 AI 工具的 API 地址改回模型厂商官方地址继续做，"
         "或在设置页换一家中转站后重试。这段对话在换地址前无法继续。"
@@ -3528,7 +3893,7 @@ def _shift_placeholders(text: str, records: List[Any], base: int) -> str:
 
     sanitizer 每条消息独立编号从 1 开始，而 restorer 是按会话
     统一映射还原的 —— 编号必须在整个请求内唯一，否则第二条消息的
-    ⟦XD_1⟧ 会覆盖第一条的记录。
+    ⟦KH_1⟧ 会覆盖第一条的记录。
     """
     if base == 0:
         return text
@@ -3716,30 +4081,106 @@ def _record_log(
         logger.warning("日志记录失败: %s", e)
 
 
-def find_masked_key_in_others(
-    others: Optional[List[Any]],
-) -> Optional[Tuple[int, str]]:
-    """在中转站列表里找出第一个「掩码串冒充真 Key」的条目。
+def _errors_detail(errors: List[str]) -> str:
+    """把校验错误列表压成一句人能读的话。
 
-    ★ 为什么必须单独抽出来：
-      这条守卫的失效后果是**静默且不可逆** ——
-      用户每点一次「保存中转站配置」，其余中转站的真实 Key
-      就被替换成 `sk-a…CD⟪…⟫` 落进磁盘；之后切到那家必然 401，
-      而配置页显示一切正常，用户只会以为中转站封了他。
-
-    ★ 判据放在模块级而非路由闭包内：
-      写在闭包里就只能靠「读源码找 is_masked_key 字样」来判断，
-      而那种判据是恒真的 —— 把判断条件改掉、字样还在，测试照样绿。
-
-    Returns: (下标, 该条的值)；没有则 None
+    ★★ 2026-10-29（第三轮审查 P0-4）：原来返回 ``{"errors": [...]}``
+      对象，而前端 `api.ts` 与 Rust `lib.rs` 两条错误解析通道都只认
+      ``msg`` / ``message`` / ``detail`` 是**字符串**的情况 ——
+      于是用户最终只看到「保存失败：本地代理返回 HTTP 400 Bad Request」，
+      既不知道哪一项填错，也没有下一步。引擎侧统一成字符串，
+      两端无需改协议即可读懂。
     """
-    for i, item in enumerate(others or []):
+    joined = "；".join(str(e) for e in errors if str(e).strip())
+    return joined or "配置校验未通过"
+
+
+def _require_config_shapes(payload: Dict[str, Any]) -> None:
+    """写内存前校验入参形状；畸形体一律 400。
+
+    ★★ 2026-10-29（第三轮审查 P0-5）：实测畸形的
+      ``{"relay": {"others": ["x"]}}`` 会在后续 ``others[].get`` 处抛
+      AttributeError。原实现只捕获 HTTPException 回滚，于是**运行态被写坏**：
+      磁盘毫发无损，但 ``GET /api/config`` 之后永久 500，设置页整页失效，
+      只有重启引擎才恢复。形状校验必须在任何 setattr 之前。
+    """
+    for key in ("relay", "guard", "server", "storage"):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, dict):
+            raise HTTPException(
+                status_code=400, detail=f"配置项 {key} 必须是对象"
+            )
+
+    relay = payload.get("relay")
+    if not isinstance(relay, dict):
+        return
+    others = relay.get("others")
+    if others is None:
+        return
+    if not isinstance(others, list):
+        raise HTTPException(
+            status_code=400, detail="relay.others 必须是列表"
+        )
+    for i, item in enumerate(others):
         if not isinstance(item, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"relay.others 第 {i + 1} 项必须是对象",
+            )
+
+
+def reconcile_masked_others(
+    incoming: Optional[List[Any]],
+    current: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """把前端回传的中转站列表与现有记录对齐：掩码值换回真实 Key。
+
+    ★★ 2026-10-29 实测 P0（用户截图）：配置页点「保存」必然失败，
+      报「第 1 条中转站配置的 API Key 看起来是脱敏后的串（含 ****）」。
+
+      成因：前端把 ``GET /api/config`` 拿到的 relay **整体**回传，
+      而 ``to_safe_dict()`` 已经把 others 每一项的 Key 换成了掩码。
+      旧做法是「见到掩码就整单拒绝」—— 它保住了「不把真实 Key 写坏」，
+      却把**正常保存**一并挡死：只要配过一家中转站，
+      之后任何设置都存不进去，用户被彻底卡住。
+
+      正确判据不是「有没有 ****」，而是「这个掩码值是不是服务端自己发出去的」：
+        · 与服务端当前掩码一致  → 用户没动过这个字段，保留真实 Key；
+        · 不一致 / 对不上记录   → 仍然是错误，拒绝并说明（防止有人塞掩码串）。
+
+    Returns: (合并后的列表, 错误信息)；错误信息非 None 表示应拒绝保存
+    """
+    if not isinstance(incoming, list):
+        return list(current), None
+
+    by_id = {str(r.get("id") or ""): r for r in current}
+    by_url = {str(r.get("base_url") or ""): r for r in current}
+
+    merged: List[Dict[str, Any]] = []
+    for i, item in enumerate(incoming):
+        if not isinstance(item, dict):
+            merged.append(item)
             continue
-        key = str(item.get("api_key") or "")
-        if is_masked_key(key):
-            return i, key
-    return None
+        entry = dict(item)
+        key = str(entry.get("api_key") or "")
+        if not is_masked_key(key):
+            merged.append(entry)
+            continue
+
+        old = by_id.get(str(entry.get("id") or "")) or by_url.get(
+            str(entry.get("base_url") or "")
+        )
+        real = str((old or {}).get("api_key") or "")
+        if real and not is_masked_key(real) and key == mask_relay_key(real):
+            entry["api_key"] = real
+            merged.append(entry)
+            continue
+
+        return merged, (
+            f"第 {i + 1} 条中转站配置的 API Key 是脱敏后的串（含 ****），"
+            "与服务端记录对不上，已拒绝保存。请删除这一条后重新添加。"
+        )
+    return merged, None
 
 
 def resolve_forward_target(
@@ -3786,7 +4227,7 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
 
     ★★ 这是多中转站里最关键的一步。
       原实现无条件用配置里的 api_key 覆盖 Authorization，
-      于是「AI 工具里填 A 家、玄盾里配 B 家」时，
+      于是「AI 工具里填 A 家、勘合里配 B 家」时，
       用户以为在用 A 扣费，实际扣的是 B ——
       账单打错，而且两边都不知道。
 
@@ -3802,7 +4243,7 @@ def _resolve_upstream(request) -> Optional[Dict[str, Any]]:
       AI 工具里填的 Key 常常是占位串（很多 IDE 只校验非空），
       按 Key 识别会全部落到「当前启用项」——
       用户明明把 B 家的地址填进了工具，实际扣的却是 A 家的钱。
-      端口是用户在玄盾里亲手指定给某一家的事实，优先级最高。
+      端口是用户在勘合里亲手指定给某一家的事实，优先级最高。
 
     ★ 不做自动故障转移、不做轮询：
       探活是真实 HTTP 请求，本机平均延迟 13 秒，
@@ -3911,6 +4352,37 @@ async def _sync_relay_ports(desired: Iterable[int]) -> Dict[int, str]:
     if _relay_listeners is None:
         return {}
     return await _relay_listeners.sync(desired)
+
+
+def _port_failure_for(
+    errs: Dict[int, str], port: int, action: str
+) -> Optional[str]:
+    """从「本次同步的端口失败集」里挑出**与本次操作有关**的那一条。
+
+    ★★ P1-6（2026-10-29 第三轮审查）
+    ────────────────────────────────────────────────────────────
+    ``sync(desired)`` 的入参是「配置里声明过的**全部**端口」，
+    它返回的失败集因此混着两类东西：
+      · 本次刚改的那个端口绑不上 —— 这次的保存该失败；
+      · 别的端口在更早的时候就没绑上（被别的软件占着）——
+        与这次操作毫无关系，却原来会让「新增一家 / 改任意端口」全部 400，
+        而报错说的是一个用户没动过的端口号。
+
+    全量校验当作本次操作的准入条件 = 一个域的问题封死另一域的正常路径。
+    所以这里只认 ``port`` 这一条；其余的原样打 warning（界面上
+    仍可通过 GET /api/config 的 port_errors 长期看到）。
+    """
+    if not port:
+        return None
+    if int(port) in errs:
+        return errs[int(port)]
+    others = {p: e for p, e in errs.items() if int(p) != int(port)}
+    if others:
+        logger.warning(
+            "%s：另有专属端口未生效（与本次操作无关，仅告警）: %s",
+            action, others,
+        )
+    return None
 
 
 def apply_relay_switch(relay_cfg, want: str) -> Dict[str, Any]:
@@ -4163,7 +4635,7 @@ def _migrate_relay_keys_to_fingerprint() -> None:
         logger.warning("信誉键迁移失败（不影响使用）: %s", e)
 
 
-def _sync_reputation_after_log_delete() -> None:
+def _rebuild_reputation_from_logs() -> None:
     """删日志后把中转站计数按剩余日志重算（2026-10-04）。
 
     ★ 为什么必须有
@@ -4625,7 +5097,7 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
 
     parser = argparse.ArgumentParser(
         prog="daoti_xuandun_personal.proxy.app",
-        description="道体·玄盾 个人版 — 本地代理",
+        description="道体·勘合 个人版 — 本地代理",
     )
     parser.add_argument("--host", default=None, help="监听地址（仅允许本地）")
     parser.add_argument("--port", type=int, default=None, help="监听端口（默认 18765）")
@@ -4670,7 +5142,7 @@ def run(host: Optional[str] = None, port: Optional[int] = None) -> None:
     )
 
     print("=" * 64)
-    print("  道体·玄盾 个人版 — 本地代理")
+    print("  道体·勘合 个人版 — 本地代理")
     print("=" * 64)
     print(f"  监听地址:  http://{actual_host}:{actual_port}")
     print(f"  中转站:    {config.relay.base_url or '(未配置，请先在设置中填写)'}")

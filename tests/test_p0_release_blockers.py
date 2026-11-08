@@ -6,7 +6,7 @@
 十条 P0 的共同特征：**界面上一切正常，底层已经坏了**。
 所以这里的判据不看「有没有某段代码」，而是看真实调用点的结果：
 
-  P0-1 引擎身份：/health 必须能证明「对面是玄盾」，桌面端才能把 Key 交出去
+  P0-1 引擎身份：/health 必须能证明「对面是勘合」，桌面端才能把 Key 交出去
   P0-2 就绪语义：/− 存储或检测器缺失时不能再回 ok
   P0-3 建表异常：锁等待/只读盘不得被当成「库损坏」而整库隔离
   P0-4 截断冒充成功：响应体读到一半失败，不能当作 200 空内容通过
@@ -39,6 +39,31 @@ if str(ROOT / "src") not in sys.path:
 
 from daoti_xuandun_personal.proxy import app as app_mod  # noqa: E402
 from daoti_xuandun_personal.storage import db as db_mod  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _treat_as_activated(monkeypatch):
+    """把「授权判定」固定为已授权。
+
+    ★★ 2026-10-28（CI 实测）：本文件的用例测的是流式终止、截断处理、
+      引擎身份等**与授权无关**的行为，但它们都要经过
+      ``app._protection_enabled()`` 这道门。
+
+      该门的语义是「未激活 / 已过期 → 只读直通」：公钥缺失时按已授权处理，
+      公钥在、码不在时按未激活处理。开发机上有 license.json，门是开的，
+      用例全绿；干净 runner 上公钥随包分发（发布前置条件）而没有码，
+      门是关的 —— 三个用例因此只在 CI 上失败，本地永远复现不出来。
+
+      这里显式把授权判定钉成已授权，让用例只依赖被测逻辑；
+      需要验「未激活只读」的用例请自行 monkeypatch 回真实实现。
+    """
+    from daoti_xuandun_personal import license as lic_mod
+
+    monkeypatch.setattr(lic_mod, "load_public_key", lambda: None)
+    app_mod._protection_cache.clear()
+    yield
+    app_mod._protection_cache.clear()
+
 
 LIB_RS = ROOT / "desktop" / "src-tauri" / "src" / "lib.rs"
 API_TS = ROOT / "desktop" / "src" / "services" / "api.ts"
@@ -273,7 +298,7 @@ class TestEngineIdentity:
         """Rust 侧必须比对身份，不匹配即拒绝。"""
         src = LIB_RS.read_text(encoding="utf-8")
         assert "instance" in src, "Rust 未校验引擎身份标记"
-        assert "不是玄盾引擎" in src or "非本机引擎" in src or "身份" in src, (
+        assert "不是勘合引擎" in src or "非本机引擎" in src or "身份" in src, (
             "拒绝外部进程时没有可读的提示"
         )
 
@@ -343,17 +368,57 @@ class TestStreamTermination:
         assert rows and rows[0].action != "pass", "中断的响应被记成了「通过」"
 
     def test_block_ends_with_done_marker(self, tmp_path):
-        """阻断后同样要补终止标记，否则客户端一直等。"""
+        """阻断后只补**一个**结束标记，且阻断帧必须排在它之前。
+
+        ★★ 2026-10-29（第三轮审查 P0-1）：本用例原来只断言
+          「以 [DONE] 结尾」—— 那个断言在「内容先外泄、事后补标记、
+          还发两个 [DONE]」的缺陷形态下**也是绿的**，等于给缺陷发了
+          合格证。现在把三条真实性质都钉住：
+            1. [DONE] 只出现一次（上游的那个已被代理吞掉）；
+            2. 阻断帧在 [DONE] 之前（否则严格客户端读不到）；
+            3. 内容已交付 ⇒ 记账必须是 alert，不能写 block。
+        """
         resp = _StreamResp([
             b'data: {"choices":[{"delta":{"content":"payload"}}]}\n\n',
         ])
-        result, _store = _run(tmp_path, resp, stream=True,
+        result, store = _run(tmp_path, resp, stream=True,
                               verifier=_BlockingVerifier())
         out = result
 
         assert b"relay_response_blocked" in out
-        assert out.rstrip().endswith(b"data: [DONE]"), (
-            "阻断后没有终止标记 —— 客户端无法判断这条流已经结束"
+        assert out.count(b"data: [DONE]") == 1, (
+            "结束标记发了不止一次 —— 客户端会看到两个 [DONE]"
+        )
+        assert out.rfind(b"relay_response_blocked") < out.find(b"data: [DONE]"), (
+            "阻断帧排在结束标记之后 —— 严格按协议读到 [DONE] 就收工的客户端"
+            "根本看不到这条阻断"
+        )
+        rows = store.query_logs(limit=5)
+        assert rows and rows[0].action == "alert", (
+            f"内容已经交给客户端了，却把这次记成 {rows[0].action!r} —— "
+            "账本说谎，下次复盘会得出「拦住了」的错误结论"
+        )
+        assert "已发出部分内容" in (rows[0].detail_json or ""), (
+            "日志没有写明「内容已送达」，用户无法判断这次到底泄露没泄露"
+        )
+
+    def test_tool_call_frames_are_withheld_when_blocked(self, tmp_path):
+        """被阻断时，工具调用帧绝不能交付 —— 那是唯一会被执行的东西。"""
+        resp = _StreamResp([
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"function":{"name":"RunCommand","arguments":"{\\"command\\":\\"rm -rf /\\"}"}}]}}]}\n\n',
+        ])
+        result, store = _run(tmp_path, resp, stream=True,
+                              verifier=_BlockingVerifier())
+        out = result
+
+        assert b"RunCommand" not in out, (
+            "被判定高危的工具调用仍然发给了客户端 —— AI 工具会照着执行"
+        )
+        assert b"relay_response_blocked" in out
+        rows = store.query_logs(limit=5)
+        assert rows and rows[0].action == "block", (
+            "这次确实没让任何东西落地（工具调用已扣住），应当记 block"
         )
 
 
@@ -571,3 +636,74 @@ class TestTaskkillIsBounded:
             assert "run_command_bounded" in body, (
                 f"{fn} 没有走有界执行器 —— 该调用可能永久阻塞 lifecycle 锁"
             )
+
+
+# ══════════════════════════════════════════════════════════════
+# 隐私门禁：放行占位串，但真钥匙必须仍然被拦
+# ══════════════════════════════════════════════════════════════
+
+
+class TestSecretScanDistinguishesPlaceholderFromRealKey:
+    """★ 2026-10-29（第三轮审查）：门禁原来只看 PEM 头。
+
+    后果是「只有头和尾、没有任何密钥体」的测试夹具也被判成泄露私钥，
+    测试为了能入库只能把 PEM 头拆成字符串拼接 —— 反而让真正该被
+    grep 到的形态从代码里消失。现按「头之后是否有 ≥200 个连续 base64
+    字符」区分：占位放行，真钥匙一律拦下。下面两条互为反向自证。
+    """
+
+    @staticmethod
+    def _scan(data: bytes):
+        import importlib.util
+
+        script = ROOT / ".github" / "scripts" / "scan_secrets.py"
+        spec = importlib.util.spec_from_file_location("scan_secrets_probe", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.scan_bytes("probe.txt", data)
+
+    def test_real_key_body_is_still_flagged(self):
+        body = b"MIIEpAIBAAKCAQEA" * 20          # 320 个连续 base64 字符
+        data = (
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            + body
+            + b"\n-----END RSA PRIVATE KEY-----\n"
+        )
+        assert self._scan(data), (
+            "带完整密钥体的 PEM 被放过了 —— 隐私门禁被改坏了"
+        )
+
+    def test_placeholder_header_without_body_is_allowed(self):
+        data = (
+            b"scan-secrets: allow-pem-placeholder\n"
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            b"MIIEpAIBAAKCAQEA\n"
+            b"-----END RSA PRIVATE KEY-----"
+        )
+        assert not self._scan(data), (
+            "显式声明过的测试占位串仍被判成私钥材料 —— "
+            "下一个人只好去拆字符串绕过门禁"
+        )
+
+    def test_placeholder_without_declaration_is_still_flagged(self):
+        """默认仍严格：没声明就按密钥材料处理（不给静默放行的口子）。"""
+        data = (
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            b"AAAA\n"
+        )
+        assert self._scan(data), (
+            "没有任何声明的 PEM 头被静默放行了 —— 门禁出现无条件豁免"
+        )
+
+    def test_declaration_cannot_hide_a_real_key(self):
+        """声明不能当免死金牌：带完整密钥体时，写了声明也照样拦。"""
+        body = b"MIIEpAIBAAKCAQEA" * 20
+        data = (
+            b"scan-secrets: allow-pem-placeholder\n"
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            + body
+            + b"\n-----END RSA PRIVATE KEY-----\n"
+        )
+        assert self._scan(data), (
+            "写了占位声明就能藏真钥匙 —— 这条豁免被滥用"
+        )

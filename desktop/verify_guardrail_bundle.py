@@ -30,10 +30,24 @@
 
 判据
 ────────────────────────────────────────────────────────────────
-在**二进制**里搜护栏判据标识（system_prompt_inject / sensitive_leak）。
+在**二进制**里搜**只有护栏层才会产生**的符号。
 
 不找 .py 文件 —— Nuitka standalone 把模块编译进二进制，源码不落盘。
 不只看目录存在 —— 空壳目录也满足，而它毫无防护能力。
+
+★★ 2026-10-29（第三轮审查 P0-2）：此前的判据是
+   `system_prompt_inject` / `sensitive_leak`，并注释写「这些标识只由
+   护栏代码产生」—— **那句注释是错的**。这两个字符串恰恰由个人版
+   自己在「护栏不可用」分支里产出（verifier.get_stats 的
+   guardrail_missing_layers、各类 finding 的 category 名）。
+   后果：护栏整包没编进去，这两个串反而必然出现在二进制里，
+   门禁恒真 —— 一个月、三轮审查全绿，而包可能根本没有防护能力。
+
+   现在的判据换成护栏模块自己的类名（个人版一行都不出现）：
+     OutputGuardrail   ← _check_output.py
+     SensitiveLeakDetector ← sensitive_leak.py
+     PromptLeakChecker ← _check_prompt_leak.py
+   并且**三个都要在**，少一个就说明只编进了一部分。
 """
 
 from __future__ import annotations
@@ -48,9 +62,13 @@ ROOTS = [
     Path("engine_main.dist"),
 ]
 
-# ★ 这些标识只由护栏代码产生，个人版自研层不包含它们。
+# ★ 只由护栏层产生的符号（个人版源码里不出现这些标识）。
 #   护栏缺失时必然搜不到 —— 这是「防护能力在不在」的判据。
-SIGS = [b"system_prompt_inject", b"sensitive_leak"]
+SIGS = [
+    b"OutputGuardrail",
+    b"SensitiveLeakDetector",
+    b"PromptLeakChecker",
+]
 
 BIN_SUFFIXES = (".exe", ".bin")
 
@@ -69,19 +87,30 @@ def _list_dir(d: Path) -> None:
 
 
 def main() -> int:
+    # ★ 2026-10-29：支持 `--root <dir>`，让测试能用**合成产物**验证
+    #   「护栏缺失时必须失败」。没有负样本的门禁不算门禁。
+    roots = ROOTS
+    if "--root" in sys.argv:
+        idx = sys.argv.index("--root")
+        try:
+            roots = [Path(sys.argv[idx + 1])]
+        except IndexError:
+            print("::error::--root 后面要跟一个目录")
+            return 2
+
     # ★ 只验公钥：build_engine.py 拷公钥，但「脚本说拷了」不等于
     #   「真的拷了」。缺公钥的包能启动、能自检通过，
     #   唯独每个用户都激活不了 —— 发布后才发现等于白发一个版本。
     if "--pubkey-only" in sys.argv:
         hits = [
             p
-            for r in ROOTS
+            for r in roots
             if r.is_dir()
             for p in r.rglob("license_pub.pem")
         ]
         if not hits:
             print("::error::引擎产物里没有 license_pub.pem —— 所有用户都将无法激活")
-            for r in ROOTS:
+            for r in roots:
                 _list_dir(r)
             return 1
         print(f"PASS：公钥已落入引擎产物（{hits[0]}）")
@@ -89,15 +118,31 @@ def main() -> int:
 
     bins = [
         p
-        for r in ROOTS
+        for r in roots
         if r.is_dir()
         for p in r.iterdir()
         if p.is_file() and p.suffix in BIN_SUFFIXES
     ]
 
     if not bins:
+        # ★ macOS / Linux 的 sidecar 按 Tauri externalBin 约定**没有扩展名**
+        #   （如 `xuandun-engine-aarch64-apple-darwin`）。只认 .exe/.bin 会让
+        #   这两个平台在「找不到可执行文件」处直接失败 —— 那是判据写错，
+        #   不是产物有问题。这里退化为「根目录里最大的那个文件」。
+        candidates = [
+            p
+            for r in roots
+            if r.is_dir()
+            for p in r.iterdir()
+            if p.is_file() and p.stat().st_size > 1_000_000
+        ]
+        bins = sorted(
+            candidates, key=lambda p: p.stat().st_size, reverse=True
+        )[:1]
+
+    if not bins:
         print("::error::在引擎产物目录里找不到可执行文件")
-        for r in ROOTS:
+        for r in roots:
             _list_dir(r)
         return 1
 

@@ -392,7 +392,7 @@ class TestPrivateKeyGateIsContentBased:
 
     def test_detects_pem_header_in_text(self):
         mod = _load_module(SCAN_SECRETS, "scan_secrets_probe")
-        # ★ 头部必须拼出来：本机玄盾会把"像私钥"的字面量替换成占位符
+        # ★ 头部必须拼出来：本机勘合会把"像私钥"的字面量替换成占位符
         header = ("-----BEGIN " + "RSA " + "PRIVATE" + " KEY" + "-----").encode()
         assert mod.scan_bytes("notes.md", header + b"\nAAAA\n"), (
             "PEM 私钥粘进文本文件时未被检出"
@@ -443,14 +443,24 @@ class TestRepositorySurface:
     另一款产品的使用指南在仓库里，Release 里就会混进别的版本号。
     """
 
-    def test_architecture_docs_are_shipped(self):
+    def test_internal_docs_are_out_of_the_repo(self):
+        """★ 2026-11-08：策略已改为「开发文档移出公开仓库」。
+
+        此前要求 docs/README.md 等随仓库走；现在仓库只保留源码与测试，
+        内部文档（架构、开发、边界说明）不再公开。判据随之反转：
+        docs/ 必须被忽略，且不能有任何文件被版本库追踪。
+        """
+        import subprocess
+
         ignore = _read(ROOT / ".gitignore")
-        for name in ("README.md", "ARCHITECTURE.md", "DEVELOPMENT.md",
-                     "SECURITY_BOUNDARIES.md"):
-            assert (ROOT / "docs" / name).is_file(), f"docs/{name} 不存在"
-            assert f"!docs/{name}" in ignore, (
-                f"docs/{name} 仍被 .gitignore 排除 —— clone 后拿不到"
-            )
+        assert "docs/" in ignore, (
+            "docs/ 未被 .gitignore 忽略 —— 内部开发文档会随仓库公开"
+        )
+        out = subprocess.run(
+            ["git", "ls-files", "docs"],
+            cwd=str(ROOT), capture_output=True, text=True,
+        ).stdout.strip()
+        assert out == "", f"docs/ 下仍有文件被版本库追踪：{out}"
 
     def test_enterprise_doc_is_out_of_the_repo(self):
         import subprocess
@@ -507,7 +517,7 @@ class TestBuildJobEgressIsEnforced:
 class TestLocalProxyOfflineIsRecoverable:
     """P1-30：引擎没起来时，用户必须能就地恢复。
 
-    此前只写「请确认玄盾代理已启动（127.0.0.1:端口）」+「重试」——
+    此前只写「请确认勘合代理已启动（127.0.0.1:端口）」+「重试」——
     那是一句用户无法执行的指令：他不知道引擎是什么、怎么启动，
     也不知道「端口被别的程序占了」「改过端口没重启」这两种常见原因。
     """
@@ -556,7 +566,7 @@ class TestLocalProxyOfflineIsRecoverable:
 class TestMultiRelayMultiPortConsistency:
     """多中转站 + 多端口：主端口正常、某一家入口失效时不能静默。
 
-    玄盾是「一个进程监听多个端口」：主端口 + 每家中转站一个专属端口。
+    勘合是「一个进程监听多个端口」：主端口 + 每家中转站一个专属端口。
     这带来两类**只看主端口发现不了**的失效：
       ① 保存配置时某个专属端口绑不上 —— 后端照旧保存，只在 port_errors 里说明；
       ② 引擎重启后某个专属端口仍绑不上 —— 界面上完全没痕迹。

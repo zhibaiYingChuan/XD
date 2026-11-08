@@ -43,6 +43,8 @@ import {
 import { useToast } from '../components/Toast';
 import { EngineOffline, useBootDeadline } from '../components/EngineOffline';
 import { copyToClipboard } from '../lib/tauriShim';
+import { confirmDialog } from '../lib/confirm';
+import { useI18n } from '../i18n';
 
 /**
  * 首页卡片的标题文案：优先说人话，说不出来才用引擎的原话。
@@ -101,6 +103,7 @@ const SCORE_WEIGHTS = {
 
 export default function Dashboard() {
   const toast = useToast();
+  const { t } = useI18n();
   const [state, setState] = useState<StateResponse | null>(null);
   const [recent, setRecent] = useState<LogEntry[]>([]);
   const [relays, setRelays] = useState<RelayReputation[]>([]);
@@ -265,11 +268,13 @@ export default function Dashboard() {
     // ★ 永久暂停是**危险操作**：一点之后所有对话都不再受保护，
     //   而用户此前只会看到一条 Toast —— 手滑点中就要手动恢复，且中途
     //   没有任何拦截兜底。这里加二次确认，文案必须讲清后果，不能只说
-    //   「确定暂停吗」。项目内既有约定用 window.confirm（见 Logs.tsx / Settings.tsx）。
+    //   「确定暂停吗」。项目内统一用 confirmDialog（见 lib/confirm.ts）。
     //   取消则不做任何改动，连 busy 都不置位。
     if (durationMin === 0) {
-      const ok = window.confirm(
-        '确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。',
+      // ★ 原生 window.confirm 在 Tauri 2.7 上弹不出来（见 lib/confirm.ts），
+      //   统一走应用内确认框；必须 await，否则还没等用户答复就暂停了。
+      const ok = await confirmDialog(
+        t('确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。'),
       );
       if (!ok) return;
     }
@@ -277,11 +282,13 @@ export default function Dashboard() {
     try {
       await api.pause(durationMin);
       toast.info(
-        durationMin > 0 ? `防护已暂停 ${durationMin} 分钟` : '防护已永久暂停，直到手动恢复',
+        durationMin > 0
+          ? `${t('防护已暂停')} ${durationMin} ${t('分钟')}`
+          : t('防护已永久暂停，直到手动恢复'),
       );
       await load();
     } catch (e) {
-      toast.error(`暂停失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('暂停失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -292,10 +299,10 @@ export default function Dashboard() {
     setBusy(true);
     try {
       await api.resume();
-      toast.success('防护已恢复');
+      toast.success(t('防护已恢复'));
       await load();
     } catch (e) {
-      toast.error(`恢复失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('恢复失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -308,38 +315,38 @@ export default function Dashboard() {
     try {
       const d = await api.getDiagnostics();
       const report = [
-        '道体·玄盾 个人版 — 诊断报告',
-        `版本: ${d.version}`,
+        t('道体·勘合 个人版 — 诊断报告'),
+        `${t('版本')}: ${d.version}`,
         // ★ P2-4 修复：原硬编码 127.0.0.1:18765，
         //   用户改过端口后报告会给出错误的排查指引
-        `代理端口: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
-        `中转站: ${displayDomain(d.relay_domain) || '(未配置)'}`,
-        `安全级别: ${d.verifier?.level ?? '-'}`,
-        `企业版护栏: ${d.verifier?.guardrail_available ? '已加载' : '未加载'}`,
-        `日志总数: ${d.storage?.total_logs ?? 0}`,
-        `已知中转站: ${d.reputation?.total_relays ?? 0}`,
+        `${t('代理端口')}: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
+        `${t('中转站')}: ${displayDomain(d.relay_domain) || t('(未配置)')}`,
+        `${t('安全级别')}: ${d.verifier?.level ?? '-'}`,
+        `${t('企业版护栏')}: ${d.verifier?.guardrail_available ? t('已加载') : t('未加载')}`,
+        `${t('日志总数')}: ${d.storage?.total_logs ?? 0}`,
+        `${t('已知中转站')}: ${d.reputation?.total_relays ?? 0}`,
         '',
-        '（本报告不含任何对话内容与 API 密钥）',
+        t('（本报告不含任何对话内容与 API 密钥）'),
       ].join('\n');
       const ok = await copyToClipboard(report);
-      if (ok) toast.success('诊断报告已复制到剪贴板');
-      else toast.error('复制失败，请手动截图');
+      if (ok) toast.success(t('诊断报告已复制到剪贴板'));
+      else toast.error(t('复制失败，请手动截图'));
     } catch (e) {
-      toast.error(`生成诊断报告失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`${t('生成诊断报告失败：')}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
   };
 
   // ★ 首次配置后的「还差一步」：把本地地址直接摆在首页并支持一键复制。
-  //   新用户最常见的卡点是「玄盾里配好了，但 AI 工具还在直连中转站」——
-  //   此时首页一切正常、却永远没有记录，他只会以为玄盾坏了。
+  //   新用户最常见的卡点是「勘合里配好了，但 AI 工具还在直连中转站」——
+  //   此时首页一切正常、却永远没有记录，他只会以为勘合坏了。
   const handleCopyProxyAddress = async () => {
     const ok = await copyToClipboard(
       `http://127.0.0.1:${currentProxyPort()}/v1`,
     );
-    if (ok) toast.success('代理地址已复制，粘贴到 AI 工具的 API 地址');
-    else toast.error('复制失败，请手动选中地址');
+    if (ok) toast.success(t('代理地址已复制，粘贴到 AI 工具的 API 地址'));
+    else toast.error(t('复制失败，请手动选中地址'));
   };
 
   // ══════════════════════════════════════════════════════════
@@ -362,11 +369,11 @@ export default function Dashboard() {
     return (
       <div>
         <div className="page-header">
-          <h1 className="page-title">首页</h1>
+          <h1 className="page-title">{t('首页')}</h1>
         </div>
         <EngineOffline error={loadError} onRetried={() => load()} />
         <button className="btn secondary mt-8" onClick={() => load()}>
-          重试
+          {t('重试')}
         </button>
       </div>
     );
@@ -425,9 +432,9 @@ export default function Dashboard() {
     : 0;
   const usedLabel =
     usedDays >= 1
-      ? `已使用 ${usedDays} 天`
+      ? `${t('已使用')} ${usedDays} ${t('天')}`
       : primaryRelay
-        ? '今天开始使用'
+        ? t('今天开始使用')
         : '';
 
   // ── 评分扣分明细 ──
@@ -476,22 +483,22 @@ export default function Dashboard() {
     ? [
         {
           key: 'malicious',
-          label: '命中已知恶意中转站库',
-          detail: '信誉直接归零',
+          label: t('命中已知恶意中转站库'),
+          detail: t('信誉直接归零'),
           points: primaryRelay.known_malicious ? primaryRelay.score : 0,
           hit: primaryRelay.known_malicious,
         },
         {
           key: 'watermark',
-          label: '检测到数据保留迹象',
-          detail: `响应中出现中转站自述留存 · ${SCORE_WEIGHTS.watermark} 分`,
+          label: t('检测到数据保留迹象'),
+          detail: `${t('响应中出现中转站自述留存')} · ${SCORE_WEIGHTS.watermark} ${t('分')}`,
           points: primaryRelay.watermark_detected ? SCORE_WEIGHTS.watermark : 0,
           hit: primaryRelay.watermark_detected,
         },
         {
           key: 'pattern',
-          label: '域名高风险模式',
-          detail: `这个域名是老手常用来行骗的免费域名 · 扣 ${SCORE_WEIGHTS.suspiciousPattern} 分`,
+          label: t('域名高风险模式'),
+          detail: `${t('这个域名是老手常用来行骗的免费域名')} · ${t('扣')} ${SCORE_WEIGHTS.suspiciousPattern} ${t('分')}`,
           points: primaryRelay.notes.some((n) => n.startsWith('高风险模式'))
             ? SCORE_WEIGHTS.suspiciousPattern
             : 0,
@@ -499,7 +506,7 @@ export default function Dashboard() {
         },
         {
           key: 'behavior',
-          label: '中转站侧问题响应占比',
+          label: t('中转站侧问题响应占比'),
           // ★ 说人话：把「危险 N 次（权重 2）+ 可疑 M 次」这种带权重的算式
           //   翻译成用户能对上号的叙述。relayRisk 即 danger+suspect 的实际命中条数；
           //   扣分用 Number(toFixed(1)) 抹掉无意义的尾随 .0（如 4.0 → 4）。
@@ -507,10 +514,10 @@ export default function Dashboard() {
           // ★ 2026-10-20：原名「可疑内容」把危险也算进去，
           //   与 KPI 的「危险 / 提示」两栏对不上；改为「被判为危险或提示」。
           detail:
-            `${primaryRelay.total_calls} 次调用里有 ${relayRisk} 次被判为危险或提示`
-            + `（危险的按双倍算）`
-            + `→ 扣 ${Number(behaviorPenalty.toFixed(1))} 分`
-            + `（最多扣 ${SCORE_WEIGHTS.behaviorMax}）`,
+            `${primaryRelay.total_calls} ${t('次调用里有')} ${relayRisk} ${t('次被判为危险或提示')}`
+            + t('（危险的按双倍算）')
+            + `${t('→ 扣')} ${Number(behaviorPenalty.toFixed(1))} ${t('分')}`
+            + `${t('（最多扣')} ${SCORE_WEIGHTS.behaviorMax}${t('）')}`,
           points: Number(behaviorPenalty.toFixed(1)),
           hit: relayRisk > 0,
         },
@@ -529,13 +536,14 @@ export default function Dashboard() {
         <div className="alert suspect" style={{ marginBottom: 16 }}>
           <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
           <div>
-            <b>未激活：当前只转发，不做防护</b>
+            <b>{t('未激活：当前只转发，不做防护')}</b>
             <div className="mt-8">
-              玄盾现在只会把你的请求原样转给中转站 ——
-              <b>不会脱敏、也不会拦截</b>。激活后才会开始检查。
+              {t('勘合现在只会把你的请求原样转给中转站 ——')}
+              <b>{t('不会脱敏、也不会拦截')}</b>
+              {t('。激活后才会开始检查。')}
             </div>
             <Link to="/activate" className="btn sm mt-8">
-              去激活
+              {t('去激活')}
             </Link>
           </div>
         </div>
@@ -544,10 +552,10 @@ export default function Dashboard() {
       {/* ① 英雄区 */}
       <div className="card hero">
         <div className={`hero-state ${loaded ? s : 'learning'}`}>
-          {loaded ? STATE_LABELS[s] : '读取中'}
+          {loaded ? t(STATE_LABELS[s]) : t('读取中')}
         </div>
         <div className="hero-message">
-          {loaded ? (state?.message ?? '') : '正在读取状态…'}
+          {loaded ? (state?.message ?? '') : t('正在读取状态…')}
         </div>
 
         {/* ★ 手动刷新 + 上次更新时间。
@@ -567,22 +575,35 @@ export default function Dashboard() {
           }}
         >
           <span className="mono">
-            {lastLoadedAt ? `更新于 ${formatTime(lastLoadedAt)}` : '尚未更新'}
+            {lastLoadedAt ? `${t('更新于')} ${formatTime(lastLoadedAt)}` : t('尚未更新')}
           </span>
           <button
             className="btn ghost sm"
             onClick={() => void handleRefresh()}
             disabled={refreshing}
-            aria-label="刷新数据"
+            aria-label={t('刷新数据')}
           >
             <RefreshCw
               size={13}
               strokeWidth={1.5}
               className={refreshing ? 'spin-icon' : undefined}
             />
-            {refreshing ? '刷新中' : '刷新'}
+            {refreshing ? t('刷新中') : t('刷新')}
           </button>
         </div>
+
+        {today && (
+          <div className="hero-narrative">
+            {t('今天检查了')} <b>{today.total_calls}</b> {t('次')}
+            {today.redaction_count > 0 && (
+              <>{t('，打码')} <b>{today.redaction_count}</b> {t('处')}</>
+            )}
+            {today.danger_count > 0 && (
+              <>{t('，拦下')} <b>{today.danger_count}</b> {t('条')}</>
+            )}
+            。
+          </div>
+        )}
 
         {today && (
           /* ★ 三个数字都能点进去（2026-10-20）。
@@ -596,33 +617,39 @@ export default function Dashboard() {
               to="/logs?days=1&action=pass&marked=exclude&exclude=proxy_error"
               className="kpi"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天安全通过的记录"
+              title={t('查看今天安全通过的记录')}
             >
-              <div className="kpi-value safe">{today.safe_count}</div>
-              <div className="kpi-label">安全</div>
+              <div className={`kpi-value ${today.safe_count > 0 ? 'safe' : 'neutral'}`}>
+                {today.safe_count}
+              </div>
+              <div className="kpi-label">{t('安全')}</div>
             </Link>
             <Link
               to="/logs?days=1&action=alert&marked=exclude&exclude=proxy_error"
               className="kpi"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天的提示记录"
+              title={t('查看今天的提示记录')}
             >
-              <div className="kpi-value suspect">{today.suspect_count}</div>
+              <div className={`kpi-value ${today.suspect_count > 0 ? 'suspect' : 'neutral'}`}>
+                {today.suspect_count}
+              </div>
               {/* ★ 「可疑」→「提示」。
                   「可疑」暗示「出问题了」，但这一栏现在装的是
                   「回答长度/结构与平时不同」这类统计信号 ——
                   它不指向任何问题。用户看到「可疑 42」只会莫名紧张，
                   反而看不到真正该看的「危险」。 */}
-              <div className="kpi-label">提示</div>
+              <div className="kpi-label">{t('提示')}</div>
             </Link>
             <Link
               to="/logs?days=1&action=block&marked=exclude&exclude=proxy_error"
               className="kpi"
               style={{ textDecoration: 'none', color: 'inherit' }}
-              title="查看今天被拦截的记录"
+              title={t('查看今天被拦截的记录')}
             >
-              <div className="kpi-value danger">{today.danger_count}</div>
-              <div className="kpi-label">危险</div>
+              <div className={`kpi-value ${today.danger_count > 0 ? 'danger' : 'neutral'}`}>
+                {today.danger_count}
+              </div>
+              <div className="kpi-label">{t('危险')}</div>
             </Link>
           </div>
         )}
@@ -631,9 +658,9 @@ export default function Dashboard() {
       {/* ② 近期安全记录 */}
       <div className="card">
         <div className="card-title">
-          <span>近期安全记录</span>
+          <span>{t('近期安全记录')}</span>
           <Link to="/logs" className="btn ghost sm">
-            查看全部
+            {t('查看全部')}
             <span style={{ transform: 'translateX(1px)' }}>→</span>
           </Link>
         </div>
@@ -648,33 +675,22 @@ export default function Dashboard() {
                   这个用户库里有 1246 条，启动瞬间被告诉「还没有检测记录」，
                   第一反应只会是「我的数据是不是没了」。 */}
               {!loaded
-                ? '正在加载记录…'
+                ? t('正在加载记录…')
                 : today && today.total_calls > 0
                   ? (today.danger_count + today.suspect_count > 0
-                    /* ★ 不能因为「最近 8 条都是安全」就说「今天没有危险响应」——
-                       这里只取了 8 条做展示，更早的危险记录不在窗口内，
-                       而上面的 KPI 明明写着「危险 N」。两句话互相打架。 */
-                    ? `最近的对话没有新问题。今天累计：危险 ${today.danger_count} 条、提示 ${today.suspect_count} 条，点「查看全部」可逐条核对。`
-                    : '今天没有发现危险响应，你的 AI 对话很安全')
-                  : '还没有检测记录 — 使用 AI 工具发起一次对话试试'}
+                    ? `${t('最近的对话没有新问题。今天累计：危险')} ${today.danger_count} ${t('条、提示')} ${today.suspect_count} ${t('条，点「查看全部」可逐条核对。')}`
+                    : t('今天没有发现危险响应，你的 AI 对话很安全'))
+                  : t('还没有检测记录 — 使用 AI 工具发起一次对话试试')}
             </div>
           </div>
         ) : (
           <div className="list">
             {recent.map((entry) => (
               <div key={entry.id} className="list-item">
-                <span className={`list-icon ${actionBadgeClass(entry)}`}>
-                  {entry.action === 'block' ? (
-                    <ShieldX size={14} strokeWidth={1.5} />
-                  ) : entry.severity === 'medium' ? (
-                    <AlertTriangle size={14} strokeWidth={1.5} />
-                  ) : (
-                    <Info size={14} strokeWidth={1.5} />
-                  )}
-                </span>
+                <span className={`status-dot ${actionBadgeClass(entry)}`} />
                 <span className="list-time">{formatTime(entry.timestamp)}</span>
-                <span className="list-text" title={entryHeadline(entry)}>
-                  {entryHeadline(entry)}
+                <span className="list-text" title={t(entryHeadline(entry))}>
+                  {t(entryHeadline(entry))}
                 </span>
               </div>
             ))}
@@ -684,7 +700,7 @@ export default function Dashboard() {
 
       {/* ③ 当前中转站 */}
       <div className="card">
-        <div className="card-title">当前中转站</div>
+        <div className="card-title">{t('当前中转站')}</div>
         {primaryRelay ? (
           <>
             <div className="flex items-center justify-between gap-12">
@@ -693,7 +709,11 @@ export default function Dashboard() {
                 <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
                   {usedLabel}
                   {usedLabel && ' · '}
-                  {primaryRelay.total_calls} 次调用
+                  {/* ★ 2026-11-03：标明「累计」。
+                      这个数来自 relay_reputation（全部时间的响应验证），
+                      与顶部 KPI 的「今日」不是同一口径 ——
+                      不写范围，用户会拿它和「今日检查」对账。 */}
+                  累计 {primaryRelay.total_calls} 次调用
                   {/* ★ 只把「中转站侧」的风险算到中转站头上。
                       旧版这里显示的是 danger_count（总量），
                       实测 19 次里全部是「响应长度突变」——
@@ -722,15 +742,15 @@ export default function Dashboard() {
                   {(primaryRelay.self_danger_count ?? 0) > 0 && (
                     <>
                       {' · '}
-                      <span title="这些请求在发往中转站之前就被拦下了，中转站从未收到">
-                        你有 {primaryRelay.self_danger_count} 次操作被拦截
+                      <span title={t('这些请求在发往中转站之前就被拦下了，中转站从未收到')}>
+                        {t('你有')} {primaryRelay.self_danger_count} {t('次操作被拦截')}
                       </span>
                     </>
                   )}
                   {primaryRelay.watermark_detected && (
                     <>
                       {' · '}
-                      <span style={{ color: 'var(--xd-suspect)' }}>检测到数据保留迹象</span>
+                      <span style={{ color: 'var(--xd-suspect)' }}>{t('检测到数据保留迹象')}</span>
                     </>
                   )}
                 </div>
@@ -741,7 +761,7 @@ export default function Dashboard() {
                   <span style={{ fontSize: 13, fontWeight: 400 }}>/100</span>
                 </div>
                 <div className="faint" style={{ fontSize: 11 }}>
-                  {RELAY_LEVEL_TEXT[primaryRelay.level]}
+                  {t(RELAY_LEVEL_TEXT[primaryRelay.level])}
                 </div>
               </div>
             </div>
@@ -761,7 +781,7 @@ export default function Dashboard() {
                   transition: 'transform .15s ease',
                 }}
               />
-              {showRepDetail ? '收起评分明细' : '为什么是这个分数？'}
+              {showRepDetail ? t('收起评分明细') : t('为什么是这个分数？')}
             </button>
 
             {showRepDetail && (
@@ -783,9 +803,9 @@ export default function Dashboard() {
                   <>
                     <div className="table" style={{ marginBottom: 12 }}>
                       <div className="rep-row rep-row-head">
-                        <span>扣分项</span>
-                        <span className="faint">依据</span>
-                        <span style={{ textAlign: 'right' }}>扣分</span>
+                        <span>{t('扣分项')}</span>
+                        <span className="faint">{t('依据')}</span>
+                        <span style={{ textAlign: 'right' }}>{t('扣分')}</span>
                       </div>
                       {repDeductions.map((d) => (
                         <div key={d.key} className="rep-row">
@@ -797,8 +817,8 @@ export default function Dashboard() {
                         </div>
                       ))}
                       <div className="rep-row rep-row-total">
-                        <span>当前信誉分</span>
-                        <span className="faint">满分 100</span>
+                        <span>{t('当前信誉分')}</span>
+                        <span className="faint">{t('满分')} 100</span>
                         <span style={{ textAlign: 'right' }}>{primaryRelay.score}</span>
                       </div>
                     </div>
@@ -813,13 +833,13 @@ export default function Dashboard() {
                     )}
 
                     <div className="faint" style={{ fontSize: 12, lineHeight: 1.7, marginTop: 8 }}>
-                      平均响应延迟{' '}
+                      {t('平均响应延迟')}{' '}
                       <span className="mono">
                         {primaryRelay.latency_samples > 0
                           ? `${Math.round(primaryRelay.avg_latency_ms)} ms`
-                          : '暂无样本'}
+                          : t('暂无样本')}
                       </span>
-                      （{primaryRelay.latency_samples} 次采样）
+                      （{primaryRelay.latency_samples} {t('次采样')}）
                     </div>
                   </>
                 )}
@@ -836,7 +856,7 @@ export default function Dashboard() {
               /* 还在查 —— 不给结论。
                  早先这里直接落到「尚未配置中转站」，
                  于是每次打开首页都有几秒在谎报用户没配。 */
-              <div className="empty-text faint">正在读取中转站配置…</div>
+              <div className="empty-text faint">{t('正在读取中转站配置…')}</div>
             ) : relayConfigured ? (
               /* ★ 已配置但信誉库里还没有它 —— 通常是刚填完还没发过对话。
                  这里**必须**显示域名：用户刚在设置页填完地址回来，
@@ -847,13 +867,13 @@ export default function Dashboard() {
                   {displayDomain(currentDomain)}
                 </div>
                 <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>
-                  已配置 · 尚未产生调用记录
+                  {t('已配置 · 尚未产生调用记录')}
                 </div>
-                {/* ★ 新用户最容易卡在这里：玄盾配好了，但 AI 工具还在直连中转站。
+                {/* ★ 新用户最容易卡在这里：勘合配好了，但 AI 工具还在直连中转站。
                     只写「用 AI 工具发起一次对话后…」等于让他自己去猜该改哪里。
                     直接把地址摆出来 + 一键复制，这一步才走得下去。 */}
                 <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
-                  还差一步：把 AI 工具的 API 地址改成
+                  {t('还差一步：把 AI 工具的 API 地址改成')}
                 </div>
                 <div className="code-box" style={{ fontSize: 12, marginTop: 6 }}>
                   http://127.0.0.1:{currentProxyPort()}/v1
@@ -861,11 +881,11 @@ export default function Dashboard() {
                 <div className="btn-row mt-8" style={{ justifyContent: 'center' }}>
                   <button className="btn secondary sm" onClick={() => void handleCopyProxyAddress()}>
                     <Copy size={13} strokeWidth={1.5} />
-                    复制地址
+                    {t('复制地址')}
                   </button>
                 </div>
                 <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
-                  改完发起一次对话，这里就会显示它的信誉评分与调用统计。
+                  {t('改完发起一次对话，这里就会显示它的信誉评分与调用统计。')}
                 </div>
               </div>
             ) : (
@@ -873,7 +893,7 @@ export default function Dashboard() {
                 尚未配置中转站
                 <div className="mt-8">
                   <Link to="/settings" className="btn sm">
-                    前往设置
+                    {t('前往设置')}
                   </Link>
                 </div>
               </div>
@@ -884,44 +904,44 @@ export default function Dashboard() {
 
       {/* ④ 快速操作 */}
       <div className="card">
-        <div className="card-title">快速操作</div>
+        <div className="card-title">{t('快速操作')}</div>
         <div className="btn-row">
           {s === 'paused' ? (
             <button className="btn" onClick={handleResume} disabled={busy}>
               <ShieldCheck size={15} strokeWidth={1.5} />
-              恢复防护
+              {t('恢复防护')}
             </button>
           ) : (
             <>
               <button className="btn secondary" onClick={() => handlePause(5)} disabled={busy}>
                 <PauseCircle size={15} strokeWidth={1.5} />
-                暂停 5 分钟
+                {t('暂停 5 分钟')}
               </button>
               <button className="btn secondary" onClick={() => handlePause(30)} disabled={busy}>
                 <PauseCircle size={15} strokeWidth={1.5} />
-                暂停 30 分钟
+                {t('暂停 30 分钟')}
               </button>
               <button className="btn secondary" onClick={() => handlePause(0)} disabled={busy}>
                 <PauseCircle size={15} strokeWidth={1.5} />
-                永久暂停
+                {t('永久暂停')}
               </button>
             </>
           )}
           <Link to="/logs" className="btn secondary">
             <FileText size={15} strokeWidth={1.5} />
-            打开日志
+            {t('打开日志')}
           </Link>
           <button className="btn secondary" onClick={handleShareDiagnostics} disabled={busy}>
             <Share2 size={15} strokeWidth={1.5} />
-            分享诊断报告
+            {t('分享诊断报告')}
           </button>
         </div>
         {s === 'paused' && (
           <div className="alert suspect mt-16" style={{ marginBottom: 0 }}>
             <PauseCircle size={17} strokeWidth={1.5} className="alert-icon" />
             <div>
-              防护已暂停，你的 AI 对话当前<b>不受任何检测保护</b>。
-              中转站可以自由篡改返回内容、截留你的数据。
+              {t('防护已暂停，你的 AI 对话当前')}<b>{t('不受任何检测保护')}</b>
+              {t('。中转站可以自由篡改返回内容、截留你的数据。')}
             </div>
           </div>
         )}

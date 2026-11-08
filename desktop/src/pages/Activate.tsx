@@ -24,6 +24,7 @@ import {
 import { api, type LicenseStatus } from '../services/api';
 import { useToast } from '../components/Toast';
 import { copyToClipboard, isTauri } from '../lib/tauriShim';
+import { useI18n } from '../i18n';
 
 type LoadState = 'loading' | 'ready' | 'unavailable';
 
@@ -76,6 +77,7 @@ function Notice({
 
 export default function Activate() {
   const toast = useToast();
+  const { t } = useI18n();
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [status, setStatus] = useState<LicenseStatus | null>(null);
   const [code, setCode] = useState('');
@@ -105,7 +107,7 @@ export default function Activate() {
   const handleActivate = async () => {
     const trimmed = code.trim();
     if (!trimmed) {
-      toast.error('请输入激活码');
+      toast.error(t('请输入激活码'));
       return;
     }
     setBusy(true);
@@ -113,7 +115,7 @@ export default function Activate() {
       const s = await api.activate(trimmed);
       setStatus(s);
       setCode('');
-      toast.success('激活成功');
+      toast.success(t('激活成功'));
       // 通知侧边栏刷新激活角标（见 Layout.tsx 的同名事件监听）
       window.dispatchEvent(new Event('xuandun:license-changed'));
     } catch (e) {
@@ -134,7 +136,7 @@ export default function Activate() {
     //   而那正是唯一真正需要换机的场景。
     const trimmed = (rebindCode || code).trim();
     if (!trimmed) {
-      toast.error('请先填写原激活码');
+      toast.error(t('请先填写原激活码'));
       return;
     }
     setBusy(true);
@@ -154,31 +156,31 @@ export default function Activate() {
   const copyMch = async () => {
     if (!status) return;
     const ok = await copyToClipboard(status.machineCode);
-    if (ok) toast.success('机器码已复制');
-    else toast.error('复制失败，请手动选中复制');
+    if (ok) toast.success(t('机器码已复制'));
+    else toast.error(t('复制失败，请手动选中复制'));
   };
 
   // ── 引擎不可达：如实说明，不假装「未激活」 ──
   if (loadState === 'unavailable') {
     return (
       <div style={{ maxWidth: 640 }}>
-        <h1 className="page-title">激活</h1>
+        <h1 className="page-title">{t('激活')}</h1>
         <div className="card">
           <div className="card-title">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
               <ShieldAlert size={18} strokeWidth={1.5} style={{ color: 'var(--xd-danger)' }} />
-              暂时无法确认激活状态
+              {t('暂时无法确认激活状态')}
             </span>
           </div>
           <p className="muted">
-            本机代理没有运行，激活校验无法执行。
+            {t('本机代理没有运行，激活校验无法执行。')}
             <br />
-            这<strong>不代表</strong>你的激活码有问题 —— 只是现在没法判断。
+            {t('这')}<strong>{t('不代表')}</strong>{t('你的激活码有问题 —— 只是现在没法判断。')}
           </p>
           <div className="btn-row mt-16">
             <button className="btn secondary" onClick={() => void refresh()}>
               <RefreshCw size={15} strokeWidth={1.5} />
-              重试
+              {t('重试')}
             </button>
           </div>
         </div>
@@ -190,7 +192,7 @@ export default function Activate() {
     return (
       <div className="loading" style={{ height: 240 }}>
         <span className="spinner" />
-        正在读取激活状态...
+        {t('正在读取激活状态...')}
       </div>
     );
   }
@@ -209,11 +211,11 @@ export default function Activate() {
     <div className="field">
       {rebindOpen ? (
         <>
-          <div className="field-label">换机申请</div>
+          <div className="field-label">{t('换机申请')}</div>
           <Notice kind="info">
-            填入<strong>原激活码</strong>后生成，把整段发给玄盾官方（
+            {t('填入')}<strong>{t('原激活码')}</strong>{t('后生成，把整段发给勘合官方（')}
             <a href={`mailto:${OFFICIAL_EMAIL}`}>{OFFICIAL_EMAIL}</a>
-            ）。官方会发回一张绑定本机的新码。
+            {t('）。官方会发回一张绑定本机的新码。')}
           </Notice>
           <input
             id="act-rebind-code"
@@ -222,19 +224,19 @@ export default function Activate() {
             onChange={(e) => setRebindCode(e.target.value)}
             placeholder="XDACT-..."
           />
-          <div className="code-box mt-8">{rebindText || '（尚未生成）'}</div>
+          <div className="code-box mt-8">{rebindText || t('（尚未生成）')}</div>
           <div className="btn-row mt-8">
             <button
               className="btn secondary"
               onClick={() => void handleGenerateRebind()}
               // ★ 两个输入框都算数：未激活态下用户通常直接在
-              //   上方主输入框填原激活码（那里文案写着「粘贴玄盾官方发给你的
+              //   上方主输入框填原激活码（那里文案写着「粘贴勘合官方发给你的
               //   激活码」），此时 rebindCode 是空的。
               //   只看 rebindCode 会让按钮恒为禁用 —— 而按钮变灰
               //   没有任何解释，用户只会以为功能坏了。
               disabled={busy || !(rebindCode.trim() || code.trim())}
             >
-              {rebindText ? '重新生成' : '生成换机申请'}
+              {rebindText ? t('重新生成') : t('生成换机申请')}
             </button>
             {rebindText && (
               <button
@@ -244,9 +246,9 @@ export default function Activate() {
                   if (ok) {
                     setCopied(true);
                     setTimeout(() => setCopied(false), 2000);
-                    toast.success('换机申请已复制');
+                    toast.success(t('换机申请已复制'));
                   } else {
-                    toast.error('复制失败，请手动选中复制');
+                    toast.error(t('复制失败，请手动选中复制'));
                   }
                 }}
               >
@@ -255,11 +257,11 @@ export default function Activate() {
                 ) : (
                   <Copy size={14} strokeWidth={1.5} />
                 )}
-                {copied ? '已复制' : '复制'}
+                {copied ? t('已复制') : t('复制')}
               </button>
             )}
             <button className="btn ghost" onClick={() => setRebindOpen(false)}>
-              取消
+              {t('取消')}
             </button>
           </div>
         </>
@@ -281,7 +283,7 @@ export default function Activate() {
 
   return (
     <div style={{ maxWidth: 640 }}>
-      <h1 className="page-title">激活</h1>
+      <h1 className="page-title">{t('激活')}</h1>
 
       {/* ── 已激活 ── */}
       {s.activated ? (
@@ -289,18 +291,18 @@ export default function Activate() {
           <div className="card-title">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
               <ShieldCheck size={18} strokeWidth={1.5} style={{ color: 'var(--xd-safe)' }} />
-              已激活
+              {t('已激活')}
             </span>
             <span className={`badge ${urgencyClass(s.remainingDays)}`}>
-              剩余 {s.remainingDays} 天
+              {t('剩余')} {s.remainingDays} {t('天')}
             </span>
           </div>
-          <Row label="授权给">{s.subject || '—'}</Row>
-          <Row label="版本">{s.tier === 'personal-pro' ? '个人版 Pro' : '个人版'}</Row>
-          <Row label="到期">
-            {s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString('zh-CN') : '—'}
+          <Row label={t('授权给')}>{s.subject || '—'}</Row>
+          <Row label={t('版本')}>{s.tier === 'personal-pro' ? 'Personal Pro' : 'Personal'}</Row>
+          <Row label={t('到期')}>
+            {s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : '—'}
           </Row>
-          <Row label="激活码 ID">
+          <Row label={t('激活码ID')}>
             <span className="mono faint">{s.jti || '—'}</span>
           </Row>
           {/* 机器码在已激活态同样要能看到。
@@ -308,7 +310,7 @@ export default function Activate() {
                 报障时给不出这串串 —— 而签发方核对一台机器
                 靠的就是它，双方都没有就只剩「重装试试」这种钝办法。
                 顺带也满足测试对「机器码始终可见」的要求。 */}
-          <Row label="本机机器码">
+          <Row label={t('本机机器码')}>
             {/* 用 code-box 而非普通文本：这串要能被选中复制，
                 报障时用户得把它原样发给签发方。 */}
             <div className="code-box">{s.machineCode || '—'}</div>
@@ -316,9 +318,9 @@ export default function Activate() {
           {s.remainingDays <= 7 && (
             <Notice kind={s.remainingDays <= 0 ? 'error' : 'warn'}>
               {s.remainingDays <= 0
-                ? '激活码已过期，玄盾已进入只读模式。'
-                : `激活码将在 ${s.remainingDays} 天后过期。`}
-              {' '}到期后防护会停止，记得提前续期。
+                ? t('激活码已过期，勘合已进入只读模式。')
+                : `${t('激活码将在')} ${s.remainingDays} ${t('天后过期。')}`}
+              {' '}{t('到期后防护会停止，记得提前续期。')}
             </Notice>
           )}
 
@@ -351,32 +353,32 @@ export default function Activate() {
 
           {/* ① 先让用户拿到机器码：不知道机器码就无从签发 */}
           <div className="field">
-            <label className="field-label">本机机器码</label>
+            <label className="field-label">{t('本机机器码')}</label>
             <div className="code-box">{s.machineCode}</div>
-            {/* ★ 官方邮箱必须直接写出来，不能只说「发给玄盾官方」。
-                用户看不到「玄盾官方」是谁，也找不到客服入口，
+            {/* ★ 官方邮箱必须直接写出来，不能只说「发给勘合官方」。
+                用户看不到「勘合官方」是谁，也找不到客服入口，
                 到这一步就卡死了 —— 而卡住的状态在激活页里
-                没有任何提示，看起来像是玄盾没提供这个服务。
+                没有任何提示，看起来像是勘合没提供这个服务。
                 留一个 mailto: 让用户一步就能发起邮件，
                 免去「抄下来再自己去开邮件客户端」的摩擦。 */}
             <div className="field-hint">
-              申请激活码：把这串机器码发邮件给官方{' '}
-              <a href={`mailto:${OFFICIAL_EMAIL}?subject=${encodeURIComponent('玄盾激活码申请')}&body=${encodeURIComponent(`请为我签发激活码：\n\n本机机器码：${s.machineCode}\n\n`)}`}>
+              {t('申请激活码：把这串机器码发邮件给官方')}{' '}
+              <a href={`mailto:${OFFICIAL_EMAIL}?subject=${encodeURIComponent(t('勘合激活码申请'))}&body=${encodeURIComponent(`${t('请为我签发激活码：')}\n\n${t('本机机器码：')}${s.machineCode}\n\n`)}`}>
                 {OFFICIAL_EMAIL}
               </a>
-              ，玄盾会回邮件发激活码给你。
+              {t('，勘合会回邮件发激活码给你。')}
             </div>
             <div className="btn-row mt-8">
               <button className="btn secondary" onClick={() => void copyMch()}>
                 <Copy size={14} strokeWidth={1.5} />
-                复制机器码
+                {t('复制机器码')}
               </button>
             </div>
           </div>
 
           <div className="field">
             <label className="field-label" htmlFor="act-code">
-              激活码
+              {t('激活码')}
             </label>
             <textarea
               id="act-code"
@@ -387,19 +389,19 @@ export default function Activate() {
               placeholder="XDACT-..."
               spellCheck={false}
             />
-            <div className="field-hint">粘贴玄盾官方发给你的激活码（以 XDACT- 开头）</div>
+            <div className="field-hint">{t('粘贴勘合官方发给你的激活码（以 XDACT- 开头）')}</div>
           </div>
 
           {s.reason && (
             <Notice kind={s.verifierAvailable ? 'warn' : 'error'}>
               {s.reason}
-              {!s.verifierAvailable && '（这是玄盾组件的问题，不是你的码有问题）'}
+              {!s.verifierAvailable && t('（这是勘合组件的问题，不是你的码有问题）')}
             </Notice>
           )}
 
           <div className="btn-row mt-16">
             <button className="btn" onClick={() => void handleActivate()} disabled={busy}>
-              {busy ? '激活中...' : '激活'}
+              {busy ? t('激活中...') : t('激活')}
             </button>
           </div>
 
@@ -410,7 +412,7 @@ export default function Activate() {
 
       {!isTauri() && (
         <div className="card mt-16">
-          <Notice kind="warn">当前是浏览器预览模式，激活功能仅在桌面版可用。</Notice>
+          <Notice kind="warn">{t('当前是浏览器预览模式，激活功能仅在桌面版可用。')}</Notice>
         </div>
       )}
     </div>

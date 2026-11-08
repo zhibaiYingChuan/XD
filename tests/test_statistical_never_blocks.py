@@ -147,11 +147,9 @@ class TestRealAttacksStillBlock:
 
     @pytest.mark.parametrize("category", [
         "system_prompt_inject",
-        "undeclared_tool",
         "sensitive_leak",
         "hidden_instruction",
         "model_downgrade",
-        "tool_call_dangerous",
     ])
     def test_real_attack_still_blocked(self, category):
         findings = [_finding(category)]
@@ -178,20 +176,20 @@ class TestRealAttacksStillBlock:
 
 
 class TestStatisticalProducesAdvice:
-    """③ 统计类命中必须产生提示，不能静默通过。
+    """③ 统计类命中必须留下痕迹，不能静默通过。
 
-    静默通过会让用户以为防护没在工作——
-    「计数动了却没有任何提示」比「有提示但不好看」更糟。
+    ★ 2026-11-03：痕迹从「提示」改为「观察」。
+      统计类信号（长度/结构突变）不指向任何安全问题，
+      把它计入首页「提示」只会让用户被噪声淹没。
+      观察 = 记录、可查、不阻断、不计入「提示」。
     """
 
-    def test_resolve_action_lifts_statistical_to_alert(self):
+    def test_resolve_action_lifts_statistical_to_observe(self):
         """★ 真实链路（2026-10-03 补测，此前真的会静默 pass）。
 
         统计类信号 severity 恒为 low，而 _resolve_action('low', None)
         原实现直接返回 PASS —— 于是用户完全看不到记录。
-        非流式路径靠传入 verify_result 走新的 ALERT 分支，
-        流式路径靠调用点后那句 `if findings and action == PASS` 兜住。
-        两条路径都必须留下痕迹。
+        现在必须返回 OBSERVE：日志里查得到，但不占用「提示」。
         """
         from daoti_xuandun_personal.proxy.app import _resolve_action
 
@@ -203,8 +201,8 @@ class TestStatisticalProducesAdvice:
         class _R:
             findings = [finding]
 
-        assert _resolve_action("low", _R()) == Action.ALERT.value, (
-            "统计类命中未产生任何提示 —— 用户会以为防护没开"
+        assert _resolve_action("low", _R()) == Action.OBSERVE.value, (
+            "统计类命中未留下任何痕迹 —— 用户会以为防护没开"
         )
         assert _resolve_action("low", _R()) != Action.BLOCK.value, (
             "统计类命中竟导致阻断"

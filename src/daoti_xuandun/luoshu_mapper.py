@@ -81,12 +81,12 @@ class LuoshuSymbolMapper:
     - 阴阳分叉比例由输入Shannon熵动态调整，无硬编码参数
     - 攻击原型学习带去重和频率门限，防原型洪水攻击
     - 预置通用域原型，冷启动即有基础判别力
-    - 内部使用176维洛书空间，通过无损投影适配玄盾hidden_dim
+    - 内部使用176维洛书空间，通过无损投影适配勘合hidden_dim
 
     Attributes:
         config: 全局配置。
         native_dim: 洛书空间原生维度（176，与Loong Recall对齐）。
-        state_dim: 输出维度（适配玄盾hidden_dim）。
+        state_dim: 输出维度（适配勘合hidden_dim）。
         n_gua: 卦数（固定64）。
         gua_prototypes: 64卦原型矩阵，shape (64, native_dim)。
         safe_prototypes: 安全域原型集合（在线学习积累）。
@@ -189,7 +189,7 @@ class LuoshuSymbolMapper:
         """初始化无损投影层：176维→hidden_dim。
 
         质疑D修复：使用随机正交投影矩阵，将176维洛书空间
-        无损映射到玄盾的hidden_dim维度。正交投影保持距离关系，
+        无损映射到勘合的hidden_dim维度。正交投影保持距离关系，
         避免截断导致的信息损失。
         """
         if self.state_dim >= self.native_dim:
@@ -258,7 +258,7 @@ class LuoshuSymbolMapper:
         self.safe_prototypes = []
 
     def encode(self, text: str) -> np.ndarray:
-        """将文本编码为洛书空间状态向量（适配玄盾hidden_dim）。
+        """将文本编码为洛书空间状态向量（适配勘合hidden_dim）。
 
         编码管线（语言无关）：
         1. Unicode码点 → 位置敏感散列 → 176维初始向量

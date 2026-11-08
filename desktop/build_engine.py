@@ -77,6 +77,19 @@ SRC_DIR = os.path.join(PERSONAL_ROOT, "src")
 #   `from daoti_xuandun.xuandun import XuanDun` 必然 ImportError
 #   → _guardrail_available 恒为 False。
 GUARDRAIL_SRC_DIR = SRC_DIR
+
+
+def has_guardrail_source() -> bool:
+    """护栏层源码是否在场（在场才能编进去）。
+
+    ★ 2026-10-29（第三轮审查 P0-2）：把原来的内联判定抽成函数。
+      内联时测试只能「先建个目录、再断言这个目录存在」—— 那是
+      断言自己的夹具，恒真；护栏真丢了也测不出来。
+      抽出来后正反两面都能测：空目录必须 False，真实仓库必须 True。
+    """
+    return os.path.isdir(os.path.join(GUARDRAIL_SRC_DIR, "daoti_xuandun"))
+
+
 RESOURCE_ENGINE_DIR = os.path.join(SCRIPT_DIR, "src-tauri", "resources", "engine")
 
 # 引擎入口：Nuitka 编译的入口脚本。
@@ -156,6 +169,139 @@ def _pe_version_from_cargo() -> str:
     return ".".join(str(min(int(n), 65535)) for n in nums)
 
 
+def _pyinstaller_version_file(path: str) -> str:
+    """生成 PyInstaller 的 Windows 版本资源文件，返回路径。
+
+    ★ 与 Nuitka 的 --company-name 等参数是同一件事：给 exe 补上
+      发布者 / 产品名 / 版本。杀软的启发式里，「三无可执行文件」
+      本身就接近释放器画像，而我们的引擎恰好是常驻后台、
+      监听端口、读取全部 API 流量的进程。
+    ★ 版本号同样从 Cargo.toml 读（唯一真源），不在这里另写一份。
+    """
+    ver = _pe_version_from_cargo()  # "0.1.28.0"
+    nums = [int(x) for x in ver.split(".")][:4]
+    while len(nums) < 4:
+        nums.append(0)
+    tuple4 = f"({nums[0]}, {nums[1]}, {nums[2]}, {nums[3]})"
+    content = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={tuple4}, prodvers={tuple4},
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', 'DaoTi Research'),
+      StringStruct('FileDescription', 'XuanDun Personal Protection Engine'),
+      StringStruct('FileVersion', '{ver}'),
+      StringStruct('InternalName', 'xuandun-engine'),
+      StringStruct('LegalCopyright', 'Copyright (c) 2026 DaoTi Research'),
+      StringStruct('OriginalFilename', 'xuandun-engine.exe'),
+      StringStruct('ProductName', 'XuanDun Personal'),
+      StringStruct('ProductVersion', '{ver}'),
+      StringStruct('Trademarks', 'XuanDun')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return path
+
+
+def _builder_name() -> str:
+    """本次使用哪个打包器。默认 pyinstaller，可用 --builder=nuitka 回退。
+
+    ★ 为什么换掉 Nuitka（2026-10-30）：
+      Nuitka 要把每个 Python 模块编译成 C 再编译成机器码，
+      Linux 上一次要 13~14 分钟。而 GitHub 免费的 ubuntu-22.04
+      runner 在这个时长里被回收的概率极高 —— v0.1.28 连续 6 轮
+      死在 9.8~14.4 分钟，日志统一是
+      `The runner has received a shutdown signal`，与代码无关。
+
+      PyInstaller 不做 C 编译，只做打包与字节码归档，同规模项目
+      通常 1~2 分钟；产物同样是 onedir 结构（一堆文件 + 主程序），
+      不是自解压单文件，因此**没有** dropper 特征
+      （企业版当年被火绒拦截的是 --onefile，不是 onedir）。
+
+    ★ 保留 Nuitka 回退的理由：打包器切换是发布链上的高风险动作，
+      一旦 PyInstaller 在某些平台出现兼容问题，需要能一条参数切回去，
+      而不是回滚整条流水线。
+    """
+    for arg in sys.argv:
+        if arg.startswith("--builder="):
+            value = arg.split("=", 1)[1].strip().lower()
+            if value in ("pyinstaller", "nuitka"):
+                return value
+            print(f"FATAL: 未知打包器 {value!r}（可选 pyinstaller / nuitka）",
+                  file=sys.stderr)
+            raise SystemExit(2)
+    return "pyinstaller"
+
+
+def _pyinstaller_cmd(version_file: str) -> list:
+    """构造 PyInstaller 命令。
+
+    ★ 收集策略说明（每一条都对应一种「产物能启动但功能缺失」）：
+      --collect-submodules  延迟 import 的护栏层（daoti_xuandun）不在
+                            入口的静态依赖里，不显式收集就会整个缺失；
+      --collect-data        rules/*.yaml 与 schema.sql 不在代码里，
+                            只在包数据里 —— 缺了会静默回退到内置最小规则集，
+                            拦截能力大幅下降而界面照常显示「防护中」。
+    """
+    work = os.path.join(SCRIPT_DIR, "build", "pyinstaller")
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--noconfirm", "--clean", "--onedir",
+        "--name", "engine_main",
+        f"--distpath={SCRIPT_DIR}",
+        f"--workpath={work}",
+        f"--specpath={work}",
+        f"--paths={SRC_DIR}",
+        "--collect-submodules=daoti_xuandun_personal",
+        "--collect-data=daoti_xuandun_personal",
+        "--collect-submodules=daoti_xuandun",
+        "--collect-data=daoti_xuandun",
+        # ★★ 2026-10-30 本地实测：不加这一条，产物能启动、/health 也返回 ok，
+        #   但护栏加载时报
+        #     No module named 'numpy._core._exceptions'
+        #   于是 guardrail_missing_layers = ["system_prompt_inject","sensitive_leak"]
+        #   —— 提示词注入与敏感泄露两层检测全部缺失，而界面照常显示「防护中」。
+        #   numpy 2.x 把实现搬进了 numpy._core，PyInstaller 的静态分析只看到
+        #   numpy 顶层包，子模块必须显式收集。
+        "--collect-submodules=numpy._core",
+        # 延迟 import 的第三方件，静态分析同样看不见
+        "--hidden-import=yaml",
+        "--hidden-import=jwt",
+        "--hidden-import=cryptography",
+        # 开发期依赖不进产物
+        "--exclude-module=tkinter",
+        "--exclude-module=pytest",
+        "--exclude-module=mypy",
+        "--exclude-module=unittest",
+        "--exclude-module=test",
+        # ★★ 2026-10-30 CI 实测：产物在 Linux 上启动即崩，堆栈是
+        #     ModuleNotFoundError: No module named 'backports'
+        #     [PYI-3465:ERROR] Failed to execute script 'pyi_rth_pkgres'
+        #   即 PyInstaller 为 pkg_resources 注入的运行时钩子先于我们的代码
+        #   执行，而它在 Python 3.11 + 新版 setuptools 下依赖 backports
+        #   （本地是 3.12，不受影响 —— 典型的「本机能跑、CI 挂」）。
+        #
+        #   本项目的运行时链路（fastapi / uvicorn / httpx / pydantic / yaml /
+        #   jwt / cryptography / numpy）都不使用 pkg_resources 的入口点机制，
+        #   因此直接排除它，让那个钩子不启用 —— 比补一个空 backports 干净。
+        #   ★ 若将来引入依赖 pkg_resources 的库，这里会立刻在运行时验证
+        #     （verify_engine_runtime.py）里失败，不会静默降级。
+        "--exclude-module=pkg_resources",
+    ]
+    if platform.system().lower() == "windows":
+        icon = os.path.join(SCRIPT_DIR, "src-tauri", "icons", "icon.ico")
+        # 无 console 窗口：引擎是后台服务，不能弹黑框
+        cmd.extend(["--noconsole", f"--icon={icon}", f"--version-file={version_file}"])
+    ENGINE_MAIN_ABS = ENGINE_MAIN
+    cmd.append(ENGINE_MAIN_ABS)
+    return cmd
+
+
 def main() -> int:
     # ★ 显式开关，不做「有则拷、无则静默跳过」。
     #   缺公钥的包能启动、能自检通过，唯独所有用户都激活不了 ——
@@ -166,12 +312,20 @@ def main() -> int:
         print(f"FATAL: 未找到个人版源码目录: {SRC_DIR}", file=sys.stderr)
         return 2
 
-    # 依赖自检：给出可执行的修复指引，而不是让 Nuitka 报一堆 import 错误
+    builder = _builder_name()
+    print(f"打包器: {builder}")
+
+    # 依赖自检：给出可执行的修复指引，而不是让打包器报一堆 import 错误
     missing = []
-    for mod, pkg in (("nuitka", "nuitka==4.1.3"), ("fastapi", "fastapi"),
+    tool = (
+        ("PyInstaller", "pyinstaller==6.11.1") if builder == "pyinstaller"
+        else ("nuitka", "nuitka==4.1.3")
+    )
+    for mod, pkg in (tool, ("fastapi", "fastapi"),
                      ("uvicorn", "uvicorn"), ("httpx", "httpx"),
                      ("pydantic", "pydantic"), ("yaml", "pyyaml"),
-                     ("jwt", "pyjwt"), ("cryptography", "cryptography")):
+                     ("jwt", "pyjwt"), ("cryptography", "cryptography"),
+                     ("numpy", "numpy")):
         try:
             __import__(mod)
         except ImportError:
@@ -196,7 +350,7 @@ def main() -> int:
     #   此处曾按「仓库外企业版路径」判定，本地恰好有那个目录所以
     #   一直带上了，干净 clone 上却静默跳过 —— 已修正为包内路径。
     guardrail_dir = os.path.join(GUARDRAIL_SRC_DIR, "daoti_xuandun")
-    has_guardrail = os.path.isdir(guardrail_dir)
+    has_guardrail = has_guardrail_source()
     if has_guardrail:
         print("护栏层已就位 → 将编入（提示词注入 + 敏感泄露）")
     else:
@@ -210,25 +364,57 @@ def main() -> int:
 
     target = _triple()
     final_engine_name = target
-    # Nuitka 输出名：standalone 模式下主程序名 = <入口脚本名>.exe / .bin
-    nuitka_main = "engine_main.exe" if platform.system().lower() == "windows" else "engine_main.bin"
+    is_windows = platform.system().lower() == "windows"
 
-    dist_dir = os.path.join(SCRIPT_DIR, "engine_main.dist")
+    # 两种打包器的产物目录不同，但**输出契约一致**：
+    # resources/engine/ 下一堆文件 + 一个已改名的主程序。
+    if builder == "pyinstaller":
+        dist_dir = os.path.join(SCRIPT_DIR, "engine_main")
+        main_bin = "engine_main.exe" if is_windows else "engine_main"
+    else:
+        dist_dir = os.path.join(SCRIPT_DIR, "engine_main.dist")
+        main_bin = "engine_main.exe" if is_windows else "engine_main.bin"
 
     # 清理旧产物，避免残留上一版 dll 造成诡异的运行时问题
-    if os.path.isdir(dist_dir):
-        shutil.rmtree(dist_dir)
-        print(f"已清理旧产物: {dist_dir}")
-    if os.path.isdir(RESOURCE_ENGINE_DIR):
-        shutil.rmtree(RESOURCE_ENGINE_DIR)
-        print(f"已清空 resources/engine/")
+    for _d in (dist_dir, RESOURCE_ENGINE_DIR):
+        if os.path.isdir(_d):
+            shutil.rmtree(_d)
+            print(f"已清理旧产物: {_d}")
+
+    # ★★ 2026-10-30：ccache 只在 Linux 且系统里显式装了时才用。
+    #
+    #   背景：Linux 上 Nuitka 的 C 编译约占整个 job 的 10.6 分钟，
+    #   是构建里最长的一段。job 越长，GitHub 免费 runner 中途被回收的
+    #   概率越高 —— Linux AppImage 已连续 4 轮被砍，与代码正确性无关。
+    #
+    #   ★★ 为什么不是「加一个 --use-ccache」：Nuitka 没有这个选项。
+    #     实测 4.1.3 直接 `error: no such option: --use-ccache`，
+    #     win-x64 与 linux-appimage 双双在 1 分钟内失败。
+    #     Nuitka 的语义是**默认允许** ccache，只有 `--disable-cache=ccache`
+    #     才关闭 —— 所以「启用」就是**不传这个参数**。
+    #
+    #   ★ 为什么限定 Linux：Windows runner 上 Strawberry Perl 自带一个
+    #     `C:\Strawberry\c\bin\ccache.EXE`，`which` 会命中它；而 Nuitka 在
+    #     Windows 上走 MSVC，ccache 对 MSVC 并无可靠收益，反而多一层不确定。
+    #
+    #   ★ 安全边界没变：仍然**不允许 Nuitka 自己下载** ccache
+    #     （那会让构建期静默抓取第三方可执行文件，见下方 P1-26 注释）。
+    #     CI 里由 apt 显式安装、并把 ~/.cache/ccache 缓存起来；
+    #     本地没装就退回全量编译，行为与以前完全一致。
+    ccache_bin = (
+        shutil.which("ccache") if sys.platform.startswith("linux") else None
+    )
+    if ccache_bin:
+        print(f"检测到 ccache，交给 Nuitka 默认启用: {ccache_bin}")
+    else:
+        print("未启用 ccache，本次为全量 C 编译")
 
     cmd = [
         sys.executable, "-m", "nuitka",
         "--standalone",
-        # 禁用 ccache 自动下载：Nuitka 默认会从 nuitka.net 拉 ccache，
-        # 网络受限环境会 FATAL 失败。ccache 只影响编译速度，不影响产物。
-        "--disable-cache=ccache",
+        # 有 ccache 就不传（Nuitka 默认启用）；否则显式禁用，
+        # 顺带阻止它从 nuitka.net 自行下载 —— 网络受限环境会 FATAL。
+        *([] if ccache_bin else ["--disable-cache=ccache"]),
         "--remove-output",
         # ★ P1-26：不再"自动确认下载"（此前显式传过那个参数）。
         #   它让 Nuitka 在构建期**静默**从第三方拉取工具（ccache /
@@ -337,7 +523,19 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    print("编译引擎中（首次约需数分钟）...")
+    # ★ PyInstaller 分支：上面那段 cmd 是为 Nuitka 构造的，这里整体替换。
+    #   保留 Nuitka 的构造代码不动，是为了 `--builder=nuitka` 能原样回退。
+    if builder == "pyinstaller":
+        build_dir = os.path.join(SCRIPT_DIR, "build")
+        os.makedirs(build_dir, exist_ok=True)
+        vf = ""
+        if is_windows:
+            vf = _pyinstaller_version_file(
+                os.path.join(build_dir, "version_info.txt")
+            )
+        cmd = _pyinstaller_cmd(vf)
+
+    print("打包引擎中...")
     print("护栏层:", "已编入" if has_guardrail else "★未编入（检测能力降级）")
     print("命令:", " ".join(cmd))
     result = subprocess.run(
@@ -346,7 +544,7 @@ def main() -> int:
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
-        print(f"FATAL: Nuitka 编译失败，退出码 {result.returncode}", file=sys.stderr)
+        print(f"FATAL: {builder} 打包失败，退出码 {result.returncode}", file=sys.stderr)
         return result.returncode
 
     if not os.path.isdir(dist_dir):
@@ -363,7 +561,7 @@ def main() -> int:
         else:
             shutil.copy2(src, dst)
 
-    main_src = os.path.join(RESOURCE_ENGINE_DIR, nuitka_main)
+    main_src = os.path.join(RESOURCE_ENGINE_DIR, main_bin)
     main_dst = os.path.join(RESOURCE_ENGINE_DIR, final_engine_name)
     if not os.path.isfile(main_src):
         print(f"FATAL: 未找到引擎主程序: {main_src}", file=sys.stderr)

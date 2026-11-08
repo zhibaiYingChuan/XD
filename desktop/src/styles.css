@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: DaoTi-Research-1.0
    Copyright (c) 2026 独立研究者，知白
-   道体·玄盾 个人版 — UI 设计系统
+   道体·勘合 个人版 — UI 设计系统
 
    设计原则（源自产品文档 v1.0 第五章）：
    - 消费级：比企业版更友好，减少技术术语
@@ -13,44 +13,54 @@
    色彩系统
    ══════════════════════════════════════════════════════════════ */
 :root {
-  /* 品牌色 */
-  --xd-primary: #2B5FD7;
-  --xd-primary-hover: #2450B8;
-  --xd-primary-dim: rgba(43, 95, 215, 0.12);
+  /* 品牌色：朱砂，只用于判定与主操作 */
+  --xd-primary: #E04A3A;
+  --xd-primary-hover: #C93E30;
+  --xd-primary-dim: rgba(224, 74, 58, 0.10);
 
-  /* 状态色（首页状态栏 + 徽章） */
-  --xd-safe: #00D4AA;
-  --xd-safe-dim: rgba(0, 212, 170, 0.12);
-  --xd-suspect: #F5A623;
-  --xd-suspect-dim: rgba(245, 166, 35, 0.12);
-  --xd-danger: #E54D4D;
-  --xd-danger-dim: rgba(229, 77, 77, 0.12);
-  --xd-learning: #2B5FD7;
-  --xd-learning-dim: rgba(43, 95, 215, 0.12);
-  --xd-paused: #6B7280;
-  --xd-paused-dim: rgba(107, 114, 128, 0.12);
+  /* 状态色：降饱和，不与品牌色抢 */
+  --xd-safe: #5FA97A;
+  --xd-safe-dim: rgba(95, 169, 122, 0.12);
+  --xd-suspect: #D9A441;
+  --xd-suspect-dim: rgba(217, 164, 65, 0.12);
+  --xd-danger: #C0392B;
+  --xd-danger-dim: rgba(192, 57, 43, 0.12);
+  /* ★ 学习中 = 尚未产生任何判定，属中性待命态。
+     原先沿用品牌朱砂，导致「学习中」在首页与状态栏都显示成红色 ——
+     用户第一眼读成「出事了」，而实际只是还没收到第一次请求。
+     改用暖灰：与「已暂停」的更深灰区分，又不与安全/提示/危险抢语义。 */
+  --xd-learning: #8C8880;
+  --xd-learning-dim: rgba(140, 136, 128, 0.12);
+  --xd-paused: #5E5B56;
+  --xd-paused-dim: rgba(94, 91, 86, 0.12);
+
+  /* 深色底上的浅色文字变体：提示条正文需要比状态色更亮才读得清，
+     但它们是同一语义的派生色，必须收进令牌，不能散落在规则里。 */
+  --xd-danger-text: #E8A79E;
+  --xd-suspect-text: #E8C27A;
+  --xd-danger-hover: #A32E22;
 
   /* 背景层次 */
-  --xd-bg: #0B0E14;
-  --xd-card: #151A24;
-  --xd-card-hover: #1B2130;
-  --xd-border: #232A38;
-  --xd-border-light: #2E3646;
+  --xd-bg: #0A0A0B;
+  --xd-card: #111113;
+  --xd-card-hover: #16161A;
+  --xd-border: #232326;
+  --xd-border-light: #2E2E32;
 
   /* 文字 */
-  --xd-text: #E8ECF3;
-  --xd-text-dim: #9AA4B8;
-  --xd-text-faint: #6B7689;
+  --xd-text: #F2EFE9;
+  --xd-text-dim: #8C8880;
+  --xd-text-faint: #6E6A64;
 
   /* 尺寸 */
-  --xd-sidebar-w: 220px;
+  --xd-sidebar-w: 200px;
   --xd-statusbar-h: 44px;
-  --xd-radius: 10px;
-  --xd-radius-sm: 6px;
+  --xd-radius: 2px;
+  --xd-radius-sm: 2px;
 
   /* 动效 */
-  --xd-transition: 300ms cubic-bezier(0.4, 0, 0.2, 1);
-  --xd-fade-in: 200ms ease-out;
+  --xd-transition: 300ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  --xd-fade-in: 150ms ease-out;
 
   /* 字号 */
   --xd-fs-h1: 28px;
@@ -84,6 +94,21 @@ body {
   background: var(--xd-bg);
   -webkit-font-smoothing: antialiased;
   user-select: none;
+}
+
+/* ★ 正文区链接统一品牌色。
+   原先没有任何 a 规则，激活页的申请邮箱、帮助页的本地地址
+   都渲染成浏览器默认蓝 —— 在朱砂/暖灰的界面里像外链广告。
+   只作用于 .page-content，侧栏导航（.nav-item）不受影响。
+   ★ 必须排除 .btn：按钮型链接（如首页「去激活」）自带底色，
+     被这条规则改色后文字与底色同色，按钮会变成一块纯红方块。 */
+.page-content a:not(.btn) {
+  color: var(--xd-primary);
+  text-decoration: none;
+}
+
+.page-content a:not(.btn):hover {
+  text-decoration: underline;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -133,7 +158,87 @@ textarea {
    ══════════════════════════════════════════════════════════════ */
 .app-shell {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+}
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* ── 自绘标题栏 ──
+   窗口设了 decorations: false，系统标题栏不再绘制，
+   由这里接管最外沿的视觉：品牌区与侧栏同宽，右侧是窗口控制。 */
+.titlebar {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  background: var(--xd-bg);
+  border-bottom: 1px solid var(--xd-border);
+  user-select: none;
+}
+
+.titlebar-brand {
+  width: var(--xd-sidebar-w);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  /* 与侧栏同色：两者连成一条完整的左侧竖带，
+     否则标题栏品牌区（bg）与侧栏（card）之间会出现一道横向色差。 */
+  background: var(--xd-card);
+  border-right: 1px solid var(--xd-border);
+}
+
+.titlebar-title {
+  font-family: 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--xd-text);
+}
+
+.titlebar-sub {
+  font-size: 11px;
+  color: var(--xd-text-faint);
+  letter-spacing: 0.04em;
+}
+
+.titlebar-drag {
+  flex: 1;
+  min-width: 0;
+}
+
+.titlebar-controls {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+}
+
+.titlebar-btn {
+  width: 44px;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  color: var(--xd-text-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.titlebar-btn:hover {
+  background: var(--xd-card-hover);
+  color: var(--xd-text);
+}
+
+/* 关闭按钮悬停用危险色：与系统惯例一致，也避免误点 */
+.titlebar-btn.close:hover {
+  background: var(--xd-danger);
+  color: #fff;
 }
 
 .sidebar {
@@ -143,41 +248,7 @@ textarea {
   border-right: 1px solid var(--xd-border);
   display: flex;
   flex-direction: column;
-  padding: 20px 0;
-}
-
-.sidebar-brand {
-  padding: 0 20px 24px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.sidebar-brand-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--xd-primary), var(--xd-safe));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  flex-shrink: 0;
-}
-
-.sidebar-brand-text {
-  min-width: 0;
-}
-
-.sidebar-brand-title {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-
-.sidebar-brand-sub {
-  font-size: var(--xd-fs-caption);
-  color: var(--xd-text-faint);
+  padding: 12px 0;
 }
 
 .sidebar-nav {
@@ -353,9 +424,11 @@ textarea {
 }
 
 .page-title {
+  /* VI 2.2.1：标题用宋体，是品牌语言（文书感、判定感）；正文用黑体。 */
+  font-family: 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
   font-size: var(--xd-fs-h2);
   font-weight: 600;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.02em;
 }
 
 .page-subtitle {
@@ -379,8 +452,10 @@ textarea {
 }
 
 .card-title {
+  font-family: 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
   font-size: 15px;
   font-weight: 600;
+  letter-spacing: 0.02em;
   margin-bottom: 14px;
   display: flex;
   align-items: center;
@@ -407,7 +482,7 @@ textarea {
   color: var(--xd-text-dim);
   padding: 2px 9px;
   border: 1px solid var(--xd-border-light);
-  border-radius: 999px;
+  border-radius: var(--xd-radius-sm);
 }
 
 .relay-empty {
@@ -450,7 +525,7 @@ textarea {
 .relay-card-icon {
   width: 30px;
   height: 30px;
-  border-radius: 50%;
+  border-radius: var(--xd-radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -461,7 +536,7 @@ textarea {
 
 .relay-card-icon.active {
   background: var(--xd-safe);
-  color: #06231C;
+  color: var(--xd-bg);
 }
 
 .relay-card-main {
@@ -494,7 +569,7 @@ textarea {
   color: var(--xd-safe);
   background: var(--xd-safe-dim);
   border: 1px solid var(--xd-safe);
-  border-radius: 999px;
+  border-radius: var(--xd-radius-sm);
   padding: 0 8px;
 }
 
@@ -565,7 +640,7 @@ textarea {
   background: var(--xd-primary-dim);
   border: 1px dashed var(--xd-primary);
   border-radius: var(--xd-radius-sm);
-  color: #A9C4F5;
+  color: var(--xd-primary);
   font-size: var(--xd-fs-body);
   font-weight: 500;
   cursor: pointer;
@@ -626,6 +701,20 @@ textarea {
   color: var(--xd-text-dim);
   font-size: var(--xd-fs-body);
   margin-bottom: 28px;
+}
+
+/* 叙事句：把三个数字串成一句话，先讲发生了什么，再给分项 */
+.hero-narrative {
+  font-family: 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', serif;
+  font-size: 20px;
+  line-height: 1.7;
+  color: var(--xd-text);
+  margin-bottom: 24px;
+}
+.hero-narrative b {
+  color: var(--xd-primary);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -705,7 +794,7 @@ a.kpi:hover {
 .list-icon {
   width: 26px;
   height: 26px;
-  border-radius: 50%;
+  border-radius: var(--xd-radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -787,7 +876,7 @@ a.kpi:hover {
 }
 
 .btn.danger:hover:not(:disabled) {
-  background: #C93F3F;
+  background: var(--xd-danger-hover);
 }
 
 .btn.ghost {
@@ -900,7 +989,9 @@ a.kpi:hover {
   position: absolute;
   inset: 0;
   background: var(--xd-border-light);
-  border-radius: 24px;
+  /* ★ 直角：整套界面是 2px 直角体系，圆角胶囊开关是唯一的例外，
+     在设置页里显得像从别的产品搬来的控件。 */
+  border-radius: var(--xd-radius);
   transition: background var(--xd-transition);
 }
 
@@ -912,7 +1003,7 @@ a.kpi:hover {
   left: 3px;
   top: 3px;
   background: #fff;
-  border-radius: 50%;
+  border-radius: 1px;
   transition: transform var(--xd-transition);
 }
 
@@ -938,11 +1029,42 @@ a.kpi:hover {
   cursor: pointer;
 }
 
+/* 复选框：原生控件在 Windows 上是圆角小方块，与 2px 直角体系不一致，
+   改为自绘方形 + 深色勾。 */
 .check-row input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
   width: 15px;
   height: 15px;
-  accent-color: var(--xd-primary);
+  border: 1px solid var(--xd-border-light);
+  border-radius: 1px;
+  background: transparent;
   cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.check-row input[type='checkbox']:checked {
+  border-color: var(--xd-primary);
+  background: var(--xd-primary);
+}
+
+.check-row input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--xd-bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.check-row input[type='checkbox']:focus-visible {
+  outline: 1px solid var(--xd-primary);
+  outline-offset: 2px;
 }
 
 .check-row span {
@@ -983,11 +1105,30 @@ a.kpi:hover {
   background: var(--xd-primary-dim);
 }
 
+/* 单选：原生 radio 是圆形，与 2px 直角体系冲突，改为自绘方形。
+   选中态用实心朱砂方块 —— 不画内点，小尺寸下内点会糊成一个圆。 */
 .radio-card input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
   margin-top: 3px;
-  accent-color: var(--xd-primary);
+  border: 1px solid var(--xd-border-light);
+  border-radius: 1px;
+  background: transparent;
   cursor: pointer;
   flex-shrink: 0;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.radio-card input:checked {
+  border-color: var(--xd-primary);
+  background: var(--xd-primary);
+}
+
+.radio-card input:focus-visible {
+  outline: 1px solid var(--xd-primary);
+  outline-offset: 2px;
 }
 
 .radio-title {
@@ -1009,31 +1150,70 @@ a.kpi:hover {
   align-items: center;
   gap: 5px;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--xd-radius-sm);
+  font-size: var(--xd-fs-caption);
+  font-weight: 500;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.badge.safe {
+  background: transparent;
+  border-color: var(--xd-safe);
+  color: var(--xd-safe);
+}
+.badge.suspect {
+  background: transparent;
+  border-color: var(--xd-suspect);
+  color: var(--xd-suspect);
+}
+.badge.danger {
+  background: transparent;
+  border-color: var(--xd-danger);
+  color: var(--xd-danger);
+}
+.badge.neutral {
+  background: transparent;
+  border-color: var(--xd-border-light);
+  color: var(--xd-text-dim);
+}
+.badge.info {
+  background: transparent;
+  border-color: var(--xd-primary);
+  color: var(--xd-primary);
+}
+
+/* 状态标记：点 + 文字，替代填充胶囊。
+   满屏绿色胶囊会把「已阻断」埋掉，点 + 文字让异常先被看到。 */
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+.status-dot.safe { background: var(--xd-safe); }
+.status-dot.suspect { background: var(--xd-suspect); }
+.status-dot.danger { background: var(--xd-danger); }
+.status-dot.info { background: var(--xd-text-faint); }
+
+.status-text {
   font-size: var(--xd-fs-caption);
   font-weight: 500;
   white-space: nowrap;
 }
+.status-text.safe { color: var(--xd-safe); }
+.status-text.suspect { color: var(--xd-suspect); }
+.status-text.danger { color: var(--xd-danger); }
+.status-text.info { color: var(--xd-text-dim); }
 
-.badge.safe {
-  background: var(--xd-safe-dim);
-  color: var(--xd-safe);
+/* 阻断行：左边框 + 淡红底，让异常在满屏日志里先被看到 */
+.table tbody tr.hot {
+  background: linear-gradient(90deg, var(--xd-danger-dim), transparent 60%);
+  box-shadow: inset 2px 0 0 var(--xd-danger);
 }
-.badge.suspect {
-  background: var(--xd-suspect-dim);
-  color: var(--xd-suspect);
-}
-.badge.danger {
-  background: var(--xd-danger-dim);
-  color: var(--xd-danger);
-}
-.badge.neutral {
-  background: var(--xd-paused-dim);
-  color: var(--xd-text-dim);
-}
-.badge.info {
-  background: var(--xd-learning-dim);
-  color: var(--xd-learning);
+.table tbody tr.hot td {
+  color: var(--xd-text);
 }
 
 /* 信誉分 */
@@ -1420,6 +1600,58 @@ table.table {
   justify-content: flex-end;
 }
 
+/* 更新说明条目（人话列表） */
+.modal-notes {
+  margin: 0 0 16px;
+  padding: 14px 16px 14px 30px;
+  background: var(--xd-bg);
+  border: 1px solid var(--xd-border);
+  border-radius: var(--xd-radius-sm);
+  color: var(--xd-text-dim);
+  font-size: var(--xd-fs-body);
+  line-height: 1.75;
+  max-height: 240px;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.modal-notes li {
+  margin: 2px 0;
+  word-break: break-word;
+}
+
+.modal-notes li::marker {
+  color: var(--xd-primary);
+}
+
+/* 更新下载进度 */
+.update-progress {
+  position: relative;
+  height: 26px;
+  margin-top: 14px;
+  background: var(--xd-bg);
+  border: 1px solid var(--xd-border-light);
+  border-radius: var(--xd-radius-sm);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.update-progress-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--xd-primary-dim);
+  border-right: 1px solid var(--xd-primary);
+  transition: width 200ms ease-out;
+}
+
+.update-progress-text {
+  position: relative;
+  font-size: var(--xd-fs-caption);
+  color: var(--xd-text);
+}
+
 /* ══════════════════════════════════════════════════════════════
    消息提示（Toast）
    ══════════════════════════════════════════════════════════════ */
@@ -1514,25 +1746,25 @@ table.table {
 
 .alert.danger {
   background: var(--xd-danger-dim);
-  color: #FCA5A5;
-  border: 1px solid rgba(229, 77, 77, 0.3);
+  color: var(--xd-danger-text);
+  border: 1px solid rgba(192, 57, 43, 0.3);
 }
 .alert.suspect {
   background: var(--xd-suspect-dim);
-  color: #FCD34D;
-  border: 1px solid rgba(245, 166, 35, 0.3);
+  color: var(--xd-suspect-text);
+  border: 1px solid rgba(217, 164, 65, 0.3);
 }
 /* 成功态：用于「测试连接」通过等实测结论。
    danger / suspect / info 都不能表达「已验证可用」。 */
 .alert.safe {
   background: var(--xd-safe-dim);
   color: var(--xd-safe);
-  border: 1px solid rgba(0, 212, 170, 0.3);
+  border: 1px solid rgba(95, 169, 122, 0.3);
 }
 .alert.info {
   background: var(--xd-primary-dim);
-  color: #93C5FD;
-  border: 1px solid rgba(43, 95, 215, 0.3);
+  color: var(--xd-primary);
+  border: 1px solid rgba(224, 74, 58, 0.3);
 }
 
 .alert-icon {
@@ -1672,18 +1904,24 @@ table.table {
 .wizard-icon {
   width: 56px;
   height: 56px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, var(--xd-primary), var(--xd-safe));
+  border-radius: var(--xd-radius);
+  /* ★ 原先是朱砂→绿的线性渐变。VI 明令禁止渐变球，
+     且朱砂与安全绿同时出现在一个装饰块里，会让「品牌色」与
+     「安全状态色」的语义互相污染。改为朱砂描边 + 淡朱砂底。 */
+  background: var(--xd-primary-dim);
+  border: 1px solid var(--xd-primary);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--xd-primary);
   margin-bottom: 20px;
 }
 
 .wizard-title {
+  font-family: 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
   font-size: 21px;
   font-weight: 600;
+  letter-spacing: 0.02em;
   margin-bottom: 10px;
 }
 
@@ -1709,11 +1947,12 @@ table.table {
   content: '';
   position: absolute;
   left: 4px;
-  top: 9px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--xd-safe);
+  top: 10px;
+  width: 4px;
+  height: 4px;
+  /* 直角体系：圆点改为小方块，颜色用品牌朱砂而非安全绿 ——
+     这里的列表项是「说明」，不是「安全状态」。 */
+  background: var(--xd-primary);
 }
 
 .wizard-actions {
@@ -1910,11 +2149,36 @@ table.table {
   z-index: 5;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px 0;
-  margin-bottom: 12px;
+  gap: 0;
+  padding: 0;
+  margin-bottom: 16px;
   background: var(--xd-bg);
   border-bottom: 1px solid var(--xd-border);
+}
+
+/* 页内导航做成下划线 tab，而不是一排按钮：
+   按钮会与页面里真正的操作按钮（保存 / 测试连接）抢注意力，
+   而这里只是「跳到哪一段」，属于导航而非操作。 */
+.anchor-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 9px 12px;
+  margin-bottom: -1px;
+  font-size: 13px;
+  color: var(--xd-text-dim);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.anchor-tab:hover {
+  color: var(--xd-text);
+  border-bottom-color: var(--xd-border-light);
+}
+
+.anchor-tab.active {
+  color: var(--xd-text);
+  border-bottom-color: var(--xd-primary);
 }
 #sec-guard,
 #sec-level,
@@ -1946,5 +2210,5 @@ table.table {
   color: var(--xd-text-dim);
   background: var(--xd-card);
   border: 1px solid var(--xd-border);
-  border-radius: 6px;
+  border-radius: var(--xd-radius-sm);
 }

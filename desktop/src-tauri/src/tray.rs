@@ -5,7 +5,7 @@
 // 系统托盘 — 个人版唯一的「我被保护了」感知通道
 //
 // ── 为什么必须有托盘（产品定位：透明防火墙）─────────────────
-// 玄盾的核心承诺是「响应侧自动拦截」，而用户对中转站返回了什么完全无感。
+// 勘合的核心承诺是「响应侧自动拦截」，而用户对中转站返回了什么完全无感。
 // 若用户关掉窗口进程就退出，防护会静默失效 —— 这是比「缺少可视化」严重得多的
 // 问题：承诺在用户不知情时不再成立，且没有任何信号提示。
 // 因此托盘必须承担三件事：
@@ -22,7 +22,7 @@
 //
 // ── 图标为什么在 Rust 里画而不是读 PNG ──────────────────────
 // Tauri 2 的 Image::from_bytes 解 PNG 需要额外 feature，
-// 而托盘图标只有 4 个 16~64px 的盾牌，用像素光栅化即可，
+// 而托盘图标只有 4 个 16~64px 的双括号，用像素光栅化即可，
 // 零依赖、零资源文件、任意尺寸都清晰。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -93,48 +93,50 @@ impl TrayState {
 
     fn rgb(self) -> (u8, u8, u8) {
         match self {
-            // 与 styles.css 设计令牌一致
-            TrayState::Safe => (0x00, 0xD4, 0xAA),
-            TrayState::Suspect => (0xF5, 0xA6, 0x23),
-            TrayState::Danger => (0xE5, 0x4D, 0x4D),
-            // ★ 刻意比 styles.css 的 --xd-text-dim(#9AA4B8) 更深：
+            // 与 styles.css 设计令牌一致（VI 朱砂体系）
+            TrayState::Safe => (0x5F, 0xA9, 0x7A),
+            TrayState::Suspect => (0xD9, 0xA4, 0x41),
+            TrayState::Danger => (0xC0, 0x39, 0x2B),
+            // ★ 刻意比 styles.css 的 --xd-text-dim(#8C8880) 更深：
             //   托盘图标绘制在**系统任务栏**上，而任务栏主题不随本应用走 ——
-            //   用户可能用亮色任务栏，深灰会几乎不可见。
-            //   离线渲染实测（本地用来核对的托盘渲染脚本）：#8A8F98 在亮色底上
-            //   对比度不足，降到 #5A6068 后四种状态在任何底色下都可辨认。
+            //   用户可能用亮色任务栏，浅灰会几乎不可见。
             //   「防护已停」恰恰是最需要被一眼看到的状态，不能靠悬停 tooltip 才发现。
-            TrayState::Paused => (0x5A, 0x60, 0x68),
+            TrayState::Paused => (0x5E, 0x5B, 0x56),
         }
     }
 }
 
 // ══════════════════════════════════════════════════════════════
-// 盾牌光栅化
+// 品牌符号光栅化
 // ══════════════════════════════════════════════════════════════
 
-/// 盾牌轮廓（基准 32×32 坐标系）。
+/// 双括号轮廓（基准 32×32 坐标系）。
 ///
-/// 比例要点：上宽下窄，但**上半段接近竖直**，只在下 1/3 处收成尖点。
-/// 若上半段也倾斜，缩小后视觉上会退化成倒三角/箭头，丢失盾牌语义。
+/// 形状取自产品标志 ⟦玄⟧ 的括号部分 —— 托盘只有 16~24px，
+/// 画不下「玄」字，但括号是标志里最可辨识的骨架，且比盾牌更贴合 VI。
+/// 笔画宽 4（占 32 的 1/8）：再细在 16px 下会断成虚线。
 #[rustfmt::skip]
-const SHIELD: [(f32, f32); 7] = [
-    (4.0,  3.5),   // 左上
-    (28.0, 3.5),   // 右上
-    (28.0, 15.0),  // 右侧竖直段底
-    (24.0, 24.0),  // 右下收束
-    (16.0, 29.5),  // 底部尖点
-    (8.0,  24.0),  // 左下收束
-    (4.0,  15.0),  // 左侧竖直段底
+const BRACKETS: [[(f32, f32); 8]; 2] = [
+    // 左括号 [
+    [
+        (12.0, 4.0), (3.0, 4.0), (3.0, 28.0), (12.0, 28.0),
+        (12.0, 24.0), (7.0, 24.0), (7.0, 8.0), (12.0, 8.0),
+    ],
+    // 右括号 ]
+    [
+        (20.0, 4.0), (29.0, 4.0), (29.0, 28.0), (20.0, 28.0),
+        (20.0, 24.0), (25.0, 24.0), (25.0, 8.0), (20.0, 8.0),
+    ],
 ];
 
-/// 射线法判断点是否在多边形内
-fn point_in_poly(px: f32, py: f32) -> bool {
+/// 射线法判断点是否在单个多边形内
+fn point_in_poly(poly: &[(f32, f32)], px: f32, py: f32) -> bool {
     let mut inside = false;
-    let n = SHIELD.len();
+    let n = poly.len();
     let mut j = n - 1;
     for i in 0..n {
-        let (xi, yi) = SHIELD[i];
-        let (xj, yj) = SHIELD[j];
+        let (xi, yi) = poly[i];
+        let (xj, yj) = poly[j];
         if (yi > py) != (yj > py) {
             let x_cross = (xj - xi) * (py - yi) / (yj - yi) + xi;
             if px < x_cross {
@@ -146,10 +148,15 @@ fn point_in_poly(px: f32, py: f32) -> bool {
     inside
 }
 
-/// 生成 RGBA 盾牌图标。
+/// 点是否落在任一括号内
+fn in_brackets(px: f32, py: f32) -> bool {
+    BRACKETS.iter().any(|poly| point_in_poly(poly, px, py))
+}
+
+/// 生成 RGBA 品牌符号图标（双括号）。
 ///
 /// 3×3 超采样抗锯齿：托盘实际显示 16~24px，直接硬边画会全是锯齿。
-fn shield_image(size: u32, rgb: (u8, u8, u8)) -> Image<'static> {
+fn brand_image(size: u32, rgb: (u8, u8, u8)) -> Image<'static> {
     const SS: usize = 3;
     let mut buf = Vec::with_capacity((size * size * 4) as usize);
 
@@ -164,7 +171,7 @@ fn shield_image(size: u32, rgb: (u8, u8, u8)) -> Image<'static> {
                     // 32×32 基准 → 目标尺寸
                     let bx = px / size as f32 * 32.0;
                     let by = py / size as f32 * 32.0;
-                    if point_in_poly(bx, by) {
+                    if in_brackets(bx, by) {
                         hits += 1;
                     }
                 }
@@ -294,11 +301,11 @@ fn apply<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
     let (st, detail) = app.state::<TrayController>().effective();
-    let _ = tray.set_icon(Some(shield_image(32, st.rgb())));
+    let _ = tray.set_icon(Some(brand_image(32, st.rgb())));
     let _ = tray.set_tooltip(Some(if detail.is_empty() {
-        format!("道体·玄盾 个人版 — {}", st.label())
+        format!("道体·勘合 个人版 — {}", st.label())
     } else {
-        format!("道体·玄盾 个人版 — {}：{}", st.label(), detail)
+        format!("道体·勘合 个人版 — {}：{}", st.label(), detail)
     }));
     let _ = app.emit(EVENT_TRAY_STATE, st.as_str());
 }
@@ -313,29 +320,12 @@ fn apply<R: Runtime>(app: &AppHandle<R>) {
 /// 而泛型化后 `TrayIconBuilder` 内部要求 `Manager<Wry>`，
 /// 泛型版本无法证明该约束成立，只会招来编译错误。
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause", "暂停防护 30 分钟", true, None::<&str>)?;
-    let resume = MenuItem::with_id(app, "resume", "恢复防护", true, None::<&str>)?;
-    let logs = MenuItem::with_id(app, "logs", "打开安全日志", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "退出玄盾", true, None::<&str>)?;
-
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show,
-            &sep,
-            &pause,
-            &resume,
-            &logs,
-            &PredefinedMenuItem::separator(app)?,
-            &quit,
-        ],
-    )?;
+    let lang = read_lang(app);
+    let menu = build_menu(app, &lang)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(shield_image(32, TrayState::Safe.rgb()))
-        .tooltip("道体·玄盾 个人版 — 防护中")
+        .icon(brand_image(32, TrayState::Safe.rgb()))
+        .tooltip(labels(&lang).tooltip)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
@@ -393,6 +383,102 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 托盘菜单本地化
+// ══════════════════════════════════════════════════════════════
+
+/// 托盘菜单文案。中英各一套，避免英文界面下托盘仍是中文。
+struct TrayLabels {
+    show: &'static str,
+    pause: &'static str,
+    resume: &'static str,
+    logs: &'static str,
+    quit: &'static str,
+    tooltip: &'static str,
+}
+
+fn labels(lang: &str) -> TrayLabels {
+    if lang == "en" {
+        TrayLabels {
+            show: "Open main window",
+            pause: "Pause protection for 30 minutes",
+            resume: "Resume protection",
+            logs: "Open security logs",
+            quit: "Quit Kanghe",
+            tooltip: "Daoti · Kanghe Personal — Protecting",
+        }
+    } else {
+        TrayLabels {
+            show: "打开主窗口",
+            pause: "暂停防护 30 分钟",
+            resume: "恢复防护",
+            logs: "打开安全日志",
+            quit: "退出勘合",
+            tooltip: "道体·勘合 个人版 — 防护中",
+        }
+    }
+}
+
+/// 语言持久化文件：前端切换语言后写入，下次启动托盘直接按该语言构建。
+fn lang_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("tray-lang.txt"))
+}
+
+fn read_lang(app: &AppHandle) -> String {
+    lang_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s == "zh" || s == "en")
+        .unwrap_or_else(|| "zh".to_string())
+}
+
+fn write_lang(app: &AppHandle, lang: &str) {
+    if let Some(p) = lang_file(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, lang);
+    }
+}
+
+fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let l = labels(lang);
+    let show = MenuItem::with_id(app, "show", l.show, true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause", l.pause, true, None::<&str>)?;
+    let resume = MenuItem::with_id(app, "resume", l.resume, true, None::<&str>)?;
+    let logs = MenuItem::with_id(app, "logs", l.logs, true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", l.quit, true, None::<&str>)?;
+    Menu::with_items(
+        app,
+        &[
+            &show,
+            &sep,
+            &pause,
+            &resume,
+            &logs,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )
+}
+
+/// 前端切换语言时调用：持久化并立即重建托盘菜单。
+#[tauri::command]
+pub fn set_tray_lang(app: tauri::AppHandle, lang: String) {
+    let lang = if lang == "en" { "en" } else { "zh" };
+    write_lang(&app, lang);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(menu) = build_menu(&app, lang) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        let _ = tray.set_tooltip(Some(labels(lang).tooltip));
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
 // Tauri 命令
 // ══════════════════════════════════════════════════════════════
 
@@ -431,7 +517,7 @@ mod tests {
         for px in buf.chunks_exact(4) {
             if px[3] > 200 {
                 let c = (px[0], px[1], px[2]);
-                // 绿色分量最高者即盾牌主色。
+                // 绿色分量最高者即符号主色。
                 // 灰态 #5A6068 的绿分量（96）虽是四态中最低，
                 // 但每张图只渲染一种状态，组内比较无意义。
                 let score = c.1 as usize;
@@ -456,7 +542,7 @@ mod tests {
     #[test]
     fn image_buffer_length_matches_size() {
         for size in [16u32, 32, 64] {
-            let img = shield_image(size, (0x00, 0xD4, 0xAA));
+            let img = brand_image(size, (0x00, 0xD4, 0xAA));
             assert_eq!(
                 img.rgba().len(),
                 size as usize * size as usize * 4,
@@ -474,18 +560,18 @@ mod tests {
     #[test]
     fn four_states_render_distinct_colors() {
         let expected = [
-            (TrayState::Safe, (0x00u8, 0xD4, 0xAA)),
-            (TrayState::Suspect, (0xF5, 0xA6, 0x23)),
-            (TrayState::Danger, (0xE5, 0x4D, 0x4D)),
-            (TrayState::Paused, (0x5A, 0x60, 0x68)),
+            (TrayState::Safe, (0x5Fu8, 0xA9, 0x7A)),
+            (TrayState::Suspect, (0xD9, 0xA4, 0x41)),
+            (TrayState::Danger, (0xC0, 0x39, 0x2B)),
+            (TrayState::Paused, (0x5E, 0x5B, 0x56)),
         ];
 
         let mut seen: Vec<(u8, u8, u8)> = Vec::new();
         for (state, want) in expected {
-            let img = shield_image(32, state.rgb());
+            let img = brand_image(32, state.rgb());
             let got = dominant_rgb(img.rgba());
             assert_eq!(got, want, "{} 态渲染颜色不符", state.as_str());
-            assert!(opaque_count(img.rgba()) > 200, "{} 态盾牌几乎不可见", state.as_str());
+            assert!(opaque_count(img.rgba()) > 200, "{} 态符号几乎不可见", state.as_str());
             assert!(
                 !seen.contains(&got),
                 "{} 态与前面某态撞色，托盘无法区分",
@@ -495,26 +581,28 @@ mod tests {
         }
     }
 
-    /// 盾牌形状必须真的是盾牌，而不是退化成方块或三角。
+    /// 符号必须是双括号，而不是退化成方块或一团实心。
     ///
-    /// 判据：四角透明（否则是方块）、上宽下窄（否则不是盾形）、
-    /// 中心不透明（否则轮廓自相矛盾）。
+    /// 判据：四角透明（否则是方块）、左右竖线不透明、
+    /// 中间留空（括号之间必须是空的，否则两个括号会连成一块）、
+    /// 上下横线不透明（否则只剩两根竖线，读不出括号）。
     #[test]
-    fn shield_shape_is_legible() {
-        let img = shield_image(32, (0x00, 0xD4, 0xAA));
+    fn bracket_shape_is_legible() {
+        let img = brand_image(32, (0x5F, 0xA9, 0x7A));
         let px = |x: usize, y: usize| -> u8 { img.rgba()[(y * 32 + x) * 4 + 3] };
 
         // 四角必须透明
         for (x, y) in [(0usize, 0usize), (31, 0), (0, 31), (31, 31)] {
             assert_eq!(px(x, y), 0, "({x},{y}) 不透明，轮廓退化成方块");
         }
-        // 几何中心必须不透明
-        assert!(px(16, 14) > 200, "中心透明，轮廓自相矛盾");
-        // 上部宽度 > 下部宽度（盾牌语义的关键特征）
-        let width_at = |y: usize| -> usize {
-            (0..32).filter(|x| px(*x, y) > 200).count()
-        };
-        assert!(width_at(8) > width_at(24), "上窄下宽，不是盾牌形状");
+        // 左右竖线必须实心（x=4 落在左括号竖线，x=27 落在右括号竖线）
+        assert!(px(4, 16) > 200, "左括号竖线缺失");
+        assert!(px(27, 16) > 200, "右括号竖线缺失");
+        // 中间必须留空：两个括号之间是空的，否则会连成一块实心
+        assert_eq!(px(16, 16), 0, "括号之间不透明，符号退化成实心块");
+        // 上下横线必须存在（y=5 落在括号上沿）
+        assert!(px(4, 5) > 200, "左括号上横线缺失");
+        assert!(px(27, 26) > 200, "右括号下横线缺失");
     }
 
     /// 非法状态名必须降级为灰态，绝不能静默显示绿色。

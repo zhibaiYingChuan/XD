@@ -37,27 +37,19 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
-      # ★ P1-19/P1-26：与 release.yml 保持一致 ——
-      #   ① 所有 action 钉 40 位 commit SHA，不用浮动 tag
-      #      （tag 可被移动，`@v5` 等于把构建交给上游随时改写）；
-      #   ② 出网策略从 audit 收紧为 block：这个 job 的依赖面很小
-      #      （pip + 取仓库），allowlist 可核准；比"只审计不拦截"更实在。
-      - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            objects.githubusercontent.com:443
-            pypi.org:443
-            files.pythonhosted.org:443
+      # ★ 2026-10-31：harden-runner 已移除。
+      #   它在 ubuntu runner 上会把 egress 全程拦住，actions/checkout 偶发连不上而失败；
+      #   随后它的 post 收尾又要联网上报、被自己的策略挡住不返回，
+      #   job 永远停在 in_progress —— 后续 job 全部开始不了。
+      #   本仓库已因此卡死四次（release.yml 三次、本 job 一次）。
+      #   保留 P1-19 的另一半：所有 action 仍钉 40 位 commit SHA。
+      #   出网面收窄改用上面的 job 级超时兜底。
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -74,6 +66,15 @@ jobs:
       - name: Assert version consistency
         run: python .github/scripts/sync_version.py --check
 
+      # ★★ 2026-11-03：误报回归门禁。
+      #   每条已复核的误报都固化在 test_false_positive_regressions.py 里。
+      #   单独跑一遍是为了「失败时一眼看出是误报回归」——
+      #   混在 800 条测试里，红了的名字不会告诉任何人它在防什么。
+      #   这一步红了就不允许发版：新判据把已知误报带回来了。
+      - name: False-positive regression gate
+        run: python -m pytest tests/test_false_positive_regressions.py -q --no-header -p no:cacheprovider
+        timeout-minutes: 5
+
       # ★ 门禁 1-4 仍在本地 CI（.github/workflows/ci.yml 完整版，未公开）运行。
       #   这里只跑「不依赖未公开资源」的那部分，
       #   避免公开仓库 clone 后因缺文件而恒红 ——
@@ -81,3 +82,81 @@ jobs:
       - name: Run test suite
         run: python -m pytest tests -q --no-header -p no:cacheprovider
         timeout-minutes: 15
+
+  # ══════════════════════════════════════════════════════════
+  # 桌面端：前端构建 + Rust 类型检查
+  # ══════════════════════════════════════════════════════════
+  # ★★ P1-10（2026-10-29 第三轮审查）：这两步此前**完全不在 CI 里**。
+  #   证据是真实的：vite 从 5.4.21 跳到 8.3.5（跨三个主版本）期间
+  #   三个 PR 全绿 —— 因为没有任何 job 执行过 `npm run build`。
+  #   同一个洞让 `cargo check` 级别的错误只在发 tag 之后才暴露。
+  #
+  # ★ 为什么放在 windows-latest 而不是 ubuntu：
+  #   Tauri 的 Linux 构建要 apt 装 libwebkit2gtk 等系统库（需要出网到
+  #   ubuntu 源），而本工作流的出网策略是 block + 允许清单。
+  #   Windows runner 自带 Rust / Node 与 WebView2 开发头，
+  #   整条链只需要 registry.npmjs.org 与 crates.io 两类白名单主机。
+  desktop:
+    name: Desktop (frontend build + rust check)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            index.crates.io:443
+            static.crates.io:443
+            crates.io:443
+            static.rust-lang.org:443
+            sh.rustup.rs:443
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+        with:
+          toolchain: stable
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      # 必须用 npm 脚本而不是裸 `vite build`：`npm run build` = tsc + vite build，
+      # 类型错误与技术栈版本不兼容都会在这里暴露。
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+
+      # ★★ 2026-10-29（实测）：`tauri_build::build()` 会在**编译期**校验
+      #   `bundle.resources` 里声明的路径是否存在。本项目声明的是
+      #   `resources/engine`（Nuitka 产物目录，由 build_engine.py 生成、
+      #   不入库），干净 clone 上它不存在 —— 于是 cargo check 抛
+      #   「failed to run custom build command」而没有任何可读原因。
+      #   这里给一个空目录占位：本 job 只验证类型与依赖，不验证产物。
+      - name: Create resource placeholders for cargo check
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/resources/engine | Out-Null
+          Set-Content -Path src-tauri/resources/engine/.placeholder -Value ""
+
+      # ★★ 顺序不能反：tauri 的 generate_context! 在**编译期**要求
+      #   frontendDist（../dist）存在，而 dist/ 不入库。
+      #   先构建前端再 cargo check，仓库里不需要提交任何构建产物。
+      - name: Check Rust
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+        timeout-minutes: 20
