@@ -1601,9 +1601,9 @@ jobs:
       #   SFANG_SFTP_USER   SSH 用户名
       #   SFANG_SFTP_KEY    SSH 私钥（OpenSSH 格式，含 BEGIN/END 行）
       #   SFANG_SFTP_PORT   可选，默认 22
-      #   SFANG_SFTP_PATH   可选，默认 /wwwroot/sfang.cc/download/downloads
-      #                     Windows OpenSSH 也可写成 /C:/wwwroot/... 或
-      #                     C:/wwwroot/sfang.cc/download/downloads
+      #   SFANG_SFTP_PATH   可选，默认 /C:/wwwroot/sfang.cc/download/dist/downloads
+      #                     （Windows OpenSSH 的盘符路径写法；实测服务器
+      #                      站点根目录为 C:\wwwroot\sfang.cc\download\dist）
       #
       # ★ 上传内容：dist/ 下全部文件（安装包、.sig、latest.json、
       #   checksums-sha256.txt、RELEASE_NOTES.md）。
@@ -1624,7 +1624,7 @@ jobs:
             exit 1
           fi
           PORT="${SFTP_PORT:-22}"
-          REMOTE="${SFTP_PATH:-/wwwroot/sfang.cc/download/downloads}"
+          REMOTE="${SFTP_PATH:-/C:/wwwroot/sfang.cc/download/dist/downloads}"
 
           VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
                 | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -1686,7 +1686,7 @@ jobs:
         run: |
           set -euo pipefail
           PORT="${SFTP_PORT:-22}"
-          REMOTE="${SFTP_PATH:-/wwwroot/sfang.cc/download/downloads}"
+          REMOTE="${SFTP_PATH:-/C:/wwwroot/sfang.cc/download/dist/downloads}"
           VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
                 | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
                 | head -1)
