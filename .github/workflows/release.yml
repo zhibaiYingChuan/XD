@@ -291,7 +291,7 @@ jobs:
       # ★ 各平台用该平台的 Rust 工具链。macOS runner 是 arm64，
       #   显式指定 aarch64-apple-darwin 而不用默认工具链，
       #   否则会按 x86_64 交叉编译，产物在 M 系列机器上跑不起来。
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1.0.6
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -966,7 +966,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: desktop/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1.0.6
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
@@ -1081,7 +1081,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: desktop/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # v1.0.6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1.0.6
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
