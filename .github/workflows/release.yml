@@ -1632,7 +1632,9 @@ jobs:
           test -n "$VER" || { echo "::error::无法读取版本号"; exit 1; }
 
           KEY_FILE="$RUNNER_TEMP/sfang_deploy_key"
-          printf '%s\n' "$SFTP_KEY" > "$KEY_FILE"
+          # ★ 去掉 Windows 剪贴板带来的 CR：OpenSSH 私钥带 \r 会验签失败，
+          #   而 GitHub Secret 里看不出这个差异（只显示 ***）。
+          printf '%s\n' "$SFTP_KEY" | tr -d '\r' > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
           mkdir -p ~/.ssh
           ssh-keyscan -p "$PORT" -H "$SFTP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
@@ -1691,7 +1693,7 @@ jobs:
                 | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
                 | head -1)
           KEY_FILE="$RUNNER_TEMP/sfang_deploy_key"
-          printf '%s\n' "$SFTP_KEY" > "$KEY_FILE"
+          printf '%s\n' "$SFTP_KEY" | tr -d '\r' > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
           mkdir -p ~/.ssh
           ssh-keyscan -p "$PORT" -H "$SFTP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
