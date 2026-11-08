@@ -21,6 +21,10 @@ updates:
       python-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # major 一律人工评估：引擎是 Nuitka 冻结的，大版本会改变构建行为
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # 前端（Tauri 的 webview 侧）
   - package-ecosystem: npm
@@ -34,8 +38,8 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     ignore:
-      # Tauri 主版本与 CLI 必须同步升级，自动 PR 只会造成半升级
-      - dependency-name: "@tauri-apps/*"
+      # major 一律人工评估：React 19 / Router 7 / Vite 8 这类升级必须集中做并回归
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
 
   # Rust 壳
@@ -49,6 +53,10 @@ updates:
       cargo-patch:
         patterns: ["*"]
         update-types: ["patch"]
+    ignore:
+      # major 一律人工评估：tauri / reqwest 这类大版本会改变运行时行为
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions 本身也是依赖：action 被投毒等于发布链被接管。
   # ★ 这里只做"发现新版"，实际合入仍需把 SHA 钉死（见 ci.yml / release.yml）。
@@ -58,3 +66,7 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    ignore:
+      # major 一律人工评估：action 大版本常伴随输入参数变更，需同步改工作流
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
