@@ -22,6 +22,7 @@ import { useEffect, useState } from 'react';
 import { Minus, Square, Copy, X } from 'lucide-react';
 import { BrandMark } from './BrandMark';
 import { isTauri } from '../lib/tauriShim';
+import { useToast } from './Toast';
 import { useI18n } from '../i18n';
 
 async function currentWindow() {
@@ -31,7 +32,9 @@ async function currentWindow() {
 
 export function TitleBar() {
   const { t } = useI18n();
+  const toast = useToast();
   const [maximized, setMaximized] = useState(false);
+  const [closing, setClosing] = useState(false);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -59,7 +62,32 @@ export function TitleBar() {
 
   const act = (fn: (w: Awaited<ReturnType<typeof currentWindow>>) => Promise<void>) => {
     if (!isTauri()) return;
-    void currentWindow().then(fn).catch(() => undefined);
+    // ★ 2026-11-09：此前这里把异常整个吞掉，导致「点了没反应」时
+    //   既没有界面反馈、也没有任何日志可查。权限缺失（capabilities
+    //   未授予 allow-close / allow-minimize / allow-toggle-maximize）
+    //   正是这样被藏了整整一个版本。现在至少留下可排查的痕迹。
+    void currentWindow().then(fn).catch((e) => {
+      console.error('[titlebar] 窗口操作失败：', e);
+    });
+  };
+
+  /**
+   * 关闭窗口 = 隐藏到托盘，防护继续运行。
+   *
+   * ★ 2026-11-09：Rust 侧 on_window_event 会 prevent_close + hide，
+   *   但用户看不到任何解释，会以为「关不掉」。这里先给一句提示，
+   *   留 1.2 秒可见时间再隐藏，避免「窗口突然消失、不知道还在跑」。
+   */
+  const handleClose = () => {
+    if (closing) return;
+    setClosing(true);
+    toast.info(t('已最小化到托盘，防护继续运行；右键托盘图标可退出'));
+    window.setTimeout(() => {
+      act((w) => w.close());
+      // ★ 窗口只是隐藏、组件不会卸载；不复位的话，
+      //   从托盘重新打开后关闭按钮会永久失效。
+      setClosing(false);
+    }, 1200);
   };
 
   return (
@@ -99,9 +127,9 @@ export function TitleBar() {
         <button
           type="button"
           className="titlebar-btn close"
-          title={t('关闭')}
+          title={t('关闭窗口（防护继续在托盘运行）')}
           aria-label={t('关闭')}
-          onClick={() => act((w) => w.close())}
+          onClick={handleClose}
         >
           <X size={15} strokeWidth={1.5} />
         </button>
