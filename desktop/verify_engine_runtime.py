@@ -76,10 +76,10 @@ def _find_engine(engine_dir: Path) -> Path:
     """
     candidates = [
         p for p in engine_dir.iterdir()
-        if p.is_file() and p.name.startswith("xuandun-engine-")
+        if p.is_file() and p.name.startswith("kanhe-engine-")
     ]
     if not candidates:
-        raise SystemExit(f"::error::引擎目录里没有 xuandun-engine-*：{engine_dir}")
+        raise SystemExit(f"::error::引擎目录里没有 kanhe-engine-*：{engine_dir}")
     return candidates[0]
 
 

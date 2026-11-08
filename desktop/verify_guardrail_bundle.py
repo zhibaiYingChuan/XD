@@ -126,7 +126,7 @@ def main() -> int:
 
     if not bins:
         # ★ macOS / Linux 的 sidecar 按 Tauri externalBin 约定**没有扩展名**
-        #   （如 `xuandun-engine-aarch64-apple-darwin`）。只认 .exe/.bin 会让
+        #   （如 `kanhe-engine-aarch64-apple-darwin`）。只认 .exe/.bin 会让
         #   这两个平台在「找不到可执行文件」处直接失败 —— 那是判据写错，
         #   不是产物有问题。这里退化为「根目录里最大的那个文件」。
         candidates = [

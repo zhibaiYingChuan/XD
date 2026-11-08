@@ -107,7 +107,7 @@ def main() -> int:
     _setup_file_logging()
     _setup_stack_dump()
 
-    log = logging.getLogger("xuandun-engine")
+    log = logging.getLogger("kanhe-engine")
     # 启动标记：File 日志为空时，至少能区分「没进来」与「进来了但卡住」。
     log.info(
         "engine_main start: frozen=%s meipass=%s argv=%s",

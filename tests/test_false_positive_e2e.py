@@ -41,7 +41,7 @@ strict 是最激进的配置，误报最容易在这里暴露。
 默认用当前解释器跑源码（`python -m daoti_xuandun_personal.proxy.app`），
 CI 与本地都能跑。发布前可用环境变量指向冻结后的二进制：
 
-    XUANDUN_TEST_ENGINE_BIN=".../xuandun-engine-*.exe" pytest tests/test_false_positive_e2e.py
+    XUANDUN_TEST_ENGINE_BIN=".../kanhe-engine-*.exe" pytest tests/test_false_positive_e2e.py
 
 这能覆盖「源码不误报 ≠ 装到用户机器上那个引擎不误报」的落差。
 

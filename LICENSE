@@ -114,7 +114,7 @@ below.
           the Architecture Source Code from the Nuitka-compiled binary or
           the Repository Assets;
     (v)   you do NOT sublicense, resell, or redistribute the core algorithm
-          binary (xuandun-engine) as a standalone product or as part of any
+          binary (kanhe-engine) as a standalone product or as part of any
           distribution platform, repository, or marketplace without
           prior written consent from 独立研究者，知白;
     (vi)  any derivative work created through modification of the core
@@ -131,7 +131,7 @@ below.
     (iii) 公开 API 的衍生作品须依据本许可证分发；
     (iv)  不得从 Nuitka 编译二进制或仓库资产中进行逆向工程、反编译或尝试重建
           架构源码；
-    (v)   未经 独立研究者，知白 事先书面同意，不得将核心算法二进制（xuandun-engine）
+    (v)   未经 独立研究者，知白 事先书面同意，不得将核心算法二进制（kanhe-engine）
           作为独立产品或任何分发平台、仓库、市场的一部分进行转授权、转售或再分发；
     (vi)  任何基于核心算法修改产生的衍生作品均须依据本许可证分发。
 2.2 ARCHITECTURE SOURCE CODE — CASE-BY-CASE AUTHORIZATION

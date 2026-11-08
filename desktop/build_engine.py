@@ -111,7 +111,7 @@ def _triple() -> str:
     else:
         target = f"{machine}-unknown-linux-gnu"
         ext = ""
-    return f"xuandun-engine-{target}{ext}"
+    return f"kanhe-engine-{target}{ext}"
 
 
 def _git(*args: str) -> str:
@@ -191,14 +191,14 @@ def _pyinstaller_version_file(path: str) -> str:
   kids=[
     StringFileInfo([StringTable('040904B0', [
       StringStruct('CompanyName', 'DaoTi Research'),
-      StringStruct('FileDescription', 'XuanDun Personal Protection Engine'),
+      StringStruct('FileDescription', '勘合个人版 防护引擎'),
       StringStruct('FileVersion', '{ver}'),
-      StringStruct('InternalName', 'xuandun-engine'),
+      StringStruct('InternalName', 'kanhe-engine'),
       StringStruct('LegalCopyright', 'Copyright (c) 2026 DaoTi Research'),
-      StringStruct('OriginalFilename', 'xuandun-engine.exe'),
-      StringStruct('ProductName', 'XuanDun Personal'),
+      StringStruct('OriginalFilename', 'kanhe-engine.exe'),
+      StringStruct('ProductName', '勘合个人版'),
       StringStruct('ProductVersion', '{ver}'),
-      StringStruct('Trademarks', 'XuanDun')])]),
+      StringStruct('Trademarks', '勘合')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
 )

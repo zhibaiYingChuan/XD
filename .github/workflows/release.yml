@@ -505,7 +505,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ENGINE=$(find desktop/src-tauri/resources/engine -name 'xuandun-engine-*' -type f -print -quit)
+          ENGINE=$(find desktop/src-tauri/resources/engine -name 'kanhe-engine-*' -type f -print -quit)
           if [ -z "$ENGINE" ]; then
             echo "::error::引擎产物不存在"
             exit 1
@@ -837,7 +837,7 @@ jobs:
           #   （都是 x86_64-unknown-linux-gnu），artifact 名字冲突时
           #   upload-artifact 会直接失败 —— 而且报错与真实原因
           #   毫无关联，不容易联想到是命名撞了。
-          name: xuandun-personal-${{ matrix.art }}
+          name: kanhe-personal-${{ matrix.art }}
           # ★ 2026-10-20：除安装包外，还要带上 updater 资产：
           #   .exe.sig / .app.tar.gz(.sig)。
           #   少了 .sig，latest.json 就生成不出来，自动更新形同虚设。
@@ -936,14 +936,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ENGINE=$(find desktop/src-tauri/resources/engine -name 'xuandun-engine-*' -type f -print -quit)
+          ENGINE=$(find desktop/src-tauri/resources/engine -name 'kanhe-engine-*' -type f -print -quit)
           test -n "$ENGINE" || { echo "::error::引擎产物不存在"; exit 1; }
           echo "引擎：$ENGINE"
 
       - name: Upload prebuilt engine
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: xuandun-engine-linux
+          name: kanhe-engine-linux
           path: desktop/src-tauri/resources/engine
           if-no-files-found: error
 
@@ -993,7 +993,7 @@ jobs:
       - name: Download prebuilt engine
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: xuandun-engine-linux
+          name: kanhe-engine-linux
           path: desktop/src-tauri/resources/engine
 
       - name: Restore engine permissions
@@ -1001,7 +1001,7 @@ jobs:
         run: |
           set -euo pipefail
           DIR=desktop/src-tauri/resources/engine
-          find "$DIR" -type f \( -name '*.bin' -o -name 'xuandun-engine-*' \) \
+          find "$DIR" -type f \( -name '*.bin' -o -name 'kanhe-engine-*' \) \
             -exec chmod +x {} \;
           echo "已恢复可执行位"
 
@@ -1039,7 +1039,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: xuandun-personal-linux-deb
+          name: kanhe-personal-linux-deb
           path: |
             desktop/src-tauri/target/release/bundle/**/*.deb
           if-no-files-found: error
@@ -1114,7 +1114,7 @@ jobs:
       - name: Download prebuilt engine
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: xuandun-engine-linux
+          name: kanhe-engine-linux
           path: desktop/src-tauri/resources/engine
 
       # ★ artifact 是 zip 打包的，**不保留可执行位** —— 下载后必须补。
@@ -1126,7 +1126,7 @@ jobs:
           set -euo pipefail
           DIR=desktop/src-tauri/resources/engine
           test -d "$DIR" || { echo "::error::引擎目录不存在"; exit 1; }
-          find "$DIR" -type f \( -name '*.bin' -o -name 'xuandun-engine-*' \) \
+          find "$DIR" -type f \( -name '*.bin' -o -name 'kanhe-engine-*' \) \
             -exec chmod +x {} \;
           echo "已恢复可执行位："
           find "$DIR" -maxdepth 1 -type f -perm -u+x | head -5
@@ -1138,7 +1138,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ENGINE=$(find desktop/src-tauri/resources/engine -name 'xuandun-engine-*' -type f -print -quit)
+          ENGINE=$(find desktop/src-tauri/resources/engine -name 'kanhe-engine-*' -type f -print -quit)
           test -n "$ENGINE" || { echo "::error::引擎产物不存在"; exit 1; }
           echo "引擎：$ENGINE"
 
@@ -1200,7 +1200,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: xuandun-personal-linux-appimage
+          name: kanhe-personal-linux-appimage
           path: |
             desktop/src-tauri/target/release/bundle/**/*.AppImage
             desktop/src-tauri/target/release/bundle/**/*.sig

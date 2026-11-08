@@ -191,6 +191,8 @@ fn data_dir() -> std::path::PathBuf {
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// 保留的日志文件个数（当前文件 + 其备份，合计最多 3 个）
 const LOG_KEEP: usize = 3;
+/// 日志文件名（品牌名：勘合）
+const LOG_NAME: &str = "kanhe.log";
 
 /// 日志写入的全局串行锁。
 ///
@@ -200,7 +202,7 @@ static LOG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 追加一行落盘日志（替代 eprintln!，release 下唯一可见的输出）。
 ///
-/// 位置：%LOCALAPPDATA%\com.daoti.xuandun-personal\logs\xuandun.log
+/// 位置：%LOCALAPPDATA%\com.daoti.xuandun-personal\logs\kanhe.log
 /// 格式：`<UTC 时间戳> [级别] 消息`
 /// 轮转：单文件超过约 5MB 时滚动，最多保留 3 个文件。
 ///
@@ -214,7 +216,7 @@ fn log_line(level: &str, msg: &str) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let path = dir.join("xuandun.log");
+    let path = dir.join(LOG_NAME);
     rotate_logs(&dir, &path);
 
     let line = format!(
@@ -233,7 +235,7 @@ fn log_line(level: &str, msg: &str) {
     }
 }
 
-/// 日志超过阈值时滚动：xuandun.log → .1 → .2，丢弃最旧的。
+/// 日志超过阈值时滚动：kanhe.log → .1 → .2，丢弃最旧的。
 fn rotate_logs(dir: &std::path::Path, path: &std::path::Path) {
     let Ok(meta) = std::fs::metadata(path) else {
         return;
@@ -241,14 +243,14 @@ fn rotate_logs(dir: &std::path::Path, path: &std::path::Path) {
     if meta.len() < LOG_MAX_BYTES {
         return;
     }
-    let _ = std::fs::remove_file(dir.join(format!("xuandun.log.{}", LOG_KEEP - 1)));
+    let _ = std::fs::remove_file(dir.join(format!("{LOG_NAME}.{}", LOG_KEEP - 1)));
     for i in (1..LOG_KEEP - 1).rev() {
         let _ = std::fs::rename(
-            dir.join(format!("xuandun.log.{i}")),
-            dir.join(format!("xuandun.log.{}", i + 1)),
+            dir.join(format!("{LOG_NAME}.{i}")),
+            dir.join(format!("{LOG_NAME}.{}", i + 1)),
         );
     }
-    let _ = std::fs::rename(path, dir.join("xuandun.log.1"));
+    let _ = std::fs::rename(path, dir.join(format!("{LOG_NAME}.1")));
 }
 
 /// 生成可读时间戳（UTC）。
@@ -1001,7 +1003,10 @@ fn resolve_engine() -> Option<(std::path::PathBuf, bool)> {
             if let Ok(entries) = std::fs::read_dir(&res_dir) {
                 for e in entries.flatten() {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name.starts_with("xuandun-engine-") {
+                    // ★ 同时接受新旧两个前缀：升级安装时旧版残留的
+                    //   xuandun-engine-* 仍可能留在 resources 目录里，
+                    //   只认新名会让老用户升级后找不到引擎。
+                    if name.starts_with("kanhe-engine-") || name.starts_with("xuandun-engine-") {
                         let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
                         if name.ends_with(ext) {
                             return Some((e.path(), false));
@@ -1087,7 +1092,7 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
     //   OS 都会关闭这条管道的写端 → 引擎的 stdin 读到 EOF → 立即自行退出。
     //   这一机制不依赖 PID、不依赖轮询，跨平台可靠（此前用 PID + 轮询的
     //   方案对「曾存在后被强杀」的进程不生效，引擎会成孤儿长期占用
-    //   xuandun-engine-*.exe，导致升级安装时 NSIS 无法覆盖该文件 ——
+    //   kanhe-engine-*.exe，导致升级安装时 NSIS 无法覆盖该文件 ——
     //   用户装完新版引擎仍是旧版）。
     //   写端即 child.stdin：只要 child 被保存在 EngineState 里就会一直持有，
     //   故**绝不能** take() 后丢弃或置 None，否则写端提前关闭会让引擎误判。
@@ -1316,7 +1321,7 @@ fn process_alive(pid: u32) -> bool {
     };
 
     let text = String::from_utf8_lossy(&o.stdout);
-    // 行格式："xuandun-engine-amd64-pc-windows-msvc.exe   24580 Console ..."
+    // 行格式："kanhe-engine-amd64-pc-windows-msvc.exe   24580 Console ..."
     text.lines().any(|line| {
         line.split_whitespace()
             .nth(1)
