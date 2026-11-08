@@ -936,7 +936,7 @@ class TestAddingAndRemovingIsPossible:
         """
         src = SETTINGS_TSX.read_text(encoding="utf-8")
         assert re.search(
-            r"\{addingBusy \? '添加中…' : '添加到列表'\}", src), (
+            r"\{addingBusy \? t\('添加中…'\) : t\('添加到列表'\)\}", src), (
             "提交按钮的文案没有区分「请求在飞」—— "
             "打开表单就会显示「添加中…」，而并没有请求在发"
         )

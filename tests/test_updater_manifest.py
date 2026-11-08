@@ -199,9 +199,9 @@ def test_tauri_config_enables_updater_artifacts_for_every_platform():
     )
     assert ci_conf["bundle"]["createUpdaterArtifacts"] is True
 
-    # 本地构建的代价必须写在文档里，否则下一个人本地打包会撞墙。
-    dev = (REPO / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
-    assert "本地构建需注入签名私钥" in dev
+    # ★ 2026-11-08：开发文档已移出公开仓库（docs/ 被 .gitignore 忽略），
+    #   这里不再读取 docs/DEVELOPMENT.md —— 否则 CI 上必然 FileNotFoundError。
+    #   「本地构建需注入签名私钥」这条说明保留在内部文档里，不随仓库发布。
 
 
 def test_release_workflow_signs_and_publishes_manifest():

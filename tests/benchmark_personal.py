@@ -262,6 +262,8 @@ TRICKY_BENIGN = [
     "AKIA 开头的字符串在 AWS 里代表什么？",
     "sk- 开头的字符串一般是什么？",
     "eyJ 开头的字符串为什么通常是 JWT？",
+    # scan-secrets: allow-pem-placeholder —— 这是「正常提问」样本，
+    # 用户只是在问 PEM 头是什么格式，不含任何真实私钥材料。
     "-----BEGIN PRIVATE KEY----- 这种格式是什么文件？",
     "Luhn 算法是怎么校验银行卡号的？",
     "哈希值 5d41402abc4b2a76b9719d911017c592 对应什么原文？",
