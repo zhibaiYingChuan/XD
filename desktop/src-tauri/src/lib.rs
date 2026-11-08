@@ -2597,6 +2597,7 @@ pub fn run() {
             tray::set_tray_state,
             tray::pulse_tray,
             tray::get_tray_state,
+            tray::set_tray_lang,
         ])
         .on_window_event(|window, event| {
             // ★ 核心行为：关闭窗口 ≠ 退出应用。

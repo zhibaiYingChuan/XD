@@ -320,29 +320,12 @@ fn apply<R: Runtime>(app: &AppHandle<R>) {
 /// 而泛型化后 `TrayIconBuilder` 内部要求 `Manager<Wry>`，
 /// 泛型版本无法证明该约束成立，只会招来编译错误。
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause", "暂停防护 30 分钟", true, None::<&str>)?;
-    let resume = MenuItem::with_id(app, "resume", "恢复防护", true, None::<&str>)?;
-    let logs = MenuItem::with_id(app, "logs", "打开安全日志", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "退出勘合", true, None::<&str>)?;
-
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show,
-            &sep,
-            &pause,
-            &resume,
-            &logs,
-            &PredefinedMenuItem::separator(app)?,
-            &quit,
-        ],
-    )?;
+    let lang = read_lang(app);
+    let menu = build_menu(app, &lang)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(brand_image(32, TrayState::Safe.rgb()))
-        .tooltip("道体·勘合 个人版 — 防护中")
+        .tooltip(labels(&lang).tooltip)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
@@ -396,6 +379,102 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// 托盘菜单本地化
+// ══════════════════════════════════════════════════════════════
+
+/// 托盘菜单文案。中英各一套，避免英文界面下托盘仍是中文。
+struct TrayLabels {
+    show: &'static str,
+    pause: &'static str,
+    resume: &'static str,
+    logs: &'static str,
+    quit: &'static str,
+    tooltip: &'static str,
+}
+
+fn labels(lang: &str) -> TrayLabels {
+    if lang == "en" {
+        TrayLabels {
+            show: "Open main window",
+            pause: "Pause protection for 30 minutes",
+            resume: "Resume protection",
+            logs: "Open security logs",
+            quit: "Quit Kanghe",
+            tooltip: "Daoti · Kanghe Personal — Protecting",
+        }
+    } else {
+        TrayLabels {
+            show: "打开主窗口",
+            pause: "暂停防护 30 分钟",
+            resume: "恢复防护",
+            logs: "打开安全日志",
+            quit: "退出勘合",
+            tooltip: "道体·勘合 个人版 — 防护中",
+        }
+    }
+}
+
+/// 语言持久化文件：前端切换语言后写入，下次启动托盘直接按该语言构建。
+fn lang_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("tray-lang.txt"))
+}
+
+fn read_lang(app: &AppHandle) -> String {
+    lang_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s == "zh" || s == "en")
+        .unwrap_or_else(|| "zh".to_string())
+}
+
+fn write_lang(app: &AppHandle, lang: &str) {
+    if let Some(p) = lang_file(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, lang);
+    }
+}
+
+fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let l = labels(lang);
+    let show = MenuItem::with_id(app, "show", l.show, true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause", l.pause, true, None::<&str>)?;
+    let resume = MenuItem::with_id(app, "resume", l.resume, true, None::<&str>)?;
+    let logs = MenuItem::with_id(app, "logs", l.logs, true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", l.quit, true, None::<&str>)?;
+    Menu::with_items(
+        app,
+        &[
+            &show,
+            &sep,
+            &pause,
+            &resume,
+            &logs,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )
+}
+
+/// 前端切换语言时调用：持久化并立即重建托盘菜单。
+#[tauri::command]
+pub fn set_tray_lang(app: tauri::AppHandle, lang: String) {
+    let lang = if lang == "en" { "en" } else { "zh" };
+    write_lang(&app, lang);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(menu) = build_menu(&app, lang) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        let _ = tray.set_tooltip(Some(labels(lang).tooltip));
     }
 }
 

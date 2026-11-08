@@ -1106,6 +1106,16 @@ export function LangProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     currentLang = lang;
     document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    // ★ 2026-11-09：托盘菜单在 Rust 侧构建，必须显式同步语言，
+    //   否则英文界面下右键托盘仍是中文。浏览器预览没有该命令，忽略即可。
+    void (async () => {
+      try {
+        const { isTauri, invoke } = await import('../lib/tauriShim');
+        if (isTauri()) await invoke('set_tray_lang', { lang });
+      } catch {
+        // 旧版本桌面端尚未注册该命令，保持默认中文
+      }
+    })();
   }, [lang]);
 
   const setLang = useCallback((next: Lang) => {
