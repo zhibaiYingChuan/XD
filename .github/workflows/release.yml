@@ -1605,8 +1605,23 @@ jobs:
       #                     （Windows OpenSSH 的盘符路径写法；实测服务器
       #                      站点根目录为 C:\wwwroot\sfang.cc\download\dist）
       #
+      # ★ 站点下载页引用的是 SHA256SUMS.txt / MD5SUMS.txt，
+      #   而流水线只产出 checksums-sha256.txt。不同步的话，
+      #   下载页的「校验值」会一直停在旧版本，用户核对哈希必然对不上。
+      - name: Prepare site checksum files
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
+                | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                | head -1)
+          test -n "$VER" || { echo "::error::无法读取版本号"; exit 1; }
+          cp dist/checksums-sha256.txt dist/SHA256SUMS.txt
+          ( cd dist && md5sum kanhe-personal_${VER}_* latest.json RELEASE_NOTES.md > MD5SUMS.txt )
+          echo "已生成 SHA256SUMS.txt / MD5SUMS.txt（$VER）"
+
       # ★ 上传内容：dist/ 下全部文件（安装包、.sig、latest.json、
-      #   checksums-sha256.txt、RELEASE_NOTES.md）。
+      #   checksums-sha256.txt、SHA256SUMS.txt、MD5SUMS.txt、RELEASE_NOTES.md）。
       #   旧版本文件不自动删除 —— 还在用旧版的用户仍需要能下载到
       #   对应版本的更新包；如需只保留最新版，见文末的可选清理步骤。
       - name: Upload release assets to sfang.cc
@@ -1648,6 +1663,19 @@ jobs:
             for f in dist/*; do
               [ -f "$f" ] || continue
               echo "put \"$f\""
+            done
+            # ★ 下载页用的是 *-latest_* 别名，必须指向当前版本，
+            #   否则「下载」按钮会一直给旧包（0.2.2 之前就是这样）。
+            for pair in \
+              "kanhe-personal_${VER}_x64-setup.exe:kanhe-personal-latest_x64-setup.exe" \
+              "kanhe-personal_${VER}_aarch64.dmg:kanhe-personal-latest_aarch64.dmg" \
+              "kanhe-personal_${VER}_amd64.AppImage:kanhe-personal-latest_amd64.AppImage" \
+              "kanhe-personal_${VER}_amd64.deb:kanhe-personal-latest_amd64.deb"; do
+              src="dist/${pair%%:*}"
+              dst="${pair##*:}"
+              if [ -f "$src" ]; then
+                echo "put \"$src\" \"$REMOTE/$dst\""
+              fi
             done
             echo "bye"
           } > "$BATCH"
