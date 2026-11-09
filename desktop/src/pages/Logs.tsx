@@ -199,6 +199,8 @@ function DetailDrawer({
   const [marking, setMarking] = useState(false);
   // ★ 2026-11-10：模型命名差异的判定（在飞标志独立于误报标记）
   const [aliasSaving, setAliasSaving] = useState(false);
+  // ★ 2026-11-10：陌生端点确认（与模型命名差异同一套机制）
+  const [endpointSaving, setEndpointSaving] = useState(false);
   // 删除在飞标志：删除不可恢复，期间必须锁住按钮防重复触发
   const [deleting, setDeleting] = useState(false);
   // ★ 抽屉标题引用：打开时把焦点移入，让读屏用户立刻知道
@@ -424,6 +426,33 @@ function DetailDrawer({
     }
   };
 
+  /**
+   * 判定日志里出现的陌生地址（★ 2026-11-10）。
+   *
+   * ★ 与 handleAlias 同一套理由：判据只知道「请求里没提过」，
+   *   不知道你就是要访问它。确认一次之后同类不再打扰。
+   */
+  const handleEndpoint = async (status: 'confirmed' | 'rejected' | 'auto') => {
+    if (endpointSaving) return;
+    setEndpointSaving(true);
+    try {
+      await api.markLogEndpoint(logId, status);
+      const d = await api.getLogDetail(logId);
+      setDetail(d);
+      toast.success(
+        status === 'confirmed'
+          ? t('已记为你在用的地址，以后同样的地址不再提示')
+          : status === 'rejected'
+            ? t('已记为「不该出现」，以后同样的地址会继续提示')
+            : t('已撤销结论'),
+      );
+    } catch (e) {
+      toast.error(`${t('记录失败：')}${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEndpointSaving(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (deleting) return;
     // ★ 删除不可恢复（脱敏记录会一并删除），必须先确认。
@@ -609,6 +638,68 @@ function DetailDrawer({
                   </div>
                 </div>
               )}
+
+              {/* ★ 2026-11-10：陌生地址确认。
+                  与模型判定同样是「判据答不了、只能由用户裁决」的问题：
+                  判据只知道请求正文没提过这个域名，不知道你就是要访问它。
+                  AI 编程助手在一轮会话里反复调同一个接口是常态，
+                  不确认一次就会每轮一条提示 —— 用户很快学会忽略它。 */}
+              {detail.endpoints && (() => {
+                const { hosts, statuses } = detail.endpoints;
+                const allConfirmed = hosts.every((h) => statuses[h] === 'confirmed');
+                const anyRejected = hosts.some((h) => statuses[h] === 'rejected');
+                return (
+                  <div className="alert mt-16" style={{ marginBottom: 0 }}>
+                    <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+                    <div style={{ width: '100%' }}>
+                      <div style={{ fontWeight: 500 }}>
+                        {t('AI 要访问一个这次对话里没提过的地址')}
+                      </div>
+                      <div className="faint mono" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7 }}>
+                        {hosts.join('、')}
+                      </div>
+                      <div className="faint" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7 }}>
+                        {allConfirmed
+                          ? t('你已记为「我在用这些地址」：以后同类地址不再提示。')
+                          : anyRejected
+                            ? t('你已记为「这些地址不该出现」：以后同类地址会继续提示。')
+                            : t('如果这是你正在用的接口（比如你在让我对接某个 API），确认一次就不再提示；如果这些地址你完全不认识，那值得查明它从哪来。')}
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                        {!allConfirmed && (
+                          <button
+                            className="btn secondary"
+                            onClick={() => handleEndpoint('confirmed')}
+                            disabled={endpointSaving}
+                          >
+                            <CheckCircle2 size={15} strokeWidth={1.5} />
+                            {t('这是我在用的地址')}
+                          </button>
+                        )}
+                        {!anyRejected && (
+                          <button
+                            className="btn secondary"
+                            onClick={() => handleEndpoint('rejected')}
+                            disabled={endpointSaving}
+                          >
+                            <AlertTriangle size={15} strokeWidth={1.5} />
+                            {t('我不认识这些地址')}
+                          </button>
+                        )}
+                        {(allConfirmed || anyRejected) && (
+                          <button
+                            className="btn secondary"
+                            onClick={() => handleEndpoint('auto')}
+                            disabled={endpointSaving}
+                          >
+                            {t('撤销结论')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {detail.entry.marked_safe && (
                 <div className="alert safe mt-16" style={{ marginBottom: 0 }}>

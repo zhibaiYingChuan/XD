@@ -1310,13 +1310,26 @@ class PersonalStorage:
             return None
 
         now = time.time()
-        # ★ 先数「这个请求模型一共见过几种返回名」。
-        #   它必须包含本次（插入之前数，所以 +1 落在下面两个分支里）。
-        variants = int(self._conn.execute(
-            """SELECT COUNT(*) FROM model_alias
+        # ★ 先数「这个请求模型一共见过几种返回名」并找出**主写法**。
+        #   两者都必须在插入之前查，否则本次会把自己也算进去。
+        variants_row = self._conn.execute(
+            """SELECT COUNT(*) AS n FROM model_alias
                 WHERE relay_domain = ? AND request_model = ?""",
             (domain, req),
-        ).fetchone()[0] or 0)
+        ).fetchone()
+        variants = int(variants_row["n"] or 0) if variants_row else 0
+        # 主写法 = 该请求模型下出现次数最多的返回名。
+        # ★ 只在已有 ≥2 次观察时才叫「主导」—— 只有一个候选时不构成多数派，
+        #   否则「第 2 种写法出现一次」就会被当成主写法，静默得毫无道理。
+        dominant_row = self._conn.execute(
+            """SELECT response_model, seen_count FROM model_alias
+                WHERE relay_domain = ? AND request_model = ?
+                ORDER BY seen_count DESC, last_seen DESC LIMIT 1""",
+            (domain, req),
+        ).fetchone()
+        dominant = ""
+        if dominant_row and int(dominant_row["seen_count"] or 0) >= 2:
+            dominant = str(dominant_row["response_model"] or "")
 
         row = self._conn.execute(
             """SELECT status, seen_count, first_seen, last_seen
@@ -1328,17 +1341,26 @@ class PersonalStorage:
 
         if row is None:
             with self._conn:
+                # ★ 用 ON CONFLICT 而不是裸 INSERT（2026-11-10 代码审查）：
+                #   并发下同一个组合可能被两个请求同时判定为「不存在」，
+                #   裸 INSERT 会抛 IntegrityError → 被 app 的异常兜底吞掉
+                #   → alias_state=None → 该轮必然提示一次（哪怕已 confirmed）。
+                #   upsert 让并发的后到者变成一次正常累加。
                 self._conn.execute(
                     """INSERT INTO model_alias
                        (relay_domain, request_model, response_model,
                         status, seen_count, first_seen, last_seen)
-                       VALUES (?,?,?,'auto',1,?,?)""",
-                    (domain, req, resp, now, now),
+                       VALUES (?,?,?,'auto',1,?,?)
+                       ON CONFLICT(relay_domain, request_model, response_model)
+                       DO UPDATE SET seen_count = seen_count + 1, last_seen = ?""",
+                    (domain, req, resp, now, now, now),
                 )
             return {
                 "status": "auto", "is_first": True, "seen_count": 1,
                 "first_seen": now, "last_seen": now,
                 "variant_count": variants + 1,
+                # 本次自己就是第一个候选 → 无「别的」主写法可言
+                "dominant_model": dominant if dominant != resp else "",
             }
 
         with self._conn:
@@ -1356,6 +1378,7 @@ class PersonalStorage:
             "first_seen": float(row["first_seen"]),
             "last_seen": now,
             "variant_count": variants,
+            "dominant_model": dominant,
         }
 
     def set_model_alias_status(
@@ -1423,9 +1446,147 @@ class PersonalStorage:
         return [dict(r) for r in rows]
 
     # ══════════════════════════════════════════════════════════
-    # 中转站信誉
+    # 陌生端点台账（★ 2026-11-10，与模型别名同一套「变化检测」）
     # ══════════════════════════════════════════════════════════
 
+    def observe_endpoint(
+        self, relay_domain: str, host: str
+    ) -> Optional[Dict[str, Any]]:
+        """记录一次「某中转站返回了这个端点」，返回该端点的台账状态。
+
+        返回值形如：
+          None                          —— 入参不足
+          {"status": "auto", "is_first": True, ...}
+          {"status": "confirmed", ...}  —— 用户确认过这是常用地址，应静默
+          {"status": "rejected",  ...}  —— 用户确认过这地址不该出现，应告警
+        """
+        domain = (relay_domain or "").strip().lower()
+        h = (host or "").strip().lower().rstrip(".")
+        if not domain or not h:
+            return None
+
+        now = time.time()
+        row = self._conn.execute(
+            """SELECT status, seen_count, first_seen
+                 FROM endpoint_allowance
+                WHERE relay_domain = ? AND host = ?""",
+            (domain, h),
+        ).fetchone()
+
+        if row is None:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT INTO endpoint_allowance
+                       (relay_domain, host, status, seen_count,
+                        first_seen, last_seen)
+                       VALUES (?,?,'auto',1,?,?)
+                       ON CONFLICT(relay_domain, host)
+                       DO UPDATE SET seen_count = seen_count + 1, last_seen = ?""",
+                    (domain, h, now, now, now),
+                )
+            return {
+                "status": "auto", "is_first": True, "seen_count": 1,
+                "first_seen": now, "last_seen": now,
+            }
+
+        with self._conn:
+            self._conn.execute(
+                """UPDATE endpoint_allowance
+                      SET seen_count = seen_count + 1, last_seen = ?
+                    WHERE relay_domain = ? AND host = ?""",
+                (now, domain, h),
+            )
+        return {
+            "status": str(row["status"]),
+            "is_first": False,
+            "seen_count": int(row["seen_count"]) + 1,
+            "first_seen": float(row["first_seen"]),
+            "last_seen": now,
+        }
+
+    def set_endpoint_status(
+        self, relay_domain: str, host: str, status: str
+    ) -> bool:
+        """设置某个端点的判定（auto / confirmed / rejected）。"""
+        if status not in ("auto", "confirmed", "rejected"):
+            return False
+        domain = (relay_domain or "").strip().lower()
+        h = (host or "").strip().lower().rstrip(".")
+        with self._conn:
+            cur = self._conn.execute(
+                """UPDATE endpoint_allowance SET status = ?
+                    WHERE relay_domain = ? AND host = ?""",
+                (status, domain, h),
+            )
+        return bool(cur.rowcount)
+
+    def get_endpoint(
+        self, relay_domain: str, host: str
+    ) -> Optional[Dict[str, Any]]:
+        """精确读取某个端点的台账记录（不存在则 None）。
+
+        ★ 与 get_model_alias 同理：list_endpoints 是限量列表，
+          台账变长后「用户确认过的那个地址」可能不在前 200 条里，
+          界面就会把 confirmed 读成 auto，于是又提示一次。
+        """
+        domain = (relay_domain or "").strip().lower()
+        h = (host or "").strip().lower().rstrip(".")
+        row = self._conn.execute(
+            """SELECT * FROM endpoint_allowance
+                WHERE relay_domain = ? AND host = ?""",
+            (domain, h),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_endpoints(
+        self, relay_domain: Optional[str] = None, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """列出端点台账（供设置页查看与撤销）。"""
+        if relay_domain:
+            rows = self._conn.execute(
+                """SELECT * FROM endpoint_allowance WHERE relay_domain = ?
+                    ORDER BY last_seen DESC LIMIT ?""",
+                (relay_domain.strip().lower(), limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM endpoint_allowance ORDER BY last_seen DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def purge_ledgers(self, keep_days: int = 90) -> Dict[str, int]:
+        """清理两张台账里**长期没再出现**的自动记录，避免无限增长。
+
+        ★ 只删 status='auto' 的行（2026-11-10 代码审查提出）。
+          用户亲手判定过的是 confirmed / rejected —— 那是他的决策，
+          不是可以随时间丢弃的缓存。删掉会让「已经确认过的写法」
+          重新开始打扰，等于把用户的判断当垃圾清了。
+
+        ★ 为什么需要定期清理：model_alias 的键含 (中转站, 请求模型,
+          返回模型)，endpoint_allowance 含 (中转站, 主机)。两者都随
+          「用过的组合数」增长，长期用下来会积累成百上千条。
+          表本身不大，但没有任何上限的增长不值得留。
+        """
+        cutoff = time.time() - max(1, int(keep_days)) * 86400
+        out: Dict[str, int] = {}
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM model_alias WHERE status = 'auto' AND last_seen < ?",
+                (cutoff,),
+            )
+            out["model_alias"] = int(cur.rowcount or 0)
+            cur = self._conn.execute(
+                "DELETE FROM endpoint_allowance "
+                "WHERE status = 'auto' AND last_seen < ?",
+                (cutoff,),
+            )
+            out["endpoint_allowance"] = int(cur.rowcount or 0)
+        return out
+
+    # ══════════════════════════════════════════════════════════
+    # 中转站信誉
+    # ══════════════════════════════════════════════════════════
     def upsert_reputation(self, rep: RelayReputation) -> None:
         """写入/更新中转站信誉。"""
         with self._conn:

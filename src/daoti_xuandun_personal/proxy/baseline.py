@@ -245,13 +245,22 @@ def _sha256(text: str) -> str:
 
 
 # URL / IP / 包名提取（结构特征，非危险词表）
+#
+# ★ 2026-11-10：URL 正则在 userinfo 存在时不能停在「第一个像域名的东西」。
+#   实测 `https://github.com@evil.com/x` 需要被整体捕获，
+#   再由 _host_of 按 authority 结构取真实主机 —— 否则真实外传会被
+#   良性名单吃掉（见 _host_of 的说明）。
 _URL_RE = re.compile(r"https?://[^\s\"'()<>\]]+", re.IGNORECASE)
 _HOST_RE = re.compile(
     r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"(?:com|net|org|io|dev|cn|tk|ml|ga|cf|gq|sh|co|ai|xyz|top|ru)\b",
+    r"(?:com|net|org|io|dev|cn|tk|ml|ga|cf|gq|sh|co|ai|xyz|top|ru|"
+    r"app|cloud|site|info|biz|me|cc|tv|link|live|online|store|"
+    r"tech|space|fun|icu|vip|club|pro|name|mobi|asia|pw|su)\b",
     re.IGNORECASE,
 )
 _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+#: IPv6 字面量（宽松匹配，够用即可 —— 只用于「这是不是 IP」的判别）
+_IPV6_RE = re.compile(r"(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}", re.IGNORECASE)
 # 依赖名：pip install X / npm i X / import X / from X import
 #
 # ★ 提取必须排除「安装源/URL 片段」：
@@ -366,7 +375,47 @@ def _normalize_pkg(name: str) -> str:
 
 
 def _host_of(url: str) -> str:
-    m = _HOST_RE.search(url)
+    """取出 URL 的**真实**主机名。
+
+    ★★ 2026-11-10 安全漏报（代码审查发现，已实测复现）：
+        https://github.com@evil.com/x
+      旧实现用 `_HOST_RE.search()` 取最左匹配，于是拿到的 host 是
+      `github.com` —— 而 github.com 在良性名单里，这条**真实外传
+      直接零告警**。同一个手法带上 IP 更直接：
+        https://api.trusted.io@45.33.32.19/c  → 旧实现归因为 api.trusted.io
+
+      这不是误报问题，是漏报问题：攻击者只要在 userinfo 段写一个
+      人畜无害的域名，就能让「新端点」判据完全失效。
+
+    ★ 修法：断言 URL 的 authority 结构（RFC 3986）——
+      `scheme://[userinfo@]host[:port]/...`，userinfo 以**最后一个**
+      `@` 为界，之后才是 host。没有 `://` 的裸文本退回正则搜索
+      （那种形态没有 userinfo 语义，`user@host` 只是普通文本）。
+    """
+    raw = (url or "").strip()
+    if "://" in raw:
+        authority = raw.split("://", 1)[1]
+        for sep in ("/", "?", "#"):
+            idx = authority.find(sep)
+            if idx >= 0:
+                authority = authority[:idx]
+        # ★ rpartition：userinfo 本身可能含 @（虽然不合法，但攻击者会用）
+        host_part = authority.rpartition("@")[2] if "@" in authority else authority
+        # ★ 去端口。IPv6 字面量形如 [::1]:8080 —— 先去方括号再剥端口。
+        if host_part.startswith("["):
+            end = host_part.find("]")
+            host = host_part[1:end] if end > 0 else host_part.strip("[]")
+        else:
+            host = host_part.split(":", 1)[0]
+        host = host.strip().lower().rstrip(".")
+        if not host:
+            return ""
+        # 先看是不是 IP 字面量；是就原样返回（正则不会匹配纯 IP）
+        if _IP_RE.fullmatch(host) or _IPV6_RE.fullmatch(host):
+            return host
+        m = _HOST_RE.fullmatch(host) or _HOST_RE.search(host)
+        return m.group(0).lower() if m else host
+    m = _HOST_RE.search(raw)
     return m.group(0).lower() if m else ""
 
 
@@ -704,6 +753,35 @@ def _judge_naming_mismatch(
     #   ★ 为什么不设成「永远静默」：命名突然开始变化本身是值得知道的事，
     #     完全不说等于把「让他明白」丢掉了。
     variants = int(alias_state.get("variant_count") or 1)
+    # ★★ 2026-11-10（代码审查修正）：预算耗尽后的静默不能是**无条件**的。
+    #
+    #   审查指出的漏洞：只要每轮换个名字，第 3 种起就永久静默 ——
+    #   于是「一直换名」这个状态本身被静音了，而它恰恰是最该被看见的。
+    #   台账里已经有主写法（seen_count ≥ 2 且是第一名的那个），
+    #   若本次**不是**主写法，说明真正在变的是多数派之外的东西 —— 仍要提示。
+    #   若本次就是主写法（稳定在用），静默才是对的。
+    if is_first and variants > _NAMING_NOTICE_BUDGET:
+        # 预算已用完：只在「本次写法不是该请求模型下的主写法」时提示。
+        # 主写法由调用方（app._observe_model_alias）查询后放进 dominant_model；
+        # 未提供时保守提示 —— 宁可多说一次，也不把「一直在变」静音掉。
+        dominant = str(alias_state.get("dominant_model") or "")
+        if not dominant or dominant == resp_model:
+            logger.debug(
+                "模型命名差异：第 %d 种写法，已是主写法（%s），静默",
+                variants, resp_model,
+            )
+            return None
+        return {
+            "category": "model_naming_diff",
+            "severity": "medium",
+            "detail": (
+                detail_base + "。这个中转站对同一请求已经在返回多种不同的名字，"
+                f"本次「{resp_model}」不是其中最常用的那个"
+                f"（常用为「{dominant}」）—— 这值得核一下。"
+            ),
+            "evidence": f"request={req_model} response={resp_model} dominant={dominant}",
+        }
+
     if is_first and variants <= _NAMING_NOTICE_BUDGET:
         return {
             "category": "model_naming_diff",
@@ -772,17 +850,30 @@ def classify_model_mismatch(req: str, resp: str) -> str:
     if changed & _MODEL_CAPABILITY_TOKENS:
         return _MODEL_MISMATCH_CAPABILITY
 
-    # ★ 2026-11-10：多出来的**数字段**不是命名习惯，是版本号。
-    #   判据不靠枚举服务商怎么起名，而是靠「数字段是不是合法日期」：
-    #     ✗ claude-3-5-sonnet → claude-3-5-sonnet-2  （版本号冒充，不同型号）
-    #     ✗ model-a → model-a-9999                 （既有逃逸通道用例）
-    #     ✓ deepseek-v4.1-flash → ...-1017-cm      （1017 是合法月日 → 走上面的
-    #                                                兼容判定，不会到这里）
-    #   合法日期段已在 _model_compatible 里放行，所以到这里还剩下的
-    #   纯数字段只能是版本号，不存在「日期被误判」的通道。
-    for tok in changed:
-        if tok.isdigit() and not _MODEL_DATE_TOKEN_RE.match(tok):
-            return _MODEL_MISMATCH_CAPABILITY
+    # ★ 2026-11-10（代码审查修正）：**尾部新增的数字段**才是「版本号冒充」。
+    #
+    #   首版写成「差异里含任何非日期数字段就判降级」，实测把正常的
+    #   版本升级也判成了降级：
+    #     llama-3.1-70b      → llama-3.3-70b        （模型版本迭代）
+    #     deepseek-v4.1-flash → deepseek-v4.2-flash  （同上）
+    #   而这两条都拿不到「这是同一个模型」的确认入口（_alias_target 只对
+    #   naming 档返回），于是每轮一条告警、严格档每轮阻断 ——
+    #   正是这次要根治的形态又换了个位置复发。
+    #
+    #   现在的判据只认一种形态：resp = req + 尾部标签，且标签里有
+    #   **非合法日期**的数字段。那是「在同一个名字后面挂个号码冒充新版本」：
+    #     ✗ claude-3-5-sonnet → claude-3-5-sonnet-2   （尾部 -2）
+    #     ✗ model-a → model-a-9999                    （9999 不是合法月日）
+    #     ✓ deepseek-v4.1-flash → ...-1017-cm         （1017 是合法月日，已在
+    #                                                  _model_compatible 放行）
+    #   而 3.1→3.3 这类**同位替换**不满足 resp.startswith(req)，
+    #   归入 naming 交给台账：首次提示一次，用户确认过就不再打扰。
+    if resp.startswith(req):
+        tail = resp[len(req):]
+        if tail and tail[0] in "-_.":
+            for tok in re.split(r"[-_.]", tail):
+                if tok.isdigit() and not _MODEL_DATE_TOKEN_RE.match(tok):
+                    return _MODEL_MISMATCH_CAPABILITY
 
     return _MODEL_MISMATCH_NAMING
 
@@ -1622,11 +1713,96 @@ def _is_benign_host(host: str) -> bool:
     return any(h == s or h.endswith("." + s) for s in _BENIGN_HOST_SUFFIXES)
 
 
+def extract_exec_hosts(payload: Any) -> Set[str]:
+    """只取出「会被执行的」工具调用参数里的主机名（域名 + IP）。
+
+    ★ 为什么单独开一个函数，而不是让调用方用 extract_response_facts：
+      extract_response_facts 会对全文跑一遍 URL / 域名 / IP / 包名 /
+      工具名 / 工具参数的全部提取，供差分使用；而端点台账只需要
+      「工具参数里有哪些主机」这一项。若为了记账再算一次全集，
+      每条响应就会多跑一整轮正则 —— 流式响应还要按轮重复，
+      这是纯浪费。这里只扫工具参数，一次正则集。
+
+    ★ 只扫 tool_call 参数，不扫正文：模型在回答里写
+      `requests.get('https://api.example.com')` 是讲解行为，
+      不进台账（否则台账会被正常教学里的示例域名塞满）。
+    """
+    arg_text = _collect_tool_arguments(payload)
+    if not arg_text:
+        return set()
+    urls = {u.rstrip(".,);:'\"") for u in _URL_RE.findall(arg_text)}
+    hosts = {_host_of(u) for u in urls if _host_of(u)}
+    hosts |= set(_IP_RE.findall(arg_text))
+    return {h for h in hosts if h}
+
+
+def _judge_new_endpoints(
+    hosts: List[str],
+    endpoint_states: Optional[Dict[str, Dict[str, Any]]],
+    strict: bool = False,
+) -> str:
+    """「请求里没提过这个地址」该不该提示 —— 由端点台账回答。
+
+    与 ``_judge_naming_mismatch`` 同一套逻辑（见那里的说明）：
+
+      · rejected（用户说过这地址不该出现） → 提示
+      · confirmed（用户确认这是常用地址）   → 静默
+      · auto + 首次见到                    → 提示一次
+      · auto + 见过多次                    → 静默
+      · 无台账（旧调用路径）               → 提示（保守）
+
+    ★★ 严格档不静默（2026-11-10 代码审查）。
+      「陌生地址进入 tool_call」是**数据外传**信号，性质比命名差异重：
+      命名差异最多是买到便宜模型，外传是数据已经走了。
+      静默在均衡档是合理的降噪（AI 编程助手本来就反复调同一接口），
+      但在用户主动选了「宁可多报」的严格档里，把这类信号彻底吞掉
+      等于替用户做了他明确没授权的降噪决定。
+
+    返回可直接放进 detail 的说明文本；不该提示时返回空串。
+    """
+    if not hosts:
+        return ""
+    uniq = sorted(set(hosts))
+
+    def _should_notify(host: str) -> bool:
+        st = None if endpoint_states is None else endpoint_states.get(host)
+        if st is None:
+            # 无台账（旧调用路径 / 本次没记上）→ 保守提示
+            return True
+        status = str(st.get("status") or "auto")
+        if status == "confirmed":
+            return False
+        if status == "rejected":
+            return True
+        if strict:
+            # 严格档：稳定出现也照报（用户自己选的口径）
+            return True
+        return bool(st.get("is_first"))
+
+    fresh = [h for h in uniq if _should_notify(h)]
+    if not fresh:
+        return ""
+    # ★ evidence 只存前 10 个（日志体积考虑），但提示文案里必须说清
+    #   「还有几个没列出来」—— 否则用户确认了列出的这些，
+    #   剩下那批地址永远无法被看到、也无法被确认（2026-11-10 代码审查）。
+    shown = fresh[:5]
+    extra = len(fresh) - len(shown)
+    more = f"，另有 {extra} 个地址未列出" if extra > 0 else ""
+    return (
+        "工具调用参数里出现了请求从未提及的外部地址（"
+        + "、".join(shown) + more
+        + "），该调用会被自动执行。第一次见到这类地址："
+        "如果是你正在用的接口，可在日志里标记，之后不再提示。"
+    )
+
+
 def diff_against_baseline(
     baseline: RequestBaseline,
     response_facts: Dict[str, Any],
     content: str = "",
     model_alias_state: Optional[Dict[str, Any]] = None,
+    endpoint_states: Optional[Dict[str, Dict[str, Any]]] = None,
+    strict: bool = False,
 ) -> List[Dict[str, str]]:
     """把响应事实与请求基线做结构比对，返回发现项列表。
 
@@ -1644,6 +1820,11 @@ def diff_against_baseline(
         model_alias_state: 别名台账对本次「请求模型 → 返回模型」的观察结果
             （见 storage.observe_model_alias）。为 None 时退化为
             「只按命名判定」的旧行为，保证未接台账的调用路径不受影响。
+        endpoint_states: 端点台账对本次各个陌生地址的观察结果，
+            ``{host: {"status": ..., "is_first": ...}}``（见
+            storage.observe_endpoint）。为 None 时按「第一次见到」处理。
+        strict: 是否严格档。严格档下陌生端点不享受「稳定即静默」——
+            外传信号的降噪不能由代码替用户决定。
     """
     # ★ 防御 None 入参：与 build_baseline 同理，
     #   抛异常会被 verifier 兜住 → 结构差分整体静默失效。
@@ -1772,21 +1953,20 @@ def diff_against_baseline(
     risky_domains = {d for d in new_domains if not _is_benign_host(d)}
     risky_ips = {i for i in new_ips if not _is_benign_host(i)}
     if risky_domains or risky_ips:
-        parts = []
-        if risky_domains:
-            parts.append("域名 " + "、".join(sorted(risky_domains)[:5]))
-        if risky_ips:
-            parts.append("IP " + "、".join(sorted(risky_ips)[:5]))
-        findings.append({
-            "category": "new_external_endpoint",
-            "severity": _SEVERITY["new_external_endpoint"],
-            "detail": (
-                f"工具调用参数中出现了请求里从未提及的外部地址（"
-                + "；".join(parts)
-                + "），该调用会被自动执行，可能是数据外传或载荷下载"
-            ),
-            "evidence": " ".join(parts),
-        })
+        # ★★ 2026-11-10：与模型命名差异同一套「变化检测」。
+        #   「请求里没提过」不等于「不该出现」——
+        #   AI 编程助手在一个会话里反复调同一个接口是常态，
+        #   每轮一条告警只会把首页「可疑」堆满，用户学会忽略它。
+        #   现在只有「第一次见到 / 用户否认过」才提示。
+        hosts = list(risky_domains) + list(risky_ips)
+        notices = _judge_new_endpoints(hosts, endpoint_states, strict=strict)
+        if notices:
+            findings.append({
+                "category": "new_external_endpoint",
+                "severity": _SEVERITY["new_external_endpoint"],
+                "detail": notices,
+                "evidence": " ".join(sorted(hosts)[:10]),
+            })
 
     # ④ tool_call 引入了请求中不存在的依赖包名 —— 依赖投毒
     #

@@ -240,6 +240,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ★ 2026-10-20：按用户设定的保留天数清理一次旧日志。
     #   默认 0 = 永久保留，此时函数直接返回，不动任何数据。
     _purge_logs_by_retention()
+    # ★ 2026-11-10：两张台账（模型别名 / 陌生端点）随使用增长，
+    #   启动时清掉长期没再出现的 auto 行。用户亲手判定过的
+    #   confirmed / rejected 不删 —— 那是决策，不是缓存。
+    try:
+        purged = _storage.purge_ledgers(keep_days=90)
+        if any(purged.values()):
+            logger.info("已清理过期台账记录: %s", purged)
+    except Exception as e:  # noqa: BLE001 — 清理失败不影响启动
+        logger.warning("台账清理失败（不影响使用）: %s", e)
     _sanitizer = RequestSanitizer(
         level=_config.guard.security_level,
         custom_keywords=_config.guard.custom_keywords,
@@ -1031,6 +1040,9 @@ def create_app() -> FastAPI:
             verify_result = _verifier.verify(
                 content, session_id, payload, baseline=request_baseline,
                 model_alias_state=alias_state,
+                endpoint_states=_observe_endpoints(
+                    domain, payload, request_baseline
+                ),
             )
 
         # 记录中转站返回的模型名（供事后比对模型降级）
@@ -1299,17 +1311,23 @@ def create_app() -> FastAPI:
                         and _verifier is not None
                         and (not mid_verified or grown)
                     ):
+                        stream_payload = (
+                            {"tool_calls": sse_tools, "model": sse_model}
+                            if (sse_tools or sse_model) else None
+                        )
                         result = _verifier.verify(
                             sse_text,
                             session_id,
-                            {"tool_calls": sse_tools, "model": sse_model}
-                            if (sse_tools or sse_model) else None,
+                            stream_payload,
                             baseline=request_baseline,
                             model_alias_state=_observe_model_alias(
                                 domain,
                                 str(getattr(request_baseline, "model", "") or ""),
                                 sse_model,
                             ) if sse_model else None,
+                            endpoint_states=_observe_endpoints(
+                                domain, stream_payload or {}, request_baseline
+                            ),
                         )
                         if result.findings:
                             findings.extend(result.findings)
@@ -1706,11 +1724,30 @@ def create_app() -> FastAPI:
         #   才返回。前端据此决定是否显示「这是同一个模型」按钮 ——
         #   否则每条日志上都挂一个点了报 400 的按钮。
         alias = _alias_target(entry)
+        # ★ 同理：端点确认入口只在「这条日志里有陌生地址」时出现。
+        ep = _endpoint_hosts_of(entry)
+        ep_states: Dict[str, str] = {}
+        if ep and _storage is not None:
+            for h in ep["hosts"]:
+                # ★ 精确查询，不用限量列表（见 get_endpoint 的说明）
+                row = _storage.get_endpoint(ep["relay_domain"], h)
+                ep_states[h] = str((row or {}).get("status") or "auto")
         return {
             "entry": entry.to_dict(),
             "redactions": _storage.get_redactions(log_id),
             "model_alias": (
                 {**alias, "status": _alias_status_of(entry)} if alias else None
+            ),
+            "endpoints": (
+                {
+                    "relay_domain": ep["relay_domain"],
+                    "hosts": ep["hosts"],
+                    # 每个地址的状态；没有记录的按 auto 处理
+                    "statuses": {
+                        h: ep_states.get(h, "auto") for h in ep["hosts"]
+                    },
+                }
+                if ep else None
             ),
         }
 
@@ -2006,6 +2043,101 @@ def create_app() -> FastAPI:
             "relay_domain": target["relay_domain"],
             "request_model": target["request_model"],
             "response_model": target["response_model"],
+        }
+
+    # ── 陌生端点台账（与模型别名同一套机制）──
+
+    def _endpoint_hosts_of(entry: Any) -> Optional[Dict[str, Any]]:
+        """从一条日志的 findings 里取出它涉及的陌生地址。
+
+        ★ 只对 new_external_endpoint 生效：其它类别没有「地址」这个概念，
+          界面上不该出现端点确认入口。
+        """
+        try:
+            detail = json.loads(getattr(entry, "detail_json", "") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(detail, list):
+            return None
+        hosts: List[str] = []
+        for item in detail:
+            if not isinstance(item, dict):
+                continue
+            if item.get("category") != "new_external_endpoint":
+                continue
+            for tok in str(item.get("evidence") or "").split():
+                tok = tok.strip().lower().rstrip(".;,")
+                if tok and tok not in hosts:
+                    hosts.append(tok)
+        domain = str(getattr(entry, "relay_domain", "") or "").strip().lower()
+        if not hosts or not domain:
+            return None
+        return {"relay_domain": domain, "hosts": hosts}
+
+    @app.get("/api/endpoints")
+    async def list_endpoints(
+        relay_domain: Optional[str] = None, limit: int = Query(default=200, ge=1, le=1000)
+    ):
+        """已记录的陌生端点（设置页「已知地址」）。"""
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        return {"items": _storage.list_endpoints(relay_domain, limit)}
+
+    @app.post("/api/logs/{log_id}/endpoint")
+    async def mark_log_endpoint(
+        log_id: int, payload: Dict[str, Any] = Body(default={}),
+    ):
+        """在日志上判定「这些地址是不是我在用的」。
+
+        status:
+          confirmed —— 我在用这些地址：此后同类不再提示
+          rejected  —— 这些地址不该出现：此后继续告警
+          auto      —— 撤销结论
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        entry = _storage.get_log(log_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="日志不存在")
+        info = _endpoint_hosts_of(entry)
+        if not info:
+            raise HTTPException(
+                status_code=400,
+                detail="这条日志里没有需要确认的外部地址",
+            )
+        status = str(payload.get("status") or "confirmed").strip()
+        if status not in ("auto", "confirmed", "rejected"):
+            raise HTTPException(status_code=400, detail="status 只能是 auto / confirmed / rejected")
+        # ★ 支持只确认其中某几个地址（2026-11-10 代码审查）。
+        #   原实现一律整条日志批量写：一条日志里若同时出现两个地址，
+        #   用户认识的一个和不认识的一个会被一起 confirmed ——
+        #   那等于替用户把不认识的地址也放行了。
+        wanted = payload.get("hosts")
+        if isinstance(wanted, list) and wanted:
+            targets = [str(h).strip().lower().rstrip(".")
+                       for h in wanted if str(h).strip()]
+            unknown = [h for h in targets if h not in info["hosts"]]
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"这条日志里没有这些地址：{'、'.join(unknown[:5])}",
+                )
+        else:
+            targets = info["hosts"]
+        for host in targets:
+            # 台账可能还没有这条（旧版本产生的日志），先补一次观察再改状态。
+            _storage.observe_endpoint(info["relay_domain"], host)
+            _storage.set_endpoint_status(info["relay_domain"], host, status)
+        logger.info(
+            "日志 %d：用户判定端点 %s = %s",
+            log_id, "、".join(targets), status,
+        )
+        return {
+            "ok": True,
+            "log_id": log_id,
+            "status": status,
+            "relay_domain": info["relay_domain"],
+            "hosts": targets,
         }
 
 
@@ -3182,6 +3314,53 @@ def _observe_model_alias(
         return None
 
 
+def _observe_endpoints(
+    domain: str, payload: Any, baseline: Any = None,
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """把本次响应里出现的**陌生**外部地址记进端点台账。
+
+    ★ 与 _observe_model_alias 是同一个机制（2026-11-10）
+    ────────────────────────────────────────────────────────────
+    new_external_endpoint 的判据是「工具调用参数里出现了请求正文
+    没提过的域名」。它不知道用户就是要访问那个地址 ——
+    AI 编程助手在一个会话里反复调同一个接口是常态，
+    于是每轮一条告警，首页「可疑」一直涨，用户学会忽略它。
+
+    与模型命名差异一样，这里真正该看的不是「认不认识」，
+    而是「变没变」：第一次见到记一次，之后稳定就静默。
+
+    ★★ 必须裁掉「请求里本来就提到过的地址」（2026-11-10 代码审查）。
+      审查指出的漏洞：某地址曾在请求正文合法出现过，之后若出现在
+      tool_call 里，差分侧会判为可疑，而台账因为早就记过 → is_first=False
+      → **永久静默**。那是一条把「降噪」滑成「失明」的确证通道。
+      台账只该记「差分认为是新的」那些地址，口径必须与判据一致。
+
+    返回 ``{host: {"status": ..., "is_first": ...}}``；
+    不涉及 / 写库失败时返回 None（差分侧按「第一次见到」保守处理）。
+    """
+    if _storage is None or not isinstance(payload, dict):
+        return None
+    try:
+        from .baseline import _is_benign_host, extract_exec_hosts
+
+        hosts = extract_exec_hosts(payload)
+        hosts = {h for h in hosts if not _is_benign_host(h)}
+        if baseline is not None:
+            # ★ 与 diff_against_baseline 的 ③ 段同一口径：
+            #   请求侧出现过的地址不算「新」，不记账。
+            known = set(getattr(baseline, "request_domains", set()) or set())
+            known |= set(getattr(baseline, "request_ips", set()) or set())
+            hosts -= known
+        if not hosts:
+            return None
+        return {
+            h: _storage.observe_endpoint(domain, h) for h in sorted(hosts)
+        }
+    except Exception as e:  # noqa: BLE001 — 台账失败不影响转发
+        logger.debug("端点台账写入失败: %s", e)
+        return None
+
+
 def _extract_content(payload: Any) -> str:
     """从 OpenAI/Anthropic 响应结构中提取文本内容。"""
     if isinstance(payload, str):
@@ -3598,18 +3777,21 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
     ):
         return Action.OBSERVE.value
 
+    # ★★ 2026-11-10：只告知类信号（模型命名差异），任何档位都只提示。
+    #   ★ 位置必须与 verifier.decide_response_action 的规则五一致 ——
+    #     那里也排在 severity 相关分支**之前**，因此低危也会提示。
+    #     审查指出过：若这里排在 `max_sev == "low"` 之后，两条路径的
+    #     优先级就不同（low 会被这里吞成 observe），当前 naming_diff
+    #     恒为 medium 所以不可达，但那是下一次分叉的入口。
+    if cats and cats <= NOTIFY_ONLY_SIGNALS:
+        return Action.ALERT.value
+
     if max_sev == "low":
         # ★ 2026-11-04：低危发现一律「观察」，不再计入「提示」。
         #   低危包括统计类异常（长度/结构突变）和「本会话没脱敏过却出现
         #   占位符字样」这类只说明「值得看一眼」的情况。
         #   把它们算成「提示」会让首页长期挂着噪声，用户会学会忽略它。
         return Action.OBSERVE.value
-    # ★★ 2026-11-10：只告知类信号（模型命名差异）永不阻断。
-    #   必须与 verifier.decide_response_action 的规则五逐字一致：
-    #   两条路径若各写一套，就会出现「verify 判提示、外层判阻断」，
-    #   而两边各自的单测都是绿的（这正是 _resolve_action 存在的理由）。
-    if cats and cats <= NOTIFY_ONLY_SIGNALS:
-        return Action.ALERT.value
     if _verifier is not None:
         try:
             action = _verifier._threshold_for(max_sev)

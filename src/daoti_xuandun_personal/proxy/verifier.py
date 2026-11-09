@@ -1398,6 +1398,7 @@ class ResponseVerifier:
         payload: Any = None,
         baseline: Any = None,
         model_alias_state: Optional[Dict[str, Any]] = None,
+        endpoint_states: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> VerifyResult:
         """验证响应内容。
 
@@ -1412,6 +1413,9 @@ class ResponseVerifier:
                 观察结果（storage.observe_model_alias 的返回值）。
                 为 None 时退化为「按命名判定」的保守行为：
                 命名差异只提示一次，不阻断。
+            endpoint_states: 端点台账对本次各陌生地址的观察结果
+                （storage.observe_endpoint 的返回值，按 host 索引）。
+                为 None 时按「第一次见到」处理（保守提示一次）。
 
         Returns:
             VerifyResult：含整体处置、最高严重程度、发现项列表
@@ -1441,7 +1445,7 @@ class ResponseVerifier:
         #   这一类的判据来源是请求本身，不依赖被评判的模型，
         #   因此不存在循环论证。
         baseline_findings = self._check_against_baseline(
-            content, payload, baseline, model_alias_state
+            content, payload, baseline, model_alias_state, endpoint_states
         )
         # ★ 2026-10-28：「未声明工具名」只有与高危工具参数同时出现才阻断，
         #   见 _demote_undeclared_without_danger。必须在汇总前降级，
@@ -1766,6 +1770,7 @@ class ResponseVerifier:
         payload: Any,
         baseline: Any,
         model_alias_state: Optional[Dict[str, Any]] = None,
+        endpoint_states: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[VerificationFinding]:
         """结构差分检测：响应是否偏离了请求本身声明的内容。
 
@@ -1785,6 +1790,9 @@ class ResponseVerifier:
             raw = diff_against_baseline(
                 baseline, facts, content,
                 model_alias_state=model_alias_state,
+                endpoint_states=endpoint_states,
+                # ★ 严格档的降噪口径与均衡档不同，见 _judge_new_endpoints
+                strict=(self._level == "strict"),
             )
         except Exception as e:  # noqa: BLE001 — 差分失败不应阻断主流程
             logger.warning("结构差分异常，跳过该项检测: %s", e)

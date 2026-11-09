@@ -163,11 +163,28 @@ export interface ModelAliasInfo {
   status: ModelAliasStatus;
 }
 
+/**
+ * 陌生端点确认（★ 2026-11-10，与模型别名同一套机制）。
+ *
+ * ★ 为什么需要它：new_external_endpoint 的判据是「工具调用参数里出现了
+ *   请求正文没提过的地址」，它不知道你就是要访问那个地址。
+ *   AI 编程助手在一个会话里反复调同一个接口是常态，
+ *   不确认一次就会每轮一条告警。
+ */
+export interface EndpointInfo {
+  relay_domain: string;
+  hosts: string[];
+  /** 每个地址的判定状态；未出现在这里的按 auto 处理 */
+  statuses: Record<string, ModelAliasStatus>;
+}
+
 export interface LogDetail {
   entry: LogEntry;
   redactions: RedactionRecord[];
   /** 仅当这条日志的返回模型与请求模型存在「命名差异」时才有值 */
   model_alias?: ModelAliasInfo | null;
+  /** 仅当这条日志命中了陌生外部地址时才有值 */
+  endpoints?: EndpointInfo | null;
 }
 
 /**
@@ -905,6 +922,22 @@ export const api = {
       'mark_log_model_alias',
       'POST',
       `/api/logs/${id}/model-alias`,
+      { status },
+      TIMEOUT.NORMAL,
+      { id },
+    ),
+  /**
+   * 判定日志里出现的陌生地址（★ 2026-11-10）。
+   *
+   * confirmed = 我在用这些地址（此后同类静默）
+   * rejected  = 这些地址不该出现（此后继续告警）
+   * auto      = 撤销结论
+   */
+  markLogEndpoint: (id: number, status: ModelAliasStatus) =>
+    call<{ ok: boolean; log_id: number; status: ModelAliasStatus }>(
+      'mark_log_endpoint',
+      'POST',
+      `/api/logs/${id}/endpoint`,
       { status },
       TIMEOUT.NORMAL,
       { id },
