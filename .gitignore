@@ -282,6 +282,16 @@ tests/*
 !tests/test_false_positive_e2e.py
 # ★ 2026-10-23：凭证来源台账（谁把 token 放进来的）
 !tests/test_credential_provenance.py
+#   test_model_alias_ledger —— 模型命名差异的三层机制（2026-11-10）
+#     起因是用户报的误报：请求 deepseek-v4.1-flash，
+#     中转站返回 deepseek-v4.1-flash-dedicated，被判降级并直接拦截。
+#     根子是「靠枚举后缀白名单区分命名差异」——每出现一种新写法就刷一批，
+#     -1017 / -cm / -dedicated 各刷过一次。
+#     本文件锁住替代机制的三个不变量：
+#       ① 命名差异任何档位都只提示、永不阻断；
+#       ② 台账见过多次或超出提示预算后静默（否则机制变成新的刷屏源）；
+#       ③ 真降级（能力词差异）不受台账影响，仍必须告警。
+!tests/test_model_alias_ledger.py
 !tests/cdp_desktop_regression.py
 # ★ 2026-10-22：仓库只保留「程序 + 用户文档 + CI 会跑的门禁」。
 #   下面这些是本地排障/变异测试用的脚本，CI 从不调用，

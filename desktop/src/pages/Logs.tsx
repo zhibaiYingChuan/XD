@@ -197,6 +197,8 @@ function DetailDrawer({
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [marking, setMarking] = useState(false);
+  // ★ 2026-11-10：模型命名差异的判定（在飞标志独立于误报标记）
+  const [aliasSaving, setAliasSaving] = useState(false);
   // 删除在飞标志：删除不可恢复，期间必须锁住按钮防重复触发
   const [deleting, setDeleting] = useState(false);
   // ★ 抽屉标题引用：打开时把焦点移入，让读屏用户立刻知道
@@ -392,6 +394,36 @@ function DetailDrawer({
     }
   };
 
+  /**
+   * 判定这次「请求模型 → 返回模型」的性质（★ 2026-11-10 第三层）。
+   *
+   * ★ 为什么这条路径必须真的落库：
+   *   硬编码后缀白名单每次都要我改代码，而服务商的命名永远追不完。
+   *   用户的判断一旦记下来，同组合就不会再提示 —— 这才是根治。
+   *   所以这里不做「只改本地 state」的假乐观更新：以引擎返回为准。
+   */
+  const handleAlias = async (status: 'confirmed' | 'rejected' | 'auto') => {
+    if (aliasSaving) return;
+    setAliasSaving(true);
+    try {
+      await api.markLogModelAlias(logId, status);
+      // 重新拉详情：状态以后端为准，避免本地与台账不一致
+      const d = await api.getLogDetail(logId);
+      setDetail(d);
+      toast.success(
+        status === 'confirmed'
+          ? t('已记为同一个模型，以后同样的返回不再提示')
+          : status === 'rejected'
+            ? t('已记为「确实换了模型」，以后同样的返回会继续提示')
+            : t('已撤销结论'),
+      );
+    } catch (e) {
+      toast.error(`${t('记录失败：')}${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setAliasSaving(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (deleting) return;
     // ★ 删除不可恢复（脱敏记录会一并删除），必须先确认。
@@ -514,6 +546,67 @@ function DetailDrawer({
                   >
                     {detail.entry.response_model}
                   </span>
+                </div>
+              )}
+
+              {/* ★ 2026-11-10：模型命名差异的判定入口。
+                  设计意图与「标记为误报」完全不同：
+                    误报标记 = 「这次判定错了」；
+                    这里 = 「这类返回名到底是不是换模型」——
+                  后者是判据本身无法回答的问题，必须由用户裁决一次，
+                  裁决结果落进别名台账，此后同组合按结论处置。
+                  这正是「硬编码后缀判断会一直出问题」的根治办法。 */}
+              {detail.model_alias && (
+                <div className="alert mt-16" style={{ marginBottom: 0 }}>
+                  <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
+                  <div style={{ width: '100%' }}>
+                    <div style={{ fontWeight: 500 }}>
+                      {t('这次的返回模型名和你请求的不一样')}
+                    </div>
+                    <div className="faint" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7 }}>
+                      {t('请求')} <span className="mono">{detail.model_alias.request_model_raw}</span>
+                      {'　→　'}
+                      {t('返回')} <span className="mono">{detail.model_alias.response_model_raw}</span>
+                    </div>
+                    <div className="faint" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7 }}>
+                      {detail.model_alias.status === 'confirmed'
+                        ? t('你已记为「同一个模型」：以后这类返回不再提示。')
+                        : detail.model_alias.status === 'rejected'
+                          ? t('你已记为「确实换了模型」：以后这类返回会继续提示。')
+                          : t('光看名字判断不了：可能只是这家中转站的命名习惯（构建号、独享实例等），也可能真的换了模型。你确认一次，同类返回以后就不再打扰你。')}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                      {detail.model_alias.status !== 'confirmed' && (
+                        <button
+                          className="btn secondary"
+                          onClick={() => handleAlias('confirmed')}
+                          disabled={aliasSaving}
+                        >
+                          <CheckCircle2 size={15} strokeWidth={1.5} />
+                          {t('这是同一个模型')}
+                        </button>
+                      )}
+                      {detail.model_alias.status !== 'rejected' && (
+                        <button
+                          className="btn secondary"
+                          onClick={() => handleAlias('rejected')}
+                          disabled={aliasSaving}
+                        >
+                          <AlertTriangle size={15} strokeWidth={1.5} />
+                          {t('确实换了模型')}
+                        </button>
+                      )}
+                      {detail.model_alias.status !== 'auto' && (
+                        <button
+                          className="btn secondary"
+                          onClick={() => handleAlias('auto')}
+                          disabled={aliasSaving}
+                        >
+                          {t('撤销结论')}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 

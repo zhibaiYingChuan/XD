@@ -63,8 +63,8 @@ from .listeners import RelayPortListeners
 from .restorer import ContentRestorer
 from .sanitizer import CATEGORY_LABELS, RequestSanitizer
 from .verifier import (
-    OBSERVATION_ONLY_SIGNALS, STRUCTURED_SIGNALS, ResponseVerifier,
-    _OBSERVE_ONLY_TOOL_SIGNALS, decide_response_action,
+    NOTIFY_ONLY_SIGNALS, OBSERVATION_ONLY_SIGNALS, STRUCTURED_SIGNALS,
+    ResponseVerifier, _OBSERVE_ONLY_TOOL_SIGNALS, decide_response_action,
 )
 
 logger = logging.getLogger("xuandun-personal.app")
@@ -1016,11 +1016,21 @@ def create_app() -> FastAPI:
         #   还原后响应里会出现用户自己的原文，那不是中转站返回的东西。
         credential_findings = _check_response_credentials(content, session_id)
 
-        # 第二层：响应验证（★ 传入请求基线做结构差分）
+        # 第二层：响应验证（★ 传入请求基线做结构差分 + 模型别名台账）
+        #
+        # ★★ 2026-11-10：台账必须在**验证之前**观察一次 ——
+        #   它要回答的正是「这次是不是第一次见到这个返回名」，
+        #   而这决定本轮该提示一次还是静默。
         verify_result = None
         if _config.guard.enable_response_verify and _verifier is not None:
+            alias_state = _observe_model_alias(
+                domain,
+                str(getattr(request_baseline, "model", "") or ""),
+                str(payload.get("model") or ""),
+            ) if isinstance(payload, dict) else None
             verify_result = _verifier.verify(
-                content, session_id, payload, baseline=request_baseline
+                content, session_id, payload, baseline=request_baseline,
+                model_alias_state=alias_state,
             )
 
         # 记录中转站返回的模型名（供事后比对模型降级）
@@ -1295,6 +1305,11 @@ def create_app() -> FastAPI:
                             {"tool_calls": sse_tools, "model": sse_model}
                             if (sse_tools or sse_model) else None,
                             baseline=request_baseline,
+                            model_alias_state=_observe_model_alias(
+                                domain,
+                                str(getattr(request_baseline, "model", "") or ""),
+                                sse_model,
+                            ) if sse_model else None,
                         )
                         if result.findings:
                             findings.extend(result.findings)
@@ -1687,9 +1702,16 @@ def create_app() -> FastAPI:
         entry = _storage.get_log(log_id)
         if entry is None:
             raise HTTPException(status_code=404, detail="日志不存在")
+        # ★ 2026-11-10：模型命名差异的确认入口只在「确实有命名差异」时
+        #   才返回。前端据此决定是否显示「这是同一个模型」按钮 ——
+        #   否则每条日志上都挂一个点了报 400 的按钮。
+        alias = _alias_target(entry)
         return {
             "entry": entry.to_dict(),
             "redactions": _storage.get_redactions(log_id),
+            "model_alias": (
+                {**alias, "status": _alias_status_of(entry)} if alias else None
+            ),
         }
 
     @app.get("/api/logs/{log_id}/evidence")
@@ -1845,6 +1867,147 @@ def create_app() -> FastAPI:
         _storage.unmark_safe(log_id)
         logger.info("日志 %d 已撤销误报标记", log_id)
         return {"ok": True, "log_id": log_id, "marked_safe": False}
+
+    # ══════════════════════════════════════════════════════════
+    # 模型别名台账（★ 2026-11-10 第三层：用户确认即学习）
+    # ══════════════════════════════════════════════════════════
+
+    def _alias_target(entry: Any) -> Optional[Dict[str, str]]:
+        """从一条日志推出它对应的台账键（中转站 + 归一化请求/返回模型）。
+
+        返回 None 表示这条日志与模型命名差异无关，界面上不该出现确认入口。
+        """
+        from .baseline import (
+            _MODEL_MISMATCH_NAMING, _normalize_model,
+            classify_model_mismatch,
+        )
+
+        req_raw = str(getattr(entry, "model", "") or "")
+        resp_raw = str(getattr(entry, "response_model", "") or "")
+        if not req_raw or not resp_raw:
+            return None
+        req = _normalize_model(req_raw)
+        resp = _normalize_model(resp_raw)
+        if not req or not resp or req == resp:
+            return None
+        if classify_model_mismatch(req, resp) != _MODEL_MISMATCH_NAMING:
+            return None
+        domain = str(getattr(entry, "relay_domain", "") or "").strip().lower()
+        if not domain:
+            return None
+        return {
+            "relay_domain": domain,
+            "request_model": req,
+            "response_model": resp,
+            "request_model_raw": req_raw,
+            "response_model_raw": resp_raw,
+        }
+
+    def _alias_status_of(entry: Any) -> Optional[str]:
+        """这条日志涉及的模型组合当前被用户判成什么（auto/confirmed/rejected）。"""
+        if _storage is None:
+            return None
+        target = _alias_target(entry)
+        if not target:
+            return None
+        # ★ 精确查询而不是「拉 200 条再过滤」—— 后者在台账变长后
+        #   会让用户确认过的组合读不到，界面又显示 auto（见 get_model_alias）。
+        row = _storage.get_model_alias(
+            target["relay_domain"],
+            target["request_model"],
+            target["response_model"],
+        )
+        return str((row or {}).get("status") or "auto")
+
+    @app.get("/api/model-aliases")
+    async def list_model_aliases(
+        relay_domain: Optional[str] = None, limit: int = Query(default=200, ge=1, le=1000)
+    ):
+        """已记录的「请求模型 → 返回模型」组合（设置页「已知模型写法」）。"""
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        return {"items": _storage.list_model_aliases(relay_domain, limit)}
+
+    @app.post("/api/model-aliases/status")
+    async def set_model_alias_status(payload: Dict[str, Any] = Body(default={})):
+        """由用户判定某个模型组合的性质，此后同类返回据此处置。
+
+        status:
+          confirmed —— 「这是同一个模型」：此后同组合**静默**，不再提示
+          rejected  —— 「确实被换了」：此后同组合**继续告警**（保持 medium）
+          auto      —— 撤销结论，回到「首次提示一次」的默认行为
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        domain = str(payload.get("relay_domain") or "").strip().lower()
+        req = str(payload.get("request_model") or "").strip()
+        resp = str(payload.get("response_model") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        if not domain or not req or not resp:
+            raise HTTPException(
+                status_code=400, detail="relay_domain / request_model / response_model 都必填"
+            )
+        if status not in ("auto", "confirmed", "rejected"):
+            raise HTTPException(status_code=400, detail="status 只能是 auto / confirmed / rejected")
+        ok = _storage.set_model_alias_status(domain, req, resp, status)
+        if not ok:
+            raise HTTPException(status_code=404, detail="台账里没有这个模型组合")
+        logger.info(
+            "模型别名台账更新：%s %s → %s = %s", domain, req, resp, status
+        )
+        return {"ok": True, "status": status}
+
+    @app.post("/api/logs/{log_id}/model-alias")
+    async def mark_log_model_alias(
+        log_id: int, payload: Dict[str, Any] = Body(default={}),
+    ):
+        """在日志上直接判定「这次返回是不是换了模型」。
+
+        ★ 为什么入口放在日志上而不是设置页：
+          用户是在**看到某一条具体记录**时才产生「这是同一个模型」
+          或「确实被换了」的判断。让他先跳到设置页、再手填两个模型名，
+          等于要求他记住刚看到的东西 —— 没人会这么做，
+          于是台账永远收不到用户的判断，机制等于没做。
+        """
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        entry = _storage.get_log(log_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="日志不存在")
+        target = _alias_target(entry)
+        if not target:
+            raise HTTPException(
+                status_code=400,
+                detail="这条日志的返回模型与请求模型没有命名差异，无需确认",
+            )
+        status = str(payload.get("status") or "confirmed").strip()
+        if status not in ("auto", "confirmed", "rejected"):
+            raise HTTPException(status_code=400, detail="status 只能是 auto / confirmed / rejected")
+        # 台账可能还没有这条记录（例如旧版本产生的日志），先补一次观察再改状态。
+        _storage.observe_model_alias(
+            target["relay_domain"],
+            target["request_model"],
+            target["response_model"],
+        )
+        ok = _storage.set_model_alias_status(
+            target["relay_domain"],
+            target["request_model"],
+            target["response_model"],
+            status,
+        )
+        logger.info(
+            "日志 %d：用户判定模型组合 %s → %s = %s",
+            log_id, target["request_model"], target["response_model"], status,
+        )
+        return {
+            "ok": bool(ok),
+            "log_id": log_id,
+            "status": status,
+            "relay_domain": target["relay_domain"],
+            "request_model": target["request_model"],
+            "response_model": target["response_model"],
+        }
+
 
     @app.post("/api/logs/export")
     async def export_logs(payload: Dict[str, Any] = Body(default={})):
@@ -2968,6 +3131,57 @@ def _make_preview(text: str, limit: int = 500) -> str:
     return normalized[:limit]
 
 
+def _observe_model_alias(
+    domain: str, request_model: str, response_model: str,
+) -> Optional[Dict[str, Any]]:
+    """把本次「请求模型 → 返回模型」记进别名台账，返回该组合的状态。
+
+    ★ 为什么判据在台账而不是在命名规则里（2026-11-10 机制改造）
+    ────────────────────────────────────────────────────────────
+    「响应模型名和请求不同」这件事，仅凭一次请求**无法判定性质**：
+        · 可能是同一模型的不同写法（快照号、渠道标记、部署形态）
+        · 也可能真的被换成了更便宜的模型
+    此前靠枚举后缀白名单去区分，于是每出现一种没见过的写法就刷一批误报
+    （-1017 / -cm / -dedicated 各刷过一次）。服务商的命名想象力
+    永远跑在枚举表前面，这条路走不通。
+
+    台账回答的是另一个问题：「这个中转站对同一个请求模型，
+    以前是不是也返回这个名字？」—— 那是跨请求才看得见的事实。
+
+    只记录 naming 档（差异里没有能力词）：
+      · compatible —— 同一模型的合法写法，不需要台账
+      · capability —— 差异里有 mini/lite/flash 这类能力词，是真降级，
+                      直接告警，台账不参与判定
+      · naming     —— 光看名字判不出来，交给台账
+
+    异常一律吞掉：台账写不进去只影响「提示几次」，绝不能因此
+    让一次正常转发失败。
+    """
+    if _storage is None:
+        return None
+    if not request_model or not response_model:
+        return None
+    try:
+        from .baseline import (
+            _MODEL_MISMATCH_NAMING, _normalize_model,
+            classify_model_mismatch,
+        )
+
+        req = _normalize_model(request_model)
+        resp = _normalize_model(response_model)
+        if not req or not resp or req == resp:
+            return None
+        if classify_model_mismatch(req, resp) != _MODEL_MISMATCH_NAMING:
+            return None
+        # ★ 台账键用归一化名：同一模型写不写 vendor 前缀
+        #   （deepseek/xxx 与 xxx）应落在同一条记录上，否则用户确认过
+        #   一次「这是同一个模型」，换个措辞又重新提示一遍。
+        return _storage.observe_model_alias(domain, req, resp)
+    except Exception as e:  # noqa: BLE001 — 台账失败不影响转发
+        logger.debug("模型别名台账写入失败: %s", e)
+        return None
+
+
 def _extract_content(payload: Any) -> str:
     """从 OpenAI/Anthropic 响应结构中提取文本内容。"""
     if isinstance(payload, str):
@@ -3390,6 +3604,12 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
         #   占位符字样」这类只说明「值得看一眼」的情况。
         #   把它们算成「提示」会让首页长期挂着噪声，用户会学会忽略它。
         return Action.OBSERVE.value
+    # ★★ 2026-11-10：只告知类信号（模型命名差异）永不阻断。
+    #   必须与 verifier.decide_response_action 的规则五逐字一致：
+    #   两条路径若各写一套，就会出现「verify 判提示、外层判阻断」，
+    #   而两边各自的单测都是绿的（这正是 _resolve_action 存在的理由）。
+    if cats and cats <= NOTIFY_ONLY_SIGNALS:
+        return Action.ALERT.value
     if _verifier is not None:
         try:
             action = _verifier._threshold_for(max_sev)

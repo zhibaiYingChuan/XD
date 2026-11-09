@@ -138,6 +138,40 @@ CREATE INDEX IF NOT EXISTS idx_request_baseline_created
     ON request_baseline(created_at);
 
 -- ══════════════════════════════════════════════════════════════
+-- 模型别名台账（★ 2026-11-10：用「变化检测」替代「命名枚举」）
+--
+-- 为什么需要这张表
+-- ────────────────────────────────────────────────────────────
+-- 原判据是「返回的模型名是不是请求名的合法写法」，只能靠**枚举**
+-- 命名形态来判定：-1017 快照、-cm 渠道、-dedicated 部署……
+-- 每漏一种就刷一批误报，而服务商的命名是开放集合 ——
+-- 枚举永远追不上，这类误报注定反复发生。
+--
+-- 真正的判据是**变化**，不是「长得像不像」：
+--   · 第一次见到 (请求模型 → 返回模型) 这个组合：记录，提示一次；
+--   · 之后稳定不变：静默（它就是这个中转站的正常写法）；
+--   · 突然变了：告警 —— 这才是「被换了」的可核事实。
+--
+-- status:
+--   auto       首次观察自动记录
+--   confirmed  用户确认「这是同一个模型」，之后彻底静默
+--   rejected   用户确认「确实被换了」，之后继续告警
+-- ══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS model_alias (
+    relay_domain   TEXT NOT NULL,
+    request_model  TEXT NOT NULL,              -- 归一化后的请求模型
+    response_model TEXT NOT NULL,              -- 归一化后的返回模型
+    status         TEXT NOT NULL DEFAULT 'auto',
+    seen_count     INTEGER NOT NULL DEFAULT 1,
+    first_seen     REAL NOT NULL,
+    last_seen      REAL NOT NULL,
+    PRIMARY KEY (relay_domain, request_model, response_model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_alias_lookup
+    ON model_alias(relay_domain, request_model);
+
+-- ══════════════════════════════════════════════════════════════
 -- 凭证来源台账（2026-10-23）
 --
 -- 为什么要有这张表

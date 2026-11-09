@@ -901,7 +901,35 @@ STRUCTURED_SIGNALS: frozenset = frozenset({
     "new_external_endpoint",
     "new_dependency",
     "placeholder_injection",
+    # ★ 2026-11-10：模型名不同、但差异里没有任何能力词。
+    #   它是协议层的结构化事实（响应 model 字段 ≠ 请求 model 字段），
+    #   不是文本启发式，因此可以产生一条「提示」；
+    #   但仅凭名字无法判定是换模型还是命名习惯 —— 见 NOTIFY_ONLY_SIGNALS。
+    "model_naming_diff",
 })
+
+#: ★★ 只告知、永不阻断的信号（2026-11-10，模型命名差异）
+#:
+#: 这一类的性质与前几类都不同：**它自己说不清自己是不是问题**。
+#:   · 请求 deepseek-v4.1-flash，返回 deepseek-v4.1-flash-dedicated
+#:     —— 可能只是该中转站给付费用户分独享实例，
+#:     也可能真换成了别的模型，光看名字判不出来。
+#:
+#: 于是处置只能二选一：要么打扰用户（阻断/提示），要么完全静默。
+#: 硬编码后缀枚举走过前一条路，每出现一种新写法就刷一批误报
+#: （-1017 / -cm / -dedicated 各刷过一次），这正是本次机制改造的起因。
+#:
+#: 现在：**提示一次**，并把这次观察记进别名台账（storage.model_alias）。
+#: 用户可以在日志里点「这是同一个模型」，此后同组合永久静默；
+#: 若用户点「确实被换了」，组合被记为 rejected，之后继续告警。
+#: 判据从「名字像不像」变成「这个组合变没变过 / 用户认不认可」——
+#: 服务商怎么起名都不需要改代码。
+#:
+#: ★ 为什么不复用 OBSERVATION_ONLY_SIGNALS：
+#:   那个集合的语义是「记录但不提示」（统计类、内容合规类）。
+#:   命名差异恰恰需要让用户看见一次 —— 否则「让用户明白模型被换了」
+#:   这件事就永远不发生。
+NOTIFY_ONLY_SIGNALS: frozenset = frozenset({"model_naming_diff"})
 
 #: ★★ 2026-11-04：同一 category 下「只观察」的判据名。
 #:
@@ -1238,6 +1266,18 @@ def decide_response_action(
         )
         action = Action.ALERT.value
 
+    # ★★ 规则五（2026-11-10）：只告知类信号，任何档位都只提示一次。
+    #   与规则二/三同理，必须是不依赖 severity 取值的独立判断 ——
+    #   严格档下 medium 会映射成 BLOCK，拦下来换不到任何安全收益，
+    #   只会让用户当下干不了活。
+    #   ★ 同时把宽松档的 PASS 提升为 ALERT：宽松档其余 medium 确实可以放过，
+    #     但「模型可能被换了」如果完全不出现，用户就永远无从得知 ——
+    #     而告知的成本只是一条记录，不影响他继续干活。
+    #     这条必须在 app._resolve_action 里逐字对应，否则日志处置会与
+    #     这里判定的不一致（历史上这类分叉修过多次）。
+    if categories and categories <= NOTIFY_ONLY_SIGNALS:
+        return Action.ALERT.value, max_sev
+
     # ★ 2026-11-03：启发式判据单条不阻断。
     #   证据类别（去掉 late_delivery 这类元信号）不足两条时，
     #   把「单条文本共现」降为告警 —— 用户仍能看到，但对话不被打断。
@@ -1357,6 +1397,7 @@ class ResponseVerifier:
         session_id: str = "default",
         payload: Any = None,
         baseline: Any = None,
+        model_alias_state: Optional[Dict[str, Any]] = None,
     ) -> VerifyResult:
         """验证响应内容。
 
@@ -1367,6 +1408,10 @@ class ResponseVerifier:
             baseline: RequestBaseline（请求侧可信对照物）。传入后
                 额外执行结构差分检测 —— 这是唯一能防住
                 「载荷不含任何被禁词」那类攻击的判据来源。
+            model_alias_state: 别名台账对本次「请求模型 → 返回模型」的
+                观察结果（storage.observe_model_alias 的返回值）。
+                为 None 时退化为「按命名判定」的保守行为：
+                命名差异只提示一次，不阻断。
 
         Returns:
             VerifyResult：含整体处置、最高严重程度、发现项列表
@@ -1395,7 +1440,9 @@ class ResponseVerifier:
         #   而中转站的演化方向是不含任何被禁词 —— 实测 9/13 绕过。
         #   这一类的判据来源是请求本身，不依赖被评判的模型，
         #   因此不存在循环论证。
-        baseline_findings = self._check_against_baseline(content, payload, baseline)
+        baseline_findings = self._check_against_baseline(
+            content, payload, baseline, model_alias_state
+        )
         # ★ 2026-10-28：「未声明工具名」只有与高危工具参数同时出现才阻断，
         #   见 _demote_undeclared_without_danger。必须在汇总前降级，
         #   否则 decide_response_action 取到的最大值仍是 high。
@@ -1714,7 +1761,11 @@ class ResponseVerifier:
         return None
 
     def _check_against_baseline(
-        self, content: str, payload: Any, baseline: Any
+        self,
+        content: str,
+        payload: Any,
+        baseline: Any,
+        model_alias_state: Optional[Dict[str, Any]] = None,
     ) -> List[VerificationFinding]:
         """结构差分检测：响应是否偏离了请求本身声明的内容。
 
@@ -1731,7 +1782,10 @@ class ResponseVerifier:
             from .baseline import diff_against_baseline, extract_response_facts
 
             facts = extract_response_facts(payload, content)
-            raw = diff_against_baseline(baseline, facts, content)
+            raw = diff_against_baseline(
+                baseline, facts, content,
+                model_alias_state=model_alias_state,
+            )
         except Exception as e:  # noqa: BLE001 — 差分失败不应阻断主流程
             logger.warning("结构差分异常，跳过该项检测: %s", e)
             return []

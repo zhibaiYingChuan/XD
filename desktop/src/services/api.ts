@@ -144,9 +144,30 @@ export interface RedactionRecord {
   created_at: number;
 }
 
+/**
+ * 模型命名差异的判定状态（★ 2026-11-10 第三层）。
+ *
+ * ★ 为什么这条信息要跟着日志详情一起返回：
+ *   「这次返回到底是不是换了模型」只有用户能判断。判完之后
+ *   要能立刻看到「已记为同一个模型」，否则他不知道自己的操作生效了没有，
+ *   于是下一次仍会被同一条提示打断。
+ */
+export type ModelAliasStatus = 'auto' | 'confirmed' | 'rejected';
+
+export interface ModelAliasInfo {
+  relay_domain: string;
+  request_model: string;
+  response_model: string;
+  request_model_raw: string;
+  response_model_raw: string;
+  status: ModelAliasStatus;
+}
+
 export interface LogDetail {
   entry: LogEntry;
   redactions: RedactionRecord[];
+  /** 仅当这条日志的返回模型与请求模型存在「命名差异」时才有值 */
+  model_alias?: ModelAliasInfo | null;
 }
 
 /**
@@ -870,6 +891,24 @@ export const api = {
       TIMEOUT.NORMAL,
       { id },
     ),
+  /**
+   * 判定一次「请求模型 → 返回模型」的性质（★ 2026-11-10 第三层）。
+   *
+   * confirmed = 这是同一个模型（此后同组合静默，不再提示）
+   * rejected  = 确实被换了（此后同组合继续告警）
+   * auto      = 撤销结论
+   *
+   * ★ 入口必须挂在具体日志上：用户是在看到那一条记录时才产生判断的。
+   */
+  markLogModelAlias: (id: number, status: ModelAliasStatus) =>
+    call<{ ok: boolean; log_id: number; status: ModelAliasStatus }>(
+      'mark_log_model_alias',
+      'POST',
+      `/api/logs/${id}/model-alias`,
+      { status },
+      TIMEOUT.NORMAL,
+      { id },
+    ),
   // ★ 2026-10-19：导出必须带上当前筛选条件。
   //   原实现只传 format，后端又忽略筛选参数 —— 用户按筛选导出
   //   拿到的却是全量数据。现把筛选条件一并下传（后端已接线）。
@@ -1199,6 +1238,15 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     //   「名字不一致」是事实，「偷换」是推断 ——
     //   界面不能替用户下结论，否则一次误报就会让人白白弃用中转站。
     meaning: '你请求的模型和实际返回的模型不一样。可能是换成了更便宜的模型、被路由改写，也可能只是同一模型的日期快照。展开下方「查看技术细节」可以看到这两个模型名。',
+  },
+  model_naming_diff: {
+    // ★ 2026-11-10 新增：与 model_downgrade 分开。
+    //   model_downgrade = 差异里有能力词（mini / lite / flash），是确定的降级；
+    //   model_naming_diff = 名字不同但没有任何能力词差异，**判不出来**。
+    //   后者只提示一次，并邀请用户裁决 —— 这正是替代「后缀白名单枚举」
+    //   的那套机制（别名台账）的用户侧入口。
+    title: '返回的模型名和你请求的不一样',
+    meaning: '光看名字判断不了：可能只是这家中转站的命名习惯（构建号、独享实例等），也可能真的换了模型。勘合已记下这次观察；你可以在下方判定一次，同类返回以后就不再打扰你。',
   },
   tool_call_dangerous: {
     title: 'AI 准备做一个有风险的操作',

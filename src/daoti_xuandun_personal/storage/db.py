@@ -1274,6 +1274,155 @@ class PersonalStorage:
         return int(cur.rowcount or 0)
 
     # ══════════════════════════════════════════════════════════
+    # 模型别名台账（★ 2026-11-10：变化检测替代命名枚举）
+    # ══════════════════════════════════════════════════════════
+
+    def observe_model_alias(
+        self,
+        relay_domain: str,
+        request_model: str,
+        response_model: str,
+    ) -> Optional[Dict[str, Any]]:
+        """记录一次「请求模型 → 返回模型」的观察，返回该组合的台账状态。
+
+        返回值：
+          None                             —— 入参不足，无法记录
+          {"status": "confirmed", ...}     —— 用户已确认是同一模型，调用方应静默
+          {"status": "rejected",  ...}     —— 用户已确认确实被换，调用方应继续告警
+          {"status": "auto",
+           "is_first": True,  ...}         —— 首次见到这个组合
+          {"status": "auto",
+           "is_first": False, ...}         —— 之前见过，本次计数 +1
+
+        另有 ``variant_count``：该 (中转站, 请求模型) 下已经出现过**几种**
+        不同的返回名（含本次）。调用方用它控制提示预算 —— 见
+        baseline._judge_naming_mismatch 的说明。
+
+        ★ 为什么把「判据」放在这里而不是 baseline.py：
+          「变没变」是一个**跨请求**的事实，单个请求的差分看不到。
+          只有落库才能回答「这个中转站上一千次都返回 X，这次返回 Y」，
+          而这正是用户真正想知道的「被换了」。
+        """
+        domain = (relay_domain or "").strip().lower()
+        req = (request_model or "").strip()
+        resp = (response_model or "").strip()
+        if not domain or not req or not resp:
+            return None
+
+        now = time.time()
+        # ★ 先数「这个请求模型一共见过几种返回名」。
+        #   它必须包含本次（插入之前数，所以 +1 落在下面两个分支里）。
+        variants = int(self._conn.execute(
+            """SELECT COUNT(*) FROM model_alias
+                WHERE relay_domain = ? AND request_model = ?""",
+            (domain, req),
+        ).fetchone()[0] or 0)
+
+        row = self._conn.execute(
+            """SELECT status, seen_count, first_seen, last_seen
+                 FROM model_alias
+                WHERE relay_domain = ? AND request_model = ?
+                  AND response_model = ?""",
+            (domain, req, resp),
+        ).fetchone()
+
+        if row is None:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT INTO model_alias
+                       (relay_domain, request_model, response_model,
+                        status, seen_count, first_seen, last_seen)
+                       VALUES (?,?,?,'auto',1,?,?)""",
+                    (domain, req, resp, now, now),
+                )
+            return {
+                "status": "auto", "is_first": True, "seen_count": 1,
+                "first_seen": now, "last_seen": now,
+                "variant_count": variants + 1,
+            }
+
+        with self._conn:
+            self._conn.execute(
+                """UPDATE model_alias
+                      SET seen_count = seen_count + 1, last_seen = ?
+                    WHERE relay_domain = ? AND request_model = ?
+                      AND response_model = ?""",
+                (now, domain, req, resp),
+            )
+        return {
+            "status": str(row["status"]),
+            "is_first": False,
+            "seen_count": int(row["seen_count"]) + 1,
+            "first_seen": float(row["first_seen"]),
+            "last_seen": now,
+            "variant_count": variants,
+        }
+
+    def set_model_alias_status(
+        self,
+        relay_domain: str,
+        request_model: str,
+        response_model: str,
+        status: str,
+    ) -> bool:
+        """设置某个模型组合的台账状态（confirmed / rejected / auto）。"""
+        if status not in ("auto", "confirmed", "rejected"):
+            return False
+        domain = (relay_domain or "").strip().lower()
+        with self._conn:
+            cur = self._conn.execute(
+                """UPDATE model_alias SET status = ?
+                    WHERE relay_domain = ? AND request_model = ?
+                      AND response_model = ?""",
+                (status, domain, request_model, response_model),
+            )
+        return bool(cur.rowcount)
+
+    def is_model_alias_confirmed(
+        self, relay_domain: str, request_model: str, response_model: str
+    ) -> bool:
+        """用户是否已确认这个组合是同一个模型（确认后不再提示）。"""
+        row = self.get_model_alias(relay_domain, request_model, response_model)
+        return bool(row) and str(row.get("status")) == "confirmed"
+
+    def get_model_alias(
+        self, relay_domain: str, request_model: str, response_model: str
+    ) -> Optional[Dict[str, Any]]:
+        """精确读取某个组合的台账记录（不存在则 None）。
+
+        ★ 为什么不复用 list_model_aliases 再过滤：那是按 last_seen 倒序
+          **限量**返回的（默认 200 条）。一个用得久的中转站很容易超过这个数，
+          于是「用户确认过的那个组合」恰好不在前 200 条里 ——
+          界面读到 auto、又提示一次，而台账里明明写着 confirmed。
+          这类「限量列表当精确查询用」的缺陷在本项目已出现过多次。
+        """
+        domain = (relay_domain or "").strip().lower()
+        row = self._conn.execute(
+            """SELECT * FROM model_alias
+                WHERE relay_domain = ? AND request_model = ?
+                  AND response_model = ?""",
+            (domain, request_model, response_model),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_model_aliases(
+        self, relay_domain: Optional[str] = None, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """列出模型别名台账（供设置页「已知模型写法」查看与撤销）。"""
+        if relay_domain:
+            rows = self._conn.execute(
+                """SELECT * FROM model_alias WHERE relay_domain = ?
+                    ORDER BY last_seen DESC LIMIT ?""",
+                (relay_domain.strip().lower(), limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM model_alias ORDER BY last_seen DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ══════════════════════════════════════════════════════════
     # 中转站信誉
     # ══════════════════════════════════════════════════════════
 

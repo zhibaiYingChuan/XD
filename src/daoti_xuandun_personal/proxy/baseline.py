@@ -620,8 +620,171 @@ _MODEL_SAME_FAMILY_PAIRS: frozenset = frozenset({
 
 
 def _model_same_family(req: str, resp: str) -> bool:
-    """两个模型名是否属于「同一模型的合法变体」。"""
+    """两个归一化模型名是否落在「同系列合法变体」白名单里。"""
     return frozenset({req, resp}) in _MODEL_SAME_FAMILY_PAIRS
+
+
+#: 命名差异的提示预算：同一个请求模型下，前几种**不同**的返回写法各提示一次。
+#: 超过之后只记录、不提示（否则中转站每轮换个名字就变成每轮一条）。
+_NAMING_NOTICE_BUDGET = 2
+
+
+def _judge_naming_mismatch(
+    raw_req: str,
+    raw_resp: str,
+    req_model: str,
+    resp_model: str,
+    alias_state: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, str]]:
+    """「命名不同但无能力词差异」该如何处置 —— 由别名台账回答。
+
+    ┌──────────────────────┬────────────────────────────────┐
+    │ 台账状态             │ 处置                           │
+    ├──────────────────────┼────────────────────────────────┤
+    │ confirmed（用户确认）│ 静默 —— 用户已经看过并认可了   │
+    │ rejected（用户否认） │ 告警 —— 用户认定被换了         │
+    │ auto + 首次见到      │ 提示一次（medium）—— 告知但不打断 │
+    │ auto + 见过多次      │ 静默 —— 这是该中转站的稳定写法 │
+    │ auto + 超出提示预算  │ 静默 —— 名字一直在变，不再逐条报 │
+    │ 无台账（旧调用路径） │ 提示一次（medium）—— 保守      │
+    └──────────────────────┴────────────────────────────────┘
+
+    ★ 为什么「首次见到」只提示不阻断：
+      它既可能是服务商的命名习惯（dedicated / cm / 各种构建号），
+      也可能是真的换了模型 —— 单次观察无法区分。
+      这时候打断用户的工作，收益（让他知道一个不确定的事）
+      远小于代价（他正在写的代码调不出来）。记录 + 提示一次，
+      让他自己看一眼；之后再见到就默认是正常写法。
+
+    ★ 为什么台账能根治枚举问题：
+      新后缀第一次出现时最多提示一次，之后永久静默。
+      无论服务商怎么起名，都不需要我改代码去追。
+      同时保留了「名字开始频繁变化」这条信息：前
+      ``_NAMING_NOTICE_BUDGET`` 种写法各提示一次，
+      之后只记录 —— 既不骚扰，也不失明。
+    """
+    detail_base = (
+        f"响应返回的模型名与你请求的不同："
+        f"你请求 {raw_req}，中转站返回 {raw_resp}"
+    )
+
+    if alias_state is None:
+        # 未接台账：保守地提示一次（medium，不阻断）
+        return {
+            "category": "model_naming_diff",
+            "severity": "medium",
+            "detail": (
+                detail_base + "。这可能只是该中转站的命名习惯，"
+                "也可能换了模型 —— 可在日志里标记「这是同一个模型」，"
+                "之后同类返回不再提示。"
+            ),
+            "evidence": f"request={req_model} response={resp_model}",
+        }
+
+    status = str(alias_state.get("status") or "auto")
+    if status == "confirmed":
+        return None
+    if status == "rejected":
+        return {
+            "category": "model_downgrade",
+            "severity": _SEVERITY["model_downgrade"],
+            "detail": (
+                detail_base + "。（你此前已确认这类返回是换模型）"
+            ),
+            "evidence": f"request={req_model} response={resp_model}",
+        }
+
+    is_first = bool(alias_state.get("is_first"))
+    seen = int(alias_state.get("seen_count") or 1)
+    # ★ 2026-11-10：提示预算。
+    #   若中转站每轮都换一个新名字（第一种、第二种、第三种…），
+    #   「首次见到就提示」会变成每轮一条 —— 那仍是骚扰，只是换了个来源。
+    #   所以前 2 种写法各提示一次（让用户意识到「这里的命名在变」），
+    #   之后再出现新名字就只记录不提示。
+    #   ★ 为什么不设成「永远静默」：命名突然开始变化本身是值得知道的事，
+    #     完全不说等于把「让他明白」丢掉了。
+    variants = int(alias_state.get("variant_count") or 1)
+    if is_first and variants <= _NAMING_NOTICE_BUDGET:
+        return {
+            "category": "model_naming_diff",
+            "severity": "medium",
+            "detail": (
+                detail_base + "。这是第一次见到这个返回名，"
+                "已记录；如果确认是同一个模型，可在日志里标记，"
+                "之后不再提示。"
+            ),
+            "evidence": f"request={req_model} response={resp_model}",
+        }
+
+    # 见过多次，或已经用完了提示预算 → 静默
+    logger.debug(
+        "模型命名差异不再提示（见过 %d 次，该请求模型下第 %d 种写法）：%s → %s",
+        seen, variants, req_model, resp_model,
+    )
+    return None
+
+
+# ── 模型名不一致的三种性质（★ 2026-11-10 机制改造）──
+#
+# 原实现只有两分法：compatible / 降级。于是「所有没见过的命名形态」
+# 都被归入降级 → high → 均衡档阻断，每遇到一种新后缀就刷一批误报
+# （-1017 / -cm / -dedicated 已经各刷过一次）。
+#
+# 真正的分类是按**用户该采取什么行动**来分：
+#
+#   "compatible"  同一个模型的不同写法 → 什么都不做
+#   "capability"  能力确实变弱（mini/lite/flash/haiku…）→ 告警
+#                 这是中转站最主要的牟利手法，必须说清楚
+#   "naming"      名字不同但没有任何能力词变化 → **无法仅凭名字判定**
+#                 交给别名台账：见过就是正常写法，没见过就先记一次
+#
+# ★ "naming" 这一档是这次改造的关键：它承认「光看名字判不出来」，
+#   而不是硬猜。判据从「名字像不像」换成「这个组合变没变过」。
+_MODEL_MISMATCH_COMPATIBLE = "compatible"
+_MODEL_MISMATCH_CAPABILITY = "capability"
+_MODEL_MISMATCH_NAMING = "naming"
+
+
+def classify_model_mismatch(req: str, resp: str) -> str:
+    """把「请求模型 vs 返回模型」的差异归入三种性质之一。
+
+    Args:
+        req: 归一化后的请求模型名
+        resp: 归一化后的返回模型名
+
+    ★ 判定顺序很重要：
+      先看是否 compatible（同一模型的合法写法），
+      再看差异里有没有**能力词**（那是真降级），
+      都没有才归入 naming（交给台账）。
+    """
+    if not req or not resp:
+        return _MODEL_MISMATCH_COMPATIBLE
+    if _model_compatible(req, resp):
+        return _MODEL_MISMATCH_COMPATIBLE
+
+    # 差异部分含能力词 → 认作真降级，不再依赖台账。
+    # ★ 不要求 resp 以 req 开头：有些中转站会返回
+    #   `deepseek-v4-mini` 而请求是 `deepseek-v4.1-flash`，
+    #   名字形态完全不同，但能力词差异仍是硬证据。
+    req_tokens = set(re.split(r"[-_.]", req))
+    resp_tokens = set(re.split(r"[-_.]", resp))
+    changed = (req_tokens ^ resp_tokens) - {"", "v1", "v2", "v3"}
+    if changed & _MODEL_CAPABILITY_TOKENS:
+        return _MODEL_MISMATCH_CAPABILITY
+
+    # ★ 2026-11-10：多出来的**数字段**不是命名习惯，是版本号。
+    #   判据不靠枚举服务商怎么起名，而是靠「数字段是不是合法日期」：
+    #     ✗ claude-3-5-sonnet → claude-3-5-sonnet-2  （版本号冒充，不同型号）
+    #     ✗ model-a → model-a-9999                 （既有逃逸通道用例）
+    #     ✓ deepseek-v4.1-flash → ...-1017-cm      （1017 是合法月日 → 走上面的
+    #                                                兼容判定，不会到这里）
+    #   合法日期段已在 _model_compatible 里放行，所以到这里还剩下的
+    #   纯数字段只能是版本号，不存在「日期被误判」的通道。
+    for tok in changed:
+        if tok.isdigit() and not _MODEL_DATE_TOKEN_RE.match(tok):
+            return _MODEL_MISMATCH_CAPABILITY
+
+    return _MODEL_MISMATCH_NAMING
 
 
 # ── 工具名归一化（★ 避免 undeclared_tool 对正常网关误报）──
@@ -1395,9 +1558,28 @@ def _collect_tool_names(obj: Any, out: List[str], depth: int = 0) -> None:
 
 # 差分规则同样外置到 rules/baseline_rules.yaml，此处仅保留
 # 「哪些差分属于严重级别」的映射骨架。
+#
+# ★★ 2026-11-10（处置分级，根治「一误报就干不了活」）
+# ────────────────────────────────────────────────────────────
+# 这里的分级标准从「像不像攻击」改成**伤害是否已经发生**：
+#
+#   · 伤害未发生、还来得及拦 → high
+#       tool_call_dangerous 的破坏性命令、隐藏指令、凭证外泄：
+#       拦下来，伤害就不会发生。阻断是有效手段。
+#
+#   · 伤害已发生、只能事后告知 → medium
+#       model_downgrade：响应**已经完整到达**才知道模型名不对。
+#       此时阻断不阻止任何伤害，只是让用户拿不到已经生成好的内容 ——
+#       手段和目的不匹配。它该做的是「明确告诉他被换了」并留证，
+#       而不是打断他的工作。严格档仍可在用户主动选择的口径下阻断。
+#
+#       同理 new_external_endpoint / new_dependency 也是事后发现
+#       （tool_call 已回给客户端），保持 medium 只提示。
 _SEVERITY = {
     "undeclared_tool": "high",
-    "model_downgrade": "high",
+    # ★ 2026-11-10：high → medium。理由见上：模型降级是事后信息，
+    #   阻断代价（工作被打断）远大于收益（伤害并未被阻止）。
+    "model_downgrade": "medium",
     "data_exfiltration": "high",
     "new_external_endpoint": "medium",
     "new_dependency": "medium",
@@ -1444,6 +1626,7 @@ def diff_against_baseline(
     baseline: RequestBaseline,
     response_facts: Dict[str, Any],
     content: str = "",
+    model_alias_state: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, str]]:
     """把响应事实与请求基线做结构比对，返回发现项列表。
 
@@ -1458,6 +1641,9 @@ def diff_against_baseline(
         baseline: 请求基线
         response_facts: 响应事实（见 extract_response_facts）
         content: 响应正文，仅用于投递指令的结构组合检测
+        model_alias_state: 别名台账对本次「请求模型 → 返回模型」的观察结果
+            （见 storage.observe_model_alias）。为 None 时退化为
+            「只按命名判定」的旧行为，保证未接台账的调用路径不受影响。
     """
     # ★ 防御 None 入参：与 build_baseline 同理，
     #   抛异常会被 verifier 兜住 → 结构差分整体静默失效。
@@ -1527,29 +1713,44 @@ def diff_against_baseline(
             "evidence": ", ".join(sorted(set(returned))[:10]),
         })
 
-    # ② 模型降级 —— 请求与响应都在手，此前从未比对过
+    # ② 模型名不一致 —— 分成「真降级」与「未知命名」两种性质
     #
     # ★ 归一化是必须的，否则该判据会变成「必然误报」：
     #   gpt-4o        → gpt-4o-2024-11-01   （OpenAI/Azure 快照版，合法）
     #   gpt-4o        → openai/gpt-4o        （OpenRouter 前缀，合法）
     #   llama-3-8b    → meta-llama/Llama-3-8B-Instruct（vLLM 命名，合法）
     #   GPT-4o        → gpt-4o               （大小写差异）
-    # 这四种都是正常网关行为，若照原样比对，每一次响应都会
-    # 报 high 并在均衡级被阻断 —— 那等于产品不可用。
+    #
+    # ★★ 2026-11-10：从「二分法」改为「三分类 + 台账」。
+    #   此前所有没见过的命名形态都被当成降级（high → 均衡档阻断），
+    #   于是 -1017 / -cm / -dedicated 每出现一种就刷一批误报。
+    #   现在：
+    #     capability → 差异里有能力词，是真降级，告警（不再受台账影响）
+    #     naming     → 只是命名差异，无法仅凭名字判定，
+    #                  交给台账回答「这个组合变没变过」
     req_model = _normalize_model(baseline.model)
     resp_model = _normalize_model(response_facts.get("model"))
-    if req_model and resp_model and not _model_compatible(req_model, resp_model):
-        findings.append({
-            "category": "model_downgrade",
-            "severity": _SEVERITY["model_downgrade"],
-            "detail": (
-                f"响应返回的模型与你请求的不一致："
-                f"你请求 {baseline.model}，中转站返回 "
-                f"{response_facts.get('model')}"
-                f"（可能是模型降级或路由篡改）"
-            ),
-            "evidence": f"request={req_model} response={resp_model}",
-        })
+    if req_model and resp_model:
+        kind = classify_model_mismatch(req_model, resp_model)
+        if kind == _MODEL_MISMATCH_CAPABILITY:
+            findings.append({
+                "category": "model_downgrade",
+                "severity": _SEVERITY["model_downgrade"],
+                "detail": (
+                    f"响应返回的模型与你请求的不一致："
+                    f"你请求 {baseline.model}，中转站返回 "
+                    f"{response_facts.get('model')}"
+                    f"（型号档位不同 —— 这是降级，不是命名差异）"
+                ),
+                "evidence": f"request={req_model} response={resp_model}",
+            })
+        elif kind == _MODEL_MISMATCH_NAMING:
+            naming_finding = _judge_naming_mismatch(
+                baseline.model, response_facts.get("model"),
+                req_model, resp_model, model_alias_state,
+            )
+            if naming_finding:
+                findings.append(naming_finding)
 
     # ③ tool_call 引入了请求中不存在的外部端点 —— 载荷注入 / 数据外传
     #

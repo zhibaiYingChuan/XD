@@ -2071,6 +2071,27 @@ async fn unmark_log_safe(app: tauri::AppHandle, id: u64) -> Result<serde_json::V
     .await
 }
 
+/// 判定一次「请求模型 → 返回模型」的性质（★ 2026-11-10 第三层）。
+///
+/// ★ 与 mark_log_safe 同一形态的薄转发：判定逻辑全在引擎侧，
+///   Rust 只负责把参数送过去 —— 判据（归一化、三分类、台账）
+///   若在这里复制一份，两边迟早分叉。
+#[tauri::command]
+async fn mark_log_model_alias(
+    app: tauri::AppHandle,
+    id: u64,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::POST,
+        &format!("/api/logs/{id}/model-alias"),
+        Some(payload.map(|p| p.0).unwrap_or_else(|| serde_json::json!({}))),
+        REQ_NORMAL,
+    )
+    .await
+}
+
 /// 已配置的中转站列表（v0.1.0，多中转站）。
 ///
 /// ★ 路径是 /api/relays/configured 而非 /api/relays：
@@ -2577,6 +2598,7 @@ pub fn run() {
             delete_log,
             mark_log_safe,
             unmark_log_safe,
+            mark_log_model_alias,
             export_logs,
             clear_logs,
             get_logs_stats,
