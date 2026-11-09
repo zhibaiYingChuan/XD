@@ -483,6 +483,31 @@ _MODEL_DATE_TOKEN_RE = re.compile(
 # 没有足够证据区分时应当继续告警。
 _MODEL_TAG_TOKEN_RE = re.compile(r"^[a-z]{1,4}$")
 
+# ── 部署形态标记：同一模型的不同部署方式，不是强弱变化 ──
+#
+# ★★ 2026-11-10 实测误报（本地桌面端，均衡档直接拦截）：
+#     请求 deepseek/deepseek-v4.1-flash
+#     返回 deepseek-v4.1-flash-dedicated
+#   被判 model_downgrade / high，界面写「可能是模型降级或路由篡改」。
+#   而 `-dedicated` 表示**独享/专用通道**，是服务等级而不是模型能力 ——
+#   中转站给付费用户分独立实例时就是这么标的。
+#
+# ★ 为什么用枚举表而不是「放行任意非能力词」：
+#   后者等于「任意后缀都放行」，`claude-3-5-sonnet-2`（版本号冒充）、
+#   `model-a-9999`（逃逸通道）会一起被放过 —— 既有测试专门盯住这两条。
+#   部署形态是一个**封闭集合**，可以逐条列举并说明理由；
+#   枚举式白名单不会随服务商的命名想象力无限扩张。
+#
+# ★ 收录标准：只收「描述部署/服务等级」的词，不收任何暗示能力强弱的词。
+#     ✓ dedicated / shared / pooled       —— 资源是否独享
+#     ✓ standard / default / primary      —— 默认通道
+#     ✗ premium / plus / max / ultra      —— 可能指更强的型号，不收录
+_MODEL_DEPLOYMENT_TAGS = frozenset({
+    "dedicated", "dedicate", "exclusive", "reserved",
+    "shared", "pooled", "pool",
+    "standard", "default", "primary", "stable", "prod", "production",
+})
+
 
 def _is_build_tag_variant(req: str, resp: str) -> bool:
     """resp 是否是「req + 日期构建标签」（同一模型的不同构建）。
@@ -497,12 +522,14 @@ def _is_build_tag_variant(req: str, resp: str) -> bool:
 
     ★ 判据（刻意很窄，宁可漏放也不当逃逸通道）：
         ① resp 以 req 开头，紧跟一个分隔符；
-        ② 多出来的段里**至少有一段是日期**（合法月日 4 位 / 6-8 位数字）；
+        ② 多出来的段里**至少有一段是日期**（合法月日 4 位 / 6-8 位数字），
+           或者是显式枚举的**部署形态标记**（dedicated / shared / standard …）；
         ③ 其余段只能是 1-4 位纯字母（渠道/构建标记，如 cm / hk / sg）；
         ④ 任何一段都不得是强弱或能力词。
       于是：
         ✓ deepseek-v4.1-flash-1017-cm   （日期 + 渠道标记）
         ✓ deepseek-v4.1-flash-cm-1017   （顺序反过来同样成立）
+        ✓ deepseek-v4.1-flash-dedicated （部署形态：独享实例，非强弱变化）
         ✗ gpt-4o-mini                   （没有日期段，且 mini 是更弱的型号）
         ✗ claude-3-5-sonnet-2           （没有日期段 —— 版本号不等于构建批次）
         ✗ model-a-9999                  （9999 不是合法月日，是逃逸通道）
@@ -520,14 +547,17 @@ def _is_build_tag_variant(req: str, resp: str) -> bool:
         return False
     if any(t in _MODEL_CAPABILITY_TOKENS for t in tokens):
         return False
-    has_date = False
+    # ★ 必须有「日期」或「部署形态」这类**有实义**的标记。
+    #   只靠 1-4 位渠道字母（-cm）不构成豁免：那等于任意短后缀都放行。
+    has_meaningful_marker = False
     for t in tokens:
-        if _MODEL_DATE_TOKEN_RE.match(t):
-            has_date = True
+        if _MODEL_DATE_TOKEN_RE.match(t) or t in _MODEL_DEPLOYMENT_TAGS:
+            has_meaningful_marker = True
         elif not _MODEL_TAG_TOKEN_RE.match(t):
-            # 既不是日期、也不是短字母标记 —— 形态未知，不享受豁免
+            # 既不是日期、也不是部署标记、也不是短字母标记 ——
+            # 形态未知，不享受豁免
             return False
-    return has_date
+    return has_meaningful_marker
 
 
 def _model_compatible(req: str, resp: str) -> bool:

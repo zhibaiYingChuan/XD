@@ -505,6 +505,59 @@ class TestModelSnapshotSuffix:
                 f"{req_raw} → {resp_raw} 没有日期段却被豁免"
             )
 
+    def test_deployment_tag_is_same_model(self):
+        """部署形态标记（-dedicated / -shared / -standard）不是模型降级。
+
+        ★ 2026-11-10 实测：本地桌面端请求 deepseek/deepseek-v4.1-flash，
+          中转站返回 deepseek-v4.1-flash-dedicated，被判
+          model_downgrade / high，均衡档**直接拦截**，界面写
+          「可能是模型降级或路由篡改」。
+          而 `-dedicated` 说的是「独享实例」这个服务等级，
+          同一个模型的不同部署方式，不是强弱变化。
+        """
+        for req_raw, resp_raw in [
+            ("deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash-dedicated"),
+            ("deepseek-v4.1-flash", "deepseek-v4.1-flash-shared"),
+            ("gpt-4o", "gpt-4o-standard"),
+            ("qwen-max", "qwen-max-default"),
+            ("deepseek-v4.1-flash", "deepseek-v4.1-flash-dedicated-1017"),
+        ]:
+            req = bl._normalize_model(req_raw)
+            resp = bl._normalize_model(resp_raw)
+            assert bl._model_compatible(req, resp), (
+                f"{req_raw} → {resp_raw} 的部署形态标记被判成模型降级"
+            )
+
+    def test_deployment_tag_cannot_smuggle_capability_word(self):
+        """部署标记不能当夹带能力词的掩护。
+
+        ★ 这条是给上一条放宽配的刹车：一旦有人把判据写成
+          「后缀含部署词就放行」，`gpt-4o-dedicated-mini` 这种
+          「真降级 + 伪装部署标记」就能突破拦截。
+        """
+        for req_raw, resp_raw in [
+            ("gpt-4o", "gpt-4o-dedicated-mini"),
+            ("deepseek-v4.1-pro", "deepseek-v4.1-pro-dedicated-lite"),
+            ("gemini-1.5-pro", "gemini-1.5-pro-shared-flash"),
+        ]:
+            req = bl._normalize_model(req_raw)
+            resp = bl._normalize_model(resp_raw)
+            assert not bl._model_compatible(req, resp), (
+                f"{req_raw} → {resp_raw} 借部署标记夹带能力词，被错误放行"
+            )
+
+    def test_bare_short_tag_alone_is_not_excused(self):
+        """只有 1-4 位渠道字母、没有日期或部署标记时不豁免。
+
+        ★ 否则 `model-a → model-a-cm` 就成了任意后缀的通行证 ——
+          这也正是 `_is_build_tag_variant` 文档里「刻意很窄」的含义。
+        """
+        req = bl._normalize_model("model-a")
+        resp = bl._normalize_model("model-a-cm")
+        assert not bl._model_compatible(req, resp), (
+            "只有短渠道字母的后缀被豁免，等于任意后缀都放行"
+        )
+
 
 class TestMorningBlocks20261028:
     """2026-10-28 早间日志复核：当天 5 条阻断全是误报，逐条固化。
