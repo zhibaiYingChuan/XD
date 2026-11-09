@@ -156,7 +156,20 @@ jobs:
       # ★★ 顺序不能反：tauri 的 generate_context! 在**编译期**要求
       #   frontendDist（../dist）存在，而 dist/ 不入库。
       #   先构建前端再 cargo check，仓库里不需要提交任何构建产物。
+      #
+      # ★★ 2026-11-10：关掉 Windows runner 上的证书吊销检查。
+      #   实测该 job 连续失败，报的全是：
+      #     [35] SSL connect error (schannel: ... CRYPT_E_REVOCATION_OFFLINE)
+      #   原因是 GitHub 的 Windows runner 连不上证书吊销服务器（CRL/OCSP），
+      #   于是**每一次 crate 下载都被判定为不可信而中止**。
+      #   这不是代码问题、也不是我们依赖有问题，而是 runner 环境的
+      #   网络策略与 schannel 默认行为冲突 —— 但它会让「Rust 能不能编译」
+      #   这个门禁在有人真正需要它的时候随机罢工。
+      #   CARGO_HTTP_CHECK_REVOKE=false 只关闭吊销查询，TLS 校验仍然生效。
       - name: Check Rust
         working-directory: desktop/src-tauri
+        env:
+          CARGO_HTTP_CHECK_REVOKE: "false"
+          CARGO_NET_RETRY: "5"
         run: cargo check --locked
         timeout-minutes: 20

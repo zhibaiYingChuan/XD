@@ -610,6 +610,12 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # ★ 2026-11-10：Windows runner 连不上证书吊销服务器时，
+          #   schannel 会把每一次 crate 下载都判为不可信而中止
+          #   （CRYPT_E_REVOCATION_OFFLINE，CI 的 Rust 门禁 job 已连续失败）。
+          #   只关吊销查询，TLS 校验仍然生效。
+          CARGO_HTTP_CHECK_REVOKE: "false"
+          CARGO_NET_RETRY: "5"
         run: python .github/scripts/check_signing_key.py
 
       # ★★ Linux AppImage 专用：把 numpy 自带的科学计算库链注册进系统库路径。
@@ -691,6 +697,12 @@ jobs:
           #   本地构建同样需要注入私钥（见 docs/DEVELOPMENT.md）。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # ★ 2026-11-10：Windows runner 连不上证书吊销服务器时，
+          #   schannel 会把每一次 crate 下载都判为不可信而中止
+          #   （CRYPT_E_REVOCATION_OFFLINE，CI 的 Rust 门禁 job 已连续失败）。
+          #   只关吊销查询，TLS 校验仍然生效。
+          CARGO_HTTP_CHECK_REVOKE: "false"
+          CARGO_NET_RETRY: "5"
         # ★ 必须显式指定 --bundles，且传的是**格式名**（nsis/dmg/deb/appimage）
         #   而不是通配符 —— 命令行不接受 glob。
         #   各平台只能构建自己支持的格式，传 all 会让 macOS runner
@@ -1019,6 +1031,12 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # ★ 2026-11-10：Windows runner 连不上证书吊销服务器时，
+          #   schannel 会把每一次 crate 下载都判为不可信而中止
+          #   （CRYPT_E_REVOCATION_OFFLINE，CI 的 Rust 门禁 job 已连续失败）。
+          #   只关吊销查询，TLS 校验仍然生效。
+          CARGO_HTTP_CHECK_REVOKE: "false"
+          CARGO_NET_RETRY: "5"
         shell: bash
         run: |
           set -uo pipefail
@@ -1173,6 +1191,12 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # ★ 2026-11-10：Windows runner 连不上证书吊销服务器时，
+          #   schannel 会把每一次 crate 下载都判为不可信而中止
+          #   （CRYPT_E_REVOCATION_OFFLINE，CI 的 Rust 门禁 job 已连续失败）。
+          #   只关吊销查询，TLS 校验仍然生效。
+          CARGO_HTTP_CHECK_REVOKE: "false"
+          CARGO_NET_RETRY: "5"
         shell: bash
         run: |
           set -uo pipefail
