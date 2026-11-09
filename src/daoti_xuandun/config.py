@@ -54,7 +54,7 @@ _LEVEL_OVERHEAD = {
 
 @dataclass
 class XuanDunConfig:
-    """道体勘合全局配置对象。
+    """道体·勘合全局配置对象。
 
     所有随机性由配置中的 key 种子驱动，确保可重现。
     动态自适应机制无需预训练，开箱即用，在线演化。
