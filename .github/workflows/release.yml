@@ -1753,7 +1753,17 @@ jobs:
           WIN_PATH=$(printf '%s' "$REMOTE" | sed 's|^/\([A-Za-z]\)/|\1:/|')
           # ★ 同时清理旧品牌 xuandun-personal_* 与现品牌 kanhe-personal_*；
           #   `-latest` 别名不含 `_0.`，不会被误删。
+          #
+          # ★★ 2026-11-10：不再用 Get-ChildItem -File。
+          #   目标机器的 PowerShell 版本不支持 -File / -Name 这类参数
+          #   （实测报 NamedParameterNotFound），于是这一步在
+          #   **v0.2.3 发布时失败**，让整条 Release 流水线显示红 ——
+          #   而实际上 Release、上传、latest 别名、校验值全部已成功。
+          #   一个「可选清理」把成功报成失败，比不清理更糟：
+          #   下次真出问题时，没人会再认真看这条红色。
+          #   改用 .NET API（老版本 PowerShell 也支持），并且整体失败
+          #   只告警不中断 —— 清理旧包失败不该影响发布结论。
           ssh -i "$KEY_FILE" -p "$PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes \
             "$SFTP_USER@$SFTP_HOST" \
-            "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIN_PATH' -File | Where-Object { \$_.Name -match '^(kanhe|xuandun)-personal_0\.' -and \$_.Name -notlike '*$VER*' } | Remove-Item -Force\""
+            "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIN_PATH' -Filter '*personal_0.*' | Where-Object { \$_.Name -notlike '*$VER*' } | ForEach-Object { Remove-Item \$_.FullName -Force }\" || true"
           echo "PASS：已清理 $WIN_PATH 下非 $VER 的旧安装包"
