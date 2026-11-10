@@ -1749,10 +1749,19 @@ jobs:
           chmod 600 "$KEY_FILE"
           mkdir -p ~/.ssh
           ssh-keyscan -p "$PORT" -H "$SFTP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          # Windows 路径转 PowerShell 形式
-          WIN_PATH=$(printf '%s' "$REMOTE" | sed 's|^/\([A-Za-z]\)/|\1:/|')
+          # Windows 路径转 PowerShell 形式。
+          #
+          # ★★ 2026-11-11：原式只认 `/C/`，而实际值是 `/C:/` ——
+          #   模式 `^/\([A-Za-z]\)/` 要求第五个字符是 `/`，
+          #   而 `/C:/` 是 `/` `C` `:`，永远匹配不上。
+          #   于是 WIN_PATH 保持 `/C:/wwwroot/...`，PowerShell 把它
+          #   读成「名为 /C 的驱动器」，Get-ChildItem 直接抛
+          #   DriveNotFoundException，旧包一个都没删掉（v0.2.4 实测）。
+          #   两种写法都兼容：`/C:/x` 与 `/C/x`。
+          WIN_PATH=$(printf '%s' "$REMOTE" | sed -E 's|^/([A-Za-z]):?/|\1:/|')
           # ★ 同时清理旧品牌 xuandun-personal_* 与现品牌 kanhe-personal_*；
           #   `-latest` 别名不含 `_0.`，不会被误删。
+          #   ★ 不碰 lrc-desktop-*：那是另一个产品的安装包。
           #
           # ★★ 2026-11-10：不再用 Get-ChildItem -File。
           #   目标机器的 PowerShell 版本不支持 -File / -Name 这类参数
@@ -1761,9 +1770,13 @@ jobs:
           #   而实际上 Release、上传、latest 别名、校验值全部已成功。
           #   一个「可选清理」把成功报成失败，比不清理更糟：
           #   下次真出问题时，没人会再认真看这条红色。
-          #   改用 .NET API（老版本 PowerShell 也支持），并且整体失败
-          #   只告警不中断 —— 清理旧包失败不该影响发布结论。
+          #
+          # ★★ 2026-11-11：`|| true` 原来写在**引号内部**，被远程
+          #   cmd.exe 当成一条命令执行（报「'true' 不是内部或外部命令」），
+          #   退出码 1 照样冒出来 —— 保护完全没生效。
+          #   必须放在 ssh 命令之后、由本地 bash 处理。
           ssh -i "$KEY_FILE" -p "$PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes \
             "$SFTP_USER@$SFTP_HOST" \
-            "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIN_PATH' -Filter '*personal_0.*' | Where-Object { \$_.Name -notlike '*$VER*' } | ForEach-Object { Remove-Item \$_.FullName -Force }\" || true"
-          echo "PASS：已清理 $WIN_PATH 下非 $VER 的旧安装包"
+            "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIN_PATH' -Filter '*personal_0.*' | Where-Object { \$_.Name -notlike '*$VER*' } | ForEach-Object { Remove-Item \$_.FullName -Force }\"" \
+            || echo "::warning::清理旧安装包失败（不影响本次发布结论）"
+          echo "PASS：已请求清理 $WIN_PATH 下非 $VER 的旧安装包"
