@@ -1294,8 +1294,16 @@ def create_app() -> FastAPI:
                         if anomalies:
                             findings.extend(anomalies)
                         if restored != full:
+                            # ★★ 2026-11-11（日志 #24023）：复检必须用**提取后的
+                            #   正文**，不能把 SSE 整帧（含 id/object/model）送检；
+                            #   并且要剔除「本次还原塞回文本的用户原文」。
+                            #   工具调用不在这里查 —— 紧跟其后的完整验证
+                            #   已带 tool_calls 结构性查过一次，重复查会让
+                            #   「共 N 项」虚高。见 _verify_restored_text 的说明。
+                            r_text, _r_tools, _r_model = _extract_sse_frames(restored)
                             findings.extend(_verify_restored_text(
-                                restored, session_id, _verifier
+                                r_text, session_id, _verifier,
+                                own_values=_own_vault_values(restore_session),
                             ))
 
                     # ★ v0.1.0 修复缺口 4：原实现的中期验证是
@@ -3813,8 +3821,67 @@ def _resolve_action(max_sev: str, findings_or_none: Any = None) -> str:
     return Action.ALERT.value
 
 
+def _own_vault_values(session_id: str) -> List[str]:
+    """取出本会话登记过的原始值（供「还原后复检」剔除用户自己的原文）。
+
+    ★ 为什么不直接从 `_restorer` 拿：`ContentRestorer` 对外只暴露
+      「还原」和「统计」，不提供反向枚举 —— 那是刻意的（避免把保险箱
+      变成明文检索接口）。这里只经由 vault 的内部方法取，
+      且**仅用于本次调用内的字符串替换**，用完即弃，不入库不出日志。
+
+    ★ 保险箱不可用时返回空列表：复检退化为「不做剔除」，
+      也就是修复前的行为（可能误报）。宁可偶尔误报，
+      也不能因为取不到值就整段跳过复检 —— 那会把误报修成漏报。
+    """
+    if _restorer is None or not session_id:
+        return []
+    try:
+        return list(_restorer.vault.known_values(session_id))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _blank_own_values(text: str, own_values: Iterable[str]) -> str:
+    """把文本里「用户自己的原文」抹成中性标记，其余一字不动。
+
+    ★★ 为什么必须按 token 边界匹配，而不是直接 `str.replace`
+    ────────────────────────────────────────────────────────────
+    用户被脱敏的值常常是另一个更长字符串的**前缀**，或干脆是子串。
+    实测形态：用户有一枚 `sk-l…0c`（34 字符），中转站返回
+    `sk-l…0cXXXX`（38 字符，多了 4 位）。直接 `replace` 会把
+    「多出来的那 4 位」和后面的内容拼在一起，等于把
+    **中转站新增的凭证**也一起抹掉 —— 那是把误报修成漏报。
+
+    所以这里要求命中位置的两侧不能紧邻密钥字符类
+    （字母/数字/`-`/`_`/`.`/`+`/`=`/`/`）。这样：
+      · 完整出现自己的值 → 抹掉（这是要修的误报）；
+      · 自己那串只是前缀 → 不抹，留给正则与台账继续判定。
+
+    ★ 抹成 `⟦OWN⟧` 而不是空串：直接删掉会让前后文粘连，
+      可能拼出新的假命中（例如两段 Base64 接在一起）。
+
+    ★ 从长到短处理：短值是长值的子串时，先抹长的才能正确覆盖。
+    """
+    if not text:
+        return text
+    # 密钥字符类：与 sanitizer / verifier 的凭证正则保持同一口径
+    _edge = r"A-Za-z0-9\-_.+=/"
+    for value in sorted(
+        {v for v in own_values if v}, key=len, reverse=True
+    ):
+        try:
+            pattern = re.compile(
+                rf"(?<![{_edge}]){re.escape(value)}(?![{_edge}])"
+            )
+        except re.error:  # 理论上不会发生（已 escape），保守跳过
+            continue
+        text = pattern.sub("⟦OWN⟧", text)
+    return text
+
+
 def _verify_restored_text(
-    restored: str, session_id: str, verifier
+    restored: str, session_id: str, verifier,
+    own_values: Optional[Iterable[str]] = None,
 ) -> List[Any]:
     """对第三层恢复后的内容做一次快速验证。
 
@@ -3823,11 +3890,46 @@ def _verify_restored_text(
       嵌套生成器作用域内不存在 self，必然抛 NameError。
       触发条件恰是「本次请求命中过脱敏」，而流式客户端（Claude Code / Cursor）
       几乎必然命中，等于该路径从未跑通过。
+
+    ★★ 2026-11-11（日志 #24023 误报）：两处口径必须改
+    ────────────────────────────────────────────────────────────
+    ① **送检对象必须是「正文」，不能是 SSE 整帧。**
+       原调用点把 `full`（`data: {...}\\n\\n` 的原始累积）直接送进来，
+       于是送检内容里带着 `{"id":"6aa3f1c8…","object":"chat.completion.chunk"}`。
+       报告出来的证据是那行 `data: {...}`，用户完全看不懂，
+       而他真正该看的是模型说了什么。
+
+    ② **用户自己的原文必须先剔除。**
+       这一步叫「还原后复检」，还原的动作就是把用户被脱敏的原文
+       塞回响应文本。然后复检拿凭证正则去扫 —— 正则只认
+       「长得像凭证」，分不出「这是用户自己的」还是「中转站塞的」。
+       结果必然把自己的密钥判成泄露，报「回答正文里出现了密钥形态」，
+       而那句话（纯工具调用时甚至没有正文）根本不成立。
+       这与本项目早已确立的口径矛盾：非流式路径的凭证判定
+       （`_check_response_credentials`）明确要求「必须在还原占位符之前做，
+       还原后响应里会出现用户自己的原文，那不是中转站返回的东西」。
+       流式路径此前没遵守，这里补齐 —— 剔除 `own_values`
+       （本会话登记过的全部原始值）后再送检。
+
+    ★ 被剔除的只是「已知值」，「中转站新增的凭证」照旧会被
+      `_check_response_credentials` 由台账判定，检测面没有缩小。
+
+    ★ 刻意**不**传 payload（工具调用）：调用点后面紧跟着的完整验证
+      已经带着 tool_calls 跑过一次 `_check_tool_calls`，这里再传一遍
+      会让同一个危险参数被记成两条发现项 ——「共 N 项」虚高，
+      头条也可能重复。这一路只补「正文」的复检。
     """
     if verifier is None:
         return []
+
+    text = restored or ""
+    if own_values:
+        text = _blank_own_values(text, own_values)
+    if not text.strip():
+        return []
+
     try:
-        return list(verifier.verify(restored[:4000], session_id, None).findings)
+        return list(verifier.verify(text[:4000], session_id, None).findings)
     except Exception:  # noqa: BLE001
         return []
 
@@ -5122,7 +5224,7 @@ async def _aiter_and_close(upstream) -> AsyncGenerator[bytes, None]:
             pass
 
 
-def _describe_upstream_status(code: int) -> str:
+def _describe_upstream_status(code: int, body: bytes = b"") -> str:
     """把上游 HTTP 状态码翻译成一句用户能懂、可行动的话。
 
     ★ 2026-10-19 实测：首页「近期安全记录」出现过整段英文 JSON ——
@@ -5130,9 +5232,30 @@ def _describe_upstream_status(code: int) -> str:
       「中转站返回 HTTP 403：{"error":{"message":"Space Bunny Alpha is no longer available...」
       这里只保留「发生了什么 + 大概率为什么 + 能做什么」；
       原始错误体仍完整保存在 text_preview 里，详情页可查。
+
+    ★★ 2026-11-11（实测日志 #24006 等 9 条）：**必须看上游自己说了什么**
+    ────────────────────────────────────────────────────────────
+    原来只按状态码查表，400 一律写「请检查模型名与请求参数」。
+    实测那 9 条的真实原因全是同一句：
+
+        You have insufficient credits to make this request.
+
+    也就是余额不足。按原文案，用户会去反复检查模型名 —— 方向完全错了，
+    而且查不出任何结果（模型名一直是对的）。
+    状态码给的是「哪一类错误」，响应体才给「具体是哪一种」，
+    少了后一半，提示就只是在猜。
+
+    所以这里先按错误体识别已知的具体原因（余额/额度/模型/上下文长度/
+    内容策略），识别不出才退回按状态码的通用文案。
     """
+    detail = _classify_upstream_error(body)
+    if detail:
+        return f"{detail}（{code}）" if code else detail
+
     if code == 401:
         return "中转站拒绝认证（401）：API Key 可能填错或已失效，请到设置里检查"
+    if code == 402:
+        return "中转站余额不足（402）：请到中转站充值后重试"
     if code == 403:
         return "中转站拒绝访问（403）：Key 无此模型权限，或该模型已下线"
     if code == 404:
@@ -5144,6 +5267,81 @@ def _describe_upstream_status(code: int) -> str:
     if 400 <= code < 500:
         return f"中转站拒绝了请求（{code}）：请检查模型名与请求参数"
     return f"中转站返回异常状态（{code}）"
+
+
+# 上游错误体的具体原因识别表：(特征片段, 面向用户的结论)。
+#
+# ★ 匹配对象是**小写化后的错误体原文**，不是我们的猜测。
+#   顺序即优先级：「余额不足」必须排在「模型不存在」之前 ——
+#   有些中转站余额耗尽时回的是 `model not available` 这种含糊话，
+#   先认余额能少一次南辕北辙的排查。
+#
+# ★★ 判据必须收窄到「只在这个原因里才会出现」的措辞。
+#   写下表时的自查：能不能想象一个**别的**原因的错误体里也含这串？
+#   能想象的一律不收 ——
+#     · `not found` → 500 的 "upstream service not found" 会被说成「核对模型名」
+#     · `billing`   → "billing address invalid" 会被说成「余额不足」
+#     · `flagged`   → "request flagged for review" 会被说成「内容违规」
+#     · `authentication` → 500 里的 "authentication backend down" 会被说成「Key 无效」
+#   判错的文案比「认不出」更贵：用户会照着错误方向查很久。
+#
+# ★ 只认英文与常见中文措辞；认不出返回 None，交给状态码通用文案。
+_UPSTREAM_REASON_MARKS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (
+        ("insufficient credit", "insufficient_quota", "insufficient balance",
+         "insufficient_balance", "quota exceeded", "exceeded your current quota",
+         "billing hard limit", "out of credits", "no credits remaining",
+         "余额不足", "额度不足", "额度已用尽", "欠费", "请充值", "积分不足"),
+        "中转站账户余额或额度不足：这不是你的请求有问题，"
+        "请到中转站充值或换一家再试",
+    ),
+    (
+        ("context length", "context_length_exceeded", "maximum context",
+         "too many tokens", "prompt is too long", "上下文长度", "超出上下文"),
+        "对话太长，超出模型上下文上限：请新开一个对话或删掉部分历史后重试",
+    ),
+    (
+        # ★ 只收「模型专属」的措辞。泛化的 `not found` 已剔除，
+        #   否则任何 404/500 的「服务找不到」都会被说成模型名写错。
+        ("does not exist", "no such model", "unknown model", "invalid model",
+         "model_not_found", "model not found", "unsupported model",
+         "模型不存在", "模型名不存在"),
+        "中转站找不到这个模型：请在设置里核对模型名，或确认该家是否上架了它",
+    ),
+    (
+        ("content policy", "content_filter", "content management policy",
+         "has been flagged", "flagged as potentially", "safety system",
+         "内容政策", "违规内容"),
+        "内容被中转站的内容策略拦下：换个说法或删掉被指出的那段再试",
+    ),
+    (
+        ("invalid api key", "incorrect api key", "invalid_api_key",
+         "authentication failed", "authentication_error", "unauthorized",
+         "密钥无效", "鉴权失败"),
+        "中转站的 API Key 无效：请到设置里核对该家填的 Key",
+    ),
+)
+
+
+def _classify_upstream_error(body: bytes) -> Optional[str]:
+    """从上游错误体里识别出具体原因；认不出返回 None。
+
+    ★ 只读前 4KB：错误体前面的 message 字段就够判定，
+      而某些网关会把整段请求回显在错误体里，全量扫没有收益。
+    ★ 解码失败（二进制/截断）时直接返回 None，不臆测。
+    """
+    if not body:
+        return None
+    try:
+        text = body[:4096].decode("utf-8", errors="ignore").lower()
+    except Exception:  # noqa: BLE001
+        return None
+    if not text:
+        return None
+    for marks, message in _UPSTREAM_REASON_MARKS:
+        if any(mark in text for mark in marks):
+            return message
+    return None
 
 
 _scrub_fallback_sanitizer = None
@@ -5260,7 +5458,9 @@ def _log_upstream_error(
         return
     try:
         # ★ 不再把上游原始报错拼进 summary（理由见 _describe_upstream_status）
-        summary = _describe_upstream_status(status_code)
+        #   ★★ 2026-11-11：但必须把原文**传进去**做原因识别 ——
+        #      只看状态码会把「余额不足」写成「请检查模型名」（实测 9 条）。
+        summary = _describe_upstream_status(status_code, body_bytes)
         _storage.insert_log(LogEntry(
             log_type=LogType.PROXY_ERROR.value,
             relay_domain=domain,

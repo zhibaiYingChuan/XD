@@ -255,3 +255,22 @@ class PlaceholderVault:
         with self._lock:
             slot = self._sessions.get(session_id)
             return sorted(slot["by_index"].keys()) if slot else []
+
+    def known_values(self, session_id: str) -> List[str]:
+        """返回本会话登记过的**全部原始值**（供调用方做排除用）。
+
+        ★★ 内部专用，返回的是明文 —— 与 ``stats()`` 的性质完全不同。
+          目前唯一的调用点是「还原后复检」：还原会把用户自己的原文
+          塞回响应文本，而复检的凭证正则只认「长得像凭证」，
+          分不出那是**用户自己的**还是中转站塞的 ——
+          于是必然把自己的密钥判成泄露（实测日志 #24023）。
+          调用方拿到这些值后应在送检前逐一抹掉，让复检只看
+          「中转站新增的内容」。
+
+        ★ 绝不落库、绝不进日志、绝不外发。调用方用完即弃。
+        """
+        with self._lock:
+            slot = self._sessions.get(session_id)
+            if not slot:
+                return []
+            return [item[0] for item in slot["by_index"].values() if item[0]]
