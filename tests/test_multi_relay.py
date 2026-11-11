@@ -1131,28 +1131,34 @@ class TestFrontendAndDesktopAreWired:
             "前端没调配置列表接口 —— 设置页永远显示「还没有配置中转站」"
         )
         assert "/api/relays/active" in src, (
-            "前端没调切换接口 —— 「切到这家」按钮点了没反应"
+            "前端没调兜底接口 —— 「设为兜底」按钮点了没反应"
         )
 
     def test_switch_is_callable_from_list_item(self):
         src = SETTINGS_TSX.read_text(encoding="utf-8")
         assert "switchTo(" in src, "列表项没有绑定切换动作"
-        assert "切到这家" in src
-        # ★ 非当前项才给按钮。
-        #   判据只认 `!r.active` 与「切到这家」出现在**同一个条件块**里 ——
-        #   否则「切换按钮」和「active 判断」分散在文件两处时，
+        # ★★ 2026-11-12：文案从「切到这家」改为「设为兜底」。
+        #   原文案暗示「只有一家在用、要手动换」，而真实机制是
+        #   「请求带谁的 Key 就发给谁」—— 两家一直在同时用。
+        #   按钮只改「Key 都对不上时兜底发给谁」。
+        assert "设为兜底" in src, (
+            "按钮文案丢回了「切换」语义 —— 会让用户以为两家不能同时用"
+        )
+        # ★ 非兜底项才给按钮。
+        #   判据只认 `!r.active` 与按钮文案出现在**同一个条件块**里 ——
+        #   否则「按钮」和「active 判断」分散在文件两处时，
         #   这条断言会变成恒真。
         m = re.search(
             r"\{!r\.active && \((.*?)\n\s*\)\}", src, re.S)
         assert m, "找不到「非当前项才显示操作按钮」的条件块"
         block = m.group(1)
-        assert "切到这家" in block, (
-            "切换按钮不在 !r.active 条件内 —— "
-            "当前使用中的那家也给了按钮，用户会点出一个空操作"
+        assert "设为兜底" in block, (
+            "兜底按钮不在 !r.active 条件内 —— "
+            "已是兜底的那家也给了按钮，用户会点出一个空操作"
         )
         assert "移除" in block, (
             "移除按钮不在 !r.active 条件内 —— "
-            "用户会把正在用的那家删掉"
+            "用户会把兜底那家删掉"
         )
 
     def test_switching_blocks_repeat_clicks(self):

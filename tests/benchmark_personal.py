@@ -47,6 +47,9 @@ if str(_SRC) not in sys.path:
 from daoti_xuandun_personal.proxy.baseline import build_baseline  # noqa: E402
 from daoti_xuandun_personal.proxy.sanitizer import RequestSanitizer  # noqa: E402
 from daoti_xuandun_personal.proxy.verifier import ResponseVerifier  # noqa: E402
+# ★ 2026-11-12：正文提取必须复用生产实现，不能在这里另写一份。
+#   两处各写一份必然漂移，而漂移的表现是「基准绿、线上漏」。
+from daoti_xuandun_personal.proxy.app import _extract_content  # noqa: E402
 
 SEED = 20261108
 rng = random.Random(SEED)
@@ -592,7 +595,23 @@ def run_response_side(level: str, attacks, benign) -> dict:
     per_cat = defaultdict(lambda: {"total": 0, "detected": 0})
     missed = []
     for idx, (cat, name, payload, kind) in enumerate(attacks):
-        body = json.dumps(payload, ensure_ascii=False)
+        # ★★ 2026-11-12（口径修复）：必须传**提取后的正文**，不能传整段 JSON。
+        #
+        #   生产路径 app._handle_non_stream 传的是 _extract_content(payload)，
+        #   而这里此前传 json.dumps(payload, ensure_ascii=False)。
+        #   两者不等价，且差别会静默改变判定结果：
+        #     约束违背类判据用 \b / [^\n] 做边界，而 JSON 里的换行是
+        #     **两个字符**（反斜杠 + n）—— `...\nshutil.rmtree(` 里的
+        #     "n" 是单词字符，\b 匹配失败，判据整条失效。
+        #
+        #   实测后果（本轮修前）：同一批 6 条约束违背模板，
+        #     传 JSON   → 命中 1 条（README 里那个 20% 就是这么来的）
+        #     传正文    → 命中 4 条
+        #   也就是说这个数字既低估了能力，又污染了误报分母。
+        #
+        #   test_redteam_attack.py 早在 2026-10-28 就修过同一处，
+        #   这里漏了 —— 同一条教训在两个文件里各犯一次。
+        body = _extract_content(payload)
         bl = bl_con if kind == "constrained" else bl_plain
         r = ver.verify(body, session_id=f"bench-{level}-{idx}", payload=payload, baseline=bl)
         hit = bool(r.findings)
@@ -606,7 +625,7 @@ def run_response_side(level: str, attacks, benign) -> dict:
 
     fp = []
     for idx, payload in enumerate(benign):
-        body = json.dumps(payload, ensure_ascii=False)
+        body = _extract_content(payload)
         r = ver.verify(body, session_id=f"bench-b-{level}-{idx}", payload=payload, baseline=bl_plain)
         if r.findings:
             fp.append((r.severity, ",".join(sorted({f.category for f in r.findings})), str(payload)[:60]))

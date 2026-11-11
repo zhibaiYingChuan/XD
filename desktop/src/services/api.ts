@@ -256,6 +256,15 @@ export interface ConfiguredRelay {
   proxy_url: string;
   /** 这个端口此刻是否真的在监听（被占用/未启动时为 false）。 */
   listening: boolean;
+  /**
+   * 这家是否**真的可用**：有地址 + 有 Key + 未停用。
+   *
+   * ★ 2026-11-12：不能用「能进列表」代替「能用」——
+   *   others 里某家的 Key 可能为空（历史数据/手工改配置），
+   *   此时请求发过去必然 401，而界面写着「可用」就是谎报。
+   *   判据与后端转发时保持一致。
+   */
+  usable: boolean;
 }
 
 export interface ConfiguredRelaysResponse {
@@ -1003,7 +1012,12 @@ export const api = {
   getConfiguredRelays: () =>
     call<ConfiguredRelaysResponse>(
       'get_configured_relays', 'GET', '/api/relays/configured'),
-  /** 切换当前启用的中转站（显式切换，不做自动故障转移）。 */
+  /**
+   * 把某一家设为「兜底」。
+   *
+   * ★ 2026-11-12：语义是「请求里的 Key 谁都对不上时发给谁」，
+   *   不是「从今往后只用这一家」—— 两家始终按 Key 同时分流。
+   */
   switchRelay: (id: string) =>
     call<{ ok: boolean; active_id: string }>(
       'switch_relay', 'POST', '/api/relays/active',

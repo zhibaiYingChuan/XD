@@ -469,8 +469,25 @@ textarea {
    通用 .list-item 只有一条底边线，项与项之间没有任何区分，
    在深色卡片上「哪一家正在用」几乎看不出来 ——
    而这恰恰是用户唯一真正关心的信息。
-   这里给每家一个独立卡片，并把「当前使用中」做成实心徽标 +
-   左侧色条 + 绿色边框，让当前生效的那家在余光里就能被认出。 */
+
+   ★★ 2026-11-12（用户反馈，这张截图就是证据）：
+      上一版把「当前使用中」做成绿色对勾 + 绿边框 + 绿底，
+      其余各家是灰色 Info 图标 + 灰边框。
+      结果用户读成「我配了两个中转站，一个可用、一个不可用」——
+      完全相反的结论。
+
+      根子是把两个不同的问题画成了同一个信号：
+        · 「这家能不能用」     —— 两家都能用，都该是绿的；
+        · 「默认发往哪一家」   —— 这是取舍，不是健康度，
+                                  不该用绿色去表达（绿色已被
+                                  全局约定为「安全 / 正常」）。
+      现在的分工：
+        · 每家图标一律绿色对勾 + 每家一个绿色「可用」小标签
+          （健康度，全部一致）；
+        · 「兜底」保留绿色实心徽标，但它是**取舍标记**
+          （Key 都对不上时发给它），语义由文字承担，
+          不再靠整卡变绿去暗示；
+        · 非兜底项的卡片底色/边框回到普通卡片，不再显得「坏掉」。 */
 
 .relay-section {
   border-color: var(--xd-border-light);
@@ -514,14 +531,16 @@ textarea {
   transition: border-color var(--xd-transition), background var(--xd-transition);
 }
 
-/* 当前启用项：左侧色条 + 绿色边框 + 略亮的底色，
-   三重信号叠加，扫一眼就能定位「现在在用哪家」。 */
+/* 兜底项：只把**左侧色条**染绿作定位锚点。
+   ★ 不再改边框色与底色 —— 那会让另一家看起来「坏了」。
+     色条是「标记」，不是「状态灯」，用户不会把它读成健康度。 */
 .relay-card.active {
-  border-color: var(--xd-safe);
   border-left-color: var(--xd-safe);
-  background: var(--xd-safe-dim);
 }
 
+/* 每家一律绿色：这里表达的是「这家中转站可用」，与是否为兜底无关。
+   ★ 上一版非兜底项是灰色 Info 图标，用户读成「不可用」。
+     图标底色不再区分 active / 非 active。 */
 .relay-card-icon {
   width: 30px;
   height: 30px;
@@ -530,13 +549,8 @@ textarea {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: var(--xd-card);
-  color: var(--xd-text-dim);
-}
-
-.relay-card-icon.active {
-  background: var(--xd-safe);
-  color: var(--xd-bg);
+  background: var(--xd-safe-dim);
+  color: var(--xd-safe);
 }
 
 .relay-card-main {
@@ -547,6 +561,7 @@ textarea {
 .relay-card-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -561,6 +576,51 @@ textarea {
   white-space: nowrap;
 }
 
+/* 「可用」状态灯（每家都有，全部为绿）。
+   ★ 用圆点 + 文字而不是图标：图标容易被读成「这是按钮」，
+     而这里要表达的是单纯的状态。 */
+.relay-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  padding: 0 7px;
+  border-radius: var(--xd-radius-sm);
+}
+
+.relay-status.ok {
+  color: var(--xd-safe);
+  background: var(--xd-safe-dim);
+}
+
+/* 不可用 = 地址或 Key 缺失 / 该家被停用。
+   ★ 2026-11-12：这是**真实不可用**，不是「没在用」。
+     两者的区别正是本轮的修复点 —— 前者该红，后者不该有任何颜色。 */
+.relay-status.bad {
+  color: var(--xd-danger);
+  background: var(--xd-danger-dim);
+}
+
+/* 不可用那家的图标同步变红：图标与标签必须说同一件事 */
+.relay-card-icon.unusable {
+  background: var(--xd-danger-dim);
+  color: var(--xd-danger);
+}
+
+.relay-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+/* 「兜底」= 取舍标记，不是健康度。
+   保留绿色实心徽标（全局约定里绿色=正常/在用），
+   但它的语义完全由文字承担，不再让整张卡片跟着变色。 */
 .relay-badge {
   flex-shrink: 0;
   font-size: 11px;
@@ -619,7 +679,16 @@ textarea {
   color: var(--xd-text-dim);
 }
 
-/* 端口没起来必须显眼：这时用户照抄这个地址去配 AI 工具会连不上 */
+/* 端口正常 = 与「可用」同一语义，用同一套绿色。
+   ★ 2026-11-12：此前只在端口没起来时给红字，正常时什么都不写 ——
+     用户看到「这家有端口、那家没有」，仍会猜「是不是哪边有问题」。
+     明写「端口正常」把沉默变成确认。 */
+.relay-port-ok {
+  color: var(--xd-safe);
+}
+
+/* 端口没起来必须显眼：这时用户照抄这个地址去配 AI 工具会连不上。
+   ★ 文案里必须带上「主端口仍可用」，否则会被读成「整家都废了」。 */
 .relay-port-warn {
   color: var(--xd-danger);
   font-weight: 600;

@@ -7,7 +7,7 @@
      ① 英雄区：大字状态 + 今日概览
      ② KPI 三卡：安全 / 可疑 / 危险
      ③ 近期安全记录：最近 5 条非安全事件
-     ④ 当前中转站：信誉评分
+     ④ 中转站信誉：评分
      ⑤ 快速操作：暂停防护 / 打开日志 / 分享诊断
 */
 
@@ -698,9 +698,13 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* ③ 当前中转站 */}
+      {/* ③ 中转站信誉
+          ★ 2026-11-12（用户指出语义错误）：原标题「当前中转站」暗示
+          「只有这一家在用、其余没生效」。而多家中转站是同时生效的
+          （请求带谁的 Key 就发给谁），这里只是配置里那家的信誉卡片。
+          改叫「中转站信誉」，不再暗示排他。 */}
       <div className="card">
-        <div className="card-title">{t('当前中转站')}</div>
+        <div className="card-title">{t('中转站信誉')}</div>
         {primaryRelay ? (
           <>
             <div className="flex items-center justify-between gap-12">

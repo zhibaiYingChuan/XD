@@ -2720,6 +2720,20 @@ def create_app() -> FastAPI:
                     "api_key_masked": mask_relay_key(
                         str(r.get("api_key") or "")),
                     "active": bool(r.get("active")),
+                    # ★★ 2026-11-12（全局一致性）：界面上那个绿色「可用」标签
+                    #   必须是**真实判据**，不能因为「能进这个列表」就无条件点亮。
+                    #
+                    #   能被列出来 ≠ 能用：others 里的某一家的 Key 可能为空
+                    #   （历史数据、手工改配置文件），或这家被标记为未启用。
+                    #   此时地址还在、Key 没了，请求发过去必然 401，
+                    #   而界面却写着「可用」—— 那是比不显示更糟的谎报。
+                    #
+                    #   判据与转发时一致：有地址 + 有 Key + 未停用。
+                    "usable": bool(
+                        str(r.get("base_url") or "").strip()
+                        and str(r.get("api_key") or "").strip()
+                        and r.get("enabled", True)
+                    ),
                     # ★ 2026-10-22：专属入口端口（0 = 未单独分配）。
                     #   listening 告诉界面「这个端口此刻真的在监听吗」——
                     #   端口被别的软件占着时，保存是成功的，
@@ -2793,7 +2807,7 @@ def create_app() -> FastAPI:
         if new_id == relay_cfg.make_relay_id(
                 relay_cfg.base_url, relay_cfg.api_key):
             raise HTTPException(
-                status_code=400, detail="这家已经是当前使用中的中转站")
+                status_code=400, detail="这家就是当前配置里的那家，换一家再添加")
         if any(str(r.get("id") or "") == new_id for r in relay_cfg.others):
             raise HTTPException(status_code=400, detail="这家已经在列表里了")
 
@@ -2911,11 +2925,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/relays/configured/remove")
     async def remove_relay(payload: Dict[str, Any] = Body(...)):
-        """从列表里移除一家（**不能**移除当前启用项）。
+        """从列表里移除一家（**不能**移除当前配置的主项）。
 
-        ★ 为什么不允许移除启用项：
-          移除掉当前在用的那家等于让用户的 AI 工具立刻失去目标，
-          而界面上不会有任何提示。必须先「切到这家」。
+        ★ 为什么不允许移除主项：
+          它是「请求里的 Key 谁都对不上」时唯一的兜底目标。
+          删掉它，用户填了新 Key 但还没同步到勘合的请求会立刻失去目标，
+          而界面上不会有任何提示。要删就先「设为兜底」换到另一家。
         """
         if _config is None:
             raise HTTPException(status_code=503, detail="配置未就绪")
@@ -2927,7 +2942,7 @@ def create_app() -> FastAPI:
         if want == cur_id or want == relay_cfg.active_id:
             raise HTTPException(
                 status_code=400,
-                detail="不能移除当前使用中的中转站，请先切到另一家")
+                detail="这家是兜底项，不能直接移除；请先把另一家设为兜底")
 
         before = len(relay_cfg.others)
         relay_cfg.others = [

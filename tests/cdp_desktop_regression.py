@@ -1847,13 +1847,15 @@ def test_multi_relay_settings(page, be: Backend):
             if SECOND_KEY not in body
             else "设置页把明文 Key 渲染出来了")
 
-        # ── 界面上切到第二家 ──
+        # ── 界面上把第二家设为兜底 ──
         # ★ 说明文案随结论分支（原写法把「失败情形」写死，PASS 时日志自相矛盾）
-        btn = page.locator("button:has-text('切到这家')").first
-        rec("T14 有「切到这家」按钮", btn.count() > 0,
-            "列表项有切换按钮"
+        # ★ 2026-11-12：按钮从「切到这家」改为「设为兜底」——
+        #   两家始终同时生效，这个按钮只改「Key 都对不上时发给谁」。
+        btn = page.locator("button:has-text('设为兜底')").first
+        rec("T14 有「设为兜底」按钮", btn.count() > 0,
+            "列表项有设为兜底按钮"
             if btn.count() > 0
-            else "列表项没有切换按钮")
+            else "列表项没有设为兜底按钮")
         if btn.count() == 0:
             return
         btn.click(timeout=6000)
@@ -1865,39 +1867,41 @@ def test_multi_relay_settings(page, be: Backend):
             if after.get("base_url") == SECOND_URL:
                 break
             time.sleep(0.4)
-        rec("T14 界面切换后当前项确实变了",
+        rec("T14 设为兜底后配置项确实换了",
             after.get("base_url") == SECOND_URL,
-            f"切换后 base_url={after.get('base_url')!r}")
+            f"设为兜底后 base_url={after.get('base_url')!r}")
 
-        # 界面上的「当前使用中」标记必须跟着走
+        # 界面上的「兜底」标记必须跟着走
+        # ★ 2026-11-12：原来是「当前使用中」，暗示排他；
+        #   现在是「兜底」，如实表示「Key 都对不上时发给它」。
         try:
             page.wait_for_timeout(1500)
             body2 = page.inner_text("body")
-            rec("T14 界面标出新的当前使用项",
-                "当前使用中" in body2 and SECOND_URL.replace(
+            rec("T14 界面标出新的兜底项",
+                "兜底" in body2 and SECOND_URL.replace(
                     "https://", "") in body2,
-                "界面已标出第二家为当前使用中"
-                if "当前使用中" in body2 else
-                "界面未见「当前使用中」标记")
+                "界面已标出第二家为兜底"
+                if "兜底" in body2 else
+                "界面未见「兜底」标记")
         except Exception as e:
-            rec("T14 界面标出新的当前使用项", False, f"读取界面失败: {e}")
+            rec("T14 界面标出新的兜底项", False, f"读取界面失败: {e}")
 
-        # ── 切换后配置不丢 ──
+        # ── 设为兜底后配置不丢 ──
         lst3 = be._get("/api/relays/configured", timeout=8) or {}
         items3 = lst3.get("relays") or []
         urls = [r.get("base_url") for r in items3]
-        rec("T14 切换后两家的地址都还在",
+        rec("T14 设为兜底后两家的地址都还在",
             SECOND_URL in urls and orig_url in urls,
             f"列表地址={urls!r}")
-        rec("T14 切换后列表没有重复项", len(items3) == len(set(urls)),
+        rec("T14 设为兜底后列表没有重复项", len(items3) == len(set(urls)),
             f"列表地址={urls!r}")
-        rec("T14 切换后启用项唯一",
+        rec("T14 兜底项唯一",
             sum(1 for r in items3 if r.get("active")) == 1,
             f"active 标记={[r.get('active') for r in items3]}")
     finally:
-        # ── 收尾：切回原项、移除测试这家 ──
-        # ★ 顺序不能反：先切回原配置再移除 ——
-        #   反过来会撞上「不能移除当前启用项」而失败，
+        # ── 收尾：把原配置设回兜底、移除测试这家 ──
+        # ★ 顺序不能反：先设回兜底再移除 ——
+        #   反过来会撞上「兜底项不能移除」而失败，
         #   测试留下的占位中转站就会永久留在用户配置里。
         try:
             lst = be._get("/api/relays/configured", timeout=8) or {}

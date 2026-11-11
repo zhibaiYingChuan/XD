@@ -384,7 +384,9 @@ export default function Settings() {
     }
   };
 
-  // ★ v0.1.0：切换启用中的中转站。
+  // ★ v0.1.0：把某一家设为「兜底」。
+  //   ★ 2026-11-12：语义澄清。它改的是「请求里的 Key 谁都对不上时发给谁」，
+  //   不是「从今往后只用这一家」—— 两家始终同时生效。
   //   声明刻意放在 load 之后 —— 它要 await load()，
   //   放在前面会撞 TS2448（used before declaration）。
   const switchTo = useCallback(
@@ -407,11 +409,13 @@ export default function Settings() {
           setKeyDraft('');
           setRelayTest(null);
         }
-        if (mountedRef.current) toast.success(`${t('已切换到')}「${name}」`);
+        if (mountedRef.current) {
+          toast.success(`${t('已把')}「${name}」${t('设为兜底')}`);
+        }
       } catch (e) {
         if (mountedRef.current) {
           toast.error(
-            `${t('切换失败：')}${e instanceof Error ? e.message : String(e)}`,
+            `${t('设置兜底失败：')}${e instanceof Error ? e.message : String(e)}`,
           );
         }
       } finally {
@@ -1381,18 +1385,51 @@ export default function Settings() {
               <div className="relay-cards">
                 {configured.map((r) => (
                   <div key={r.id} className={`relay-card ${r.active ? 'active' : ''}`}>
-                    <span className={`relay-card-icon ${r.active ? 'active' : ''}`}>
-                      {r.active ? (
+                    {/* ★★ 2026-11-12（用户反馈）：图标一律绿色对勾。
+                        此前只有「当前使用中」那家是绿色对勾 + 绿边框，
+                        另一家是灰色 Info 图标 + 灰边框 ——
+                        用户的原话是「感觉我配置完两个中转站，一个可用、一个不可用」。
+                        绿色在这里必须表示「可用」，而两家都可用，
+                        所以不能只给一家上色。
+
+                        ★ 审查补：颜色一致还不够，**判据也必须真实**。
+                          若某家 Key 为空或被停用，它其实不可用，
+                          这时不能再点亮绿色 —— 那是谎报。
+                          见下方 relay-status 的 usable 分支。 */}
+                    <span className={`relay-card-icon ${r.usable ? '' : 'unusable'}`}>
+                      {r.usable ? (
                         <CheckCircle2 size={16} strokeWidth={1.8} />
                       ) : (
-                        <Info size={16} strokeWidth={1.5} />
+                        <AlertTriangle size={16} strokeWidth={1.6} />
                       )}
                     </span>
 
                     <div className="relay-card-main">
                       <div className="relay-card-head">
                         <span className="relay-card-name">{r.name}</span>
-                        {r.active && <span className="relay-badge">{t('当前使用中')}</span>}
+                        {/* 「可用」= 这家的地址与 Key 都已配好、未被停用，
+                            随时能接请求。与「当前使用中」无关 —— 后者只是默认去向。 */}
+                        {r.usable ? (
+                          <span className="relay-status ok">
+                            <span className="relay-status-dot" />
+                            {t('可用')}
+                          </span>
+                        ) : (
+                          <span className="relay-status bad">
+                            <span className="relay-status-dot" />
+                            {t('不可用')}
+                          </span>
+                        )}
+                        {/* ★★ 2026-11-12（用户指出语义错误）：
+                            原来写「当前使用中」，读起来像「只有这家在用」。
+                            而两家一直在同时用 —— 这个徽标只表示
+                            「Key 都对不上时兜底发给它」。
+                            改成「兜底」二字，与按钮一致，不再暗示排他。 */}
+                        {r.active && (
+                          <span className="relay-badge" title={t('请求里的 Key 谁都对不上时，兜底发给这家')}>
+                            {t('兜底')}
+                          </span>
+                        )}
                       </div>
                       <div className="relay-card-url mono">
                         {r.normalized_base || r.base_url}
@@ -1448,9 +1485,16 @@ export default function Settings() {
                                 >
                                   {t('复制地址')}
                                 </button>
-                                {!r.listening && (
+                                {/* 端口自己的状态。「没起来」只影响这个地址，
+                                    这家仍可从主端口进入 —— 文案必须说清，
+                                    否则用户会以为整家都废了。 */}
+                                {r.listening ? (
+                                  <span className="relay-port-ok">
+                                    {t('端口正常')}
+                                  </span>
+                                ) : (
                                   <span className="relay-port-warn">
-                                    {t('这个端口没起来，换一个再试')}
+                                    {t('这个端口没起来（主端口仍可用），换一个再试')}
                                   </span>
                                 )}
                               </>
@@ -1474,13 +1518,19 @@ export default function Settings() {
                     </div>
 
                     {!r.active && (
+                      /* ★★ 2026-11-12（用户指出语义错误）：
+                         原来这里写「切到这家」，暗示「只有一家在用，要手动换」。
+                         而真实机制是：请求带谁的 Key 就发给谁 —— 两家一直在同时用。
+                         这个按钮只改「Key 都对不上时兜底发给谁」，
+                         与「哪几家在生效」无关。按钮必须如实描述这一点。 */
                       <div className="relay-card-actions">
                         <button
-                          className="btn primary sm"
+                          className="btn ghost sm"
                           disabled={switching}
                           onClick={() => switchTo(r.id, r.name)}
+                          title={t('只在请求里的 Key 谁都对不上时才用它；两家仍可同时使用')}
                         >
-                          {t('切到这家')}
+                          {t('设为兜底')}
                         </button>
                         <button
                           className="btn ghost sm"
@@ -1496,13 +1546,12 @@ export default function Settings() {
                 ))}
               </div>
               <div className="field-hint">
-                {t('请求会按你填的 API Key 自动识别该发给哪家；')}
-                {t('Key 对不上时用「当前使用中」这家。')}
-                {t('切换只改默认目标，不会改动任何一家的配置。')}
+                {t('这些中转站可以同时使用，不需要切换：')}
+                {t('请求带谁的 API Key，就发给谁。')}
                 <br />
-                {t('主端口的地址一直可用（按 Key 分流到各家）；')}
-                {t('每家还可以各配一个「专属端口」，那个地址固定发给这一家、不看 Key。')}
-                {t('所以同一个 AI 工具里既能用两家（两家各填一个专属端口），也能只用一家 —— 由你配几个端口决定。')}
+                {t('主端口一个地址服务全部各家（按 Key 分流）；每家还可各配一个专属端口，那个地址固定发给这一家、不看 Key。')}
+                <br />
+                {t('「兜底」只在请求里的 Key 谁的都对不上时才生效 —— 那是异常情况，平时不参与分流。')}
               </div>
             </>
           )}
@@ -1566,7 +1615,7 @@ export default function Settings() {
                   </button>
                 </div>
                 <div className="field-hint">
-                  {t('添加只是存起来备着，')}<b>{t('不会')}</b>{t('切换当前使用中的那家。')}
+                  {t('添加只是存起来备着，')}<b>{t('不会')}</b>{t('改动兜底设置，也不会影响已经在用的那些。')}
                   <br />
                   {t('想让它有个自己的入口地址，就给「专属端口」填一个没被占用的数字（如 18801），')}
                   {t('然后把')} <span className="mono">http://127.0.0.1:18801/v1</span>{' '}

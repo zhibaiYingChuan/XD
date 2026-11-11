@@ -389,3 +389,13 @@ __pycache__/
 #   空 Key 掩码语义、端口失败归属、未配置 relay 的业务端点、更新检查超时、
 #   CI 是否真的构建了前端。这些都是「不报错的静默错误」，必须随码走。
 !tests/test_p1_round3_fixes.py
+
+# ★ 2026-11-12：约束违背的能力族覆盖 + 送检口径回归。
+#   它锁的是三件「不报错但会静默退化」的事：
+#     ① 基准脚本的送检口径必须与生产一致（曾传整段 JSON，
+#        导致 README 上的 20% 既低估能力又污染误报分母）；
+#     ② 六类约束违背模板与能力变体（Path.unlink / fs.unlinkSync /
+#        Remove-Item / require('child_process').execSync）必须全部命中；
+#     ③ 能力族扩展不得误伤 AI 编程助手的日常输出。
+#   判据里只有「危险函数名」，不含任何真实攻击载荷，可以随码走。
+!tests/test_constraint_capability.py
