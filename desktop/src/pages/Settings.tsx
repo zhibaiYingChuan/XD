@@ -66,17 +66,17 @@ const SECURITY_LEVELS: Array<{
   {
     value: 'lenient',
     title: '宽松',
-    desc: '硬凭证（API 密钥、身份证、银行卡）仍直接拦截；手机号、邮箱原样放行。中转站返回的高危内容只标记不拦。',
+    desc: 'API 密钥、身份证、银行卡照样直接拦下；手机号、邮箱原样发出去。中转站返回的危险内容只提示、不拦。',
   },
   {
     value: 'balanced',
     title: '均衡（推荐）',
-    desc: '硬凭证直接拦截；手机号、邮箱自动打码。中转站返回的高危内容直接拦截，中危只标记。',
+    desc: 'API 密钥、身份证、银行卡直接拦下；手机号、邮箱自动打码。中转站返回的危险内容直接拦下，可疑的只提示。',
   },
   {
     value: 'strict',
     title: '严格',
-    desc: '手机号、邮箱也一并拦截；中转站返回的中危内容同样拦截。误报会明显增多。',
+    desc: '手机号、邮箱也一并拦下；中转站返回的可疑内容同样拦。误报会明显变多。',
   },
 ];
 
@@ -359,8 +359,8 @@ export default function Settings() {
       // ★ 原生 confirm 在 Tauri 2.7 上不可用（见 lib/confirm.ts），
       //   统一走应用内确认框；必须 await，否则还没等用户答复就重启了。
       !(await confirmDialog(
-        `${t('确定重启引擎吗？')}\n\n`
-          + t('重启期间正在进行的对话会短暂中断，请稍候片刻。'),
+        `${t('确定重启一次吗？')}\n\n`
+          + t('重启时正在进行的对话会短暂中断，几秒后就好。'),
       ))
     ) {
       return;
@@ -370,14 +370,14 @@ export default function Settings() {
       await api.restartEngine();
       // 重启完成后立刻刷新：状态与版本都可能已变。
       await loadEngine(true);
-      if (mountedRef.current) toast.success(t('引擎已重启'));
+      if (mountedRef.current) toast.success(t('已重启'));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // ★ 失败后同样刷新一次：Rust 侧会把失败原因写进 startup_error，
       //   刷新后区块里能长期看到它，而不是只剩一句转瞬即逝的 toast。
       await loadEngine(true);
       if (mountedRef.current) {
-        toast.error(`${t('重启失败：')}${msg}${t('。可尝试重新打开勘合。')}`);
+        toast.error(`${t('重启失败：')}${msg}${t('。可以试着重新打开勘合。')}`);
       }
     } finally {
       if (mountedRef.current) setRestarting(false);
@@ -658,7 +658,7 @@ export default function Settings() {
       toast.info(
         `${t('当前仍运行在')} ${oldPort}${t('：请右键托盘图标选「退出勘合」再重新打开，')}`
         + t('新端口才会生效（点窗口右上角 × 只是隐藏到托盘，不算退出；')
-        + t('「重启引擎」也不会改变端口）'),
+        + t('点「重启」也不会改变端口）'),
       );
     }
   };
@@ -676,7 +676,7 @@ export default function Settings() {
       // ★ 原生 confirm 不可用，走应用内确认框。
       const ok = await confirmDialog(
         `${t('将只保留最近')} ${days} ${t('天的日志，更早的记录会立即删除且不可恢复。')}\n\n`
-        + t('脱敏明细会随日志一起删除。确定继续吗？'),
+        + t('打码明细会随日志一起删除。确定继续吗？'),
       );
       if (!ok) return;
     }
@@ -901,7 +901,7 @@ export default function Settings() {
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-      toast.success(t('代理地址已复制'));
+      toast.success(t('本机地址已复制'));
     } else {
       toast.error(t('复制失败'));
     }
@@ -911,7 +911,7 @@ export default function Settings() {
   const toggleCategory = async (cat: string) => {
     if (!config) return;
     const next = { ...config.guard.enabled_categories, [cat]: !config.guard.enabled_categories[cat] };
-    await save({ guard: { ...config.guard, enabled_categories: next } }, t('脱敏设置已更新'));
+    await save({ guard: { ...config.guard, enabled_categories: next } }, t('打码设置已更新'));
   };
 
   // ── 自定义关键词 ──
@@ -1032,9 +1032,9 @@ export default function Settings() {
         <div className="alert danger" style={{ marginBottom: 16 }}>
           <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
           <div style={{ minWidth: 0, flex: 1 }}>
-            <b>{t('有专属端口没有起来')}</b>
+            <b>{t('有个专属入口没起来')}</b>
             <div className="mt-8">
-              {t('配置已保存，但下面这些入口现在连不上：')}
+              {t('设置已经保存，但下面这些地址现在连不上：')}
             </div>
             <div className="mt-8 mono" style={{ fontSize: 12 }}>
               {Object.entries(portErrors).map(([port, why]) => (
@@ -1042,7 +1042,7 @@ export default function Settings() {
               ))}
             </div>
             <div className="mt-8 faint" style={{ fontSize: 12 }}>
-              {t('到下面「多中转站」给这家换一个端口即可，改完立即生效（不用重启应用）。')}
+              {t('到下面「多中转站」给这家换一个端口就行，改完马上生效（不用重启应用）。')}
             </div>
             <button
               className="btn ghost sm mt-8"
@@ -1062,7 +1062,7 @@ export default function Settings() {
         {[
           ['sec-guard', '防护开关'],
           ['sec-level', '安全级别'],
-          ['sec-proxy', '代理配置'],
+          ['sec-proxy', '中转站与地址'],
           ['sec-redact', '敏感信息'],
           ['sec-engine', '运行状态'],
           ['sec-update', '软件更新'],
@@ -1088,9 +1088,9 @@ export default function Settings() {
 
         <div className="switch-row">
           <div>
-            <div className="switch-label">{t('响应验证')}</div>
+            <div className="switch-label">{t('检查中转站返回的内容')}</div>
             <div className="switch-desc">
-              {t('检查中转站返回的内容是否被篡改（恶意工具调用、隐藏指令等）')}
+              {t('看它有没有偷偷改过回答（比如塞进危险的操作、藏起你看不见的指令）')}
             </div>
           </div>
           <label className="switch">
@@ -1098,7 +1098,7 @@ export default function Settings() {
               type="checkbox"
               checked={config.guard.enable_response_verify}
               disabled={saving}
-              onChange={() => toggleGuard('enable_response_verify', t('响应验证'))}
+              onChange={() => toggleGuard('enable_response_verify', t('检查中转站返回的内容'))}
             />
             <span className="switch-slider" />
           </label>
@@ -1106,9 +1106,9 @@ export default function Settings() {
 
         <div className="switch-row">
           <div>
-            <div className="switch-label">{t('请求脱敏')}</div>
+            <div className="switch-label">{t('发送前打码')}</div>
             <div className="switch-desc">
-              {t('发送前自动遮住 API 密钥、手机号等，回答回来后自动还原成原文')}
+              {t('发出去之前自动遮住 API 密钥、手机号等，回答回来后自动还原成原文')}
             </div>
           </div>
           <label className="switch">
@@ -1116,7 +1116,7 @@ export default function Settings() {
               type="checkbox"
               checked={config.guard.enable_request_sanitize}
               disabled={saving}
-              onChange={() => toggleGuard('enable_request_sanitize', t('请求脱敏'))}
+              onChange={() => toggleGuard('enable_request_sanitize', t('发送前打码'))}
             />
             <span className="switch-slider" />
           </label>
@@ -1124,15 +1124,15 @@ export default function Settings() {
 
         <div className="switch-row">
           <div>
-            <div className="switch-label">{t('中转站评估')}</div>
-            <div className="switch-desc">{t('评估中转站可信度，看它是否保留你的对话、是否在已知的恶意名单里')}</div>
+            <div className="switch-label">{t('中转站可信度')}</div>
+            <div className="switch-desc">{t('看这家中转站是否值得信任：它会不会留下你的对话、在不在已知的坏名单里')}</div>
           </div>
           <label className="switch">
             <input
               type="checkbox"
               checked={config.guard.enable_reputation}
               disabled={saving}
-              onChange={() => toggleGuard('enable_reputation', t('中转站评估'))}
+              onChange={() => toggleGuard('enable_reputation', t('中转站可信度'))}
             />
             <span className="switch-slider" />
           </label>
@@ -1164,9 +1164,9 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* ═══ C. 代理配置 ═══ */}
+      {/* ═══ C. 中转站与地址 ═══ */}
       <div className="card" id="sec-proxy">
-        <div className="card-title">{t('代理配置')}</div>
+        <div className="card-title">{t('中转站与地址')}</div>
 
         <div className="field">
           <label className="field-label" htmlFor="relay-name">
@@ -1637,7 +1637,7 @@ export default function Settings() {
 
         <div className="field">
           <label className="field-label" htmlFor="proxy-port">
-            {t('本地代理端口')}
+            {t('本机端口')}
           </label>
           <div className="flex items-center gap-8">
             <input
@@ -1662,9 +1662,9 @@ export default function Settings() {
           </div>
           <div className="field-hint" style={portError ? { color: 'var(--xd-danger)' } : undefined}>
             {portError ??
-              `${t('勘合当前运行在')} ${currentProxyPort()}${t('。端口被占用时可改成 1024–65535 的其他端口。')}`
-              + t('端口在应用启动时锁定：要右键托盘图标选「退出勘合」再重新打开 ——')
-              + t('点窗口右上角 × 只是隐藏到托盘，不算退出；「重启引擎」也不会改变它。')}
+              `${t('勘合现在用的是')} ${currentProxyPort()}${t('。这个端口被别的软件占了，可以换成 1024–65535 之间的任意一个。')}`
+              + t('端口只在应用启动时确定：改完要右键托盘图标选「退出勘合」再重新打开 ——')
+              + t('点窗口右上角 × 只是隐藏到托盘，不算退出；点「重启」也不会改变它。')}
           </div>
         </div>
 
@@ -1689,9 +1689,9 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* ═══ D. 敏感信息脱敏 ═══ */}
+      {/* ═══ D. 敏感信息打码 ═══ */}
       <div className="card" id="sec-redact">
-        <div className="card-title">{t('敏感信息脱敏')}</div>
+        <div className="card-title">{t('敏感信息打码')}</div>
         <div className="check-grid mb-16">
           {CATEGORY_ORDER.map((cat) => (
             <label key={cat} className="check-row">
@@ -1789,12 +1789,12 @@ export default function Settings() {
           // 浏览器预览模式没有本地引擎进程，命令无从执行：
           // 只给一句说明，不渲染状态与重启按钮，避免出现按不动的死控件。
           <div className="field-hint" style={{ marginTop: 0 }}>
-            {t('运行状态仅在桌面版可查看 —— 浏览器预览模式没有本地引擎进程。')}
+            {t('运行状态只在桌面版里能看 —— 浏览器预览模式没有本机服务在跑。')}
           </div>
         ) : (
           <>
             <div className="detail-row">
-              <div className="detail-key">{t('引擎状态')}</div>
+              <div className="detail-key">{t('服务状态')}</div>
               <div className="detail-val">
                 {engineView.label}
                 {engineVersion && (
@@ -1811,7 +1811,7 @@ export default function Settings() {
               <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
                 <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <b>{t('无法读取引擎状态')}</b>
+                  <b>{t('读不到运行状态')}</b>
                   <div className="mt-8">{firstLine(engineError)}</div>
                   <button
                     className="btn ghost sm mt-8"
@@ -1828,7 +1828,7 @@ export default function Settings() {
               <div className="alert danger" style={{ marginTop: 12, marginBottom: 0 }}>
                 <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <b>{t('引擎启动失败')}</b>
+                  <b>{t('服务启动失败')}</b>
                   <div className="mt-8">{firstLine(engine.startup_error)}</div>
                   {isLongError(engine.startup_error) && (
                     <details className="mt-8">
@@ -1861,10 +1861,10 @@ export default function Settings() {
                 ) : (
                   <RefreshCw size={14} strokeWidth={1.5} />
                 )}
-                {restarting ? t('重启中…') : t('重启引擎')}
+                {restarting ? t('重启中…') : t('重启一次')}
               </button>
               <span className="faint" style={{ fontSize: 12 }}>
-                {t('引擎无响应或启动失败时，可在这里重启（不会改变监听端口）')}
+                {t('服务没响应或起不来时，可以在这里重启（不会改变端口）')}
               </span>
             </div>
           </>
@@ -1975,7 +1975,7 @@ export default function Settings() {
             <option value={365}>{t('最近 365 天')}</option>
           </select>
           <div className="field-hint">
-            {t('超出保留期的日志与脱敏明细会被删除，')}<b>{t('不可恢复')}</b>。
+            {t('超出保留期的日志和打码明细会被删除，')}<b>{t('不可恢复')}</b>。
             {t('默认「永久保留」，不会主动删除任何记录。')}
           </div>
         </div>

@@ -75,12 +75,12 @@ export function EngineOffline({
     try {
       await api.restartEngine();
       setRestarted(true);
-      toast.success(t('引擎已重启，正在重新读取数据'));
+      toast.success(t('已重启，正在重新读取数据'));
       onRetried?.();
     } catch (e) {
       toast.error(
         `${t('重启失败：')}${e instanceof Error ? e.message : String(e)}。`
-        + t('可到「设置 → 运行状态」查看具体原因。'),
+        + t('可以到「设置 → 运行状态」看具体原因。'),
       );
     } finally {
       setBusy(false);
@@ -91,17 +91,17 @@ export function EngineOffline({
     <div className="alert danger">
       <AlertTriangle size={17} strokeWidth={1.5} className="alert-icon" />
       <div style={{ minWidth: 0, flex: 1 }}>
-        <b>{t('本地代理没有在运行')}</b>
+        <b>{t('勘合服务没有在运行')}</b>
         <div className="mt-8">
-          {t('勘合的检测与转发都在本机引擎里完成。引擎没起来时，')}
-          {t('界面读不到数据，AI 工具也不能通过勘合访问中转站。')}
+          {t('勘合的检查与转发都在本机这个服务里完成。它没起来时，')}
+          {t('界面读不到数据，AI 工具也没法通过勘合访问中转站。')}
         </div>
 
         <div className="field-label mt-16">{t('按顺序排查这三件事')}</div>
         <ol style={{ margin: '4px 0 0 18px', padding: 0, lineHeight: 1.9 }}>
           <li>
-            <b>{t('先试一次重启')}</b>{t('：点下方「重启引擎」。若仍然起不来，')}
-            {t('具体原因（端口被占用、配置损坏等）会写在')}
+            <b>{t('先试一次重启')}</b>{t('：点下方按钮重启一次。还是起不来，')}
+            {t('具体原因（端口被占用、配置文件损坏等）会写在')}
             <Link to="/settings#sec-engine"> {t('「设置 → 运行状态」')}</Link>。
           </li>
           <li>
@@ -110,8 +110,8 @@ export function EngineOffline({
             {t('换一个再试。专属端口改完')}<b>{t('立即生效，不用重启应用')}</b>。
           </li>
           <li>
-            <b>{t('改过主端口？需要重启应用')}</b>{t('：「设置 → 代理配置」里的主端口')}
-            {t('是引擎启动时绑定的，改完必须右键托盘「退出勘合」再打开')}
+            <b>{t('改过主端口？要重新打开应用')}</b>{t('：「设置 → 中转站与地址」里的主端口')}
+            {t('是应用启动时占用的，改完必须右键托盘「退出勘合」再打开')}
             {t('（只点窗口上的 × 不算退出）。')}
           </li>
         </ol>
@@ -133,7 +133,7 @@ export function EngineOffline({
               ) : (
                 <RefreshCw size={15} strokeWidth={1.5} />
               )}
-              {busy ? t('正在重启引擎…') : restarted ? t('再次重启引擎') : t('重启引擎')}
+              {busy ? t('正在重启…') : restarted ? t('再次重启') : t('重启一次')}
             </button>
           )}
           <Link className="btn secondary" to="/settings#sec-engine">

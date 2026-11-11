@@ -38,7 +38,7 @@ export default class ErrorBoundary extends Component<Props, State> {
         <div className="error-title">{t('应用遇到问题')}</div>
         <div className="muted" style={{ maxWidth: 420 }}>
           {t('勘合个人版遇到了意外错误。你可以尝试重新加载，如果问题持续存在，')}
-          {t('请检查本地代理（127.0.0.1:')}{currentProxyPort()}{t('）是否正常运行。')}
+          {t('请检查勘合服务（127.0.0.1:')}{currentProxyPort()}{t('）是否正常运行。')}
         </div>
         <details className="error-detail">
           <summary className="faint" style={{ cursor: 'pointer', fontSize: 12 }}>

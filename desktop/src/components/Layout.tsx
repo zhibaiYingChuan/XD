@@ -44,12 +44,12 @@ function deriveTrayState(
   readOnly = false,
 ): { state: TrayState; detail: string } {
   if (!reachable || s === 'paused') {
-    return { state: 'paused', detail: s === 'paused' ? '防护已暂停' : '本地代理未运行' };
+    return { state: 'paused', detail: s === 'paused' ? '防护已暂停' : '勘合服务没有运行' };
   }
   // ★ 学习中 = 还没产生任何判定，托盘不能显示绿色。
   //   绿色在托盘里只有一个含义：正在防护。基线未建立时显示绿色，
   //   等于告诉用户「已经安全了」，而实际上一次检测都还没发生。
-  if (!today) return { state: 'paused', detail: t('正在建立基线') };
+  if (!today) return { state: 'paused', detail: t('正在了解你平时的使用情况') };
 
   if (today.danger_count > 0) {
     return { state: 'danger', detail: `${t('今日已阻断')} ${today.danger_count} ${t('次')}` };
@@ -72,7 +72,7 @@ function deriveTrayState(
     //   这是安全产品最不能犯的错：对用户谎报状态。
     return {
       state: 'paused',
-      detail: `${t('未激活，今日仅转发')} ${today.total_calls} ${t('次（未经检测）')}`,
+      detail: `${t('未激活，今日仅转发')} ${today.total_calls} ${t('次（没检查过）')}`,
     };
   }
   return { state: 'safe', detail: `${t('今日已检查')} ${today.total_calls} ${t('次')}` };
@@ -85,10 +85,10 @@ const MISSING_LAYER_LABELS: Record<string, string> = {
 };
 
 function describeMissingLayers(layers?: string[]): string {
-  if (!layers || layers.length === 0) return t('检测规则回退到内置最小集');
+  if (!layers || layers.length === 0) return t('部分检查没能加载，只用了最基础的规则');
   return layers
     .map((l) => t(MISSING_LAYER_LABELS[l] ?? l))
-    .join(t('、')) + t(' 未启用');
+    .join(t('、')) + t(' 没有启用');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -198,7 +198,7 @@ function StatusBar() {
       return (
         <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot learning" />
-          <span className="status-label">{t('正在启动本地代理…')}</span>
+          <span className="status-label">{t('正在启动勘合服务…')}</span>
           <span className="status-meta">{t('首次启动需要几秒')}</span>
         </div>
       );
@@ -207,11 +207,11 @@ function StatusBar() {
       <div className="status-bar" role="status" aria-live="polite">
         <span className="status-dot paused" />
         <span className="status-label" style={{ color: 'var(--xd-danger)' }}>
-          {t('本地代理未运行')}
+          {t('勘合服务没有运行')}
         </span>
         <span className="status-meta">
           {t('端口')} 127.0.0.1:{currentProxyPort()} {t('没有响应')} ·{' '}
-          {t('可重启引擎，或看「设置 → 运行状态」里的原因')}
+          {t('可以点右边重启一次，或去「设置 → 运行状态」看原因')}
         </span>
         {isTauri() && (
           <button
@@ -219,7 +219,7 @@ function StatusBar() {
             onClick={() => void handleRestartEngine()}
             disabled={restarting}
           >
-            {restarting ? t('正在重启…') : t('重启引擎')}
+            {restarting ? t('正在重启…') : t('重启一次')}
           </button>
         )}
         <Link className="btn ghost sm" to="/settings#sec-engine">
@@ -253,7 +253,7 @@ function StatusBar() {
           不说就是谎报「正在保护你」。 */}
       {state?.read_only && (
         <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
-          {t('未激活，当前为只读模式（不执行拦截）')}
+          {t('未激活：现在只转发，不检查也不拦截')}
         </span>
       )}
 
@@ -263,7 +263,7 @@ function StatusBar() {
           样式复用上面那条只读提示（同一档：还没开始正确保护，不是故障）。 */}
       {state?.degraded && (
         <span className="status-stat" style={{ color: 'var(--xd-suspect)' }}>
-          {t('降级运行：')}{describeMissingLayers(state.guardrail_missing_layers)}
+          {t('不是全部检查都在正常工作：')}{describeMissingLayers(state.guardrail_missing_layers)}
         </span>
       )}
 
@@ -289,14 +289,14 @@ function StatusBar() {
             to="/logs?days=1&marked=exclude"
             className="status-stat"
             style={{ textDecoration: 'none', color: 'inherit' }}
-            title={t('查看今天参与统计的记录（不含已标记误报与转发中断）')}
+            title={t('查看今天算进统计的记录（已标记误报的、转发中断的都不算）')}
           >
             {/* ★★ P1-2：只读态下这个数字是「已转发」，不是「已检查」。
                 两句话同时出现在屏幕上（「不做防护」+「已检查 N 次」）
                 等于账本说谎，用户只会得出一个错误结论。 */}
             {state?.read_only ? (
               <>
-                {t('今日已转发')} <b className="mono">{today.total_calls}</b> {t('次（未经检测）')}
+                {t('今日已转发')} <b className="mono">{today.total_calls}</b> {t('次（没检查过）')}
               </>
             ) : (
               <>

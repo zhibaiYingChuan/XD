@@ -1228,13 +1228,13 @@ export const LOG_TYPE_LABELS: Record<LogType, string> = {
 
 export const CATEGORY_LABELS: Record<string, string> = {
   api_key: 'API 密钥',
-  aws_key: 'AWS 凭证',
-  private_key: '私钥',
-  jwt: 'JWT 令牌',
-  idcard: '身份证',
-  bankcard: '银行卡',
+  aws_key: 'AWS 云账号密钥',
+  private_key: '私钥文件',
+  jwt: '登录令牌（JWT）',
+  idcard: '身份证号',
+  bankcard: '银行卡号',
   phone: '手机号',
-  email: '邮箱',
+  email: '邮箱地址',
   custom: '自定义关键词',
 };
 
@@ -1293,7 +1293,7 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
     //   后者只提示一次，并邀请用户裁决 —— 这正是替代「后缀白名单枚举」
     //   的那套机制（别名台账）的用户侧入口。
     title: '返回的模型名和你请求的不一样',
-    meaning: '光看名字判断不了：可能只是这家中转站的命名习惯（构建号、独享实例等），也可能真的换了模型。勘合已记下这次观察；你可以在下方判定一次，同类返回以后就不再打扰你。',
+    meaning: '光看名字判断不了：可能只是这家中转站的叫法不同（版本号、独享机器等），也可能真的换了模型。勘合已经记下这次观察；你可以在下方确认一次，以后同样的返回就不再问你。',
   },
   tool_call_dangerous: {
     title: 'AI 准备做一个有风险的操作',
@@ -1342,8 +1342,8 @@ export const FINDING_LABELS: Record<string, { title: string; meaning: string }> 
   credential_from_response: {
     // ★ 2026-10-23：这一类是为「留证据」而存在的，不是拦截理由。
     //   模型可能在示例代码里自己编一枚 JWT，所以措辞必须留余地。
-    title: '中转站返回了一枚你没发过的凭证',
-    meaning: '这枚令牌不在你这次发出去的内容里。它可能是模型自己编的示例，也可能来自中转站返回的内容 —— 先核对，再决定要不要找对方说明。',
+    title: '中转站返回了一把你没发过的密钥',
+    meaning: '这枚令牌不在你这次发出去的内容里。它可能是模型自己编的示例，也可能来自中转站返回的内容 —— 先核对一下，再决定要不要找对方说明。',
   },
 };
 
@@ -1438,10 +1438,10 @@ export function explainFinding(f: {
         };
       }
 
-      // ② 凭据类文件
+      // ② 登录凭证类文件
       if (/私钥|凭证|账户|配置|登录|授权/.test(label)) {
         return {
-          title: `${t('AI 想碰你的登录凭据')}（${hit}）`,
+          title: `${t('AI 想碰你用来登录账号的文件')}（${hit}）`,
           meaning: `${t('这类文件里是能直接登录你账号的东西')}（${label}）。${t('一旦被带出去，对方可以冒充你操作。')}`,
           action: t('不是你主动要求的话，建议这次拒绝执行，并检查该中转站。'),
           hit,
@@ -1610,22 +1610,22 @@ export function humanizeLoadError(raw: string | null | undefined): {
   detail: string;
 } {
   const text = (raw ?? '').trim();
-  const howTo = t('点「重试」；若持续失败请重启勘合。');
+  const howTo = t('点「重试」；一直不行就重新打开勘合。');
   const status = /HTTP (\d{3})/.exec(text);
   if (status) {
     return {
-      message: `${t('无法连接到勘合本地服务（错误')} ${status[1]}）。${howTo}`,
+      message: `${t('连不上勘合服务（错误码')} ${status[1]}）。${howTo}`,
       detail: text,
     };
   }
   // 超时（ApiTimeoutError 的文案含「超时」）与网络不可达分开说，
   // 两者的排查方向不同：前者是服务没响应，后者是根本没连上。
   if (text.includes('超时')) {
-    return { message: `${t('连接勘合本地服务超时。')}${howTo}`, detail: text };
+    return { message: `${t('勘合服务一直没有回应，等太久了。')}${howTo}`, detail: text };
   }
   return {
-    message: `${t('无法连接到勘合本地服务。')}${howTo}`,
-    detail: text || t('（无更多信息）'),
+    message: `${t('连不上勘合服务。')}${howTo}`,
+    detail: text || t('（没有更多信息）'),
   };
 }
 

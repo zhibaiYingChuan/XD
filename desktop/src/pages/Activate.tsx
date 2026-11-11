@@ -173,7 +173,7 @@ export default function Activate() {
             </span>
           </div>
           <p className="muted">
-            {t('本机代理没有运行，激活校验无法执行。')}
+            {t('勘合服务没有运行，现在查不了激活状态。')}
             <br />
             {t('这')}<strong>{t('不代表')}</strong>{t('你的激活码有问题 —— 只是现在没法判断。')}
           </p>
@@ -318,7 +318,7 @@ export default function Activate() {
           {s.remainingDays <= 7 && (
             <Notice kind={s.remainingDays <= 0 ? 'error' : 'warn'}>
               {s.remainingDays <= 0
-                ? t('激活码已过期，勘合已进入只读模式。')
+                ? t('激活码已过期，勘合现在只转发、不检查。')
                 : `${t('激活码将在')} ${s.remainingDays} ${t('天后过期。')}`}
               {' '}{t('到期后防护会停止，记得提前续期。')}
             </Notice>
@@ -395,7 +395,7 @@ export default function Activate() {
           {s.reason && (
             <Notice kind={s.verifierAvailable ? 'warn' : 'error'}>
               {s.reason}
-              {!s.verifierAvailable && t('（这是勘合组件的问题，不是你的码有问题）')}
+              {!s.verifierAvailable && t('（这是勘合自己的问题，不是你的码有问题）')}
             </Notice>
           )}
 
@@ -412,7 +412,7 @@ export default function Activate() {
 
       {!isTauri() && (
         <div className="card mt-16">
-          <Notice kind="warn">{t('当前是浏览器预览模式，激活功能仅在桌面版可用。')}</Notice>
+          <Notice kind="warn">{t('当前是浏览器预览模式，激活功能只在桌面版里能用。')}</Notice>
         </div>
       )}
     </div>

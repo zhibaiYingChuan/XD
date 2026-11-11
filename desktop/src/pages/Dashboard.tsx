@@ -274,7 +274,7 @@ export default function Dashboard() {
       // ★ 原生 window.confirm 在 Tauri 2.7 上弹不出来（见 lib/confirm.ts），
       //   统一走应用内确认框；必须 await，否则还没等用户答复就暂停了。
       const ok = await confirmDialog(
-        t('确定暂停防护吗？\n\n暂停期间新的对话不会被脱敏，也不会被拦截。'),
+        t('确定暂停防护吗？\n\n暂停期间新的对话不会被打码，也不会被拦截。'),
       );
       if (!ok) return;
     }
@@ -319,10 +319,10 @@ export default function Dashboard() {
         `${t('版本')}: ${d.version}`,
         // ★ P2-4 修复：原硬编码 127.0.0.1:18765，
         //   用户改过端口后报告会给出错误的排查指引
-        `${t('代理端口')}: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
+        `${t('本机地址')}: ${d.server?.host ?? '127.0.0.1'}:${d.server?.port ?? '-'}`,
         `${t('中转站')}: ${displayDomain(d.relay_domain) || t('(未配置)')}`,
         `${t('安全级别')}: ${d.verifier?.level ?? '-'}`,
-        `${t('企业版护栏')}: ${d.verifier?.guardrail_available ? t('已加载') : t('未加载')}`,
+        `${t('企业版增强检查')}: ${d.verifier?.guardrail_available ? t('已加载') : t('未加载')}`,
         `${t('日志总数')}: ${d.storage?.total_logs ?? 0}`,
         `${t('已知中转站')}: ${d.reputation?.total_relays ?? 0}`,
         '',
@@ -345,7 +345,7 @@ export default function Dashboard() {
     const ok = await copyToClipboard(
       `http://127.0.0.1:${currentProxyPort()}/v1`,
     );
-    if (ok) toast.success(t('代理地址已复制，粘贴到 AI 工具的 API 地址'));
+    if (ok) toast.success(t('本机地址已复制，粘到 AI 工具的「API 地址」里'));
     else toast.error(t('复制失败，请手动选中地址'));
   };
 
@@ -490,8 +490,8 @@ export default function Dashboard() {
         },
         {
           key: 'watermark',
-          label: t('检测到数据保留迹象'),
-          detail: `${t('响应中出现中转站自述留存')} · ${SCORE_WEIGHTS.watermark} ${t('分')}`,
+          label: t('中转站暗示会留存你的对话'),
+          detail: `${t('它自己的说明里提到了保存对话')} · ${SCORE_WEIGHTS.watermark} ${t('分')}`,
           points: primaryRelay.watermark_detected ? SCORE_WEIGHTS.watermark : 0,
           hit: primaryRelay.watermark_detected,
         },
@@ -506,7 +506,7 @@ export default function Dashboard() {
         },
         {
           key: 'behavior',
-          label: t('中转站侧问题响应占比'),
+          label: t('问题回答占的比例'),
           // ★ 说人话：把「危险 N 次（权重 2）+ 可疑 M 次」这种带权重的算式
           //   翻译成用户能对上号的叙述。relayRisk 即 danger+suspect 的实际命中条数；
           //   扣分用 Number(toFixed(1)) 抹掉无意义的尾随 .0（如 4.0 → 4）。
@@ -539,7 +539,7 @@ export default function Dashboard() {
             <b>{t('未激活：当前只转发，不做防护')}</b>
             <div className="mt-8">
               {t('勘合现在只会把你的请求原样转给中转站 ——')}
-              <b>{t('不会脱敏、也不会拦截')}</b>
+              <b>{t('不会打码、也不会拦截')}</b>
               {t('。激活后才会开始检查。')}
             </div>
             <Link to="/activate" className="btn sm mt-8">
@@ -754,7 +754,7 @@ export default function Dashboard() {
                   {primaryRelay.watermark_detected && (
                     <>
                       {' · '}
-                      <span style={{ color: 'var(--xd-suspect)' }}>{t('检测到数据保留迹象')}</span>
+                      <span style={{ color: 'var(--xd-suspect)' }}>{t('中转站暗示会留存你的对话')}</span>
                     </>
                   )}
                 </div>
@@ -792,15 +792,14 @@ export default function Dashboard() {
               <div className="rep-detail mt-12">
                 {relayRisk === 0 && repDeductions.length === 0 ? (
                   <div className="faint" style={{ fontSize: 12, lineHeight: 1.7 }}>
-                    本次使用未触发任何扣分项 —
-                    没有中转站侧的危险响应或提示、没有检测到数据保留迹象，域名也不在已知风险名单里。
+                    本次没有触发任何扣分 —
+                    它没有返回过危险或可疑的内容，它的说明里也没提到保存对话，域名也不在已知风险名单里。
                     {selfRisk > 0 && (
                       <>
                         <br />
-                        另有 {selfRisk} 次拦截来自你自己的操作（如在对话里粘贴了密钥），
-                        按设计不计入中转站信誉 ——
-                        请求在发往中转站之前就被拦下了，中转站从未收到过这些内容。
-                      </>
+                        另有 {selfRisk} 次拦截来自你自己的操作（比如在对话里贴了密钥），
+                        这些不算它的问题 ——
+                        请求在发到中转站之前就被拦下了，它根本没收到过。 </>
                     )}
                   </div>
                 ) : (
@@ -841,9 +840,9 @@ export default function Dashboard() {
                       <span className="mono">
                         {primaryRelay.latency_samples > 0
                           ? `${Math.round(primaryRelay.avg_latency_ms)} ms`
-                          : t('暂无样本')}
+                          : t('还没有数据')}
                       </span>
-                      （{primaryRelay.latency_samples} {t('次采样')}）
+                      （根据 {primaryRelay.latency_samples} {t('次回答算出')}）
                     </div>
                   </>
                 )}
@@ -871,7 +870,7 @@ export default function Dashboard() {
                   {displayDomain(currentDomain)}
                 </div>
                 <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>
-                  {t('已配置 · 尚未产生调用记录')}
+                  {t('已配置 · 还没产生调用记录')}
                 </div>
                 {/* ★ 新用户最容易卡在这里：勘合配好了，但 AI 工具还在直连中转站。
                     只写「用 AI 工具发起一次对话后…」等于让他自己去猜该改哪里。
@@ -889,7 +888,7 @@ export default function Dashboard() {
                   </button>
                 </div>
                 <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
-                  {t('改完发起一次对话，这里就会显示它的信誉评分与调用统计。')}
+                  {t('改完发一次对话，这里就会显示它的信誉分和调用次数。')}
                 </div>
               </div>
             ) : (
@@ -944,8 +943,8 @@ export default function Dashboard() {
           <div className="alert suspect mt-16" style={{ marginBottom: 0 }}>
             <PauseCircle size={17} strokeWidth={1.5} className="alert-icon" />
             <div>
-              {t('防护已暂停，你的 AI 对话当前')}<b>{t('不受任何检测保护')}</b>
-              {t('。中转站可以自由篡改返回内容、截留你的数据。')}
+              {t('防护已暂停，你的 AI 对话目前')}<b>{t('不受任何检查保护')}</b>
+              {t('。中转站可以随意改写回答、留下你的数据。')}
             </div>
           </div>
         )}

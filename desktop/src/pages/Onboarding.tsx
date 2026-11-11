@@ -133,7 +133,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
         base = null;
       }
       if (!base) {
-        toast.error(t('无法连接本地代理，请确认勘合已启动'));
+        toast.error(t('连不上勘合服务，请确认勘合已经打开'));
         setSaving(false);
         return;
       }
@@ -188,12 +188,12 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
               {t('它运行在你的电脑上，会检查：')}
               <ul>
                 <li>{t('中转站返回的内容是否被篡改（偷偷插入恶意命令）')}</li>
-                <li>{t('你发送的内容是否包含敏感信息（API 密钥、手机号等）')}</li>
+                <li>{t('你发送的内容里有没有不该外发的信息（API 密钥、手机号等）')}</li>
                 <li>{t('中转站是否可信（是否保留你的对话记录）')}</li>
               </ul>
               <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
-                {t('检测过程都在本机完成，勘合不会把内容上传到它自己的服务器。')}
-                {t('你的对话仍会发给你配置的中转站 —— 那正是要被检查的那一跳。')}
+                {t('检查全在你自己的电脑上完成，勘合不会把内容上传到它自己的服务器。')}
+                {t('你的对话仍然会发给你填的中转站 —— 那一跳正是要检查的。')}
               </div>
             </div>
             <div className="wizard-actions">
@@ -240,7 +240,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
               <>
                 <div className="wizard-text">
                   {t('激活码用于开启完整防护。未激活时勘合只做转发，')}
-                  <b>{t('不脱敏、也不拦截')}</b>。
+                  <b>{t('不打码、也不拦截')}</b>。
                   <br />
                   {t('先把你的机器码发给勘合官方，拿到激活码后填在下面。')}
                 </div>
@@ -257,7 +257,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                         {t('机器码获取失败：')}{licenseError}
                       </div>
                       <div className="field-hint">
-                        {t('请确认勘合本地引擎已启动，然后重试。')}
+                        {t('请确认勘合已经打开，然后重试。')}
                       </div>
                       <button
                         className="btn ghost sm mt-8"
@@ -371,8 +371,8 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             </div>
             <h1 className="wizard-title">{t('配置你的 AI 工具')}</h1>
             <div className="wizard-text">
-              {t('勘合通过本地代理保护你的 AI 对话。你需要填写中转站信息，')}
-              {t('然后把 AI 工具的 API 地址改为勘合的本地地址。')}
+              {t('勘合在中间帮你检查。你需要填写中转站信息，')}
+              {t('然后把 AI 工具的 API 地址改成勘合给的本地地址。')}
             </div>
 
             {/* 中转站信息 */}
@@ -407,7 +407,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
 
             <div className="field">
               <label className="field-label" htmlFor="ob-key">
-                {t('中转站API Key')}
+                {t('中转站的 API Key')}
               </label>
               <input
                 id="ob-key"
@@ -418,7 +418,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
                 placeholder="sk-..."
               />
               <div className="field-hint">
-                {t('这个Key只会保存在你的电脑上，勘合不会上传')}
+                {t('这个 Key 只存在你自己的电脑上，勘合不会上传')}
               </div>
             </div>
 
@@ -458,7 +458,7 @@ export default function Onboarding({ onFinish }: { onFinish: () => void }) {
             <div className="wizard-text">
               {license?.activated
                 ? t('勘合正在运行，保护你的 AI 对话。')
-                : t('勘合正在运行，但尚未激活 —— 当前只会转发请求，不脱敏也不拦截。')}
+                : t('勘合已经在运行，但还没激活 —— 现在只转发，不打码也不拦截。')}
               <div className="mt-16">
                 <div className="field-label">{t('最后一步：修改 AI 工具的 API 地址')}</div>
                 <div className="code-box mt-8">

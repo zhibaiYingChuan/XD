@@ -2320,10 +2320,10 @@ def create_app() -> FastAPI:
         等于对用户谎报「信誉良好」。本端点专治这个场景。
         """
         if _reputation is None:
-            raise HTTPException(status_code=503, detail="信誉引擎未就绪")
+            raise HTTPException(status_code=503, detail="信誉数据还没准备好，请稍后再试")
         base_url = str(payload.get("base_url") or "").strip()
         if not base_url:
-            raise HTTPException(status_code=400, detail="base_url 不能为空")
+            raise HTTPException(status_code=400, detail="中转站地址不能为空")
         return _reputation.inspect_url(base_url)
 
     @app.post("/api/relay/test")
@@ -2901,7 +2901,7 @@ def create_app() -> FastAPI:
                 # 没有监听器（引擎不是由 run() 启动）时不能假装已生效
                 raise HTTPException(
                     status_code=503,
-                    detail="引擎还没准备好接收新端口，请重启勘合后再试")
+                    detail="服务还没准备好接收新端口，请重新打开勘合后再试")
             errs = await _sync_relay_ports(desired)
             # ★ P1-6：只对本次要申请的那个端口判失败，历史失败仅告警。
             failure = _port_failure_for(errs, port, "设置专属端口")
@@ -3014,7 +3014,7 @@ def create_app() -> FastAPI:
     async def clear_reputation():
         """清空信誉数据。"""
         if _reputation is None or _storage is None:
-            raise HTTPException(status_code=503, detail="信誉引擎未就绪")
+            raise HTTPException(status_code=503, detail="信誉数据还没准备好，请稍后再试")
         count = _reputation.clear_all()
         _storage.clear_reputations()
         return {"ok": True, "cleared": count}

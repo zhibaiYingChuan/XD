@@ -333,7 +333,7 @@ function DetailDrawer({
       `${t('类型')}: ${t(LOG_TYPE_LABELS[detail.entry.log_type])}`,
       `${t('中转站')}: ${displayDomain(detail.entry.relay_domain)}`,
       `${t('结果')}: ${entryActionLabel(detail.entry)}`,
-      `${t('摘要')}: ${detail.entry.summary}`,
+      `${t('一句话说明')}: ${detail.entry.summary}`,
       '',
       ...findings.map((f: { detail?: string }, i: number) => `${i + 1}. ${f.detail ?? ''}`),
     ].join('\n');
@@ -602,7 +602,7 @@ function DetailDrawer({
                         ? t('你已记为「同一个模型」：以后这类返回不再提示。')
                         : detail.model_alias.status === 'rejected'
                           ? t('你已记为「确实换了模型」：以后这类返回会继续提示。')
-                          : t('光看名字判断不了：可能只是这家中转站的命名习惯（构建号、独享实例等），也可能真的换了模型。你确认一次，同类返回以后就不再打扰你。')}
+                          : t('光看名字判断不了：可能只是这家中转站的叫法不同（版本号、独享机器等），也可能真的换了模型。你确认一次，以后同样的返回就不再问你。')}
                     </div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                       {detail.model_alias.status !== 'confirmed' && (
@@ -796,10 +796,10 @@ function DetailDrawer({
                                 className="faint"
                                 style={{ fontSize: 11, cursor: 'pointer', listStyle: 'none' }}
                               >
-                                {t('看完整片段和引擎原文')}
+                                {t('看完整片段和原始判定')}
                               </summary>
                               <div className="mono faint" style={{ fontSize: 11, marginTop: 2 }}>
-                                {t('引擎原文：')}{f.detail}
+                                {t('判定原文：')}{f.detail}
                               </div>
                               <div className="mono faint" style={{ fontSize: 11 }}>
                                 {t('完整片段：')}{f.evidence}
@@ -822,7 +822,7 @@ function DetailDrawer({
                   <div>
                     <b>{t('证据包加载失败')}</b>
                     <div className="mt-8" style={{ fontSize: 12 }}>
-                      {t('这不代表「这条记录没有凭证来源」，只是这次没取到。')}
+                      {t('这不代表「这条记录没留下密钥来源」，只是这次没取到。')}
                     </div>
                     <div className="mono faint mt-8" style={{ fontSize: 11 }}>
                       {evidenceError}
@@ -881,12 +881,12 @@ function DetailDrawer({
                           </div>
                         ) : (
                           <div className="faint" style={{ fontSize: 11, marginTop: 2 }}>
-                            {t('来自本次响应，没有跨轮次指纹')}
+                            {t('这次回答里的，之前没见过')}
                           </div>
                         )}
                         {h.fingerprint && (
                           <div className="mono faint" style={{ fontSize: 10, marginTop: 2 }}>
-                            {t('指纹')} {h.fingerprint.slice(0, 16)}…{t('（用于核对，不含原文）')}
+                            {t('内容编号')} {h.fingerprint.slice(0, 16)}…{t('（只用于核对，不存原文）')}
                           </div>
                         )}
                       </span>
@@ -894,9 +894,9 @@ function DetailDrawer({
                   ))}
 
                   <div className="faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.7 }}>
-                    {t('这里只记录证据的「指纹」和打码片段，不保存原文。指纹就像快递单号：')}
-                    {t('同一个内容指纹一定相同，不同内容一定不同。')}
-                    {t('如果判定为「中转站返回」，这份记录可以证明这枚内容不是你发出去的。')}
+                    {t('这里只记「内容编号」和打码后的片段，不存原文。编号就像快递单号：')}
+                    {t('同一段内容算出来的编号一定相同，不同内容一定不同。')}
+                    {t('如果判定为「中转站返回」，这份记录就能证明这段话不是你发出去的。')}
                   </div>
 
                   <div className="flex items-center gap-8 mt-8">
@@ -904,7 +904,7 @@ function DetailDrawer({
                       {t('复制证据')}
                     </button>
                     <button className="btn ghost sm" onClick={handleExportEvidence}>
-                      {t('导出 JSON')}
+                      {t('导出文件')}
                     </button>
                   </div>
                 </div>
@@ -939,7 +939,7 @@ function DetailDrawer({
                     {detail.entry.log_type === 'request_sanitize'
                       && detail.entry.action === 'block'
                       ? `${t('拦截依据')}（${countLabel}）`
-                      : `${t('脱敏记录')}（${countLabel}）`}
+                      : `${t('打码明细')}（${countLabel}）`}
                   </div>
                   {/* ★ 2026-10-22：用户反馈「怎么脱了几千条」。
                       真实情况是同一段历史每轮请求都会重新过一遍，
@@ -991,7 +991,7 @@ function DetailDrawer({
                 && (detail.entry.redaction_count ?? 0) > 0 && (
                 <div className="mt-24">
                   <div className="field-label">
-                    {t('脱敏记录')}（{detail.entry.redaction_count} {t('处')}）
+                    {t('打码明细')}（{detail.entry.redaction_count} {t('处')}）
                   </div>
                   <div className="faint" style={{ fontSize: 11, lineHeight: 1.7 }}>
                     {t('本次请求有')} {detail.entry.redaction_count} {t('处内容被打码。')}
@@ -1261,7 +1261,7 @@ export default function Logs() {
   const handleClearAll = async () => {
     if (clearing) return;
     // ★ 同上：原生 confirm 不可用，走应用内确认框。
-    if (!(await confirmDialog(t('确定清空全部安全日志吗？\n\n此操作不可恢复。\n（脱敏记录会一并删除，本地不留存任何原始敏感值）')))) {
+    if (!(await confirmDialog(t('确定清空全部安全日志吗？\n\n清了就找不回来。\n（打码明细会一起删掉，本地不会留下任何原始内容）')))) {
       return;
     }
     setClearing(true);
@@ -1301,7 +1301,7 @@ export default function Logs() {
       // ★ 同上：原生 confirm 不可用，走应用内确认框。
       if (!(await confirmDialog(
         `${t('将删除')}${scope}${t('中的')} ${probe.matched} ${t('条记录。')}\n\n`
-        + `${t('此操作不可恢复（脱敏记录会一并删除）。')}\n`
+        + `${t('删掉就找不回来（打码明细会一起删掉）。')}\n`
         + t('确定继续吗？'),
       ))) {
         return;
@@ -1479,7 +1479,7 @@ export default function Logs() {
           <input
             className="input"
             style={{ paddingLeft: 34 }}
-            placeholder={t('搜索摘要或内容片段...')}
+            placeholder={t('搜索说明或内容片段…')}
             // ★ 搜索框有图标、无可见 label，必须补 aria-label，
             //   否则读屏用户只会听到「编辑框」，不知道搜的是什么。
             aria-label={t('搜索日志')}

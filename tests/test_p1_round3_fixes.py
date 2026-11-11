@@ -289,7 +289,10 @@ class TestDegradedStateIsExposed:
         assert "state?.degraded" in src, (
             "状态栏没有渲染降级横幅 —— 每页都看不见「少了两层检测」"
         )
-        assert "降级运行" in src
+        # ★ 2026-11-12：可见文案从「降级运行」改为大白话
+        #   「不是全部检查都在正常工作」。判据只认这个横幅**存在**，
+        #   措辞本身可以改，但不能改成看不懂的词。
+        assert "不是全部检查都在正常工作" in src
         assert "guardrail_missing_layers" in src
 
 
