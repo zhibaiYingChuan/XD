@@ -124,11 +124,28 @@ def _build_secrets_env():
 # 正常路径走 rules/detection_rules.yaml —— 改一条规则不用重编打包。
 # ══════════════════════════════════════════════════════════════
 from ..rules import load_ruleset  # noqa: E402
+from ..rules import credentials as credentials_registry  # noqa: E402
 
 _RULES = load_ruleset()
 logger.info("检测规则来源：%s（v%s）",
             "规则文件" if _RULES.from_file else "内置回退集",
             _RULES.version)
+
+#: 响应侧「真实凭证泄露」需要检查的判据键（全部来自 rules/credentials.py）
+_LEAK_SENSITIVE_KEYS = (
+    "private_key_pem",
+    "openai_key",
+    "aws_access_key_id",
+    "aws_secret_key",
+    "gcp_service_account",
+    "google_api_key",
+    "azure_key",
+    "generic_secret",
+    "github_token",
+    "gitlab_token",
+    "jwt",
+    "bearer_token",
+)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1588,13 +1605,17 @@ class ResponseVerifier:
     #   真实密钥左侧永远是分隔符（行首/空格/引号/=/:/`Bearer `），
     #   加 (?<![A-Za-z0-9_]) 即可精确区分，且不影响任何真实密钥。
     #   AKIA 同理。
+    # ★★ 2026-11-13：本判据完全由 rules/credentials.py 生成，不再内联正则。
+    #   旧实现在这里手写了 6 条，与请求侧 sanitizer、YAML、企业版各写一份，
+    #   已经漂移（sk- 这边有左边界、企业版输出护栏没有；JWT 这边只认两段、
+    #   企业版要求签名 ≥43 位）。任何判据改动现在自动同步到这四处。
+    #
+    # ★ 编译**不加** IGNORECASE：大小写是判据的一部分（AKIA 大写、
+    #   sk- 小写、eyJ 固定前缀）。统一放宽会把 `akiaIOSFODNN7EXAMPLE`
+    #   判成密钥；需要忽略大小写的判据（azure/generic/aws_secret/bearer）
+    #   在正则内部自己写了 `(?i)`。
     _SENSITIVE_LEAK_RE = re.compile(
-        r"(?:(?<![A-Za-z0-9_])sk-[A-Za-z0-9\-_]{20,}|"
-        r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}|"
-        r"(?<![A-Za-z0-9])AIza[0-9A-Za-z\-_]{35}|"
-        r"(?i:azure[_a-z]*key\s*[:=]\s*\S{20,})|"
-        r"-----BEGIN\s+\w*\s*PRIVATE KEY-----|"
-        r"eyJ[A-Za-z0-9\-_]{8,}\.eyJ)",
+        credentials_registry.combined_pattern(_LEAK_SENSITIVE_KEYS),
     )
 
     # ★★ 2026-10-27：真正的「提示词泄露陈述」长什么样。
@@ -1638,10 +1659,17 @@ class ResponseVerifier:
     # ★ 2026-11-08：护栏判了 medium/redact 时，正文若含真实格式的
     #   身份证 / 手机号 / 邮箱，归为 sensitive_leak（中危告警，不阻断）。
     #   只在护栏已判风险时启用，避免对每条正常回答都扫一遍。
+    #
+    # ★★ 2026-11-13（全局收敛 + 回溯修复）：这三个判据也改为引用真源。
+    #   旧写法 `\b[A-Za-z0-9._%+\-]+@...` 没有长度上限，实测在 6 万字符
+    #   输入上耗时 2.7 秒 —— 与本次修掉的 email 平方级回溯是同一个病根，
+    #   但只修了主正则、漏了这一处（响应内容由中转站控制，可被用来卡死代理）。
+    #   现在直接复用 credentials 里已经加上限与边界的版本。
     _PII_LEAK_RE = re.compile(
-        r"(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])"
-        r"|(?<!\d)1[3-9]\d{9}(?!\d)"
-        r"|\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
+        "|".join(
+            f"(?:{credentials_registry.BY_KEY[k].pattern})"
+            for k in ("cn_id_card", "cn_phone", "email")
+        )
     )
 
     @classmethod

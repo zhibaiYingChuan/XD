@@ -31,8 +31,12 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-if str(REPO / "src") not in sys.path:
-    sys.path.insert(0, str(REPO / "src"))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(REPO / "src") in sys.path:
+    sys.path.remove(str(REPO / "src"))
+sys.path.insert(0, str(REPO / "src"))
 
 from daoti_xuandun_personal.proxy.baseline import (  # noqa: E402
     detect_typosquat,

@@ -24,11 +24,19 @@ import sys
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(_SRC) in sys.path:
+    sys.path.remove(str(_SRC))
+sys.path.insert(0, str(_SRC))
 _TESTS = Path(__file__).resolve().parent
-if str(_TESTS) not in sys.path:
-    sys.path.insert(0, str(_TESTS))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(_TESTS) in sys.path:
+    sys.path.remove(str(_TESTS))
+sys.path.insert(0, str(_TESTS))
 
 from redteam_relay_attack import (  # noqa: E402
     ATTACK_A, ATTACK_B, ATTACK_C, BASELINE_D,

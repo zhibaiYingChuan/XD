@@ -27,8 +27,12 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(_SRC) in sys.path:
+    sys.path.remove(str(_SRC))
+sys.path.insert(0, str(_SRC))
 _TOOL = _ROOT / "tools" / "activation" / "gen_activation_keys.py"
 
 # ★★ 2026-10-29：签发工具不在本仓库（P1-27 起独立存放）。

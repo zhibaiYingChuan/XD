@@ -192,23 +192,29 @@ prompt_inject:
     label: 忽略先前指令（中文）
 
 sensitive_leak:
-  # ★ 字符类必须含 '-'：sk-proj- / sk-svcacct- 是现役格式，
-  #   不含 '-' 只能匹配老格式，现代密钥全部漏放。
+  # ★★★ 2026-11-13（最终收敛）：本节不再手写正则。
   #
-  # ★★ 2026-10-04（误报修复）：前缀必须带左边界 (?<![A-Za-z0-9_])。
-  #   无边界时 `sk-` 会匹配到普通英文复合词中间
-  #   （risk-assessment-… / task-orchestration-… / disk-usage-…），
-  #   把正常回答判成「敏感信息泄露」并拦截（用户实测 id=2059 即此）。
-  #   ⚠️ 注意：本节的生效副本在 verifier.py::ResponseVerifier._SENSITIVE_LEAK_RE，
-  #   改这里不会立刻生效（见文件头说明）。
-  - pattern: '(?<![A-Za-z0-9_])sk-[A-Za-z0-9\-_]{20,}'
-    label: OpenAI 风格密钥
-  - pattern: '(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}'
-    label: AWS Access Key
-  - pattern: '-----BEGIN\s+\w*\s*PRIVATE KEY-----'
+  #   判据的唯一真源是 `daoti_xuandun/credentials.py` 的 SPECS。
+  #   本文件此前是「同步副本」，已发生过漂移：
+  #     · sk- 这里带左边界，企业版输出护栏没有 → 同一串文本两处判不同
+  #     · JWT 这里只认两段（eyJ...\.eyJ），企业版要求签名 ≥43 位
+  #     · 私钥这里曾只有头部标记 → 用户问「这是什么格式」被整条阻断
+  #
+  #   现在由 `python -m daoti_xuandun.credentials --export-yaml` 生成，
+  #   `tests/test_credential_registry.py` 会断言本段与 SPECS 完全一致，
+  #   手工改这里而不改真源会立刻失败。
+  #
+  #   下面是生成结果（勿手改）：
+  # >>> AUTO-GENERATED FROM daoti_xuandun/credentials.py <<<
+  - pattern: '-----BEGIN[ \t]+(?:(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED)[ \t]+)?PRIVATE[ \t]+KEY-----[\s\S]{0,128}?(?:(?=[^ \t\r\n]{0,128}[A-Z])(?=[^ \t\r\n]{0,128}[a-z])(?=[^ \t\r\n]{0,128}[0-9])[A-Za-z0-9+/=_\-]{48,}|(?:(?=[^ \t\r\n]{0,128}[A-Z])(?=[^ \t\r\n]{0,128}[a-z])(?=[^ \t\r\n]{0,128}[0-9])[A-Za-z0-9+/=_\-]{16,}[ \t]*\r?\n[ \t]*){2,}(?=[^ \t\r\n]{0,128}[A-Z])(?=[^ \t\r\n]{0,128}[a-z])(?=[^ \t\r\n]{0,128}[0-9])[A-Za-z0-9+/=_\-]{16,})'
     label: PEM 私钥
-  - pattern: 'eyJ[A-Za-z0-9\-_]{8,}\.eyJ'
+  - pattern: '(?<![A-Za-z0-9_\-])sk-(?:ant-)?[A-Za-z0-9\-_]{20,}'
+    label: OpenAI / Anthropic 风格密钥
+  - pattern: '(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])'
+    label: AWS Access Key
+  - pattern: '(?<!(?i:XDACT-))\beyJ[A-Za-z0-9\-_]{8,}\.eyJ[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{10,}'
     label: JWT 令牌
+  # <<< END AUTO-GENERATED <<<
 
 # ── 信誉：水印特征（中转站自述留存数据）─────────────────
 watermark:

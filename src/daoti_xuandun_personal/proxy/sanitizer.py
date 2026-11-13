@@ -224,9 +224,19 @@ def _is_own_activation_code(text: str, start: int) -> bool:
 
 
 class _Rule:
-    """单条敏感信息检测规则。"""
+    """单条敏感信息检测规则。
 
-    __slots__ = ("name", "category", "pattern", "validator")
+    ★★ 2026-11-13：不再由本文件声明具体正则。
+      全部判据来自 ``rules/credentials.py``（唯一真源），
+      本类只负责把规范正则 + 校验器 + 排除器组合成可用的检测单元。
+
+    ★★ 编译不加 IGNORECASE：判据自身需要忽略大小写时，
+      在正则内部写 `(?i)`（azure_key / generic_secret / aws_secret_key /
+      bearer_token 都是这么写的）。统一加标志会把请求侧拦截面整体放宽，
+      实测把 `SK-hynix-semiconductor-annual-report-2026` 判成密钥整条阻断。
+    """
+
+    __slots__ = ("name", "category", "pattern", "validator", "allow_if")
 
     def __init__(
         self,
@@ -234,62 +244,55 @@ class _Rule:
         category: str,
         pattern: str,
         validator: Optional[Callable[[str], bool]] = None,
+        allow_if: Optional[Callable[[str, Any], bool]] = None,
     ) -> None:
         self.name = name
         self.category = category
         self.pattern = re.compile(pattern)
         self.validator = validator
+        self.allow_if = allow_if
 
     def find(self, text: str) -> List[Tuple[int, int, str]]:
-        """返回所有匹配的 (start, end, matched_text)。"""
+        """返回所有可信命中的 (start, end, matched_text)。"""
         results = []
         for m in self.pattern.finditer(text):
             value = m.group(0)
             if self.validator and not self.validator(value):
                 continue
+            if self.allow_if and self.allow_if(text, m):
+                continue
             results.append((m.start(), m.end(), value))
         return results
 
 
-# 内置规则库（9 类，与企业版 sensitive_leak.py 对齐但独立维护）
-BUILTIN_RULES: List[_Rule] = [
-    # ── 云凭证（一律阻断）──
-    # ★ 字符类必须含 `-`：OpenAI 现役密钥是 sk-proj- 前缀（sk-proj-a1b2…），
-    #   原式 `sk-[A-Za-z0-9]{20,}` 里的 `-` 不在类内，
-    #   只能匹配到 `sk-` 后紧跟字母数字的老格式，
-    #   对 sk-proj- / sk-svcacct- 这类带第二段前缀的现代密钥**完全漏放**。
-    #   （实测：`sk-proj-a1b2c3d4e5f6…` 长度 54 的真实格式不被识别。）
-    _Rule("openai_key", "api_key", r"\bsk-[A-Za-z0-9\-_]{20,}\b"),
-    _Rule("anthropic_key", "api_key", r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b"),
-    _Rule("google_key", "api_key", r"\bAIza[0-9A-Za-z\-_]{35}\b"),
-    _Rule("azure_key", "api_key", r"(?i)\bazure[_a-z]*key\s*[:=]\s*\S{20,}"),
-    _Rule("generic_secret", "api_key",
-          r"(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)"
-          r"\s*[:=]\s*['\"]?[A-Za-z0-9\-_]{16,}"),
-    _Rule("aws_akid", "aws_key", r"\bAKIA[0-9A-Z]{16}\b"),
-    _Rule("aws_secret", "aws_key",
-          r"(?i)aws.{0,20}?(?:secret|private).{0,20}?['\"]?[A-Za-z0-9/+=]{40}"),
-    _Rule("gcp_sa", "aws_key", r'"type"\s*:\s*"service_account"'),
-    _Rule("private_key_pem", "private_key",
-          r"-----BEGIN\s+(?:RSA|EC|OPENSSH|PGP|DSA)?\s*PRIVATE KEY-----"),
-    _Rule("jwt", "jwt", r"\beyJ[A-Za-z0-9\-_]{8,}\.eyJ[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{10,}"),
+def _builtin_rules_from_registry() -> List[_Rule]:
+    """由凭据规则表生成检测规则。
 
-    # ── 强身份信息（一律阻断）──
-    _Rule("cn_idcard", "idcard", r"(?<![0-9Xx])\d{17}[\dXx](?![0-9Xx])",
-          _cn_id_checksum_valid),
-    # ★★ 2026-11-03（二次误报）：旧判据 `(?<!\d)\d{13,19}(?!\d)` 会把
-    #   哈希/Base64 里偶然出现的 13 位数字（恰好通过 Luhn）当成银行卡，
-    #   实测把一次正常的构建上传请求整条阻断。
-    #   修复：① 只认 15–19 位（13/14 位卡号早已淘汰，Amex 为 15 位）；
-    #        ② 前后必须是「非字母数字」边界，排除嵌在哈希/Base64/ID 里的数字。
-    _Rule("bankcard", "bankcard",
-          r"(?<![0-9A-Za-z])\d{15,19}(?![0-9A-Za-z])", _luhn_check),
+    ★ 为什么改成生成而不是手写列表：
+      手写列表时，同一类凭据在 sanitizer / verifier / yaml / 企业版
+      各写一份，改一处不生效（2026-11-13 私钥误报即此）。
+      现在只在这里做一次映射，判据本身全部来自 credentials.SPECS。
 
-    # ── 弱身份信息（按级别打码/阻断）──
-    _Rule("cn_phone", "phone", r"(?<!\d)1[3-9]\d{9}(?!\d)"),
-    _Rule("email", "email",
-          r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
-]
+    ★★ 为什么按 ``request_side`` 过滤：
+      请求侧的处置是**阻断 / 打码**，直接影响用户能不能把消息发出去，
+      误报代价最高。有一类判据的形态天生与无害物同形 ——
+      例如 32/64 位裸 hex 既可能是 AES 密钥，也可能是 MD5/SHA 摘要，
+      文本上没有可判别特征。这类判据在真源里声明 ``request_side=False``：
+      响应侧与检测侧照常使用（那里只记录告警，误报代价低），
+      请求侧不参与 —— 否则「帮我看看这段哈希」会被整条阻断。
+      过滤条件来自声明，不在这里按 key 名打补丁。
+    """
+    from ..rules.credentials import SPECS
+
+    return [
+        _Rule(spec.key, spec.category, spec.pattern, spec.validator, spec.allow_if)
+        for spec in SPECS
+        if spec.request_side
+    ]
+
+
+# 内置规则库：由 rules/credentials.py 生成（勿在此手写正则）
+BUILTIN_RULES: List[_Rule] = _builtin_rules_from_registry()
 
 
 # ══════════════════════════════════════════════════════════════

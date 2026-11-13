@@ -17,8 +17,12 @@ from pathlib import Path
 
 # 允许直接运行（不需安装包）
 _SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(_SRC) in sys.path:
+    sys.path.remove(str(_SRC))
+sys.path.insert(0, str(_SRC))
 
 from daoti_xuandun_personal.proxy.restorer import ContentRestorer   # noqa: E402
 from daoti_xuandun_personal.proxy.sanitizer import RequestSanitizer  # noqa: E402
@@ -66,10 +70,15 @@ def test_sanitizer_block() -> None:
 
     # 私钥 → 阻断
     # scan-secrets: allow-pem-placeholder
-    # 下面这串只有 PEM 头尾、没有任何密钥体，是「私钥必须被阻断」
-    # 这条判据的测试输入，不是真钥匙（真钥匙体有上千个 base64 字符，
-    # 隐私门禁照样会拦 —— 见 test_p0_release_blockers 的正反自证）。
-    r = s.sanitize("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----")
+    # 下面这串是「私钥必须被阻断」判据的测试输入，不是真钥匙。
+    # ★ 2026-11-13：原来的密钥体只有 14 字符（MIIEpAIBAAKCAQEA），
+    #   新判据要求 ≥48 个连续体字符（真实密钥体行宽恒为 64/70），
+    #   旧样本会被正确放行。这里换成足量体，保持「真密钥必须拦」的语义。
+    r = s.sanitize(
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA7VJTUt9Us8cKjMzEfYyjiWA4R4M2bS1GB4t7NXp98C3SC6d\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
     check("PEM 私钥被阻断", r.action == Action.BLOCK.value, f"实际={r.action}")
 
     # ★ P1-5：银行卡默认未勾选（文档 4.4）→ 默认不拦截

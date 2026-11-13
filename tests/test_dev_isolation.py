@@ -31,8 +31,12 @@ REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "daoti_xuandun_personal"
 
 # 与其他测试文件一致：仓库未安装为包，需手动把 src 加进路径
-if str(REPO / "src") not in sys.path:
-    sys.path.insert(0, str(REPO / "src"))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(REPO / "src") in sys.path:
+    sys.path.remove(str(REPO / "src"))
+sys.path.insert(0, str(REPO / "src"))
 RUST_LIB = REPO / "desktop" / "src-tauri" / "src" / "lib.rs"
 RUST_LICENSE = REPO / "desktop" / "src-tauri" / "src" \
     / "license.rs"

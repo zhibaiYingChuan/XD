@@ -6,7 +6,7 @@ r"""sensitive_leak.py — PII / 密钥 / 企业自定义敏感词典检测模块
        护照号（CN）、车牌号（CN）、住址片段（省/市/区 + 具体门牌号模式）
      - 密钥令牌：AWS Access Key / Secret、GCP Service Account 片段、
        JWT（三段 Base64URL + 签名段特征）、Bearer Token、
-       私钥片段（BEGIN PRIVATE KEY / RSA 私钥头）、Hex/AES Key（32/64 位 hex 连续）
+       PEM 私钥块（头 + 密钥体）、证书/公钥块、Hex/AES Key（32/64 位 hex 连续）
   2. 企业自定义词典：关键词 + 自定义正则，热加载 + JSON 持久化，
      运行时通过 XuanDun.add_sensitive_pattern / remove_sensitive_pattern 调用
   3. 检测结果：返回 (hit, category, matched_text, severity) 四元组，
@@ -140,64 +140,49 @@ class SensitiveLeakDetector:
     # ----------------------------------------------------------
     @classmethod
     def _init_builtin_rules(cls):
-        """预编译内置高置信正则。"""
-        # 辅助：添加一条规则
-        def add(name: str, category: str, pattern: str, severity: str, flags: int = 0):
+        """预编译内置高置信正则。
+
+        ★★ 2026-11-13（全局收敛）：凡「凭证形态」的判据全部来自
+          ``daoti_xuandun/credentials.py``（唯一真源），本文件不再手写。
+          旧实现内联了 AWK/JWT/Bearer/私钥/hex 五类正则，
+          与请求侧、响应侧、YAML、输出护栏各写一份且已漂移：
+          例如 JWT 这里要求签名 ≥43 位、响应侧只认两段；
+          银行卡这里 13–19 位无校验、请求侧是 15–19 位 + Luhn。
+          现在统一，任何判据改动只需改真源。
+
+        ★ 分类名与严重级也来自真源的 ``leak_category`` / ``leak_severity``：
+          它们允许与请求侧不同（两侧「严重」的含义不同 ——
+          请求侧 high = 禁止外发，这里 high = 拦截、medium = 打码），
+          但差异必须写在**声明**里，不能在本文件另维护一张映射表。
+          上一版在这里写死 `_CATEGORY_MAP`，结果把 key_hex_aes /
+          key_bearer / key_gcp 静默改名成 key_api / key_aws，
+          历史日志的分类统计会突变。
+
+        ★ 校验器在这里仍然生效：逐条 `spec.find()` 而非合成正则，
+          所以身份证 MOD 11-2、银行卡 Luhn 都还在。
+        """
+        from daoti_xuandun import credentials as reg
+
+        for spec in reg.SPECS:
             cls._BUILTIN_RULES.append(
-                (name, category, re.compile(pattern, flags), severity)
+                (
+                    f"_builtin_{spec.key}",
+                    spec.leak_category,
+                    spec.compile(),
+                    spec.leak_severity,
+                )
             )
 
-        # ---- PII（中国大陆）----
-        add("_builtin_pii_phone", "pii_phone",
-            r"(?<!\d)(1[3-9]\d{9})(?!\d)", "medium")
-        # 身份证 18 位（带校验位）
-        add("_builtin_pii_idcard", "pii_idcard",
-            r"(?<!\d)([1-9]\d{5}(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx])(?!\d)",
-            "high")
-        # 邮箱
-        add("_builtin_pii_email", "pii_email",
-            r"\b([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b",
-            "low", flags=re.IGNORECASE)
-        # 银行卡号：13~19 位纯数字，Luhn 校验在 check() 中二次确认
-        add("_builtin_pii_bankcard", "pii_bankcard",
-            r"(?<!\d)(\d{13,19})(?!\d)", "medium")
-        # 中国护照号：E/G + 8 位数字 或 D + 7 位数字
-        add("_builtin_pii_passport", "pii_passport",
-            r"(?<![A-Z0-9])([EG]\d{8}|D\d{7})(?![A-Z0-9])",
-            "medium", flags=re.IGNORECASE)
-        # 中国车牌号：
-        #   - 普通小型车/大型车：省简称 + 字母 + 5~6 位字母数字（7或8字符），如 京A12345、沪B88888
-        #   - 8 位新能源车牌 + 挂车/港澳/警用尾字（挂 学 警 港澳）也通过最后一位可选匹配覆盖
-        add("_builtin_pii_plate", "pii_plate",
-            r"(?<![A-Z0-9])([京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][A-HJ-NP-Z0-9]{5,6}[A-HJ-NP-Z0-9挂学警港澳]?)(?![A-Z0-9])",
-            "low")
+    #: 兼容旧代码：部分调用方按 name 取规则
+    _BUILTIN_RULES: List[Tuple[str, str, re.Pattern, str]] = []
 
-        # ---- 密钥 / Token ----
-        # AWS Access Key ID (AKIA...) + AWS Secret Access Key 格式（40 char base64 片段）
-        add("_builtin_key_aws_id", "key_aws",
-            r"\b(AKIA[0-9A-Z]{16})\b", "high")
-        add("_builtin_key_aws_secret", "key_aws",
-            r"(?i)aws.{0,3}(?:secret|access).{0,3}['\"=\s:]+([0-9a-zA-Z/+]{40})['\"\s]?",
-            "high")
-        # GCP Service Account 片段 — "type": "service_account"
-        add("_builtin_key_gcp_sa", "key_gcp",
-            r'"type"\s*:\s*"service_account"', "high")
-        # JWT：三段 Base64URL，最后段签名特征（至少 43 位 base64url 字符）
-        add("_builtin_key_jwt", "key_jwt",
-            r"\b(eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]{43,})\b",
-            "high")
-        # Bearer Token（Authorization: Bearer ... 或直接 Bearer xxx）
-        add("_builtin_key_bearer", "key_bearer",
-            r"(?i)bearer\s+([A-Za-z0-9\-\._~\+\/]{20,})",
-            "medium")
-        # 私钥头（BEGIN RSA/PRIVATE/OPENSSH PRIVATE KEY）
-        add("_builtin_key_private", "key_private",
-            r"-----BEGIN\s+(?:RSA\s+|DSA\s+|EC\s+|OPENSSH\s+|PGP\s+)?PRIVATE\s+KEY-----",
-            "high")
-        # 32/64 位连续 hex（AES-128 / AES-256 原始 key），前后边界避免误伤 UUID 中的短 hex
-        add("_builtin_key_hex_aes", "key_hex_aes",
-            r"(?<![0-9a-fA-F])([0-9a-fA-F]{32}|[0-9a-fA-F]{64})(?![0-9a-fA-F])",
-            "medium")
+    @classmethod
+    def _init_builtin_rules_legacy_removed(cls):  # pragma: no cover - 占位
+        """历史实现已删除，保留名字只为让旧调用方明确报错。"""
+        raise RuntimeError(
+            "内联判据已迁移到 daoti_xuandun.credentials.SPECS，请改用规则表"
+        )
+
 
     # ----------------------------------------------------------
     # 企业自定义词典

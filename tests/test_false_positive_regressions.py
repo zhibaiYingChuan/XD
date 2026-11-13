@@ -22,8 +22,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(ROOT / "src") in sys.path:
+    sys.path.remove(str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "src"))
 
 from daoti_xuandun_personal.proxy import baseline as bl  # noqa: E402
 from daoti_xuandun_personal.proxy import verifier as vf  # noqa: E402

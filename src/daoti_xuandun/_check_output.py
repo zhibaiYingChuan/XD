@@ -44,6 +44,54 @@ import numpy as np
 from daoti_xuandun.config import XuanDunConfig
 from daoti_xuandun.preprocessors import deobfuscate_keywords
 from daoti_xuandun.luoshu_mapper import LuoshuSymbolMapper
+from daoti_xuandun import credentials as credentials_registry
+
+#: 输出护栏需要检查的「凭证形态」判据键（全部来自 credentials.SPECS）
+_OUTPUT_CREDENTIAL_KEYS = (
+    "private_key_pem",
+    "pem_certificate",
+    "openai_key",
+    "aws_access_key_id",
+    "aws_secret_key",
+    "gcp_service_account",
+    "google_api_key",
+    "azure_key",
+    "generic_secret",
+    "github_token",
+    "gitlab_token",
+    "jwt",
+    "bearer_token",
+)
+
+
+def _credential_keys_by_severity(severity: str) -> tuple:
+    """按真源声明的 severity 拆出凭证判据键。
+
+    ★★ 2026-11-13（回归修复）：原来**整组** `_OUTPUT_CREDENTIAL_KEYS`
+      都被塞进 `_HIGH_RULE_PATTERNS`（信号 1.0 → 阻断），
+      而其中 `bearer_token` 与 `pem_certificate` 在真源里声明的是 medium。
+      结果是「声明说 medium、行为是 block」—— 与本次任务要消灭的
+      「同一判据多处不一致」是同一个病。
+
+      实测后果：`Bearer token-based-authentication-is-enabled 对不对`
+      这种普通英文短语（`token-based-…` 恰好满足「20 位以上、
+      允许 `-`」）被输出护栏判 high/block，整条回复被丢弃。
+
+      现在 severity 只由真源决定：high → 阻断信号，其余 → 打码信号。
+      新增判据时不需要再到本文件里挑清单。
+    """
+    return tuple(
+        k for k in _OUTPUT_CREDENTIAL_KEYS
+        if credentials_registry.BY_KEY[k].severity == severity
+    )
+
+
+#: 高危凭证判据（输出侧命中即阻断）
+_OUTPUT_CREDENTIAL_HIGH = _credential_keys_by_severity("high")
+#: 中危凭证判据（输出侧命中只打码）
+_OUTPUT_CREDENTIAL_MEDIUM = tuple(
+    k for k in _OUTPUT_CREDENTIAL_KEYS if k not in _OUTPUT_CREDENTIAL_HIGH
+)
 
 logger = logging.getLogger("xuandun.output_guardrail")
 
@@ -677,13 +725,21 @@ class OutputGuardrail:
     # 命中这些正则时仅替换对应片段为占位符，保留其余上下文。
     # 仅供输出侧打码定位使用，与 _HIGH/_MEDIUM_RULE_PATTERNS 的判定职责分离。
     # 编译一次，避免每次打码重复编译。
+    # ★★ 2026-11-13（全局收敛）：凭据形态的片段同样来自 credentials.SPECS，
+    #   此处只额外补充「打码定位需要、但判定不需要」的非凭据项。
     _SENSITIVE_FRAGMENT_PATTERNS = [
-        re.compile(r"\b\d{17}[\dXx]\b"),                                       # 身份证号
-        re.compile(r"1[3-9]\d{9}"),                                            # 手机号
-        re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),   # 邮箱
-        re.compile(r"[sS][kK]-[A-Za-z0-9\-]{16,}"),                            # OpenAI 风格密钥
-        re.compile(r"ghp_\S{20,}|glpat-\S{10,}|AKIA[A-Za-z0-9]{12,}"),         # GitHub/GitLab/AWS
-        re.compile(r"Bearer\s+\S{20,}"),                                       # Bearer token
+        credentials_registry.BY_KEY[k].compile()
+        for k in (
+            "cn_id_card",
+            "cn_phone",
+            "email",
+            "openai_key",
+            "github_token",
+            "gitlab_token",
+            "aws_access_key_id",
+            "bearer_token",
+        )
+    ] + [
         re.compile(
             r"(api[_-]?key|secret[_-]?key|password|access_key|secret_key|"
             r"root_password|admin_password|db_password|sa_password|redis_password)"
@@ -808,34 +864,49 @@ class OutputGuardrail:
                    r"(bypassed|removed|disabled)|"
                    r"(free|operate).{0,8}without.{0,8}(any\s+)?(restrictions?|limits?|limitations?)",
                    re.IGNORECASE),
-        # 密钥/凭据泄露（支持连字符格式的API密钥）
-        re.compile(r"[sS][kK]-[A-Za-z0-9\-]{16,}|api[_-]?key\s*[:=]\s*\S{16,}|"
-                   r"[sS][eE][cC][rR][eE][tT][_]?[kK][eE][yY]\s*[:=]\s*\S{8,}|"
-                   r"password\s*[:=]\s*\S{6,}|root_password\s*[:=]|admin_password\s*[:=]|"
-                   r"db_password\s*[:=]|sa_password\s*[:=]|redis_password\s*[:=]|"
-                   r"access_key\s*[:=]|secret_key\s*[:=]|"
-                   r"密钥.{0,4}(是|为|:)\s*sk-|"
-                   r"Bearer\s+\S{20,}|ghp_\S{20,}|glpat-\S{10,}|"
-                   r"密码哈希.{0,6}[:：=]\s*[0-9a-fA-F]{16,}|password\s*hash.{0,6}[:=]\s*[0-9a-fA-F]{16,}|"
-                   r"JWT\s*token\s*[:=]\s*\S{20,}|"
-                   r"(mysql|postgres|redis|mongodb)://\S{4,}:\S{4,}@|"
-                   # ★★ 2026-10-07（误报修复）：原来 `数据库连接串` 是**裸名词**，
-                   #   只要出现这四个字就 1.0 → block，而「把数据库连接串放进
-                   #   环境变量」「数据库连接串的格式」是最普通的工程建议。
-                   #   实测「内部策略：数据库连接串使用环境变量注入」被判
-                   #   「命中高危违规模式」并丢弃整条回复。
-                   #   与下面 connection string 对齐，要求**带值**才是泄露。
-                   #   `connection[_\s]*string`：原文只允许空格，漏掉
-                   #   connection_string 这种下划线写法。
-                   r"数据库连接串\s*[:：=]|connection[_\s]*string\s*[:：=]",
-                   re.IGNORECASE),
+        # 密钥/凭据泄露
+        # ★★ 2026-11-13（全局收敛）：凡是「凭证形态」的判据一律来自
+        #   rules/credentials.py，不再在这里手写。旧实现内联了
+        #   `[sS][kK]-[A-Za-z0-9\-]{16,}`（无左边界、宽度 16）、
+        #   `AKIA[A-Za-z0-9]{12,}`（12 位、忽略大小写）等，
+        #   与请求侧、响应侧、YAML 各写一份且已漂移 ——
+        #   实测把 `risk-assessment-framework-2026-final` 判成密钥。
+        #   下面只保留**非凭证形态**的本地判据（口令、连接串、哈希）。
+        re.compile(
+            credentials_registry.combined_pattern(_OUTPUT_CREDENTIAL_HIGH)
+            + "|"
+            r"(?i:password)\s*[:=]\s*\S{6,}|root_password\s*[:=]|admin_password\s*[:=]|"
+            r"db_password\s*[:=]|sa_password\s*[:=]|redis_password\s*[:=]|"
+            r"密码哈希.{0,6}[:：=]\s*[0-9a-fA-F]{16,}|(?i:password)\s*hash.{0,6}[:=]\s*[0-9a-fA-F]{16,}|"
+            r"(?i:JWT)\s*token\s*[:=]\s*\S{20,}|"
+            r"(?i:mysql|postgres|redis|mongodb)://\S{4,}:\S{4,}@|"
+            # ★★ 2026-10-07（误报修复）：原来 `数据库连接串` 是**裸名词**，
+            #   只要出现这四个字就 1.0 → block，而「把数据库连接串放进
+            #   环境变量」「数据库连接串的格式」是最普通的工程建议。
+            #   实测「内部策略：数据库连接串使用环境变量注入」被判
+            #   「命中高危违规模式」并丢弃整条回复。
+            #   与下面 connection string 对齐，要求**带值**才是泄露。
+            #   `connection[_\s]*string`：原文只允许空格，漏掉
+            #   connection_string 这种下划线写法。
+            r"数据库连接串\s*[:：=]|connection[_\s]*string\s*[:：=]",
+            # ★ 2026-11-13（回归修复）：这里**不能**加 re.IGNORECASE。
+            #   合成段的判据大小写是固定的（AKIA 大写、sk- 小写、eyJ 前缀），
+            #   统一放宽会把 `akiaIOSFODNN7EXAMPLE` 判成密钥整条拦截。
+            #   需要忽略大小写的判据（azure/generic/aws_secret/bearer）
+            #   在各自正则内部写了 `(?i)`，作用域仅限自己那一段。
+            #   本地补的几条（password / 连接串 / 哈希）已就地写成 `(?i:...)`。
+        ),
         # PEM/私钥/证书块泄露（全面审查补充）：模型被诱导输出完整私钥
         # （如 ~/.ssh/id_rsa）或证书时原样拦截/打码，此前完全未覆盖。
-        re.compile(r"-----BEGIN[ \w]*?(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----|"
-                   r"-----BEGIN(?: CERTIFICATE| PUBLIC KEY| RSA PUBLIC KEY|"
-                   r" ENCRYPTED PRIVATE KEY)-----|"
-                   r"OPENSSH PRIVATE KEY|BEGIN PRIVATE KEY",
-                   re.IGNORECASE),
+        # scan-secrets: allow-pem-placeholder
+        #   （下面注释里的 PEM 头是误报示例文本，不含任何密钥体）
+        # ★★ 2026-11-13（与个人版同步）：私钥必须「头 + 体」才算命中。
+        #   旧式的最后一项 `OPENSSH PRIVATE KEY|BEGIN PRIVATE KEY` 是裸 substring，
+        #   且 CERTIFICATE / ENCRYPTED PRIVATE KEY 分支也是裸头部匹配，
+        #   模型只要在回答里提到这些标记就被判成泄露整条回复，
+        #   与请求侧 id=26166 那次误报是同一个病根。
+        #   现在 PEM 私钥与证书/公钥都来自 credentials.SPECS（已在上面
+        #   的 credentials_registry.combined_pattern 里覆盖），此处不再单列。
         # 仇恨/歧视/暴力
         re.compile(r"(种族|族群|人种|族裔).{0,8}(低劣|inferior|劣等|隔离|清洗|消灭|低|蠢)|"
                    r"(驱逐|击毙|消灭|清洗|清除|监禁|赶出去|赶走).{0,6}(移民|难民|某|那些|特定)|"
@@ -973,9 +1044,26 @@ class OutputGuardrail:
 
     # 中危模式（命中 → 信号 0.6）：疑似敏感/PII/内部片段
     _MEDIUM_RULE_PATTERNS = [
-        re.compile(r"\b\d{17}[\dXx]\b", re.IGNORECASE),            # 身份证号
-        re.compile(r"1[3-9]\d{9}"),                                 # 手机号
-        re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),  # 邮箱
+        # ★★ 2026-11-13：PII 判据改为引用真源。
+        #   旧实现手写了三条（身份证裸 18 位、手机号、无上限邮箱），
+        #   其中邮箱正则没有长度上界 —— 实测 6 万字符输入耗时 2.6 秒，
+        #   而 `_compute_rule_signal` 对每条模型输出都会跑一遍。
+        #   响应内容由中转站控制，这构成一条可卡死代理的路径。
+        #   真源版本已加上 RFC 长度上限，实测降到 3 毫秒。
+        re.compile(
+            "|".join(
+                f"(?:{credentials_registry.BY_KEY[k].pattern})"
+                for k in ("cn_id_card", "cn_phone", "email")
+            )
+        ),
+        # ★★ 2026-11-13：中危**凭证**也走这里（打码），不再混进 HIGH 列表。
+        #   `bearer_token` / `pem_certificate` 在真源里声明 medium，
+        #   放进 HIGH 会导致「声明 medium、行为 block」的口径矛盾，
+        #   实测把 `Bearer token-based-authentication-is-enabled` 整条拦掉。
+        re.compile(
+            credentials_registry.combined_pattern(_OUTPUT_CREDENTIAL_MEDIUM)
+            if _OUTPUT_CREDENTIAL_MEDIUM else r"(?!x)x"   # 空集合时永不匹配
+        ),
         # 内部/机密标记（要求与敏感信息共现，减少误报）
         #
         # ★★ 2026-10-07（误报修复）：**实现与注释原来是相反的**。
@@ -1007,10 +1095,12 @@ class OutputGuardrail:
                    r"\s*[:：=]\s*\S{3,}",
                    re.IGNORECASE),
         # 凭据赋值（要求 key=value 格式，减少教学讨论误报）
-        re.compile(r"(username|user_id|account)\s*[:=]\s*\S{4,}|"
-                   r"Bearer\s+\S{10,}|"
-                   r"ghp_\S{20,}|glpat-\S{10,}|"
-                   r"AKIA[A-Z0-9]{12,}",
+        # ★★ 2026-11-13（全局收敛）：Bearer / ghp_ / glpat- / AKIA
+        #   这四项都是「凭证形态」，已由 credentials.SPECS 统一提供，
+        #   此处不再重复（旧写法 AKIA[A-Z0-9]{12,} 是 12 位、忽略大小写，
+        #   与真源的 AKIA + 16 位大写不一致，会把 AKIAabcdefghijkl 判成密钥）。
+        #   这里只保留非凭证形态的赋值键名判据。
+        re.compile(r"(username|user_id|account)\s*[:=]\s*\S{4,}",
                    re.IGNORECASE),
     ]
 

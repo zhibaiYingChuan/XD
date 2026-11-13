@@ -33,8 +33,12 @@ from pathlib import Path
 
 # 用相对路径而非硬编码绝对路径 —— 换机器/换盘符仍能运行
 _SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(_SRC) in sys.path:
+    sys.path.remove(str(_SRC))
+sys.path.insert(0, str(_SRC))
 
 from daoti_xuandun_personal.proxy.baseline import (
     _PKG_PATTERNS, _normalize_pkg, _normalize_tool_name,

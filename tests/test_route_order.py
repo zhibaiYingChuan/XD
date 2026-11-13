@@ -33,8 +33,12 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 APP_PY = REPO / "src" / "daoti_xuandun_personal" / "proxy" / "app.py"
 
-if str(REPO / "src") not in sys.path:
-    sys.path.insert(0, str(REPO / "src"))
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(REPO / "src") in sys.path:
+    sys.path.remove(str(REPO / "src"))
+sys.path.insert(0, str(REPO / "src"))
 
 
 def _route_order() -> list[tuple[int, str]]:

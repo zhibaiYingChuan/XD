@@ -41,8 +41,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+# ★★ 2026-11-13：必须**无条件**挪到最前，不能只在「不在列表里」时插入。
+#   site-packages 里的 editable .pth 已经把 personal/src 加进 sys.path，
+#   但位置在 H:\XuanDun\src 之后 —— 只判断 `not in` 会直接跳过，
+#   于是 `import daoti_xuandun` 解析到根目录那份旧副本（缺 credentials.py）。
+if str(_SRC) in sys.path:
+    sys.path.remove(str(_SRC))
+sys.path.insert(0, str(_SRC))
 
 from daoti_xuandun_personal.proxy.baseline import build_baseline  # noqa: E402
 from daoti_xuandun_personal.proxy.sanitizer import RequestSanitizer  # noqa: E402

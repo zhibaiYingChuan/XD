@@ -27,8 +27,36 @@
 from __future__ import annotations
 
 import importlib
+import sys
+from pathlib import Path
 
 import pytest
+
+# ★★★ 2026-11-13：把个人版 src 强制排到 sys.path 最前。
+#
+#   本机 site-packages 里有两条 editable 安装：
+#     __editable__.daoti_xuandun-1.3.1.pth        → H:\XuanDun\src
+#     __editable__.daoti_xuandun_personal-*.pth   → H:\XuanDun\personal\src
+#   前者排在前面，于是 `import daoti_xuandun` 解析到**根目录那份旧副本**，
+#   而实际打包（desktop/build_engine.py）用的是 personal\src 这份。
+#
+#   后果：本地跑测试全绿，发布包里却是旧判据。2026-11-13 的私钥误报
+#   排查中，连「企业版一致性断言」都校验错了对象 —— 断言的对象是根目录
+#   副本，改 personal 那份根本不在它的视野里。
+#
+#   这里在 conftest 阶段一次性把 personal\src 提到最前，
+#   让所有测试（无论单独跑还是全量跑）都对准真正会被打包的那份。
+_PERSONAL_SRC = Path(__file__).resolve().parents[1] / "src"
+# ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
+#   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
+#   只判断 `not in` 会跳过，导致 import 到根目录旧副本。
+if str(_PERSONAL_SRC) in sys.path:
+    sys.path.remove(str(_PERSONAL_SRC))
+sys.path.insert(0, str(_PERSONAL_SRC))
+
+# 把可能已被导入的旧副本清掉，确保后续 import 走 personal\src
+for _mod in [m for m in sys.modules if m == "daoti_xuandun" or m.startswith("daoti_xuandun.")]:
+    sys.modules.pop(_mod, None)
 
 
 @pytest.fixture(autouse=True)

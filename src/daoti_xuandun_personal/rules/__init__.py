@@ -25,12 +25,39 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# ★ 回退集里的凭据判据来自唯一真源，不再手写第二份。
+from daoti_xuandun.credentials import BY_KEY
+
 logger = logging.getLogger("xuandun-personal.rules")
 
 _RULES_DIR = Path(__file__).parent
 _RULES_FILE = _RULES_DIR / "detection_rules.yaml"
 # 常用包名基准表（typosquat 相似度判据用）
 _PKG_FILE = _RULES_DIR / "pkg_allowlist.yaml"
+
+
+# ══════════════════════════════════════════════════════════════
+# PEM 私钥判据 —— 已迁移到唯一真源
+# ══════════════════════════════════════════════════════════════
+#
+# ★★ 2026-11-13（最终收敛）：判据不再定义在本文件，而是统一声明在
+#   `daoti_xuandun/credentials.py`（护栏包），个人版此处的
+#   `PEM_PRIVATE_KEY_PATTERN` 只是转发别名。
+#
+#   历史教训（三次返工都记在真源文件的注释里）：
+#     · 只认头部标记  → 用户问「BEGIN PRIVATE KEY 是什么」被整条阻断
+#     · 字符集漏 -/_ → URL-safe Base64 的私钥整批漏报（20/20 掉到 6/20）
+#     · 可空分支重复 → 长空白输入直接卡死
+#
+#   现在任何改动只需改一处，五处消费点自动同步。
+#   `tests/test_credential_registry.py` 会扫描全部消费方源码，
+#   发现任何一处重新内联凭据正则就判失败。
+#
+# ★ 说明：本文件不再导出 PEM_PRIVATE_KEY_PATTERN。
+#   判据的唯一真源是 `daoti_xuandun/credentials.py`，
+#   个人版消费方（sanitizer 等）直接从那里取，不再经本模块转发 ——
+#   多一层转发就多一个「导入期依赖」，在基准脚本这类
+#   手动改 sys.path 的场景下会踩到根目录旧副本。
 
 # 加载失败时的最小回退集：只保留最不容易误判、也最致命的几条。
 # 宁可少拦，不可全瘫 —— 代理起不来等于防护完全失效。
@@ -57,8 +84,12 @@ _FALLBACK: Dict[str, List[Tuple[Any, str]]] = {
          r"系统提示词|系统指令|系统设置|内部指令)", "系统提示词注入特征"),
     ],
     "sensitive_leak": [
-        (r"sk-[A-Za-z0-9\-_]{20,}", "OpenAI 风格密钥"),
-        (r"AKIA[0-9A-Z]{16}", "AWS Access Key"),
+        # ★★ 2026-11-13：回退集也必须来自唯一真源。
+        #   这里原来手写了 sk- / AKIA 两条，是第 6 处凭据判据 ——
+        #   规则文件缺失时会悄悄用回一份可能已漂移的正则。
+        #   现在直接从 SPECS 生成，字段缺失也不会出现「第二份判据」。
+        (BY_KEY["openai_key"].pattern, "OpenAI 风格密钥"),
+        (BY_KEY["aws_access_key_id"].pattern, "AWS Access Key"),
     ],
     "watermark": [],
 }
@@ -94,7 +125,21 @@ class RuleSet:
                     if not pat:
                         continue
                     try:
-                        out.append((re.compile(pat, re.IGNORECASE), str(label)))
+                        # ★★ 2026-11-13：按章节决定是否忽略大小写，不再一刀切。
+                        #
+                        #   `sensitive_leak` 这一节的判据**大小写是判据本身**：
+                        #   AKIA 恒为大写、sk- 恒为小写、eyJ 是固定前缀、
+                        #   ghp_ 恒为小写。统一加 IGNORECASE 会把
+                        #   「akiaIOSFODNN7EXAMPLE」「SK-hynix-…」判成凭据，
+                        #   而请求侧/响应侧命中即阻断 —— 实测误报。
+                        #
+                        #   其余章节（危险命令、敏感路径、注入特征）描述的
+                        #   是语义而非格式，大小写无关，保持原 IGNORECASE 行为。
+                        #   ★ 为什么不逐条改 YAML 加 `(?i)`：55 条里绝大多数
+                        #     需要不区分大小写，逐条标注只会增加遗漏面；
+                        #     按「语义族」分组表达才与判据性质对应。
+                        flags = 0 if section == "sensitive_leak" else re.IGNORECASE
+                        out.append((re.compile(pat, flags), str(label)))
                     except re.error as e:
                         # 单条规则编译失败不应拖垮整个规则集
                         logger.warning("规则 %s 中的 %r 编译失败，已跳过: %s",
