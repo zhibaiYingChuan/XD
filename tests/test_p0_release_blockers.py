@@ -222,6 +222,62 @@ async def _drain(resp):
     return b"".join(out)
 
 
+async def _drain_partial(resp, n=1):
+    """只读 n 个 chunk 就关闭生成器，模拟客户端中途断开。"""
+    it = resp.body_iterator
+    got = []
+    async for chunk in it:
+        got.append(chunk)
+        if len(got) >= n:
+            break
+    await it.aclose()
+    return b"".join(got)
+
+
+def _run_disconnect(tmp_path, resp, *, verifier=None):
+    """跑流式端点，但只读 1 个 chunk 就断开（模拟客户端关闭连接）。"""
+    from starlette.requests import Request
+
+    store = db_mod.PersonalStorage(db_path=tmp_path / "p0.db")
+    client = _Client(resp)
+
+    old = (app_mod._config, app_mod._http_client, app_mod._storage,
+           app_mod._reputation, app_mod._paused_until, app_mod._verifier,
+           app_mod._sanitizer)
+    app_mod._config = _Cfg()
+    app_mod._http_client = client
+    app_mod._storage = store
+    app_mod._reputation = app_mod.ReputationTracker()
+    app_mod._paused_until = 0.0
+    app_mod._verifier = verifier
+    app_mod._sanitizer = None
+
+    body = json.dumps({
+        "model": "m", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }).encode("utf-8")
+
+    scope = {
+        "type": "http", "method": "POST", "path": "/v1/chat/completions",
+        "headers": [], "query_string": b"", "client": ("127.0.0.1", 40000),
+    }
+
+    async def _receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    loop = asyncio.new_event_loop()
+    try:
+        application = app_mod.create_app()
+        endpoint = _endpoint(application, "/v1/chat/completions")
+        result = loop.run_until_complete(endpoint(Request(scope, _receive)))
+        loop.run_until_complete(_drain_partial(result))
+    finally:
+        (app_mod._config, app_mod._http_client, app_mod._storage,
+         app_mod._reputation, app_mod._paused_until, app_mod._verifier,
+         app_mod._sanitizer) = old
+    return store
+
+
 # ══════════════════════════════════════════════════════════════
 # P0-2：/health 的就绪语义
 # ══════════════════════════════════════════════════════════════
@@ -334,9 +390,22 @@ class TestTruncatedResponseIsNotSuccess:
 
 
 class _FakeFinding:
-    category = "test"
+    # ★ 2026-11-19：必须是 tool_call_dangerous —— 账本只有在「阻断确实由
+    #   工具调用引起」时才记 block（见 app.py 的 tool_call_blocked）。
+    category = "tool_call_dangerous"
     severity = "high"
     detail = "测试用高危发现"
+
+    def to_dict(self):
+        return {"category": self.category, "severity": self.severity,
+                "detail": self.detail}
+
+
+class _TextLeakFinding:
+    """文本泄露类发现（不是工具调用危险）。"""
+    category = "sensitive_leak"
+    severity = "high"
+    detail = "响应里出现了真实凭证"
 
     def to_dict(self):
         return {"category": self.category, "severity": self.severity,
@@ -349,6 +418,15 @@ class _BlockingVerifier:
     def verify(self, *args, **kwargs):
         return SimpleNamespace(
             action="block", severity="high", findings=[_FakeFinding()],
+        )
+
+
+class _TextLeakVerifier:
+    """阻断来自文本泄露，工具调用本身良性。"""
+
+    def verify(self, *args, **kwargs):
+        return SimpleNamespace(
+            action="block", severity="high", findings=[_TextLeakFinding()],
         )
 
 
@@ -424,6 +502,84 @@ class TestStreamTermination:
         assert rows and rows[0].action == "block", (
             "这次确实没让任何东西落地（工具调用已扣住），应当记 block"
         )
+
+    def test_text_delivered_but_tool_call_blocked_is_recorded_as_block(self, tmp_path):
+        """文本已送达、但工具调用被扣住时，账本必须记 block。
+
+        ★★ 2026-11-19（本地安全日志实测 71 条）：流式响应里先发了一段文本，
+          随后出现工具调用帧并被扣住。旧口径只看「有没有文本交付过」，
+          于是记成 alert（界面显示「已告警」）—— 而用户那边的 AI
+          因为拿不到 tool_call 一直卡着，日志却说没拦，无从判断。
+
+          正确口径拆成两件事：
+            · 文本：已送达，撤不回 → 写进 detail
+            · 工具调用：已扣住、未交付 → 这才是「已拦截」的依据
+        """
+        resp = _StreamResp([
+            'data: {"choices":[{"delta":{"content":"我先看一下"}}]}\n\n'.encode("utf-8"),
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"function":{"name":"RunCommand","arguments":"{\\"command\\":\\"rm -rf /\\"}"}}]}}]}\n\n',
+        ])
+        result, store = _run(tmp_path, resp, stream=True,
+                              verifier=_BlockingVerifier())
+        out = result
+
+        assert b"RunCommand" not in out, "被扣住的工具调用仍然发给了客户端"
+        rows = store.query_logs(limit=5)
+        assert rows and rows[0].action == "block", (
+            f"工具调用已被扣住（危险动作确实没执行），却记成 {rows[0].action!r} —— "
+            "用户会看到「日志说没拦，可我这边 AI 一直卡着」"
+        )
+        detail = rows[0].detail_json or ""
+        assert "工具调用已扣住" in detail, "日志没写明工具调用被扣住"
+        assert "文本" in detail, "日志没写明文本已部分送达"
+
+    def test_text_leak_with_benign_tool_call_is_alert_not_block(self, tmp_path):
+        """阻断来自文本泄露、工具调用本身良性时，不能记 block。
+
+        ★★ 2026-11-19（独立审查 S3）：旧口径只看「有没有扣住的工具调用」，
+          于是「危险文本已送达 + 一个良性的 ReadFile 被扣住」被记成 block，
+          detail 还写「危险动作已拦截」—— 而真正泄露的文本早就给出去了。
+        """
+        resp = _StreamResp([
+            'data: {"choices":[{"delta":{"content":"泄露的密钥 sk-xxx"}}]}\n\n'.encode("utf-8"),
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"function":{"name":"ReadFile","arguments":"{\\"path\\":\\"/tmp/a.txt\\"}"}}]}}]}\n\n',
+        ])
+        result, store = _run(tmp_path, resp, stream=True,
+                             verifier=_TextLeakVerifier())
+        rows = store.query_logs(limit=5)
+        assert rows and rows[0].action == "alert", (
+            f"危险文本已送达、工具调用良性，却记成 {rows[0].action!r} —— "
+            "账本会说「危险动作已拦截」，与事实相反"
+        )
+        detail = rows[0].detail_json or ""
+        assert "未命中危险判据" in detail, (
+            "日志没有说明「扣住的工具调用本身是良性的」"
+        )
+
+    def test_client_disconnect_is_recorded_as_interrupted(self, tmp_path):
+        """客户端中途断开时，扣住的工具调用从未交付，不能记 pass。
+
+        ★★ 2026-11-19（S3）：生成器在 yield 处收到 GeneratorExit，
+          旧实现照常走 finally 的 pass 分支 —— 账本写「安全通过」，
+          而实际上这次响应被截断了、工具调用一个都没交付。
+        """
+        # 工具调用帧在前（被扣住），正文帧在后（触发 yield 挂起）。
+        # 只读 1 个 chunk 就断开时，held_tool_frames 非空且从未交付。
+        resp = _StreamResp([
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"function":{"name":"RunCommand","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        ])
+        store = _run_disconnect(tmp_path, resp)
+        rows = store.query_logs(limit=5)
+        assert rows, "客户端断开后一条日志都没写"
+        assert rows[0].log_type == "proxy_error", (
+            f"客户端断开被记成 {rows[0].log_type!r}/{rows[0].action!r} —— "
+            "账本会说这次「安全通过」，而响应其实被截断了"
+        )
+        assert "client_disconnected" in (rows[0].summary or "")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -553,6 +709,34 @@ class TestFrontendAdminToken:
         """401 的文案不能把人引向端口问题。"""
         src = API_TS.read_text(encoding="utf-8")
         assert "桌面端" in src, "401 时没有告诉用户「请从桌面端操作」"
+
+
+class TestRelayLogIsNotShownAsSafe:
+    """S4：relay 日志是「直通转发、未做检测」，不能显示成「安全」。
+
+    ★ 为什么只能静态判：TS 在 pytest 里跑不起来。
+      判据不是「有没有 relay 字样」，而是**结果文案与徽章颜色都改了** ——
+      只改文案不改颜色，用户仍会看到一颗绿色的「安全」圆点。
+    """
+
+    def test_entry_action_label_marks_relay_as_undetected(self):
+        src = API_TS.read_text(encoding="utf-8")
+        start = src.index("export function entryActionLabel")
+        end = src.index("\n}\n", start)
+        body = src[start:end]
+        assert "log_type === 'relay'" in body, (
+            "entryActionLabel 没有单独处理 relay —— 会沿用 pass 的「安全」"
+        )
+        assert "未检测" in body, "relay 日志的结果文案没有改成「未检测」"
+
+    def test_badge_class_does_not_paint_relay_green(self):
+        src = API_TS.read_text(encoding="utf-8")
+        start = src.index("export function actionBadgeClass")
+        end = src.index("\n}\n", start)
+        body = src[start:end]
+        assert "log_type === 'relay'" in body, (
+            "actionBadgeClass 没有单独处理 relay —— 未检测的日志仍会被染成绿色"
+        )
 
 
 class TestFilteredDeleteUsesQuery:

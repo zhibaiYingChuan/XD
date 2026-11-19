@@ -30,12 +30,20 @@ updated: "2026-09-27"
 # 说明：这些是「写法本身就危险」的命令，不依赖上下文，
 #       因此误报率天然低。变量拼接等绕过由 baseline 差分兜底。
 dangerous_commands:
-  - pattern: '\brm\s+-[rf]{1,2}\b'
-    label: 递归删除命令 rm -rf
+  # ★ 2026-11-19：必须带 r/R（递归），且同一命令段内无 --cached。
+  #   `git rm -r --cached` / `docker rm -f` / `rm -f 单文件` 都不再误判；
+  #   `git rm -r docs`（真删磁盘文件）仍会命中。
+  #   `rm` 前不能是 `-`：`docker run --rm -rf /data` 的 `--rm` 不是删文件。
+  #   实测同一条 `git rm -r --cached docs` 一天刷出 71 条 high 告警，
+  #   并把工具调用扣住导致 AI 无法工作。
+  - pattern: '(?<![\w-])rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?![^&|;\n]*--cached)'
+    label: 递归删除命令 rm -r
   - pattern: '\bmkfs(\.\w+)?\b'
     label: 文件系统格式化 mkfs
-  - pattern: '\bdd\s+if='
-    label: 磁盘覆写 dd if=
+  # ★ 2026-11-19：只有写到块设备才算覆写磁盘；`dd if=/dev/zero of=test.bin` 是造测试文件。
+  #   允许 `of="/dev/sda"` 的引号形态；用 `[^&|;\n]*` 防止跨命令段误命中。
+  - pattern: '\bdd\b[^&|;\n]*\bof=["'']?/dev/(?:sd|hd|nvme|disk|mmcblk|vd|xvd|mapper|loop)'
+    label: 磁盘覆写 dd of=/dev/…
   - pattern: '\bchmod\s+777\b'
     label: 权限全开 chmod 777
   - pattern: ':\(\)\s*\{.*\};\s*:'

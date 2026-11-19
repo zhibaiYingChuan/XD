@@ -189,7 +189,13 @@ _VIOLATION_SIGNALS: Dict[str, List[Tuple[str, str, str]]] = {
          r"Path\s*\([^)]*\)\s*\.\s*(?:unlink|rmdir)|"
          r"\.unlink\s*\(\s*(?:missing_ok|\))|\bunlinkSync|\brmdirSync|\brmSync|"
          r"fs(?:\.promises)?\.(?:unlink|rmdir|rm)\b|"
-         r"\bRemove-Item\b|\bdel\s+/[sqf]|\brm\s+-[rf])",
+         r"\bRemove-Item\b|\bdel\s+/[sqf]|"
+         # ★ 2026-11-19：与危险命令判据同口径 —— 必须带 r/R 且无 --cached。
+         #   `git rm -r --cached` / `docker rm -f` 不是删本地文件；
+         #   `git rm -r docs` 会真删磁盘文件，仍命中。
+         #   `rm` 前不能是 `-`：`docker run --rm -rf /data` 的 `--rm` 不是删文件。
+         r"(?<![\w-])rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)"
+         r"(?![^&|;\n]*--cached))",
          "响应要求删除本地文件", "high"),
         (r"\b(?:open|write_text|write_bytes|writeFile|writeFileSync|"
          r"fs\.writeFile|\.write_text)\s*\([^)]*['\"](?:w|a)",

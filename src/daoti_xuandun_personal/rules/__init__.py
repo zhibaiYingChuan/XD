@@ -63,8 +63,14 @@ _PKG_FILE = _RULES_DIR / "pkg_allowlist.yaml"
 # 宁可少拦，不可全瘫 —— 代理起不来等于防护完全失效。
 _FALLBACK: Dict[str, List[Tuple[Any, str]]] = {
     "dangerous_commands": [
-        (r"\brm\s+-[rf]{1,2}\b", "递归删除命令 rm -rf"),
-        (r"\b(?:curl|wget)\b[^\n|;]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本"),
+        # ★ 2026-11-19：必须带 r/R（递归），且同一命令段内无 --cached。
+        #   `git rm -r --cached` / `docker rm -f` / `rm -f 单文件` 不再误判；
+        #   `git rm -r docs`（真删磁盘文件）仍会命中。
+        #   `rm` 前不能是 `-`：`docker run --rm -rf /data` 的 `--rm` 不是删文件。
+        (r"(?<![\w-])rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)"
+         r"(?![^&|;\n]*--cached)", "递归删除命令 rm -r"),
+        # ★ 2026-11-19：与主判据统一为 `[^&|;\n]*`，不再跨过 `&` 匹配后续命令。
+        (r"\b(?:curl|wget)\b[^&|;\n]*\|\s*(?:ba)?sh\b", "下载并执行远程脚本"),
         (r"/dev/(?:tcp|udp)/[\w.:-]+", "反弹 shell（内建 /dev/tcp 重定向）"),
         (r"\bnc\b\s+-[a-z]*e\b", "反弹 shell（nc -e）"),
     ],

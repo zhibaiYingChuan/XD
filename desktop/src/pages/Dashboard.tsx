@@ -385,6 +385,12 @@ export default function Dashboard() {
   const loaded = state !== null;
   const StateIcon = STATE_ICON[s] ?? ShieldCheck;
   const today = state?.today;
+  // ★★ 2026-11-19（独立审查 S4）：total_calls 里混着「检测过的」与
+  //   「直通未检测的」两类记录。首页说「今天检查了 N 次」时，
+  //   必须扣掉未检测的那部分，否则只读/暂停用户会看到
+  //   「检查了 20 次、很安全」—— 而实际一次都没查。
+  const unchecked = state?.unchecked_forwarded ?? 0;
+  const checked = Math.max(0, (today?.total_calls ?? 0) - unchecked);
   // ★ P2-11 修复：按域名匹配当前配置的中转站；匹配不到时退而取
   //   信誉最高者（relays 按分数升序 → 最后一个），而不是最差的那个。
   //
@@ -594,7 +600,10 @@ export default function Dashboard() {
 
         {today && (
           <div className="hero-narrative">
-            {t('今天检查了')} <b>{today.total_calls}</b> {t('次')}
+            {t('今天检查了')} <b>{checked}</b> {t('次')}
+            {unchecked > 0 && (
+              <>{t('，另有')} <b>{unchecked}</b> {t('次未检测直通')}</>
+            )}
             {today.redaction_count > 0 && (
               <>{t('，打码')} <b>{today.redaction_count}</b> {t('处')}</>
             )}
@@ -677,9 +686,11 @@ export default function Dashboard() {
               {!loaded
                 ? t('正在加载记录…')
                 : today && today.total_calls > 0
-                  ? (today.danger_count + today.suspect_count > 0
-                    ? `${t('最近的对话没有新问题。今天累计：危险')} ${today.danger_count} ${t('条、提示')} ${today.suspect_count} ${t('条，点「查看全部」可逐条核对。')}`
-                    : t('今天没有发现危险响应，你的 AI 对话很安全'))
+                  ? (checked === 0
+                    ? `${t('今天有')} ${unchecked} ${t('次转发未做检测（防护未开启或已暂停），不能据此判断安全。')}`
+                    : today.danger_count + today.suspect_count > 0
+                      ? `${t('最近的对话没有新问题。今天累计：危险')} ${today.danger_count} ${t('条、提示')} ${today.suspect_count} ${t('条，点「查看全部」可逐条核对。')}`
+                      : t('今天没有发现危险响应，你的 AI 对话很安全'))
                   : t('还没有检测记录 — 使用 AI 工具发起一次对话试试')}
             </div>
           </div>

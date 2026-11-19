@@ -1363,6 +1363,19 @@ def create_app() -> FastAPI:
                             yield _restore_out(pending).encode("utf-8")
                             pending = ""
                             state["delivered"] = True
+            except GeneratorExit:
+                # ★★ 2026-11-19（S3）：客户端断开时，生成器在 `yield` 处
+                #   收到 GeneratorExit。此时扣住的工具调用帧**从未交付**，
+                #   若照常走 finally 的 pass 分支，账本会写「安全通过」——
+                #   而实际上这次响应被截断了。
+                #   如实记为中断（proxy_error，不计入 KPI 三档），并原样抛出
+                #   让生成器正常关闭。
+                state["interrupted"] = "client_disconnected"
+                raise
+            except asyncio.CancelledError:
+                # ★ 服务端取消/超时与客户端断开是两回事，分开记。
+                state["interrupted"] = "request_cancelled"
+                raise
             except httpx.HTTPError as e:
                 # ★★ P0-8（2026-10-28）：上游中途断开不能「只是断流」
                 #
@@ -1386,7 +1399,12 @@ def create_app() -> FastAPI:
                 #   都在这里收口，避免「每条流泄漏一条连接」。
                 try:
                     await upstream.aclose()
-                except Exception:  # noqa: BLE001 — 关闭失败不该影响收尾
+                except BaseException:  # noqa: BLE001 — 关闭失败不该影响收尾
+                    # ★★ 2026-11-19（独立审查 S3）：这里必须捕获 BaseException。
+                    #   `asyncio.CancelledError` 继承自 BaseException 而非
+                    #   Exception —— 只写 `except Exception` 时，aclose 抛出的
+                    #   CancelledError 会冒出 finally，导致后面的
+                    #   `_log_stream_interrupted` 整段被跳过，中断日志丢失。
                     pass
                 # ★★ 2026-10-27：这里不再清空还原映射。
                 #   映射已由 PlaceholderVault 按会话托管（24h TTL / LRU），
@@ -1419,24 +1437,56 @@ def create_app() -> FastAPI:
                 #     · 没有任何内容交付（例如只有工具调用帧就被拦下）
                 #       → 仍然是 block，因为这次真的没让任何东西落地。
                 late_block = state["blocked"] and state["delivered"]
+                # ★★ 2026-11-19（账本与事实对齐）：工具调用帧被扣住时，
+                #   危险动作**确实被拦住了** —— 客户端拿不到 tool_call，
+                #   也就不会去执行。此时若仍记 alert（界面显示「已告警」），
+                #   用户会看到「日志说没拦，可我这边 AI 一直卡着」，
+                #   无从判断到底发生了什么。实测一天 71 条这种记录。
+                #
+                #   口径拆成两件事，各自如实：
+                #     · 文本：已送达，撤不回 → 记在 detail 里
+                #     · 工具调用：已扣住、未交付 → 这才是「已拦截」的依据
+                #   只有「纯文本、没有任何工具调用」时，才维持 alert。
+                #
+                # ★★ 2026-11-19（独立审查 S3）：还必须确认**阻断确实由工具调用引起**。
+                #   若阻断来自文本泄露、而扣住的工具调用本身是良性的
+                #   （如 ReadFile），记 block 会让账本说「危险动作已拦截」——
+                #   而危险文本早已送达。只有 findings 里出现 tool_call_dangerous
+                #   时，扣住工具调用才算真正的「已拦截」。
+                tool_call_blocked = (
+                    state["blocked"]
+                    and bool(held_tool_frames)
+                    and any(
+                        getattr(f, "category", "") == "tool_call_dangerous"
+                        for f in findings
+                    )
+                )
                 if late_block:
+                    if tool_call_blocked:
+                        held_note = (
+                            "；工具调用已扣住、未交付给 AI 工具"
+                            "（危险动作已拦截，文本部分无法撤回）"
+                        )
+                    elif held_tool_frames:
+                        held_note = (
+                            "（扣住的工具调用本身未命中危险判据，危险文本已送达，"
+                            "不计入「已拦截」）"
+                        )
+                    else:
+                        held_note = "（本次没有工具调用，不计入「已拦截」）"
                     findings.append(
                         VerificationFinding(
                             category="late_delivery",
                             severity="high",
                             detail=(
-                                "流式响应在判定为高危前已发出部分内容"
-                                + (
-                                    "（工具调用已扣住、未交付给 AI 工具）"
-                                    if held_tool_frames
-                                    else "（本次没有工具调用）"
-                                )
-                                + "；这是事后告警，不计入「已拦截」"
+                                "流式响应在判定为高危前已发出部分内容" + held_note
                             ),
                         )
                     )
                 action = (
-                    Action.ALERT.value
+                    Action.BLOCK.value
+                    if tool_call_blocked
+                    else Action.ALERT.value
                     if late_block
                     else Action.BLOCK.value
                     if state["blocked"]
@@ -5444,7 +5494,7 @@ def _log_stream_interrupted(
             action=Action.ALERT.value,
             severity="low",
             model=model,
-            summary=f"上游流式中断：{reason}"[:200],
+            summary=f"流式中断：{reason}"[:200],
             text_preview=_make_preview(readable),
         ))
     except Exception as e:  # noqa: BLE001 — 日志失败不该改变流的行为

@@ -42,6 +42,7 @@ function deriveTrayState(
   today: StateResponse['today'],
   reachable: boolean,
   readOnly = false,
+  unchecked = 0,
 ): { state: TrayState; detail: string } {
   if (!reachable || s === 'paused') {
     return { state: 'paused', detail: s === 'paused' ? '防护已暂停' : '勘合服务没有运行' };
@@ -75,7 +76,7 @@ function deriveTrayState(
       detail: `${t('未激活，今日仅转发')} ${today.total_calls} ${t('次（没检查过）')}`,
     };
   }
-  return { state: 'safe', detail: `${t('今日已检查')} ${today.total_calls} ${t('次')}` };
+  return { state: 'safe', detail: `${t('今日已检查')} ${Math.max(0, today.total_calls - unchecked)} ${t('次')}` };
 }
 
 /** 缺失的检测层翻译成人话（后端给的是代码名）。 */
@@ -182,6 +183,7 @@ function StatusBar() {
       state?.today,
       reachable,
       state?.read_only ?? false,
+      state?.unchecked_forwarded ?? 0,
     );
     setTrayState(ts, detail);
   }, [trayKey, state, reachable]);

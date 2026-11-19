@@ -1213,6 +1213,12 @@ export function entryActionLabel(entry: {
   if (entry.log_type === 'proxy_error') {
     return entry.action === 'alert' ? t('未送达') : t(ACTION_LABELS[entry.action] ?? entry.action);
   }
+  // ★ 2026-11-19（S4）：relay 记录的是「本次请求直通转发、未做检测」
+  //   （防护暂停 / 脱敏关闭 / 非 chat 端点）。若沿用 pass 的「安全」，
+  //   用户会以为这条被检查过且没问题 —— 实际一个字节都没查。
+  if (entry.log_type === 'relay') {
+    return t('未检测');
+  }
   return t(ACTION_LABELS[entry.action] ?? entry.action);
 }
 
@@ -1630,12 +1636,19 @@ export function humanizeLoadError(raw: string | null | undefined): {
 }
 
 /** 依据 action + severity 得出徽章样式类 */
-export function actionBadgeClass(entry: { action: LogAction; severity: Severity }): string {
+export function actionBadgeClass(entry: {
+  action: LogAction;
+  severity: Severity;
+  log_type?: string;
+}): string {
   if (entry.action === 'block') return 'danger';
   // ★ 2026-11-03：观察必须先于 severity 判断。
   //   观察日志的 severity 可能是 high（如工具链注入），
   //   若先按 severity 上色，它会被染成「提示」色 —— 与「不计入提示」自相矛盾。
   if (entry.action === 'observe') return 'info';
+  // ★ 2026-11-19（S4）：relay = 未检测，不能染成「安全」绿。
+  //   与 entryActionLabel 的「未检测」保持同一口径。
+  if (entry.log_type === 'relay') return 'info';
   if (entry.action === 'alert' || entry.severity === 'medium') return 'suspect';
   if (entry.action === 'redact') return 'info';
   return 'safe';
