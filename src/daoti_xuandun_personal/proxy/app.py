@@ -100,6 +100,26 @@ _reputation: Optional[ReputationTracker] = None
 _http_client: Optional[httpx.AsyncClient] = None
 _paused_until: float = 0.0     # 暂停截止时间戳
 
+# ★★ 2026-11-20（连接失败自愈）：共享客户端的代次与重建锁。
+#
+#   实测现象：引擎连续运行数小时后，共享的 httpx 客户端进入
+#   「所有 TCP 连接都失败」的状态 —— 同一进程里临时新建的客户端
+#   却能正常连通（/api/relay/test 返回 401），重启引擎也立刻恢复。
+#   日志里只留下 47 条 `无法连接中转站：All connection attempts failed`，
+#   用户侧表现为 AI 一直卡住，必须手动重启勘合。
+#
+#   代次（generation）用于并发去重：多个请求同时失败时，
+#   第一个重建，其余直接复用新客户端，不会连环重建。
+_http_client_gen: int = 0
+_http_client_lock: Optional[asyncio.Lock] = None
+#: 上次重建的时刻（monotonic）。None = 从未重建。
+#: 用哨兵而不是 0.0：首次失败必须无条件重建，不能依赖「系统运行超过 30 秒」。
+_http_client_rebuilt_at: Optional[float] = None
+
+#: 重建冷却（秒）。持续断网时，冷却期内只快速失败，不再重建 + 重试，
+#: 避免每个请求都多等一次 connect 超时。
+_CLIENT_REBUILD_COOLDOWN_S = 30.0
+
 # ★ run() 解析出的**实际**监听端口（含 --port / 环境变量覆盖）。
 #   lifespan 里的 _config 是独立 load() 的对象，带的是配置文件里的端口，
 #   与实际监听值可能不同 —— 日志必须用这个，否则会报出错的端口。
@@ -226,10 +246,90 @@ def _inject_build_secrets(config) -> bool:  # pragma: no cover - 已废弃，见
     return False
 
 
+def _new_http_client(timeout_s: float) -> httpx.AsyncClient:
+    """构造共享 HTTP 客户端（lifespan 与故障重建共用同一份参数）。
+
+    ★ 抽成函数而不是复制两遍：重建时若参数与启动时不一致，
+      会出现「重启引擎能好、自动重建却不好」的诡异分叉。
+    """
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=10.0, read=timeout_s, write=30.0, pool=10.0
+        ),
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
+    )
+
+
+def _client_lock() -> asyncio.Lock:
+    """懒创建重建锁（必须绑定当前事件循环，见 lifespan 里的重置）。"""
+    global _http_client_lock
+    if _http_client_lock is None:
+        _http_client_lock = asyncio.Lock()
+    return _http_client_lock
+
+
+async def _replace_http_client(failed_gen: int) -> bool:
+    """连接失败后重建共享客户端（自愈）。返回调用方是否应重试。
+
+    ★★ 2026-11-20 实测：引擎连续运行数小时后，共享客户端会进入
+      「所有 TCP 连接都失败」的状态；同一进程里临时新建的客户端
+      却能正常连通，重启引擎也立刻恢复。这里在首次 ConnectError 时
+      重建客户端并重试一次，把「必须手动重启引擎」变成自愈。
+
+    ★ 返回值语义：
+      · True  —— 代次已变（别人刚重建过）或本次重建成功 → 用新客户端重试；
+      · False —— 冷却期内 → 不重试，直接快速失败。
+
+    ★ 代次去重：并发请求同时失败时，只有第一个真正重建；
+      其余请求看到代次已变，直接复用新客户端重试，不会连环重建。
+
+    ★ 冷却：持续断网时，30 秒内只重建一次。冷却期内的请求
+      **不重建、也不重试**，避免每个请求都多等一次 connect 超时、
+      并把连接池反复推倒重建。
+
+    ★★ 为什么不关闭旧客户端（两轮独立审查的结论）：
+      定时关闭不可靠 —— `read=300s` 是单次读取间隔超时，不是请求总时长，
+      只要上游持续出字，流式回答可以远超 330 秒，定时 aclose 仍会截断它。
+      而 httpcore 的连接池在连接被借出时会把它从池中移除，
+      活动流的连接**不在池里**，所以这里直接丢掉旧客户端的引用即可：
+      活动连接由响应流持有、不受影响；空闲连接随客户端被 GC 时释放。
+    """
+    global _http_client, _http_client_gen, _http_client_rebuilt_at
+    async with _client_lock():
+        if _http_client_gen != failed_gen:
+            # 别人已经重建过：让调用方用新客户端重试，不要在这里二次重建
+            return True
+        now = time.monotonic()
+        if (
+            _http_client_rebuilt_at is not None
+            and now - _http_client_rebuilt_at < _CLIENT_REBUILD_COOLDOWN_S
+        ):
+            return False
+        # 配置缺失/结构异常时退回默认读超时：重建客户端本身不能失败，
+        # 否则「自愈」会变成新的故障点。
+        timeout_s = 300.0
+        if _config is not None:
+            try:
+                timeout_s = float(_config.server.request_timeout_s)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        _http_client = _new_http_client(timeout_s)
+        _http_client_gen += 1
+        _http_client_rebuilt_at = now
+        logger.warning(
+            "共享 HTTP 客户端已重建（代次 %s → %s）",
+            failed_gen, _http_client_gen,
+        )
+    # 不 aclose 旧客户端：理由见 docstring
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """应用生命周期。"""
     global _config, _storage, _sanitizer, _verifier, _restorer, _reputation, _http_client
+    global _http_client_gen, _http_client_lock, _http_client_rebuilt_at
 
     # ① 加载配置
     _config = PersonalConfig.load()
@@ -295,13 +395,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ③ HTTP 客户端
     timeout_s = _config.server.request_timeout_s
-    _http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(
-            connect=10.0, read=timeout_s, write=30.0, pool=10.0
-        ),
-        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-        follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
-    )
+    _http_client = _new_http_client(timeout_s)
+    # ★ 新的事件循环：代次前进、锁与冷却时间必须重建 ——
+    #   上一次运行留下的锁绑定在旧循环上，跨循环使用会抛 RuntimeError；
+    #   冷却时间沿用旧值会让重启后的第一次自愈被误判为「冷却期内」。
+    _http_client_gen += 1
+    _http_client_lock = None
+    _http_client_rebuilt_at = None
 
     # ★★ 2026-11-03：启动时按日志重算一次中转站派生数据。
     #   检测规则会随版本修正（水印正则收窄、长度基线剔除近空响应、
@@ -356,6 +456,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if _http_client is not None:
         await _http_client.aclose()
         _http_client = None
+    # ★ 锁绑定在即将结束的事件循环上，必须一并丢掉
+    _http_client_lock = None
     if _storage is not None:
         _storage.close()
         _storage = None
@@ -784,9 +886,15 @@ def create_app() -> FastAPI:
             upstream_response = await _forward_to_relay(
                 body, stream, target_relay)
         except httpx.TimeoutException:
+            logger.warning("转发超时（%s）", upstream_domain, exc_info=True)
             return _proxy_error(upstream_domain, model, session_id,
                                 "中转站响应超时", t0, LogType.PROXY_ERROR)
         except httpx.HTTPError as e:
+            # ★★ 2026-11-20：必须把异常链写进日志。
+            #   原来只把 str(e) 落库（「All connection attempts failed」），
+            #   底层到底是 DNS、TCP 还是 TLS 失败完全看不出来 ——
+            #   本次排查只能靠重启引擎 + 另起实例对比才定位。
+            logger.warning("转发失败（%s）: %s", upstream_domain, e, exc_info=True)
             return _proxy_error(upstream_domain, model, session_id,
                                 f"无法连接中转站：{e}", t0, LogType.PROXY_ERROR)
 
@@ -845,16 +953,43 @@ def create_app() -> FastAPI:
         #   现在改用 build_request + send(stream=True)：响应体按到达顺序
         #   逐块可取。**调用方必须负责关闭**（await upstream.aclose()），
         #   否则连接不会归还连接池 —— 每条流泄漏一条连接，很快耗尽 pool。
-        request = _http_client.build_request(
-            "POST",
-            f"{base}/chat/completions",
-            json=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        return await _http_client.send(request, stream=True)
+        #
+        # ★★ 2026-11-20（连接失败自愈）：共享客户端会进入「所有 TCP 连接
+        #   都失败」的状态（实测一次，47 条告警，必须手动重启引擎）。
+        #   首次 ConnectError 时重建客户端并重试一次；第二次仍失败才上报。
+        for attempt in (0, 1):
+            client = _http_client
+            if client is None:
+                raise httpx.ConnectError("代理未初始化")
+            gen = _http_client_gen
+            request = client.build_request(
+                "POST",
+                f"{base}/chat/completions",
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                return await client.send(request, stream=True)
+            except httpx.ConnectError:
+                # ★★ 只重试 ConnectError：连接**尚未建立**，POST 没有被发出，
+                #   重试不会重复扣费。读/写阶段的错误（ReadError/WriteError/
+                #   RemoteProtocolError）绝不重试 —— 请求可能已被上游执行。
+                #   ★ 不要扩大到 TransportError/HTTPError，否则会引入重复扣费。
+                if attempt == 1:
+                    raise
+                rebuilt = await _replace_http_client(gen)
+                if not rebuilt:
+                    # 冷却期内 / 别人已重建：不重试，直接快速失败，
+                    # 避免持续断网时每个请求都多等一次 connect 超时。
+                    raise
+                logger.warning(
+                    "连接失败，共享客户端已重建，重试一次（代次 %s）", gen
+                )
+
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def _relay_passthrough(
         body: Dict[str, Any],
@@ -876,6 +1011,8 @@ def create_app() -> FastAPI:
         try:
             upstream = await _forward_to_relay(body, stream, target)
         except httpx.HTTPError as e:
+            # ★ 2026-11-20：与主转发同口径，把异常链写进日志
+            logger.warning("直通转发失败: %s", e, exc_info=True)
             return JSONResponse(
                 status_code=502,
                 content={"error": {"message": f"中转站不可达：{e}", "type": "upstream_error"}},

@@ -131,6 +131,28 @@ class _Client:
         return self._resp
 
 
+class _BrokenClient:
+    """模拟「共享客户端坏掉」：每次 send 都抛 ConnectError。
+
+    ★★ 2026-11-20 实测：引擎连续运行数小时后，共享客户端进入
+      「所有 TCP 连接都失败」的状态；同一进程里新建的客户端却能连通。
+    """
+
+    def __init__(self):
+        self.calls = 0
+        self.closed = False
+
+    def build_request(self, method, url, json=None, headers=None):
+        return {"method": method, "url": url, "json": json, "headers": headers}
+
+    async def send(self, request, stream=False):
+        self.calls += 1
+        raise httpx.ConnectError("All connection attempts failed")
+
+    async def aclose(self):
+        self.closed = True
+
+
 class _Relay:
     base_url = URL
     api_key = KEY
@@ -164,22 +186,24 @@ def _endpoint(application, path, method="POST"):
     raise AssertionError(f"未找到路由 {method} {path}")
 
 
-def _run(tmp_path, resp, *, stream=False, verifier=None):
+def _run(tmp_path, resp, *, stream=False, verifier=None, client=None):
     """把 /v1/chat/completions 跑起来。
 
     ★ stream=True 时**在补丁窗口内**把流读完再返回：
       生成器是惰性执行的，若先恢复模块全局再读，看到的 `_config/_storage`
       已经是测试外的旧值 —— 那样测的就不是真实运行路径。
+    ★ client 用于替换假上游客户端（测连接失败自愈）。
     返回 (结果 or 完整流字节, storage)。
     """
     from starlette.requests import Request
 
     store = db_mod.PersonalStorage(db_path=tmp_path / "p0.db")
-    client = _Client(resp)
+    client = client or _Client(resp)
 
     old = (app_mod._config, app_mod._http_client, app_mod._storage,
            app_mod._reputation, app_mod._paused_until, app_mod._verifier,
-           app_mod._sanitizer)
+           app_mod._sanitizer, app_mod._http_client_gen,
+           app_mod._http_client_rebuilt_at)
     app_mod._config = _Cfg()
     app_mod._http_client = client
     app_mod._storage = store
@@ -187,6 +211,11 @@ def _run(tmp_path, resp, *, stream=False, verifier=None):
     app_mod._paused_until = 0.0
     app_mod._verifier = verifier
     app_mod._sanitizer = None
+    # ★ 每个用例都在新事件循环里跑：重建锁与冷却时间必须清零，
+    #   否则上一个循环创建的锁被带进新循环（跨循环 await 会抛 RuntimeError），
+    #   冷却时间也会让本用例的第一次自愈被误判成「冷却期内」。
+    app_mod._http_client_lock = None
+    app_mod._http_client_rebuilt_at = None
 
     body = json.dumps({
         "model": "m", "stream": stream,
@@ -211,7 +240,9 @@ def _run(tmp_path, resp, *, stream=False, verifier=None):
     finally:
         (app_mod._config, app_mod._http_client, app_mod._storage,
          app_mod._reputation, app_mod._paused_until, app_mod._verifier,
-         app_mod._sanitizer) = old
+         app_mod._sanitizer, app_mod._http_client_gen,
+         app_mod._http_client_rebuilt_at) = old
+        app_mod._http_client_lock = None
     return result, store
 
 
@@ -243,7 +274,8 @@ def _run_disconnect(tmp_path, resp, *, verifier=None):
 
     old = (app_mod._config, app_mod._http_client, app_mod._storage,
            app_mod._reputation, app_mod._paused_until, app_mod._verifier,
-           app_mod._sanitizer)
+           app_mod._sanitizer, app_mod._http_client_gen,
+           app_mod._http_client_rebuilt_at)
     app_mod._config = _Cfg()
     app_mod._http_client = client
     app_mod._storage = store
@@ -251,6 +283,11 @@ def _run_disconnect(tmp_path, resp, *, verifier=None):
     app_mod._paused_until = 0.0
     app_mod._verifier = verifier
     app_mod._sanitizer = None
+    # ★ 每个用例都在新事件循环里跑：重建锁与冷却时间必须清零，
+    #   否则上一个循环创建的锁被带进新循环（跨循环 await 会抛 RuntimeError），
+    #   冷却时间也会让本用例的第一次自愈被误判成「冷却期内」。
+    app_mod._http_client_lock = None
+    app_mod._http_client_rebuilt_at = None
 
     body = json.dumps({
         "model": "m", "stream": True,
@@ -274,7 +311,9 @@ def _run_disconnect(tmp_path, resp, *, verifier=None):
     finally:
         (app_mod._config, app_mod._http_client, app_mod._storage,
          app_mod._reputation, app_mod._paused_until, app_mod._verifier,
-         app_mod._sanitizer) = old
+         app_mod._sanitizer, app_mod._http_client_gen,
+         app_mod._http_client_rebuilt_at) = old
+        app_mod._http_client_lock = None
     return store
 
 
@@ -580,6 +619,95 @@ class TestStreamTermination:
             "账本会说这次「安全通过」，而响应其实被截断了"
         )
         assert "client_disconnected" in (rows[0].summary or "")
+
+
+class TestConnectErrorSelfHeal:
+    """共享 HTTP 客户端坏掉时，必须重建并重试一次（2026-11-20 实测）。
+
+    ★★ 现场：引擎连续运行数小时后，共享 httpx 客户端进入
+      「所有 TCP 连接都失败」的状态，一天刷出 47 条
+      `无法连接中转站：All connection attempts failed`；
+      同一进程里临时新建的客户端却能连通，重启引擎立刻恢复。
+      这里钉住两件事：首次失败要自愈，两次都失败才上报。
+    """
+
+    def test_first_connect_error_rebuilds_and_retries(self, tmp_path, monkeypatch):
+        broken = _BrokenClient()
+        good_resp = _Resp(200, json.dumps({
+            "id": "x", "object": "chat.completion", "model": "m",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode())
+        good = _Client(good_resp)
+        rebuilt = []
+
+        def _factory(_timeout):
+            rebuilt.append(1)
+            return good
+
+        monkeypatch.setattr(app_mod, "_new_http_client", _factory)
+        result, _store = _run(tmp_path, good_resp, client=broken)
+
+        assert rebuilt, "连接失败后没有重建客户端 —— 用户只能手动重启引擎"
+        assert broken.calls == 1, "第一次失败后没有重试"
+        assert not broken.closed, (
+            "重建时立即关闭了旧客户端 —— 正在输出的流式回答会被截断"
+        )
+        assert result.status_code == 200, (
+            f"重建后仍未成功：{getattr(result, 'status_code', result)!r}"
+        )
+
+    def test_two_connect_errors_are_reported_not_retried_forever(
+        self, tmp_path, monkeypatch
+    ):
+        first = _BrokenClient()
+        second = _BrokenClient()
+        monkeypatch.setattr(app_mod, "_new_http_client", lambda _t: second)
+        result, store = _run(tmp_path, _Resp(), client=first)
+
+        assert first.calls == 1 and second.calls == 1, (
+            "重试次数不是恰好一次 —— 真实断网时会被无限重试拖住"
+        )
+        assert result.status_code == 502
+        rows = store.query_logs(limit=5)
+        assert rows and "无法连接中转站" in (rows[0].summary or "")
+
+    def test_rebuild_cooldown_prevents_storm(self, monkeypatch):
+        """持续断网时，冷却期内不得每个请求都重建一次客户端。"""
+        made = []
+        good = _Client(_Resp())
+
+        def _factory(_timeout):
+            made.append(1)
+            return good
+
+        monkeypatch.setattr(app_mod, "_new_http_client", _factory)
+
+        old = (app_mod._config, app_mod._http_client, app_mod._http_client_gen,
+               app_mod._http_client_rebuilt_at, app_mod._http_client_lock)
+        app_mod._config = _Cfg()
+        app_mod._http_client = _BrokenClient()
+        app_mod._http_client_gen = 10
+        app_mod._http_client_rebuilt_at = None
+        app_mod._http_client_lock = None
+        loop = asyncio.new_event_loop()
+        try:
+            first = loop.run_until_complete(app_mod._replace_http_client(10))
+            second = loop.run_until_complete(app_mod._replace_http_client(11))
+            # 代次已变的并发请求：应当直接用新客户端重试，不再重建
+            stale = loop.run_until_complete(app_mod._replace_http_client(9))
+        finally:
+            (app_mod._config, app_mod._http_client, app_mod._http_client_gen,
+             app_mod._http_client_rebuilt_at, app_mod._http_client_lock) = old
+            loop.close()
+
+        assert first is True, "首次失败应当重建"
+        assert second is False, "冷却期内不应再次重建 —— 断网时会被反复推倒连接池"
+        assert stale is True, "代次已变的请求应当复用新客户端重试，而不是直接 502"
+        assert len(made) == 1
 
 
 # ══════════════════════════════════════════════════════════════
