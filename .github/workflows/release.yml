@@ -1723,13 +1723,14 @@ jobs:
           echo "::error::上传后线上 latest.json 仍不是 $VER，请检查服务器路径与缓存"
           exit 1
 
-      # ★ 可选：只保留最新版本的安装包。
-      #   默认关闭 —— 还在用旧版的用户需要能下载到对应版本的更新包。
-      #   需要开启时，在仓库 Variables 里设 SFANG_PRUNE_OLD=1。
+      # ★★ 2026-11-27：改为**默认开启**（用户规则：每版发布后只保留最新版本）。
+      #   需要保留旧版本安装包时，在仓库 Variables 里设 SFANG_PRUNE_OLD=0。
       #   通过 SSH 在服务器上执行 PowerShell，删除除当前版本外的
-      #   kanhe-personal_* 文件（保留 latest.json / checksums 等）。
-      - name: Prune old installers on sfang.cc (optional)
-        if: vars.SFANG_PRUNE_OLD == '1'
+      #   kanhe-personal_* 文件（保留 latest.json / checksums / -latest 别名）。
+      - name: Prune old installers on sfang.cc
+        if: vars.SFANG_PRUNE_OLD != '0'
+        # ★ 清理失败不该把一次成功发布报成失败（与 GitHub Release 清理同一口径）
+        continue-on-error: true
         shell: bash
         env:
           SFTP_HOST: ${{ secrets.SFANG_SFTP_HOST }}
@@ -1744,6 +1745,9 @@ jobs:
           VER=$(sed -n '/^\[package\]/,/^version/p' desktop/src-tauri/Cargo.toml \
                 | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
                 | head -1)
+          # ★ VER 为空时 `-notlike '*$VER*'` 会变成 `-notlike '**'`，
+          #   把当前版本安装包也删掉 —— 必须先挡住。
+          test -n "$VER" || { echo "::warning::无法读取版本号，跳过 sfang.cc 旧包清理"; exit 0; }
           KEY_FILE="$RUNNER_TEMP/sfang_deploy_key"
           printf '%s\n' "$SFTP_KEY" | tr -d '\r' > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
@@ -1780,3 +1784,51 @@ jobs:
             "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIN_PATH' -Filter '*personal_0.*' | Where-Object { \$_.Name -notlike '*$VER*' } | ForEach-Object { Remove-Item \$_.FullName -Force }\"" \
             || echo "::warning::清理旧安装包失败（不影响本次发布结论）"
           echo "PASS：已请求清理 $WIN_PATH 下非 $VER 的旧安装包"
+
+      # ★★ 2026-11-27：每版发布后只保留最新版本 —— 清理旧 Release 与 tag。
+      #   以前靠人记，0.3.0 发布时漏了：v0.2.8 / v0.2.9 的 Release
+      #   与安装包一直挂在仓库上。现在固化为流水线最后一步：
+      #     · 保留当前 tag（GITHUB_REF_NAME）；
+      #     · 其余 Release 用 gh release delete --cleanup-tag 删除，
+      #       同时删掉远程 tag，不留孤儿；
+      #     · 失败只告警不红：清理失败不该把一次成功发布报成失败
+      #       （与 sfang.cc 清理同一口径）。
+      - name: Prune old GitHub releases (keep latest only)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "当前版本：$GITHUB_REF_NAME，开始清理旧 Release"
+          if ! all_tags=$(gh release list --repo "${{ github.repository }}" \
+                            --limit 500 --json tagName --jq '.[].tagName'); then
+            echo "::warning::无法列出旧 Release，跳过 Release 清理（不影响本次发布结论）"
+            all_tags=""
+          fi
+          old_tags=$(printf '%s\n' "$all_tags" | grep -vxF "$GITHUB_REF_NAME" || true)
+          if [ -z "$old_tags" ]; then
+            echo "没有需要清理的旧 Release"
+          else
+            for tag in $old_tags; do
+              echo "删除旧 Release 与 tag：$tag"
+              gh release delete "$tag" --repo "${{ github.repository }}" \
+                --yes --cleanup-tag \
+                || echo "::warning::清理 $tag 失败（不影响本次发布结论）"
+            done
+          fi
+
+          # 再清理没有对应 Release 的孤儿 tag —— gh release delete 只覆盖
+          # 「有 Release 的 tag」，历史上被单独推上去的 tag 会漏掉。
+          # ★ 只清版本 tag（v 开头 + 数字），避免误删 nightly 等非版本 tag。
+          if ! remote_tags=$(git ls-remote --tags origin); then
+            echo "::warning::无法列出远程 tag，跳过孤儿 tag 清理（不影响本次发布结论）"
+            remote_tags=""
+          fi
+          orphan_tags=$(printf '%s\n' "$remote_tags" \
+                          | awk '{print $2}' | sed 's#refs/tags/##' | grep -v '\^{}' \
+                          | grep -E '^v[0-9]' | grep -vxF "$GITHUB_REF_NAME" || true)
+          for tag in $orphan_tags; do
+            echo "删除孤儿 tag：$tag"
+            git push origin ":refs/tags/$tag" \
+              || echo "::warning::删除孤儿 tag $tag 失败（不影响本次发布结论）"
+          done
+          echo "PASS：旧 Release 已清理，仅保留 $GITHUB_REF_NAME"
