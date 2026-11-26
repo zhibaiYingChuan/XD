@@ -125,6 +125,20 @@ def _build_secrets_env():
 # ══════════════════════════════════════════════════════════════
 from ..rules import load_ruleset  # noqa: E402
 from ..rules import credentials as credentials_registry  # noqa: E402
+from .tool_text import (  # noqa: E402
+    SEGMENT_SEP_RE,
+    command_segment_at,
+    command_segment_span,
+    emits_paths,
+    is_inside_quotes,
+    is_regex_pattern_position,
+    quotes_balanced,
+    quoted_token_at,
+    split_unquoted,
+    strip_quoted,
+    xargs_targets,
+)
+from .tool_calls import iter_tool_calls  # noqa: E402
 
 _RULES = load_ruleset()
 logger.info("检测规则来源：%s（v%s）",
@@ -380,6 +394,57 @@ _CONTENT_CMD_RE = re.compile(
     r"(?:^|[;&|(\n\"'])\s*(?:sudo\s+)?(?:echo|printf|cat|tee)\b", re.IGNORECASE
 )
 
+#: 只列目录 / 文件名、不读取内容的命令。
+#: ★★ 2026-11-26：`Get-ChildItem -Include *.env` 里的 `*.env` 是筛选
+#:   通配符，一个字节都没被读出；`cat *.env` 才是真读（cat 不在本表）。
+_LIST_CMD_RE = re.compile(
+    r"(?:^|[;&|(\n\"'])\s*(?:sudo\s+)?"
+    r"(?:get-childitem|gci|ls|dir)\b",
+    re.IGNORECASE,
+)
+#: Unix find / fd：只有带「按名筛选」谓词且没有 -exec/-delete 时才算列目录。
+#: Windows 的 find.exe 是文本搜索（`find "SECRET" *.env`），不带这些谓词，
+#: 不能按列目录处理。
+_UNIX_FIND_RE = re.compile(
+    r"(?:^|[;&|(\n\"'])\s*(?:sudo\s+)?find\b", re.IGNORECASE
+)
+_UNIX_FIND_PREDICATE_RE = re.compile(
+    r"(?:^|\s)-(?:name|iname|path|ipath|type|print0?|regex)\b", re.IGNORECASE
+)
+_FD_RE = re.compile(
+    r"(?:^|[;&|(\n\"'])\s*(?:sudo\s+)?fd\b", re.IGNORECASE
+)
+_FD_EXEC_RE = re.compile(
+    r"(?:^|\s)(?:-x|-X|--exec|--exec-batch)\b", re.IGNORECASE
+)
+
+#: 管道下游只消费文件名/元数据、不读取内容的命令。
+_SAFE_LIST_CONSUMER_RE = re.compile(
+    r"^(?:select-object|sort-object|measure-object|format-table|format-list|"
+    r"format-wide|group-object|out-string|convertto-json|convertto-csv|"
+    r"export-csv)\b",
+    re.IGNORECASE,
+)
+_WHERE_OBJECT_RE = re.compile(r"^where-object\b", re.IGNORECASE)
+_READ_PRIMITIVE_RE = re.compile(
+    r"\b(?:get-content|gc|type|cat|select-string|findstr|head|tail|grep|awk|"
+    r"more|less|readalltext|readallbytes|openread|streamreader)\b",
+    re.IGNORECASE,
+)
+#: `xargs` 后面会读取文件内容的命令
+_READ_XARGS_TARGETS = frozenset({
+    "cat", "type", "get-content", "gc", "head", "tail", "grep", "egrep",
+    "fgrep", "rg", "findstr", "select-string", "awk", "sed", "more", "less",
+})
+#: `xargs` 后面会执行任意代码的解释器 —— 无论上游输出什么都按不安全处理
+_EXEC_XARGS_TARGETS = frozenset({
+    "sh", "bash", "zsh", "ksh", "dash", "powershell", "pwsh",
+    "python", "python2", "python3", "node", "perl", "ruby",
+})
+
+# 命令段分隔符统一由 tool_text.SEGMENT_SEP_RE 提供：
+# 参数文本必须先经 decode_tool_arguments 解码，JSON 的 `\n` 才是真实换行。
+
 #: 把内容交给解释器执行的管道：`... | sh` / `| python` / `| xargs`。
 #: 一旦出现，前面的 echo/cat 就不再是「只输出」，而是投递通道。
 _PIPE_TO_INTERP_RE = re.compile(
@@ -405,7 +470,7 @@ def _segment_starts_with_interpreter(args_text: str) -> bool:
       `; sh f` / `; . f` / `; ./f` / `| /bin/sh` 都能把内容变成命令。
       这里按命令段（`;` `&&` `||` `|` 换行）切分，逐段看第一个词。
     """
-    for seg in re.split(r"[;&|\n]", args_text):
+    for seg in SEGMENT_SEP_RE.split(args_text):
         words = seg.strip().split()
         if not words:
             continue
@@ -433,6 +498,109 @@ def _redirects_to_special_device(seg: str) -> bool:
     return False
 
 
+def _command_segment(text: str, m: "re.Match") -> str:
+    """取命中位置所在的命令段（实现在 tool_text，全项目共用一套词法）。"""
+    return command_segment_at(text, m.start())
+
+
+def _is_listing_only(segment: str) -> bool:
+    """该命令段是否只列目录/文件名，不读取内容。
+
+    `find ... -exec cat {} \\;` 这类「边列边执行」的不算 —— 它确实会读。
+    ★ 管道下游的读取（`ls *.env | cat`）不在本函数判断范围，
+      由 `_is_pattern_mention` 结合整条命令另行判断。
+    """
+    if _LIST_CMD_RE.search(segment):
+        return not re.search(
+            r"-exec(?:dir)?\b|-ok(?:dir)?\b|-delete\b", segment, re.IGNORECASE
+        )
+    if _UNIX_FIND_RE.search(segment):
+        if re.search(
+            r"-exec(?:dir)?\b|-ok(?:dir)?\b|-delete\b", segment, re.IGNORECASE
+        ):
+            return False
+        # Windows find.exe 没有这些谓词 —— 它是文本搜索，不是列目录
+        return bool(_UNIX_FIND_PREDICATE_RE.search(segment))
+    if _FD_RE.search(segment):
+        return not _FD_EXEC_RE.search(segment)
+    return False
+
+
+def _has_unsafe_downstream(text: str, m: "re.Match") -> bool:
+    """匹配点之后是否有管道，且下游不是「只消费文件名/元数据」的命令。
+
+    ★ 用白名单而不是「读取命令黑名单」：`xargs head/grep/tail`、
+      `ForEach-Object { [IO.File]::ReadAllText(...) }` 都能读内容，
+      黑名单永远列不全。默认不安全，只放行明确的元数据消费者。
+    """
+    # ★★ 2026-11-27（漏放修复）：tail 必须从「命中所在命令段的末尾」开始，
+    #   而不是从 m.end() 开始。`find . -name '*.env' | cat` 的命中在引号内，
+    #   m.end() 后紧跟一个孤立的闭合引号 `'`，引号感知切分把它当成
+    #   「进入引号」，后面的真管道被一起吞掉 → 下游为空 → 直接放行。
+    #   段边界用 command_segment_span（引号/注释感知），注释里的 `|` 不算管道。
+    _, seg_end = command_segment_span(text, m.start())
+    tail = text[seg_end:]
+    if "|" not in tail:
+        return False
+    # ★★ Windows 路径 `"H:\XuanDun\"` 的尾反斜杠会让引号看起来未闭合。
+    #   此时不能用引号感知切分（真管道会被吞），退回裸 `|` 切分；
+    #   下游仍按白名单判定 —— 安全元数据消费者放行，其余 fail-closed。
+    parts = (
+        tail.split("|")[1:]
+        if not quotes_balanced(text)
+        else split_unquoted(tail)[1:]
+    )
+    for part in parts:
+        seg = part.strip()
+        if not seg:
+            continue
+        if _SAFE_LIST_CONSUMER_RE.match(seg):
+            continue
+        if _WHERE_OBJECT_RE.match(seg):
+            # 只按属性过滤时安全；脚本块里出现读取原语则不安全。
+            # 先去掉引号内容，避免 `-match 'cat'` 这种字面量被当成读取。
+            bare = strip_quoted(seg)
+            if not _READ_PRIMITIVE_RE.search(bare):
+                continue
+        # ★★ 2026-11-26：xargs 是否真的会读 `.env`，取决于两件事：
+        #   ① xargs 后面的命令是不是读取命令；② 上游输出的是路径还是匹配行。
+        #   `grep .env file | xargs cat` 上游输出匹配行，通常不构成读取；
+        #   `grep -l .env file | xargs cat` / `echo .env | xargs cat` 才危险。
+        if re.match(r"xargs\b", seg, re.IGNORECASE):
+            targets = xargs_targets(seg)
+            if targets & _EXEC_XARGS_TARGETS:
+                return True
+            if targets & _READ_XARGS_TARGETS:
+                # ★★ 2026-11-27（误报收敛）：多候选不再无条件阻断。
+                #   是否真读 `.env` 取决于「xargs 拿到的数据是不是路径」，
+                #   与目标命令是否唯一无关：
+                #     · 上游明确输出匹配行/文本（False）→ 即使目标有歧义
+                #       （`-e` 的 GNU/BSD 冲突、未知选项的值被当候选），
+                #       xargs 拿到的也不是文件名，不会读到 .env；
+                #     · 上游是路径或未知（True/None）→ 仍 fail-closed。
+                upstream = command_segment_at(text, m.start())
+                if emits_paths(upstream) is not False:
+                    return True
+                continue
+            continue
+        return True
+    return False
+
+
+def _has_read_elsewhere(text: str, m: "re.Match") -> bool:
+    """同一条命令里是否还有一处敏感路径不在「只列目录」段里。
+
+    `Get-ChildItem *.env; cat .env`：第一处是筛选条件，第二处是真读。
+    不能因为第一处被豁免，就把整条命令当成只列目录。
+    """
+    for other in m.re.finditer(text):
+        if other.span() == m.span():
+            continue
+        if not _is_listing_only(_command_segment(text, other)):
+            return True
+    return False
+
+
 def _match_is_content_write(args_text: str, m: "re.Match") -> bool:
     """这次命中是否落在「把文本写进文件」的命令段里。
 
@@ -451,22 +619,7 @@ def _match_is_content_write(args_text: str, m: "re.Match") -> bool:
         return False
     if _segment_starts_with_interpreter(args_text):
         return False
-    # 定位命中所在的命令段（最后一个分隔符之后 → 下一个分隔符之前）
-    # ★ 用 `<=`：危险命令判据的匹配本身可能**从分隔符开始**
-    #   （`(?:^|[;&|(\n"'])` 把 `;` 算进匹配），此时 m.start() 正落在
-    #   分隔符上，必须把它也算作段边界，否则会把前一段的 echo 误当成本段。
-    seg_start = 0
-    for sep in re.finditer(r"[;&|\n]", args_text):
-        if sep.start() <= m.start():
-            seg_start = sep.end()
-        else:
-            break
-    seg_end = len(args_text)
-    for sep in re.finditer(r"[;&|\n]", args_text):
-        if sep.start() > m.start():
-            seg_end = sep.start()
-            break
-    seg = args_text[seg_start:seg_end]
+    seg = _command_segment(args_text, m)
     if not _CONTENT_CMD_RE.search(seg):
         return False
     if _redirects_to_special_device(seg):
@@ -474,8 +627,33 @@ def _match_is_content_write(args_text: str, m: "re.Match") -> bool:
     return True
 
 
+def _is_regex_escape(text: str, m: "re.Match", seg: str) -> bool:
+    r"""`\.env` 是正则转义还是 Windows 路径分隔符。
+
+    · 先看参数位置：grep/rg/findstr 的模式参数、Select-String -Pattern、
+      PowerShell -match 的操作数、echo/printf/tee 的内容 → 正则/内容；
+    · 引号内含正则元字符（`pem|token|\.env`）→ 正则；
+    · 引号内 `\.env` 左边是路径字符（`config\.env` / `x\.env`）→ 路径；
+    · 其余按路径/真读处理。
+    """
+    start = m.start()
+    # 先看参数位置：grep/Select-String 的模式参数、-match 操作数、echo 内容
+    # 都不构成「读取 .env」；路径参数则必须阻断。
+    if not is_inside_quotes(text, start):
+        return False
+    token = quoted_token_at(text, start)
+    if re.search(r"[|()\[\]*+?$^]", token):
+        return True
+    idx = token.find("\\.env")
+    if idx > 0:
+        left = token[idx - 1]
+        if left.isalnum() or left in ".\\/":
+            return False
+    return False
+
+
 def _is_pattern_mention(text: str, m: "re.Match") -> bool:
-    """这次敏感路径命中是「被当成模式/关键字提到」，还是「真要去读」。
+    r"""这次敏感路径命中是「被当成模式/关键字提到」，还是「真要去读」。
 
     ★★ 2026-10-28 实测（日志 #7496 / #7928）：
       被判「试图读取 .env」的两条 Shell 命令，实际都是**过滤条件**：
@@ -486,16 +664,68 @@ def _is_pattern_mention(text: str, m: "re.Match") -> bool:
       而这恰恰是编程助手被叫来干的活。
 
     判据（只看紧邻字符与所在位置的引号，不做全文语义推断）：
-      · 紧邻字符是正则转义 `\\` / 交替符 `|` / 量词 `? * +` → 是模式；
+      · 紧邻字符是交替符 `|` / 量词 `? * +` → 是模式；
+      · `\.env` 的正则转义与 Windows 路径分隔符按 _is_regex_escape 区分；
       · 引号包裹的短字面量，且左右两侧都是列表分隔符
-        （`('a','b','.env')` 这种并列清单）→ 是关键字。
+        （`('a','b','.env')` 这种并列清单）→ 是关键字；
+      · 通配符前导（`*.env`）且所在段只列目录、下游没有读取、
+        全文没有另一处真读 → 是筛选条件。
       真正的读取（`cat .env`、`Get-Content .env`、`Read .env`）
-      两条都不满足，仍然按高危处理。
+      以上都不满足，仍然按高危处理。
     """
     start, end = m.span()
     before = text[start - 1:start]
     after = text[end:end + 1]
-    if before in ("\\", "|") or after in ("|", "?", "*", "+"):
+    # ★★ 2026-11-27（位置基准统一）：is_regex_pattern_position 的 pos
+    #   必须相对**段起点**，而 m.span() 是全文位置。多段命令
+    #   （`cd /x && grep .env file`）里两者错位，会把 grep 的模式参数
+    #   误判成路径参数 → 误报。段边界用引号/注释感知切分。
+    seg_start, seg_end = command_segment_span(text, m.start())
+    seg = text[seg_start:seg_end]
+    pos = is_regex_pattern_position(seg, start - seg_start)
+    if pos is True:
+        # 模式/内容位置本身不算读取，但下游若把 .env 当输入读取
+        # （`echo .env | xargs cat`）或同命令另有真读，仍必须阻断。
+        if _has_unsafe_downstream(text, m) or _has_read_elsewhere(text, m):
+            return False
+        return True
+    if pos is False:
+        return False
+    if before == "|" or after in ("|", "?", "*", "+"):
+        # ★★ 2026-11-27（漏放修复）：只有**引号内**的 `|` / 量词才是正则：
+        #   `grep 'a|.env'`、`grep 'a.env*'`。
+        #   未引号时它们是 shell 元字符：
+        #     · `cat .env|head` 的 `|` 是管道 —— 旧实现当成交替符，直接放行；
+        #     · `ls -l .env* | xargs cat` 的 `*` 是 glob —— 旧实现当成量词，
+        #       绕过了下游读取检查。
+        #   未引号的 glob（`ls .env*` / `ls ?env`）仍可豁免，但必须同时满足
+        #   「纯列目录」且「下游/同命令没有真读」。
+        if is_inside_quotes(text, start):
+            if _has_unsafe_downstream(text, m) or _has_read_elsewhere(text, m):
+                return False
+            return True
+        if (
+            after in ("?", "*")
+            and _is_listing_only(seg)
+            and not _has_unsafe_downstream(text, m)
+            and not _has_read_elsewhere(text, m)
+        ):
+            return True
+        return False
+    if before == "\\":
+        return _is_regex_escape(text, m, seg)
+
+    # ★★ 2026-11-26：`Get-ChildItem -Include *.env` 的 `*.env` 是筛选
+    #   通配符，不是要读的文件。只对「列目录」命令生效 ——
+    #   `cat *.env` 的 `*.env` 仍是真读，不能被一起放过。
+    #   管道下游读取（`| Get-Content`）或同一命令里另有真读
+    #   （`; cat .env`）时，同样不能豁免。
+    if (
+        before in ("*", "?")
+        and _is_listing_only(seg)
+        and not _has_unsafe_downstream(text, m)
+        and not _has_read_elsewhere(text, m)
+    ):
         return True
 
     quote = before
@@ -521,38 +751,15 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
     findings: List[VerificationFinding] = []
     seen_commands: set = set()
 
-    # ── 结构化检测：提取所有 tool call 的参数文本 ──
+    # ── 结构化检测：所有网关格式统一成 ToolCall，再按工具能力选解码口径 ──
     tool_call_texts: List[Tuple[str, str]] = []  # (tool_name, arguments_text)
-
-    def _walk(obj: Any) -> None:
-        """递归遍历 JSON，提取 tool_calls 结构。"""
-        if isinstance(obj, dict):
-            # OpenAI 格式：{"tool_calls": [{"function": {"name":..., "arguments": "..."}}]}
-            if "tool_calls" in obj and isinstance(obj["tool_calls"], list):
-                for tc in obj["tool_calls"]:
-                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                    name = fn.get("name", "unknown")
-                    args = fn.get("arguments", "")
-                    if isinstance(args, (dict, list)):
-                        args = json.dumps(args, ensure_ascii=False)
-                    tool_call_texts.append((str(name), str(args)))
-            # Anthropic 格式：{"content": [{"type": "tool_use", "name":..., "input": {...}}]}
-            if obj.get("type") == "tool_use":
-                name = obj.get("name", "unknown")
-                inp = obj.get("input", "")
-                if isinstance(inp, (dict, list)):
-                    inp = json.dumps(inp, ensure_ascii=False)
-                tool_call_texts.append((str(name), str(inp)))
-            for v in obj.values():
-                _walk(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                _walk(item)
-
-    try:
-        _walk(payload)
-    except Exception:  # noqa: BLE001 — 结构异常不应影响检测
-        logger.debug("tool call 结构遍历异常，退回纯文本检测")
+    for call in iter_tool_calls(payload):
+        body = (
+            call.content_text
+            if _args_are_content(call.name, call.exec_text)
+            else call.exec_text
+        )
+        tool_call_texts.append((call.name, body))
 
     # ── 对每个 tool call 参数做危险模式匹配 ──
     dangerous_cmds = _rules("dangerous_commands")

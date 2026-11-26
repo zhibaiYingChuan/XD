@@ -47,8 +47,11 @@ import hashlib
 import json
 import logging
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+from .tool_calls import iter_tool_calls
 
 logger = logging.getLogger("xuandun-personal.baseline")
 
@@ -382,6 +385,15 @@ _HOST_RE = re.compile(
     r"tech|space|fun|icu|vip|club|pro|name|mobi|asia|pw|su)\b",
     re.IGNORECASE,
 )
+#: 合法主机名形态：标签只含字母数字与连字符，允许单标签与 Unicode（IDN）。
+#: ★★ 2026-11-26：只用来挡 URL 解析残渣 —— 实测 `https://\` 取出的
+#:   host 是 `\`，却被当成「陌生外部端点」记了一条 alert。
+#:   单标签内网主机与 IDN 仍保留，不收缩原有检测面。
+_HOST_LABEL = r"(?!-)[\w-]{1,63}(?<!-)"
+_HOST_SHAPE_RE = re.compile(
+    rf"^(?=.{{1,253}}$){_HOST_LABEL}(?:\.{_HOST_LABEL})*$",
+    re.UNICODE,
+)
 _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 #: IPv6 字面量（宽松匹配，够用即可 —— 只用于「这是不是 IP」的判别）
 _IPV6_RE = re.compile(r"(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}", re.IGNORECASE)
@@ -401,13 +413,50 @@ _IPV6_RE = re.compile(r"(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}", re.IGNORECASE)
 #:   b/c 的 typosquat 会被整条漏掉。实测 `pip install requests reqeusts`
 #:   只提取出 requests。
 _PKG_INSTALL_CMD_PATTERNS = [
-    re.compile(r"(?:pip3?|conda)\s+install\s+([^\n;&|]+)", re.IGNORECASE),
-    re.compile(r"(?:npm|yarn|pnpm)\s+(?:i|install|add)\s+([^\n;&|]+)",
+    # ★ 2026-11-26：`#` 之后是注释/说明，不是安装目标。
+    #   实测 `pip install ruff  # already satisfied` 把 already/satisfied
+    #   也当成了依赖包。
+    re.compile(r"(?:pip3?|conda)\s+install\s+([^\n;&|#]+)", re.IGNORECASE),
+    re.compile(r"(?:npm|yarn|pnpm)\s+(?:i|install|add)\s+([^\n;&|#]+)",
                re.IGNORECASE),
 ]
 
 #: 命令段里的单个包名 token（含 scope 与版本约束，交给 _normalize_pkg 处理）
 _PKG_TOKEN_RE = re.compile(r"@?[A-Za-z0-9][A-Za-z0-9@/._\-]*")
+
+#: 以这些后缀结尾的 token 是文件名/归档，不是包名。
+_NON_PKG_SUFFIXES = (
+    ".txt", ".lock", ".toml", ".yaml", ".yml", ".json", ".cfg", ".ini",
+    ".whl", ".tar", ".gz", ".zip", ".py", ".js", ".ts",
+)
+
+
+#: 安装命令里的 VCS / 协议片段 —— 不是包名，提取与 new_dependency 都要排除。
+_VCS_SCHEME_WORDS = frozenset({
+    "git", "https", "http", "ssh", "svn", "hg", "ftp", "file",
+})
+
+
+def _looks_like_non_package_token(tok: str) -> bool:
+    """明显不是包名的 token：版本号、比例、路径、文件名、dunder 残片。
+
+    ★ 2026-11-26：这些是从真实日志里捞出来的误报形态 ——
+      `0.1.99` / `11/11` / `3.12.0`（版本或比例）、`bin/oxlint`（路径）、
+      `win_amd64.whl`（归档）、`all__`（`__all__` 的残片）。
+      它们出现在 `pip install ...` 同一行里，被整段捕获成了依赖包。
+    """
+    t = tok.strip().strip("\"'")
+    if not t:
+        return True
+    # 纯数字/版本/日期；`2captcha-python` 这类真实包名含字母，不能被误杀
+    if t[0].isdigit() and re.fullmatch(r"[\d./-]+", t):
+        return True
+    # scoped 包（@scope/name）保留；其余带 `/` 的是路径
+    if "/" in t and not t.startswith("@"):
+        return True
+    if "__" in t:
+        return True
+    return t.lower().endswith(_NON_PKG_SUFFIXES)
 
 
 def _extract_install_packages(text: str) -> Set[str]:
@@ -424,10 +473,22 @@ def _extract_install_packages(text: str) -> Set[str]:
     out: Set[str] = set()
     for pat in _PKG_INSTALL_CMD_PATTERNS:
         for m in pat.finditer(text):
-            for tok in _PKG_TOKEN_RE.findall(m.group(1) or ""):
-                if tok.startswith("-"):
-                    continue   # 选项，如 -i / --upgrade
+            # `requests[security]` 的 extras 不是独立包名，先整体去掉
+            body = re.sub(r"\[[^\]]*\]", "", m.group(1) or "")
+            for tm in _PKG_TOKEN_RE.finditer(body):
+                tok = tm.group(0)
+                # 选项：`-i` / `--upgrade` / `--disable-pip-version-check`。
+                # token 正则从字母/数字开始，`--flag` 会从 flag 处匹配，
+                # 必须看它前一个字符是不是 `-`。
+                if tok.startswith("-") or (
+                    tm.start() > 0 and body[tm.start() - 1] == "-"
+                ):
+                    continue
+                if _looks_like_non_package_token(tok):
+                    continue
                 name = _normalize_pkg(tok)
+                if name in _VCS_SCHEME_WORDS:
+                    continue
                 if name and len(name) > 1:
                     out.add(name)
     return out
@@ -479,6 +540,11 @@ _PKG_DAILY_WORDS = frozenset({
     "string", "number", "object", "array", "buffer", "stream",
 })
 _PKG_STOPWORDS = _PKG_STOPWORDS | _PKG_DAILY_WORDS
+
+#: Python 标准库模块名 —— 不是 PyPI 包，不参与 typosquat 比对。
+#: ★★ 2026-11-26：实测 `urllib` 与 `urllib3` 只差一个字符，
+#:   被当成错拼包 high 阻断（args 里只是 `import urllib.request`）。
+_STDLIB_MODULES = frozenset(getattr(sys, "stdlib_module_names", ()))
 
 
 def _normalize_pkg(name: str) -> str:
@@ -537,7 +603,14 @@ def _host_of(url: str) -> str:
         # 先看是不是 IP 字面量；是就原样返回（正则不会匹配纯 IP）
         if _IP_RE.fullmatch(host) or _IPV6_RE.fullmatch(host):
             return host
-        m = _HOST_RE.fullmatch(host) or _HOST_RE.search(host)
+        # ★★ 2026-11-26：形态不合法的主机名是 URL 解析残渣，不是外部端点。
+        #   实测 `https://\` 会取出 `\` 并触发 new_external_endpoint。
+        if not _HOST_SHAPE_RE.fullmatch(host):
+            return ""
+        # ★ 只认 fullmatch：`_HOST_RE.search` 会把
+        #   `github.com.evil.museum` 截成 `github.com` —— 截出来的良性域名
+        #   会让真实外传零告警。
+        m = _HOST_RE.fullmatch(host)
         return m.group(0).lower() if m else host
     m = _HOST_RE.search(raw)
     return m.group(0).lower() if m else ""
@@ -1626,66 +1699,17 @@ def _tool_name_of(obj: Dict[str, Any]) -> str:
 def _is_authoring_tool(name: str) -> bool:
     return bool(_AUTHORING_TOOL_RE.search(name or ""))
 
+def _collect_tool_arguments(obj: Any) -> str:
+    """收集所有非写入类 tool_call 的执行面文本。
 
-def _collect_tool_arguments(obj: Any, depth: int = 0) -> str:
-    """收集所有 tool_call 的参数文本（会被客户端执行的部分）。
-
-    只取参数本身（function.arguments / input / args），
-    函数名不含端点，无需收集。
-
-    ★ 形态覆盖必须与 _collect_tool_names 一致 ——
-      否则中转站把 tool_calls 换成 Responses API / MCP / Gemini
-      形态后，工具名判据失效，依赖参数的
-      「新端点」「新依赖」判据也一并失效（参数根本没被提取）。
+    ★ 2026-11-26：wire format 解析统一在 tool_calls.iter_tool_calls，
+      这里只做「写入类工具过滤 + 拼接」，不再自己遍历 payload。
     """
-    if depth > 8:
-        return ""
-    parts: List[str] = []
-    if isinstance(obj, dict):
-        # ★ 写入类工具的参数是「内容」，不是「即将执行的命令」，
-        #   不参与「新端点 / 新依赖」判定（否则正常写文档必误报）。
-        if _is_authoring_tool(_tool_name_of(obj)):
-            return ""
-        # OpenAI chat completions
-        fn = obj.get("function")
-        if isinstance(fn, dict):
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                parts.append(args)
-            elif isinstance(args, (dict, list)):
-                parts.append(json.dumps(args, ensure_ascii=False))
-        # Anthropic tool_use / MCP mcp_tool_use
-        if obj.get("type") in ("tool_use", "mcp_tool_use", "server_tool_use"):
-            inp = obj.get("input")
-            if isinstance(inp, (dict, list)):
-                parts.append(json.dumps(inp, ensure_ascii=False))
-            elif isinstance(inp, str):
-                parts.append(inp)
-        # ★ OpenAI Responses API: function_call.arguments
-        if obj.get("type") == "function_call":
-            a = obj.get("arguments")
-            if isinstance(a, str):
-                parts.append(a)
-            elif isinstance(a, (dict, list)):
-                parts.append(json.dumps(a, ensure_ascii=False))
-        # ★ Google Gemini: functionCall.args
-        fc = obj.get("functionCall") or obj.get("function_call")
-        if isinstance(fc, dict):
-            a = fc.get("args")
-            if isinstance(a, (dict, list)):
-                parts.append(json.dumps(a, ensure_ascii=False))
-            elif isinstance(a, str):
-                parts.append(a)
-        # 通用：裸 arguments / args 键
-        for k in ("arguments", "args", "input"):
-            v = obj.get(k)
-            if isinstance(v, (dict, list)) and k in ("args", "input"):
-                parts.append(json.dumps(v, ensure_ascii=False))
-        for v in obj.values():
-            parts.append(_collect_tool_arguments(v, depth + 1))
-    elif isinstance(obj, list):
-        for item in obj:
-            parts.append(_collect_tool_arguments(item, depth + 1))
+    parts = [
+        call.exec_text
+        for call in iter_tool_calls(obj)
+        if not _is_authoring_tool(call.name)
+    ]
     return "\n".join(p for p in parts if p)
 
 
@@ -2111,6 +2135,7 @@ def diff_against_baseline(
         #   实测 `pattern` 被判成「未声明依赖」并发出一条告警 ——
         #   它只是模型代码里的一个普通变量/参数名。
         if p not in _STOPWORD_PKGS and p not in _PKG_DAILY_WORDS
+        and p not in _STDLIB_MODULES and p not in _VCS_SCHEME_WORDS
         and len(p) > 2
     }
     if new_pkgs:
@@ -2346,6 +2371,11 @@ def detect_typosquat(pkg: str, context: str = "") -> Optional[str]:
     if bare.startswith("@"):
         bare = bare.lstrip("@")
     if bare in table:
+        return None
+
+    # ★★ 2026-11-26：标准库模块不是 PyPI 包，不参与 typosquat 比对。
+    #   `urllib`（标准库）与 `urllib3`（真实包）只差一个字符。
+    if bare in _STDLIB_MODULES or bare.split(".", 1)[0] in _STDLIB_MODULES:
         return None
 
     # ★ 讲解语境豁免：模型在解释 typosquat 攻击原理时，

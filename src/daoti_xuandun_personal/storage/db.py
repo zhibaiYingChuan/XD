@@ -290,7 +290,7 @@ class PersonalStorage:
             try:
                 self._init_schema()
                 return self._conn
-            except sqlite3.OperationalError as e:
+            except sqlite3.OperationalError:
                 # ★★ P0-3（2026-10-28）：把「暂时不可用」与「文件损坏」分开
                 # ────────────────────────────────────────────────────────
                 # OperationalError 覆盖的是「数据库被另一个进程锁住」

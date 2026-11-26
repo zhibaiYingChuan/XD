@@ -50,7 +50,6 @@ from daoti_xuandun_personal.types import (  # noqa: E402
     Action,
     LogEntry,
     LogType,
-    RedactionRecord,
 )
 
 

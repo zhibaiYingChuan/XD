@@ -55,8 +55,7 @@ from ..config import (
 from ..reputation.tracker import ReputationTracker
 from ..storage.db import PersonalStorage, kpi_contribution
 from ..types import (
-    Action, LogEntry, LogType, RedactionRecord, SecurityLevel,
-    VerificationFinding, mask_secret,
+    Action, LogEntry, LogType, RedactionRecord, VerificationFinding, mask_secret,
 )
 from .baseline import build_baseline
 from .listeners import RelayPortListeners
@@ -64,7 +63,7 @@ from .restorer import ContentRestorer
 from .sanitizer import CATEGORY_LABELS, RequestSanitizer
 from .verifier import (
     NOTIFY_ONLY_SIGNALS, OBSERVATION_ONLY_SIGNALS, STRUCTURED_SIGNALS,
-    ResponseVerifier, _OBSERVE_ONLY_TOOL_SIGNALS, decide_response_action,
+    ResponseVerifier, _OBSERVE_ONLY_TOOL_SIGNALS,
 )
 
 logger = logging.getLogger("xuandun-personal.app")

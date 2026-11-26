@@ -37,7 +37,7 @@ import argparse
 import json
 import random
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src"

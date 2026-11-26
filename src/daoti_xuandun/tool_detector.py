@@ -1,7 +1,7 @@
 """MCP/Agent 工具调用意图检测器 — 基于五行生克框架"""
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from .tool_risk_registry import (
     SensitiveTool, RiskCategory, match_tool, get_risk_category_name)

@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 import threading
 from pathlib import Path
 
@@ -40,7 +39,6 @@ from daoti_xuandun_personal.config import PersonalConfig  # noqa: E402
 from daoti_xuandun_personal.proxy import app as app_mod  # noqa: E402
 from daoti_xuandun_personal.reputation.tracker import ReputationTracker  # noqa: E402
 from daoti_xuandun_personal.storage import db as db_mod  # noqa: E402
-from daoti_xuandun_personal.types import Action  # noqa: E402
 
 # ★ 注意：本套件里另有测试会 `importlib.reload(db_mod)` / `reload(config)`，
 #   那会产生**全新的类对象**。因此凡涉及 isinstance / 构造，一律走

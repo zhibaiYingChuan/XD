@@ -42,7 +42,7 @@ from redteam_relay_attack import (  # noqa: E402
     ATTACK_A, ATTACK_B, ATTACK_C, BASELINE_D,
     BASELINE_BODY, CONSTRAINED_BODY,
     NEGATIVE_E, NEGATIVE_F, NEGATIVE_G,
-    chat, tool_call,
+    chat,
 )
 import pytest  # noqa: E402
 from daoti_xuandun_personal.proxy.baseline import (  # noqa: E402

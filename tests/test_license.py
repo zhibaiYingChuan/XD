@@ -417,8 +417,6 @@ def test_read_anchor_tolerates_corruption(monkeypatch, tmp_path):
 
 def test_anchor_lives_in_same_dir_as_clock_state():
     """锚点必须与时钟水位同目录（隔离口径一致，开发态不污染稳定版）。"""
-    import os
-
     assert os.path.dirname(lic._anchor_path()) == os.path.dirname(lic._seen_path())
 
 
@@ -508,7 +506,6 @@ def test_forged_jti_cannot_revoke(keypair, monkeypatch):
     所以吊销检查必须放在验签之后 ——
     否则任何人都能构造 {"jti": "<受害者 jti>"} 让他的码失效。
     """
-    import base64
     import jwt as pyjwt
     from cryptography.hazmat.primitives import serialization
 
@@ -1155,7 +1152,6 @@ def test_license_status_exposes_public_key_error(live_engine, monkeypatch, tmp_p
     自检端点存在的意义就是「让降级可见」，
     它自己却因配置错误而崩掉或沉默就本末倒置了。
     """
-    import os as _os
 
     monkeypatch.setenv(
         "XUANDUN_LICENSE_PUBKEY_FILE", str(tmp_path / "definitely-missing.pem")

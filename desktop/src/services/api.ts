@@ -758,7 +758,7 @@ async function call<T>(
     // ★ P1-9：IPC 同样要有上界，否则卡住的命令会让界面永久停在 busy 态
     return invokeBounded<T>(
       tauriCmd,
-      { ...(tauriArgs ?? {}), payload: body ?? {} },
+      { ...tauriArgs, payload: body ?? {} },
       timeoutMs,
     );
   }

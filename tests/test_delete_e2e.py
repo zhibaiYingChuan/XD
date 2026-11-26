@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -30,7 +29,6 @@ if str(REPO / "src") in sys.path:
 sys.path.insert(0, str(REPO / "src"))
 
 from daoti_xuandun_personal.proxy import app as app_mod  # noqa: E402
-from daoti_xuandun_personal.storage import db as db_mod  # noqa: E402
 from daoti_xuandun_personal.types import (  # noqa: E402
     Action,
     LogEntry,
@@ -63,7 +61,6 @@ def client(tmp_path, monkeypatch):
 
     from daoti_xuandun_personal import paths
     importlib.reload(paths)
-    from daoti_xuandun_personal.proxy import app as app_mod
 
     try:
         with TestClient(app_mod.create_app()) as c:

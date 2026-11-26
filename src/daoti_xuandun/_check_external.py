@@ -270,7 +270,6 @@ class ExternalContentChecker:
 
         lines = text.splitlines(keepends=True)
         # 按命中区间 → 映射到行号 → 标记需要删除的行
-        line_offset = 0
         bad_line_idxs: set = set()
         for hit in decision.matches:
             if hit.severity not in ("high", "medium"):
@@ -279,7 +278,6 @@ class ExternalContentChecker:
             running = 0
             for i, line in enumerate(lines):
                 line_start = running
-                line_end = running + len(line.rstrip("\r\n"))
                 line_abs_end = running + len(line)
                 if line_start <= hit.start < line_abs_end or (hit.end > line_start and hit.start < line_abs_end):
                     bad_line_idxs.add(i)

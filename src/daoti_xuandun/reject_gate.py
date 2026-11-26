@@ -5,12 +5,10 @@ from __future__ import annotations
 # 详见 LICENSE 文件
 
 from collections import OrderedDict, deque
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import hashlib
 import json
-import random
-import math
 import re
 import threading
 import time
@@ -2148,7 +2146,6 @@ class EndogenousDomainAwareness:
 
         # ── 诊断日志：输出所有关键信号值，便于排查误判 ──
         if debug_info:
-            import json
             diag = {
                 "decision": "REJECT" if decision == Decision.REJECT else "PASS",
                 "text": (raw_input[:80] + "...") if isinstance(raw_input, str) and len(raw_input) > 80 else raw_input,

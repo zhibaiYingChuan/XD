@@ -13,7 +13,7 @@ from enum import Enum
 class RateLimitError(RuntimeError):
     """配额超限异常 — 网关应返回 HTTP 429 Too Many Requests"""
     pass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, List, Optional
 
 
 import numpy as np

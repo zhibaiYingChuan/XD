@@ -9,13 +9,13 @@ from __future__ import annotations
 import hashlib
 import time
 import threading
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Tuple, Union
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
 
 
 import numpy as np
 
 from daoti_xuandun.config import DefenseLevel, XuanDunConfig
-from daoti_xuandun.types import Decision, ProtectResult, TimingDecision, TrustLevel, Vector, RateLimitError
+from daoti_xuandun.types import Decision, ProtectResult, TrustLevel, Vector, RateLimitError
 
 if TYPE_CHECKING:
     from daoti_xuandun.reject_gate import EndogenousDomainAwareness

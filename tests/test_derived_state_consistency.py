@@ -52,8 +52,6 @@ from daoti_xuandun_personal.reputation.tracker import (  # noqa: E402
 from daoti_xuandun_personal.storage.db import PersonalStorage  # noqa: E402
 from daoti_xuandun_personal.types import (  # noqa: E402
     Action,
-    LogEntry,
-    LogType,
     RelayReputation,
 )
 

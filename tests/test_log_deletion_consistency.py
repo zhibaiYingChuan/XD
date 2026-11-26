@@ -31,7 +31,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -234,8 +233,8 @@ class TestRedactionsAreCascaded:
         assert store.get_log(b) is not None
 
     def test_delete_filtered_with_no_match_keeps_everything(self, store):
-        log_id = _write(store, Action.ALERT.value, domain="a.example.invalid",
-                        redactions=[_rec("api_key", "sk-KEEP")])
+        _write(store, Action.ALERT.value, domain="a.example.invalid",
+               redactions=[_rec("api_key", "sk-KEEP")])
         assert store.delete_logs(relay_domain="nomatch.invalid") == 0
         assert store._conn.execute(
             "SELECT COUNT(*) c FROM redaction_records"

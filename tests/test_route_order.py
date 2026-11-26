@@ -28,7 +28,6 @@ import re
 import sys
 from pathlib import Path
 
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 APP_PY = REPO / "src" / "daoti_xuandun_personal" / "proxy" / "app.py"
@@ -146,7 +145,6 @@ class TestStatsEndpointWorks:
         """
         monkeypatch.setenv("XUANDUN_DATA_DIR", str(tmp_path))
         import importlib
-        import time
 
         from fastapi.testclient import TestClient
 

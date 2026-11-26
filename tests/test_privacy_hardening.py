@@ -34,7 +34,6 @@ if str(REPO / "src") in sys.path:
     sys.path.remove(str(REPO / "src"))
 sys.path.insert(0, str(REPO / "src"))
 
-from daoti_xuandun_personal.storage import db as db_mod  # noqa: E402
 from daoti_xuandun_personal.types import (  # noqa: E402
     Action,
     LogEntry,

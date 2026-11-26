@@ -7,7 +7,7 @@ from __future__ import annotations
 # 动态阴阳壳 — 状态依赖权重演化 + 混沌非零偏置
 # 壳本身是一个动态系统，权重随状态在线更新，任何输入都产生高熵输出。
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Tuple
 
 import hashlib
 import numpy as np

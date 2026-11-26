@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 # ★ 2026-11-13：必须无条件置顶 —— editable .pth 已把
 #   该路径加入 sys.path（位置在 H:\XuanDun\src 之后），
@@ -373,6 +375,23 @@ class TestDangerousCommandSyntaxFacts:
             "echo 'rm -rf /' | sh",
             'echo "$(rm -rf /)" > f',
             "echo hi > f; rm -rf /",
+        ):
+            findings = vf._check_tool_calls(_payload("Bash", {"command": cmd}), "")
+            assert [f for f in findings if f.severity == "high"], cmd
+
+    def test_even_backslash_before_quote_does_not_swallow_separator(self):
+        r"""`"C:\\"` 的两个反斜杠是转义对，闭合引号之后的真分隔符必须生效。
+
+        ★ 2026-11-27（独立审查阻断级）：段切分的转义语义若「吞整串反斜杠
+          再多吞一个字符」，会把闭合引号也吃掉，后面的 `|` / `;` / `&&`
+          全部消失 → `echo hi "C:\\" | chmod 777 x` 被当成纯 echo 豁免。
+        """
+        for cmd in (
+            r'echo hi "C:\\" | chmod 777 x',
+            r'echo hi "C:\\"; chmod 777 x',
+            r'echo hi "C:\\" && chmod 777 x',
+            r'echo hi "C:\\" | del /s *',
+            r'echo hi "C:\\\\" | chmod 777 x',
         ):
             findings = vf._check_tool_calls(_payload("Bash", {"command": cmd}), "")
             assert [f for f in findings if f.severity == "high"], cmd
@@ -943,4 +962,461 @@ class TestEvidenceTiering:
         assert (total, danger, suspect, safe) == (1, 0, 0, 1), (
             "观察没有计入安全 —— total 会与 safe+suspect+danger 对不上"
         )
+
+
+class TestListingGlobIsNotSensitivePathRead:
+    """列目录命令里的通配符筛选条件 ≠ 读取文件。
+
+    ★ 2026-11-26 生产日志复核：`Get-ChildItem -Recurse -File -Include
+      *.env,.env*,*.ini,...` 被判 block/high，实际只是列文件名，
+      一个字节都没被读出。
+    """
+
+    def test_get_childitem_include_dotenv_glob_is_observation(self):
+        cmd = (
+            "Get-ChildItem H:\\XuanDun -Recurse -File "
+            "-Include *.env,.env*,*.ini,*.json,*.md -ErrorAction SilentlyContinue"
+        )
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" and f.severity == "high"
+            for f in findings
+        ), "列目录时把 *.env 当成了读取环境变量文件"
+        assert any(f.category == "dangerous_content" for f in findings), (
+            "应降级为观测项留痕，而不是彻底静默"
+        )
+
+    def test_cat_dotenv_glob_still_blocks(self):
+        """`cat *.env` 是真读，不能跟着通配符一起放过。"""
+        findings = vf._check_tool_calls(
+            _payload("Shell", {"command": "cat *.env"}), ""
+        )
+        assert any(
+            f.category == "tool_call_dangerous" and f.severity == "high"
+            for f in findings
+        ), "cat *.env 被误放 —— 误报修成了漏报"
+
+    def test_find_exec_dotenv_still_blocks(self):
+        """`find -exec cat` 会真的读文件，不能算「只列目录」。"""
+        findings = vf._check_tool_calls(
+            _payload(
+                "Shell",
+                {"command": "find . -name '*.env' -exec cat {} \\;"},
+            ),
+            "",
+        )
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "find -exec 读 .env 被放过了"
+
+    @pytest.mark.parametrize("cmd", [
+        "Get-ChildItem *.env | Get-Content",
+        "ls *.env | xargs cat",
+        "Get-ChildItem -Include *.env -Recurse | Select-String -Pattern 'secret'",
+        "Get-ChildItem -Recurse -Filter *.env "
+        "| ForEach-Object { Get-Content $_.FullName }",
+    ])
+    def test_listing_piped_to_read_still_blocks(self, cmd):
+        """上游只是列名字，但管道下游会读出内容 —— 必须仍然阻断。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"列目录 + 管道读取被误放：{cmd}"
+
+    @pytest.mark.parametrize("cmd", [
+        "Get-ChildItem *.env; cat .env",
+        "dir *.env && type .env",
+    ])
+    def test_listing_then_real_read_still_blocks(self, cmd):
+        """同一命令里先列目录、后真读，不能因为第一处是通配符就整体豁免。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"列目录后真读被误放：{cmd}"
+
+    def test_windows_find_is_not_listing(self):
+        """Windows 的 find.exe 是文本搜索，会读文件内容。"""
+        findings = vf._check_tool_calls(
+            _payload("Shell", {"command": 'find "SECRET" *.env'}), ""
+        )
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "Windows find 读 .env 被当成只列目录"
+
+    @pytest.mark.parametrize("cmd", [
+        "ls *.env | xargs -I{} head {}",
+        "ls *.env | xargs grep SECRET",
+    ])
+    def test_listing_piped_to_other_readers_still_blocks(self, cmd):
+        """读取消费者不能只列黑名单 —— xargs head/grep 同样会读内容。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"列目录 + 非常见读取消费者被误放：{cmd}"
+
+    @pytest.mark.parametrize("cmd", [
+        "Get-ChildItem *.env\ncat .env",
+        "Get-ChildItem *.env\nGet-Content .env",
+    ])
+    def test_literal_newline_separator_still_blocks(self, cmd):
+        """tool_call 参数里的换行是字面量 `\\n`，也要当作命令分隔符。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"字面量换行后的真读被误放：{cmd!r}"
+
+    def test_unix_find_print_is_listing(self):
+        """`find . -name '*.env' -print` 只列文件名，不应阻断。"""
+        findings = vf._check_tool_calls(
+            _payload("Shell", {"command": "find . -name '*.env' -print"}), ""
+        )
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "Unix find -print 被当成读取"
+
+    def test_fd_is_listing(self):
+        """`fd '*.env'` 只列文件名，不应阻断。"""
+        findings = vf._check_tool_calls(
+            _payload("Shell", {"command": "fd '*.env'"}), ""
+        )
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "fd 列文件名被当成读取"
+
+    def test_fd_exec_still_blocks(self):
+        """`fd -x cat` 会执行读取命令。"""
+        findings = vf._check_tool_calls(
+            _payload("Shell", {"command": "fd '*.env' -x cat"}), ""
+        )
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "fd -x 读取被误放"
+
+    def test_where_object_name_filter_is_not_read(self):
+        """`Where-Object { $_.Name -match 'cat' }` 里的 cat 是字面量，不是读取。"""
+        cmd = "Get-ChildItem *.env | Where-Object { $_.Name -match 'cat' }"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "按文件名过滤被当成读取文件内容"
+
+    def test_metadata_consumer_pipeline_is_not_read(self):
+        """只取文件名/元数据的管道（Select-Object Name）不应阻断。"""
+        cmd = "Get-ChildItem *.env | Select-Object Name"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "只取文件名的管道被当成读取"
+
+    def test_for_each_readalltext_still_blocks(self):
+        """`ForEach-Object { [IO.File]::ReadAllText(...) }` 会读内容。"""
+        cmd = (
+            "Get-ChildItem *.env "
+            "| ForEach-Object { [IO.File]::ReadAllText($_) }"
+        )
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "ForEach-Object 里的 ReadAllText 被误放"
+
+    def test_windows_path_with_backslash_n_is_not_separator(self):
+        """`C:\\new` 里的 `\\n` 是路径，不是命令分隔符。"""
+        cmd = r"Get-ChildItem C:\new\*.env"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "Windows 路径里的 \\n 被当成了换行分隔符"
+
+    def test_windows_path_trailing_backslash_does_not_hide_pipe(self):
+        """`"H:\\XuanDun\\"` 的尾反斜杠不能让后面的真管道消失。"""
+        cmd = r'Get-ChildItem *.env "H:\XuanDun\" | Get-Content'
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "Windows 路径尾反斜杠吞掉了闭合引号，真管道被漏放"
+
+    @pytest.mark.parametrize("cmd", [
+        r"Get-Content C:\x\.env",
+        r"type C:\x\.env",
+    ])
+    def test_windows_backslash_path_read_still_blocks(self, cmd):
+        """`C:\\x\\.env` 里的反斜杠是路径分隔符，不是正则转义。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"Windows 路径读取 .env 被当成正则豁免：{cmd}"
+
+    def test_read_tool_windows_path_still_blocks(self):
+        payload = _payload("Read", {"file_path": r"C:\x\.env"})
+        findings = vf._check_tool_calls(payload, "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "Read 工具的 Windows 路径 .env 被当成正则豁免"
+
+    @pytest.mark.parametrize("cmd", [
+        r"grep secret C:\x\.env",
+        r"findstr secret C:\x\.env",
+        r"rg secret C:\x\.env",
+        r"Select-String -Path C:\x\.env -Pattern secret",
+        r'Get-Content "C:\x\.env"',
+        r"cat \x\.env",
+        r"cat .\.env",
+        r'Get-Content "config\.env"',
+        r'cat "x\.env"',
+        r'Get-Content ".\x\.env"',
+        r"grep secret \.env",
+        r"grep -f \.env file",
+        r"grep --file \.env file",
+        r"grep secret .env",
+        r"findstr /s secret C:\x\.env",
+        r"echo .env | xargs cat",
+        r"printf .env | xargs cat",
+        r"grep -l .env file | xargs cat",
+        r"rg -l .env . | xargs cat",
+        r"grep -o .env file | xargs cat",
+        r"grep .env file | Get-Content",
+        r"grep .env file | xargs sh -c 'cat .env'",
+        r"echo .env | xargs -E EOF cat",
+        # BSD/macOS 的 -J / -S 需要独立值，值不能被当成目标命令而放行
+        r"echo .env | xargs -J {} cat",
+        r"echo .env | xargs -S 1024 cat",
+        # -e 后堆叠选项时，目标命令不能被提前 return 丢掉
+        r"echo .env | xargs -e -t -0 cat",
+        r"echo .env | xargs -e -0 -t cat",
+        r"echo .env | xargs -e -t -r cat",
+        # 上游是路径时，多候选不能因为「有歧义」就跳过数据流判断而放行
+        r"echo .env | xargs -Z value cat",
+        r"echo .env | xargs -e -n 1 cat",
+        # `--` 之后的第一个词是命令
+        r"echo .env | xargs -- cat",
+        # 命中在引号内时，下游管道不能被孤立的闭合引号吞掉
+        r"find . -name '*.env' | cat",
+        r"find . -name '*.env' | xargs cat",
+        r'find . -name "*.env" | xargs cat',
+        # 未引号的 `*` 是 glob，不是正则量词；`.env*` 会匹配 .env
+        r"ls -l .env* | xargs cat",
+        # 未引号的 `|` 是管道，不是交替符
+        r"cat .env|head",
+        r"Get-Content .env|Select-Object -First 5",
+        # 保守取舍：ls 输出行内含文件名 token，长格式也按路径输出处理
+        r"ls -l *.env | xargs cat",
+        # 多段命令里的真读仍必须阻断（位置基准修复不能放过路径参数）
+        r"cd /x && grep secret .env",
+        r"cd /x; cat .env",
+        # 偶数反斜杠 + 闭合引号不能吞掉后面的真管道
+        r'ls .env* "C:\\" | xargs cat',
+    ])
+    def test_regex_tools_reading_windows_path_still_block(self, cmd):
+        """读取命令 + Windows 路径 .env，不能因为命令名像正则工具就豁免。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"Windows 路径 .env 真读被当成正则豁免：{cmd}"
+
+    @pytest.mark.parametrize("cmd", [
+        r"grep '\.env' C:\x\file.txt",
+        r"grep \.env file",
+        r"grep -e \.env file",
+        r"grep .env file",
+        r"rg .env",
+        r"findstr /s \.env",
+        r"Select-String .env file",
+        r"Select-String \.env file",
+        r"Select-String -Pattern .env",
+        r"Select-String -Path C:\x\*.txt -Pattern '\.env'",
+        r"Select-String -Pattern \.env -Path file",
+        r"echo '\.env'",
+        r"echo \.env",
+        r"grep .env file | xargs cat",
+        r"grep .env file | xargs -I{} head {}",
+        r"grep .env file | xargs echo",
+        r"Select-String -Pattern .env file | xargs cat",
+        r"echo .env | xargs echo",
+        r"grep .env file | xargs -e EOF echo",
+        r"grep .env file | xargs -E EOF cat",
+        # -e 歧义：GNU 下目标是 EOF、BSD 下是 cat，但上游输出匹配行，
+        # cat 拿到的不是文件名 → 两种解释都不会读 .env
+        r"grep .env file | xargs -e EOF cat",
+        # 上游输出匹配行时，-J / -S / -t 的值与选项都不能让 .env 变成真读
+        r"grep .env file | xargs -J {} cat",
+        r"grep .env file | xargs -S 1024 cat",
+        r"grep .env file | xargs -t cat",
+        # -e 后堆叠无值选项：解析出唯一目标 cat，上游是匹配行 → 不读 .env
+        r"grep .env file | xargs -e -t -0 cat",
+        r"grep .env file | xargs -e -0 -t cat",
+        # 上游明确输出匹配行时，多候选不再无条件阻断
+        r"grep .env file | xargs -Z value cat",
+        r"grep .env file | xargs -e -n 1 cat",
+        # `--` 之后的 -weird 是命令，不是读取 .env
+        r"echo .env | xargs -- -weird cat",
+        # 未引号 glob 但只列目录、下游无读取：`.env*` 是筛选条件
+        r"ls .env*",
+        r"ls ?env",
+        # 引号内的交替符 / 量词仍是正则模式
+        r"grep 'a|.env' file",
+        r"grep 'a.env*' file",
+        r"echo .env*",
+        # 多段命令里模式参数的位置基准必须相对段起点，不能错位成路径参数
+        r"cd /x && grep .env file",
+        r"cd /x; grep .env file",
+        r"cd /x && rg .env",
+        r"cd /x && echo .env",
+    ])
+    def test_regex_pattern_with_path_argument_is_not_read(self, cmd):
+        """模式参数里的 \\.env 是关键字，路径参数是另一个词，不应阻断。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"正则模式与路径参数同段被误判为读取：{cmd}"
+
+    def test_comment_apostrophe_is_not_unclosed_quote(self):
+        """注释里的 `it's` 不能让整条命令被当成引号未闭合。"""
+        cmd = "Get-ChildItem *.env | Select-Object Name # it's fine"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "注释里的撇号导致误报"
+
+    def test_windows_trailing_backslash_with_safe_consumer_is_not_high(self):
+        """尾反斜杠 + 只取文件名的下游，不应因为引号未闭合而误报。"""
+        cmd = r'Get-ChildItem *.env "H:\XuanDun\" | Select-Object Name'
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "安全元数据消费者被 fail-closed 误伤"
+
+    def test_literal_newline_then_interpreter_still_blocks(self):
+        """先写文件、再用字面量换行后的解释器执行，必须仍阻断。"""
+        cmd = "echo 'rm -rf /' > f\nsh f"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "字面量换行后的 sh 执行被当成写文档豁免"
+
+    def test_quoted_pipe_in_where_object_is_not_pipeline(self):
+        """`-match 'env|key'` 的竖线是正则交替符，不是管道。"""
+        cmd = "Get-ChildItem *.env | Where-Object { $_.Name -match 'env|key' }"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "引号内的 | 被当成管道，导致体检命令误报"
+
+    @pytest.mark.parametrize("cmd", [
+        "find . -name '*.env' -ok cat {} \\;",
+        "find . -name '*.env' -okdir cat {} \\;",
+    ])
+    def test_find_ok_still_blocks(self, cmd):
+        """`-ok` / `-okdir` 会执行并读取，不能算列目录。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"find -ok 读取被误放：{cmd}"
+
+    @pytest.mark.parametrize("cmd", [
+        'Get-ChildItem *.env \\" | Get-Content',
+        'Get-ChildItem *.env `" | Get-Content',
+    ])
+    def test_escaped_quote_does_not_hide_pipe(self, cmd):
+        """`\\"` / 反引号转义的引号不是开引号，后面的管道仍然有效。"""
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), f"转义引号后的真管道被吞：{cmd!r}"
+
+    def test_pipe_in_comment_is_not_pipeline(self):
+        """`# | cat` 是注释内容，不是管道。"""
+        cmd = "Get-ChildItem *.env # | cat"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "注释里的 | 被当成管道，导致列目录误报"
+
+    def test_backslash_inside_single_quote_does_not_hide_pipe(self):
+        """单引号内反斜杠不是转义符，`'a\\'` 正常闭合，后面的管道有效。"""
+        cmd = "Get-ChildItem *.env 'a\\' | Get-Content"
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "单引号内的反斜杠把真管道吞掉了"
+
+    def test_double_quoted_pipe_in_where_object_is_not_pipeline(self):
+        """双引号内的 `a|b` 同样是正则交替符，不是管道。"""
+        cmd = (
+            'Get-ChildItem *.env | Where-Object { $_.Name -match "a|b" }'
+        )
+        findings = vf._check_tool_calls(_payload("Shell", {"command": cmd}), "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "双引号内的 | 被当成管道，导致体检命令误报"
+
+    def test_description_field_is_not_command(self):
+        """description 是说明文字，不能和 command 拼成一条命令。"""
+        payload = _payload("Shell", {
+            "command": "Get-ChildItem -Include *.env -Recurse",
+            "description": "查找 .env 配置文件",
+        })
+        findings = vf._check_tool_calls(payload, "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "description 里的 .env 被当成第二段真读"
+
+    def test_description_cat_is_not_executed(self):
+        """description 里写 `cat .env` 只是说明，不是执行。"""
+        payload = _payload("Shell", {
+            "command": "Get-ChildItem *.env | Select-Object Name",
+            "description": "cat .env 说明",
+        })
+        findings = vf._check_tool_calls(payload, "")
+        assert not any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "description 里的 cat .env 被当成命令执行"
+
+    def test_real_command_with_description_still_blocks(self):
+        """命令字段本身是真读时，仍然必须阻断。"""
+        payload = _payload("Shell", {
+            "command": "cat .env",
+            "description": "读取配置",
+        })
+        findings = vf._check_tool_calls(payload, "")
+        assert any(
+            f.category == "tool_call_dangerous" for f in findings
+        ), "带 description 的真读命令被误放"
+
+
+class TestInvalidHostIsNotExternalEndpoint:
+    """URL 解析残渣不能被当成外部端点。
+
+    ★ 2026-11-26 生产日志复核：一条 alert 的外部地址是 `\\` ——
+      它是 `https://\\` 取 host 时的残渣，不是任何真实主机。
+    """
+
+    def test_backslash_host_is_dropped(self):
+        assert bl._host_of("https://\\") == ""
+
+    def test_invalid_host_not_in_exec_domains(self):
+        payload = _payload("Shell", {"command": "curl https://\\ -o out"})
+        facts = bl.extract_response_facts(payload, "")
+        assert not facts["exec_domains"], "解析残渣被记成了外部端点"
+
+    def test_real_domain_still_kept(self):
+        assert bl._host_of("https://evil.example.com/x") == "evil.example.com"
+
+    def test_unknown_tld_shape_is_kept(self):
+        """形态合法但不在常见 TLD 表里的域名不能被误杀。"""
+        assert bl._host_of("https://evil.museum/x") == "evil.museum"
+
+    def test_benign_prefix_must_not_swallow_full_host(self):
+        """不能把 `github.com.evil.museum` 截成良性域名 `github.com`。"""
+        assert (
+            bl._host_of("https://github.com.evil.museum/x")
+            == "github.com.evil.museum"
+        )
+
+    def test_single_label_intranet_host_is_kept(self):
+        """单标签内网主机保留原有行为，不因形态校验被删。"""
+        assert bl._host_of("https://myhost:8080/x") == "myhost"
+
+    def test_idn_host_is_kept(self):
+        """IDN 是合法可解析域名，不能因为不是 ASCII 就被丢掉。"""
+        assert bl._host_of("https://例子.中国/x") == "例子.中国"
 

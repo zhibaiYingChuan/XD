@@ -137,7 +137,7 @@ class TestStatisticalNeverBlocks:
         只测「当前 severity 是 low」不够——
         那样只要有人重新标 high，阻断就会复活而测试全绿。
         """
-        v = ResponseVerifier(level="balanced")
+        ResponseVerifier(level="balanced")
         findings = [
             _finding("length_anomaly", severity="high"),  # 故意标成最高级
         ]

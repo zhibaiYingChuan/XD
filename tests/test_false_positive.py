@@ -43,12 +43,10 @@ sys.path.insert(0, str(_SRC))
 from daoti_xuandun_personal.proxy.baseline import (
     _PKG_PATTERNS, _normalize_pkg, _normalize_tool_name,
     build_baseline, detect_typosquat, diff_against_baseline,
-    extract_response_facts, _check_constraint_violations,
-    _check_security_downgrade, _check_typosquat, _check_toolchain_injection,
+    extract_response_facts, _check_security_downgrade, _check_typosquat, _check_toolchain_injection,
     _detect_covert_channel, _detect_delivery,
     _detect_telemetry_smuggle,
 )
-from daoti_xuandun_personal.proxy.verifier import ResponseVerifier
 
 
 # ══════════════════════════════════════════════════════════════
