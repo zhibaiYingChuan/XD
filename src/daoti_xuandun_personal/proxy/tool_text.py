@@ -33,6 +33,10 @@ NON_EXEC_FIELD_KEYS = frozenset({
     "description", "desc", "reason", "message", "msg", "query", "prompt",
     "content", "text", "notes", "note", "summary", "explanation",
     "title", "label", "caption", "comment", "comments",
+    # ★ 2026-11-27：搜索工具的 `pattern` 是搜索词/正则，不是命令。
+    #   `Grep {"pattern": "rm -r|递归删除"}` 被当成「递归删除命令」阻断，
+    #   实测一天内连刷 11 条。搜索工具的读取目标是 `path`，仍保留检查。
+    "pattern",
 })
 
 #: 命令段分隔符：shell 分隔符 + 真实换行。

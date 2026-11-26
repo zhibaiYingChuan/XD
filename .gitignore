@@ -204,6 +204,13 @@ tests/*
 #   eval( 被当成给出可执行代码、激活码被自家 JWT 规则拦下……）逐条写成断言。
 #   这些判据改一处就会悄悄回潮，必须随码走，否则下次又得靠用户来报。
 !tests/test_false_positive_regressions.py
+# ★ 2026-11-27：命令词法 / 参数解码 / 网关格式的护栏，此前三个文件
+#   全部漏在放行列表外 —— 本地跑得再绿，CI 也从未跑过它们。
+#   发 0.3.0 前补入：xargs 选项歧义、引号/注释段切分、六种网关格式、
+#   「不得自己 json.loads(arguments)」的结构守卫，都必须随码走。
+!tests/test_tool_text.py
+!tests/test_tool_calls.py
+!tests/test_tool_text_guard.py
 # ★ 授权是这个系统的命门，而 test_license.py 此前一直漏在放行列表外
 #   —— 它从未进过仓库，CI 也就从未跑过授权相关断言。
 #   补进放行列表：机器码算法、验签、吊销、激活锚点这些用例必须随码走。

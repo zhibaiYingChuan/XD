@@ -134,6 +134,7 @@ from .tool_text import (  # noqa: E402
     is_regex_pattern_position,
     quotes_balanced,
     quoted_token_at,
+    shell_tokens,
     split_unquoted,
     strip_quoted,
     xargs_targets,
@@ -431,6 +432,86 @@ _READ_PRIMITIVE_RE = re.compile(
     r"more|less|readalltext|readallbytes|openread|streamreader)\b",
     re.IGNORECASE,
 )
+
+#: 通用凭证文件名：浏览器会生成，用户也会给自己的临时文件起同样的名字。
+#: 单独出现不等于「去读浏览器凭证」——写入目标、参数名、临时文件都叫这个。
+_GENERIC_CRED_FILE_RE = re.compile(r"cookies?\.txt\b|login\.json\b", re.IGNORECASE)
+
+#: 会「接触文件内容」的原语：读取 / 编码 / 归档 / 复制 / 脚本执行 / 外发。
+#: ★ 该表漏项是安全的：判定是 fail-closed（只有「纯写入」才降级），
+#:   漏掉的原语只会让命令继续走阻断，不会放行。
+_CRED_ACCESS_RE = re.compile(
+    r"\b(?:get-content|gc|type|cat|head|tail|more|less|select-string|findstr|"
+    r"grep|awk|sed|open|read|read_text|read_bytes|readalltext|readallbytes|"
+    r"readfile|readfilesync|readtext|readbytes|openread|streamreader|"
+    r"import-csv|import-clixml|curl|wget|scp|rsync|"
+    r"invoke-webrequest|invoke-restmethod|copy-item|"
+    r"cp|mv|copy|move|robocopy|base64|base32|xxd|od|strings|gzip|gunzip|"
+    r"zip|unzip|tar|7z|python|python3|node|deno|perl|ruby|php)\b",
+    re.IGNORECASE,
+)
+
+#: 明确的「写入 / 命名」命令（段首命令名）。
+_CRED_WRITE_CMDS = frozenset({
+    "set-content", "add-content", "out-file", "new-item", "touch",
+    "export-clixml", "export-csv", "tee-object", "join-path", "mkdir",
+    "write_text", "write_bytes", "writefile", "writefilesync", "writestream",
+})
+
+
+def _cred_hit_is_write_target(text: str, hit: "re.Match") -> bool:
+    """该文件名的这次出现是否处于「写入目标」位置。"""
+    start = hit.start()
+    # ① 紧邻 `>` / `>>` 重定向：`> login.json` / `>>login.json`
+    if re.search(r">>?\s*[\"']?$", text[max(0, start - 6):start]):
+        return True
+    seg = command_segment_at(text, start)
+    if not seg:
+        return False
+    # ② 段内有访问原语 → 是读取，不是纯写入
+    if _CRED_ACCESS_RE.search(seg):
+        return False
+    # ③ 段首命令是明确的写入/命名命令（Join-Path / Set-Content / New-Item…）
+    tokens = shell_tokens(seg)
+    if not tokens:
+        return False
+    i = 0
+    # 跳过变量赋值前缀：`$t = Join-Path …` / `VAR=value cmd`
+    while i + 1 < len(tokens) and tokens[i + 1].text == "=":
+        i += 2
+    while i < len(tokens) and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[i].text):
+        i += 1
+    if i >= len(tokens):
+        return False
+    cmd = tokens[i].text.rsplit("/", 1)[-1].lower()
+    return cmd in _CRED_WRITE_CMDS
+
+
+def _is_cred_write_only(text: str, m: "re.Match") -> bool:
+    """只有当**所有**通用凭证文件名出现都处于写入/命名位置时，才允许降级。
+
+    ★ 2026-11-27（独立审查阻断级，两处）：
+      ① `echo x > login.json; cat login.json` —— 同名先写后读；
+      ② `echo x > cookies.txt; cat login.json` —— 写 A 名、读 B 名。
+      旧实现只看首个命中的同名出现，两种都会漏掉后面的读取。
+      现在遍历**全部**通用凭证文件名（不分名字），任一处不是写入目标
+      就不降级（fail-closed）。
+    """
+    hits = list(_GENERIC_CRED_FILE_RE.finditer(text))
+    if not hits:
+        return False
+    return all(_cred_hit_is_write_target(text, h) for h in hits)
+
+#: 「读取文件」的函数调用形态：`open('x')` / `read_text('x')` / `Path('x')`。
+#: 用于区分「关键字清单里的元素」与「真的把路径交给读取函数」。
+_READ_FUNC_CALL_RE = re.compile(
+    r"\b(?:open|read|read_text|read_bytes|readalltext|readallbytes|readfile|"
+    r"readfilesync|readtext|readbytes|load|loads|path|import-csv|import-clixml)"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+
 #: `xargs` 后面会读取文件内容的命令
 _READ_XARGS_TARGETS = frozenset({
     "cat", "type", "get-content", "gc", "head", "tail", "grep", "egrep",
@@ -737,6 +818,11 @@ def _is_pattern_mention(text: str, m: "re.Match") -> bool:
         pre = text[:start - 1].rstrip()
         post = text[end + 1:].lstrip()
         if pre[-1:] in ("(", "[", ",", "{") and post[:1] in (",", ")", "]", "}"):
+            # ★★ 2026-11-27（漏放修复）：`open('login.json')` / `read('.env')`
+            #   是读取函数调用，不是关键字清单 —— 左括号前紧贴读取函数名时
+            #   不豁免，否则 `python -c "open('.env').read()"` 会被放过。
+            if pre[-1:] == "(" and _READ_FUNC_CALL_RE.search(pre[:-1].rstrip()):
+                return False
             return True
     return False
 
@@ -816,6 +902,28 @@ def _check_tool_calls(payload: Any, text: str) -> List[VerificationFinding]:
                                 f'Tool Call "{tool_name}" 的参数里把'
                                 f"「{label} {m.group(0)[:40]}」当作匹配条件使用"
                                 "（是正则/关键字清单，不是文件操作；仅作记录，不阻断）"
+                            ),
+                            evidence=_mask_evidence(args_text, m.start()),
+                        )
+                    )
+                    continue
+                # ★★ 2026-11-27（误报修复，fail-closed）：`login.json` /
+                #   `cookies.txt` 是通用文件名，写入目标、参数名、自己的临时
+                #   文件都叫这个名字。只有命令段能证明是「纯写入/命名」时
+                #   才降级为观测；其余形态（含未知命令）一律继续按凭证读取阻断。
+                if (
+                    _GENERIC_CRED_FILE_RE.search(m.group(0))
+                    and _is_cred_write_only(args_text, m)
+                ):
+                    findings.append(
+                        VerificationFinding(
+                            category="dangerous_content",
+                            severity="medium",
+                            detail=(
+                                f'Tool Call "{tool_name}" 的参数里出现了'
+                                f"「{label} {m.group(0)[:40]}」这个文件名"
+                                "（所在命令段只是写入/命名，没有读取动作；"
+                                "仅作记录，不阻断）"
                             ),
                             evidence=_mask_evidence(args_text, m.start()),
                         )
