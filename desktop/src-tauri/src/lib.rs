@@ -1898,6 +1898,87 @@ async fn get_diagnostics(
     proxy_call(reqwest::Method::GET, "/api/diagnostics", None, REQ_NORMAL).await
 }
 
+/// 轮询待裁决的高危拦截（★ 2026-11-28）。
+///
+/// ★ 这个命令同时是「有人值守」的心跳：引擎按它判断桌面端是否在场，
+///   超过 10 秒没有轮询就不再等待用户，直接阻断。
+#[tauri::command]
+async fn list_pending(
+    app: tauri::AppHandle,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    let _ = &payload;
+    ensure_engine_running(&app).await?;
+    proxy_call(reqwest::Method::GET, "/api/pending", None, REQ_FAST).await
+}
+
+/// 提交用户对某条高危拦截的裁决（allow_once / allow_always / deny）。
+#[tauri::command]
+async fn decide_pending(
+    app: tauri::AppHandle,
+    id: String,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    let decision = payload
+        .as_ref()
+        .and_then(|p| p.0.get("decision"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !matches!(decision, "allow_once" | "allow_always" | "deny") {
+        return Err("decision 必须是 allow_once / allow_always / deny".into());
+    }
+    proxy_call(
+        reqwest::Method::POST,
+        &format!("/api/pending/{id}/decide"),
+        Some(serde_json::json!({ "decision": decision })),
+        REQ_NORMAL,
+    )
+    .await
+}
+
+/// 列出「始终允许」的高危判据（设置页撤销用）。
+#[tauri::command]
+async fn get_decision_allowances(
+    app: tauri::AppHandle,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    let _ = &payload;
+    ensure_engine_running(&app).await?;
+    proxy_call(
+        reqwest::Method::GET,
+        "/api/decision-allowances",
+        None,
+        REQ_NORMAL,
+    )
+    .await
+}
+
+/// 撤销一条「始终允许」。
+#[tauri::command]
+async fn remove_decision_allowance(
+    app: tauri::AppHandle,
+    payload: Option<Payload>,
+) -> Result<serde_json::Value, String> {
+    ensure_engine_running(&app).await?;
+    let fingerprint = payload
+        .as_ref()
+        .and_then(|p| p.0.get("fingerprint"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if fingerprint.is_empty() {
+        return Err("缺少 fingerprint".into());
+    }
+    proxy_call(
+        reqwest::Method::POST,
+        "/api/decision-allowances/remove",
+        Some(serde_json::json!({ "fingerprint": fingerprint })),
+        REQ_NORMAL,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn get_logs(
     app: tauri::AppHandle,
@@ -2609,6 +2690,10 @@ pub fn run() {
             get_state,
             get_stats,
             get_diagnostics,
+            list_pending,
+            decide_pending,
+            get_decision_allowances,
+            remove_decision_allowance,
             get_logs,
             get_log_detail,
             get_log_evidence,

@@ -229,6 +229,44 @@ export interface EvidenceBundle {
 }
 
 /**
+ * 等待用户裁决的高危拦截（2026-11-28）。
+ *
+ * 引擎在阻断前把请求挂起最多 45 秒，桌面端轮询到这个项后弹窗，
+ * 用户点「允许」则原请求直接继续，点「拦截」或超时才真正阻断。
+ */
+export interface PendingItem {
+  id: string;
+  /** 中转站域名 */
+  domain: string;
+  /** 一句话摘要（人类可读的命中原因） */
+  summary: string;
+  reason: string;
+  findings: Array<{
+    category: string;
+    severity: string;
+    detail: string;
+    evidence?: string;
+    signal?: string;
+  }>;
+  created_at: number;
+  /** 等待截止时间戳（秒） */
+  expires_at: number;
+  /** 剩余等待秒数 */
+  remaining_s: number;
+}
+
+export type PendingDecision = 'allow_once' | 'allow_always' | 'deny';
+
+/** 「始终允许」的高危判据（设置页可撤销）。 */
+export interface DecisionAllowance {
+  fingerprint: string;
+  summary: string;
+  created_at: number;
+  seen_count: number;
+  last_seen: number;
+}
+
+/**
  * ★ v0.1.0：已配置的中转站（配置视角，非信誉视角）。
  *
  * 与 RelayReputation 的区别：那个是「我用过哪些、它们表现如何」，
@@ -1140,6 +1178,38 @@ export const api = {
       { duration_min: durationMin },
     ),
   resume: () => call<{ ok: boolean }>('resume_protection', 'POST', '/api/resume'),
+
+  // ── 高危拦截的人工裁决（2026-11-28） ──
+  //
+  // ★ 轮询本身就是「有人值守」的心跳：引擎超过 10 秒收不到
+  //   这个请求，就判定无人值守，拦截不再等待。
+  listPending: () =>
+    call<{ items: PendingItem[] }>('list_pending', 'GET', '/api/pending', undefined, TIMEOUT.FAST),
+  decidePending: (id: string, decision: PendingDecision) =>
+    call<{ ok: boolean; decision: PendingDecision }>(
+      'decide_pending',
+      'POST',
+      `/api/pending/${id}/decide`,
+      { decision },
+      TIMEOUT.NORMAL,
+      { id },
+    ),
+  listDecisionAllowances: () =>
+    call<{ items: DecisionAllowance[] }>(
+      'get_decision_allowances',
+      'GET',
+      '/api/decision-allowances',
+      undefined,
+      TIMEOUT.NORMAL,
+    ),
+  removeDecisionAllowance: (fingerprint: string) =>
+    call<{ ok: boolean }>(
+      'remove_decision_allowance',
+      'POST',
+      '/api/decision-allowances/remove',
+      { fingerprint },
+      TIMEOUT.NORMAL,
+    ),
 
   // ── 激活 ──
   //

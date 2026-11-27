@@ -32,7 +32,9 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import (
     Any, AsyncGenerator, Dict, Iterable, List, Optional, Tuple,
@@ -137,6 +139,249 @@ _relay_listeners: Optional[RelayPortListeners] = None
 #   用户刚激活完仍会被降级最多 5 秒。mtime 一变即刻失效。
 _PROTECTION_TTL = 5.0
 _protection_cache: Dict[str, Any] = {}
+
+# ══════════════════════════════════════════════════════════════
+# 高危拦截的人工裁决（★ 2026-11-28）
+# ══════════════════════════════════════════════════════════════
+#
+# 用户的诉求：高危拦截不能「啪的就掉了」—— 明知是误报时，
+# 至少给一次「通过 / 拦截」的选择。
+#
+# 设计：
+#   · 只对 action=block 且 severity=high 询问；observe/alert 不打扰；
+#   · 原请求挂起最多 PENDING_DECISION_TIMEOUT_S 秒等桌面端裁决，
+#     点「允许」后原请求直接拿到结果继续；超时 / 拒绝按原逻辑阻断；
+#   · 弹窗提供「仅本次」与「始终允许」；后者写入 decision_allowance，
+#     同指纹以后不再询问（仍照常记日志、计入统计）；
+#   · 无人值守保护：桌面端超过 PENDING_POLL_GRACE_S 没有轮询
+#     /api/pending 时 0 等待直接拦截 —— CLI 场景不会白等 45 秒。
+PENDING_DECISION_TIMEOUT_S = 45.0
+PENDING_POLL_GRACE_S = 10.0
+
+#: 待裁决项（内存队列，进程重启即清空 —— 挂起的请求也随之结束）
+_pending_lock = threading.Lock()
+_pending_items: Dict[str, Dict[str, Any]] = {}
+#: 桌面端最后一次轮询 /api/pending 的时刻（无人值守判定依据）
+_pending_last_poll: float = 0.0
+
+
+def _decision_rule_keys(findings: List[Any]) -> set:
+    """高危发现的「规则键」集合：signal（缺省退化为 category）+ evidence。
+
+    ★ 与指纹同源，但保留逐条形态：用于回答「这些高危是不是**每一条**
+      都已经被用户放行过」。指纹是整批哈希，无法做子集判断 ——
+      用它来覆盖最终记账，会让「早期放行 A、后来新出现 B」被一起
+      记成通过（独立审查发现的 P0）。
+    """
+    return {
+        f"{getattr(f, 'signal', '') or getattr(f, 'category', '')}:"
+        f"{str(getattr(f, 'evidence', '') or '')}"
+        for f in findings or []
+        if getattr(f, "severity", "") == "high"
+    }
+
+
+def _decision_fingerprint(findings: List[Any]) -> str:
+    """把高危发现折算成稳定指纹（只取 high，避免被低危噪声带偏）。
+
+    ★ 同一组判据必须得到同一个指纹：只由 signal（缺省退化为
+      category）与 evidence 决定，不含 detail 里的计数、时间等易变内容。
+    ★ evidence 为空时退化为 category —— 不能让「证据缺失」把
+      所有高危压成同一个指纹，否则「始终允许」会无限放宽。
+    """
+    parts = sorted(_decision_rule_keys(findings))
+    if not parts:
+        return ""
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _high_findings_all_approved(
+    findings: List[Any], approved_rules: set
+) -> bool:
+    """所有高危发现的规则键是否都已被用户放行过。
+
+    ★ 用于流式最终记账：只要还有**一条**从未裁决过的高危发现
+      （例如放行 A 之后、最终段才出现的凭证泄露 B），就不能把
+      整次响应改记成「通过」—— 那会让 B 静默通过、账本说谎。
+    """
+    keys = _decision_rule_keys(findings)
+    return bool(keys) and keys <= approved_rules
+
+
+def _unapproved_high_findings(
+    findings: List[Any], approved_rules: set
+) -> List[Any]:
+    """返回尚未被用户放行过的高危发现（逐条规则键判断）。
+
+    ★ 流式最终段里，凭证泄露 / 还原异常这类高危发现不来自验证器的
+      action，但同样会把本次响应记成「已拦截」。若只看验证器的
+      action 决定要不要问，它们就绕过了用户的选择 —— 与「高危拦截
+      都给一次选择」相悖。
+    """
+    return [
+        f for f in findings or []
+        if getattr(f, "severity", "") == "high"
+        and (_decision_rule_keys([f]) - approved_rules)
+    ]
+
+
+def _approval_note(decision: str) -> str:
+    """把裁决原因翻译成日志里的一句话。"""
+    return {
+        "allow_once": "仅本次",
+        "allow_always": "始终允许",
+        "allowed_permanent": "此前已设为始终允许",
+        "allowed_this_stream": "本次响应已允许",
+    }.get(decision, decision)
+
+
+def _approval_finding(decision: str) -> VerificationFinding:
+    """放行时留痕：日志里必须能看出「这条高危是用户自己放过的」。"""
+    return VerificationFinding(
+        category="user_approved",
+        severity="low",
+        detail=f"用户已允许本次高危响应（{_approval_note(decision)}）",
+        signal="user_approved",
+    )
+
+
+def _pending_poll_recent() -> bool:
+    """桌面端最近是否在轮询（决定要不要等待）。"""
+    with _pending_lock:
+        return (time.time() - _pending_last_poll) <= PENDING_POLL_GRACE_S
+
+
+def _pending_snapshot() -> List[Dict[str, Any]]:
+    """给桌面端的待裁决列表（只含尚未裁决的项）。"""
+    now = time.time()
+    with _pending_lock:
+        return [
+            {
+                "id": item["id"],
+                "domain": item["domain"],
+                "summary": item["summary"],
+                "reason": item["reason"],
+                "findings": item["findings"],
+                "created_at": item["created_at"],
+                "expires_at": item["expires_at"],
+                "remaining_s": max(0.0, item["expires_at"] - now),
+            }
+            for item in _pending_items.values()
+            if item.get("decision") is None
+        ]
+
+
+def _pending_decide(item_id: str, decision: str) -> bool:
+    """记录用户裁决。项不存在（已超时/已裁决）时返回 False。"""
+    with _pending_lock:
+        item = _pending_items.get(item_id)
+        if item is None or item.get("decision") is not None:
+            return False
+        item["decision"] = decision
+        return True
+
+
+def _pending_discard(item_id: str) -> None:
+    with _pending_lock:
+        _pending_items.pop(item_id, None)
+
+
+async def _await_user_decision(
+    domain: str,
+    findings: List[Any],
+    timeout: Optional[float] = None,
+    approved: Optional[set] = None,
+) -> Tuple[bool, str]:
+    """等用户在桌面端裁决一次高危拦截。返回 (是否放行, 裁决原因)。
+
+    ★ 必须在事件循环里 await。等待期间用 asyncio.sleep 轮询，
+      不能用 threading.Event.wait —— 那会把整个事件循环卡死，
+      桌面端连 /api/pending 都轮询不到，必然等到超时。
+    ★ approved：本次响应内已放行过的**规则键**集合（见
+      _decision_rule_keys）。同一组判据在中期验证与最终验证会各命中
+      一次，不能让用户点两遍。
+    """
+    fingerprint = _decision_fingerprint(findings)
+    rule_keys = _decision_rule_keys(findings)
+
+    if approved is not None and rule_keys and rule_keys <= approved:
+        return True, "allowed_this_stream"
+
+    if fingerprint and _storage is not None:
+        try:
+            if _storage.is_decision_allowed(fingerprint):
+                if approved is not None:
+                    approved |= rule_keys
+                return True, "allowed_permanent"
+        except Exception as e:  # noqa: BLE001 — 查表失败不能阻断请求
+            logger.warning("查询永久允许失败: %s", e)
+
+    # ★ 无人值守保护：桌面端没在轮询，弹窗根本不会出现，不能白等 45 秒。
+    if not _pending_poll_recent():
+        return False, "unattended"
+
+    wait_s = PENDING_DECISION_TIMEOUT_S if timeout is None else float(timeout)
+    hit = _pick_explainable_finding(findings)
+    summary = str(getattr(hit, "detail", "") or "响应含高危内容")
+    item_id = uuid.uuid4().hex
+    now = time.time()
+    with _pending_lock:
+        _pending_items[item_id] = {
+            "id": item_id,
+            "domain": domain,
+            "summary": summary[:200],
+            "reason": summary,
+            "findings": [
+                f.to_dict() for f in findings if hasattr(f, "to_dict")
+            ],
+            "fingerprint": fingerprint,
+            "created_at": now,
+            "expires_at": now + max(0.0, wait_s),
+            "decision": None,
+        }
+
+    def _finish(decision: Optional[str]) -> Optional[Tuple[bool, str]]:
+        """把一次裁决落到结果上；未裁决返回 None。"""
+        if decision == "deny":
+            return False, "user_denied"
+        if decision in ("allow_once", "allow_always"):
+            if approved is not None:
+                # ★ 必须用 update：`approved |= ...` 会在闭包里重新绑定，
+                #   把 approved 变成局部变量（UnboundLocalError）。
+                approved.update(rule_keys)
+            if (
+                decision == "allow_always"
+                and fingerprint
+                and _storage is not None
+            ):
+                try:
+                    _storage.add_decision_allowance(fingerprint, summary)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("写入永久允许失败: %s", e)
+            return True, decision
+        return None
+
+    try:
+        deadline = time.monotonic() + max(0.0, wait_s)
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+            with _pending_lock:
+                item = _pending_items.get(item_id)
+                decision = item.get("decision") if item else None
+            done = _finish(decision)
+            if done is not None:
+                return done
+        # ★ 裁决与超时可能同时发生：退出前再看一眼，
+        #   避免用户刚点「允许」却被判超时（fail-closed 但体验不对）。
+        with _pending_lock:
+            item = _pending_items.get(item_id)
+            decision = item.get("decision") if item else None
+        done = _finish(decision)
+        if done is not None:
+            return done
+        return False, "timeout"
+    finally:
+        _pending_discard(item_id)
 
 
 def _days_to_start_ts(days: Optional[int]) -> Optional[float]:
@@ -1233,24 +1478,31 @@ def create_app() -> FastAPI:
 
         # 高危阻断
         if max_sev == "high" and action == Action.BLOCK.value:
-            _record_log(
-                LogType.RESPONSE_VERIFY, domain, Action.BLOCK.value, "high",
-                model, findings, payload, session_id, redaction_records,
-                text_preview=content,
-                response_model=str(payload.get("model") or ""),
-            )
-            _record_reputation(domain, Action.BLOCK.value, latency_ms, content,
-                               categories=_finding_categories(findings))
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "error": {
-                        "type": "relay_response_blocked",
-                        **_blocked_advice(findings),
-                        "findings": [f.to_dict() for f in findings],
-                    }
-                },
-            )
+            # ★ 2026-11-28：拦截前先给用户一次选择（只对高危、阻塞等待）。
+            #   放行 → 按 pass 记账并继续返回内容；拒绝/超时 → 维持原阻断。
+            allowed, decision = await _await_user_decision(domain, findings)
+            if allowed:
+                findings.insert(0, _approval_finding(decision))
+                action = Action.PASS.value
+            else:
+                _record_log(
+                    LogType.RESPONSE_VERIFY, domain, Action.BLOCK.value, "high",
+                    model, findings, payload, session_id, redaction_records,
+                    text_preview=content,
+                    response_model=str(payload.get("model") or ""),
+                )
+                _record_reputation(domain, Action.BLOCK.value, latency_ms, content,
+                                   categories=_finding_categories(findings))
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": {
+                            "type": "relay_response_blocked",
+                            **_blocked_advice(findings),
+                            "findings": [f.to_dict() for f in findings],
+                        }
+                    },
+                )
 
         # 正常返回
         _record_log(
@@ -1294,7 +1546,12 @@ def create_app() -> FastAPI:
             "interrupted": "",
             "delivered": False,
             "upstream_done": False,
+            # ★ 2026-11-28：本次响应里用户是否放行过高危拦截
+            "approved": False,
         }
+        # ★ 本次响应内已放行过的判据规则键（见 _decision_rule_keys）：
+        #   中期验证与最终验证会各命中一次同一组判据，不能让用户点两遍。
+        approved_rules: set = set()
         # ★ P0-1：工具调用帧先扣住，验证通过后再交付。
         #   威胁模型里真正会被「执行」的只有 tool_calls —— 正文只是文本。
         #   扣住它，就能在「中转站指示客户端执行危险操作」时做到真阻断。
@@ -1391,16 +1648,25 @@ def create_app() -> FastAPI:
                         )
                         findings.extend(result.findings)
                         if result.action == Action.BLOCK.value and result.severity == "high":
-                            state["blocked"] = True
-                            # ★★ 2026-10-29（P0-1）：这条是**事后**阻断 ——
-                            #   中期验证发生在内容已经开始转发之后，
-                            #   所以文案必须如实说「已中断」，
-                            #   不能说「没有交给 AI 工具」（那是假的）。
-                            yield _sse_error_frame(
-                                "relay_response_blocked",
-                                _late_block_advice(result.findings),
+                            # ★ 2026-11-28：拦截前给用户一次选择。
+                            #   放行 → 不阻断，继续转发；拒绝/超时 → 维持原逻辑。
+                            allowed, decision = await _await_user_decision(
+                                domain, result.findings,
+                                approved=approved_rules,
                             )
-                            break
+                            if not allowed:
+                                state["blocked"] = True
+                                # ★★ 2026-10-29（P0-1）：这条是**事后**阻断 ——
+                                #   中期验证发生在内容已经开始转发之后，
+                                #   所以文案必须如实说「已中断」，
+                                #   不能说「没有交给 AI 工具」（那是假的）。
+                                yield _sse_error_frame(
+                                    "relay_response_blocked",
+                                    _late_block_advice(result.findings),
+                                )
+                                break
+                            findings.insert(0, _approval_finding(decision))
+                            state["approved"] = True
                         mid_verified = True
 
                 # ★ 流结束：对全文做最终验证 + 第三层脱敏恢复
@@ -1450,6 +1716,7 @@ def create_app() -> FastAPI:
                     #   现在改为：只要有新增内容就再验一次（滑动复核），
                     #   并以全文做最终判定，覆盖中转站在流尾追加载荷的情况。
                     grown = total_len > last_verified_len
+                    result = None
                     if (
                         _config.guard.enable_response_verify
                         and _verifier is not None
@@ -1475,17 +1742,39 @@ def create_app() -> FastAPI:
                         )
                         if result.findings:
                             findings.extend(result.findings)
-                        if (
-                            result.action == Action.BLOCK.value
-                            and result.severity == "high"
-                        ):
+                        mid_verified = True
+                        last_verified_len = total_len
+
+                    # ★ 2026-11-28（独立复核）：统一裁决入口 ——
+                    #   验证器判 block/high，或存在尚未放行的高危发现
+                    #   （凭证泄露 / 还原异常不来自验证器的 action），
+                    #   都要给用户一次选择，不能因为验证器没判 block 就绕过。
+                    pending_high = _unapproved_high_findings(
+                        findings, approved_rules
+                    )
+                    verifier_blocked = (
+                        result is not None
+                        and result.action == Action.BLOCK.value
+                        and result.severity == "high"
+                    )
+                    if verifier_blocked or pending_high:
+                        asked = pending_high or (
+                            result.findings if result is not None else []
+                        )
+                        # ★ 放行则不置 blocked，后面的扣留工具调用帧照常交付。
+                        allowed, decision = await _await_user_decision(
+                            domain, asked,
+                            approved=approved_rules,
+                        )
+                        if not allowed:
                             state["blocked"] = True
                             yield _sse_error_frame(
                                 "relay_response_blocked",
-                                _late_block_advice(result.findings),
+                                _late_block_advice(asked),
                             )
-                        mid_verified = True
-                        last_verified_len = total_len
+                        else:
+                            findings.insert(0, _approval_finding(decision))
+                            state["approved"] = True
 
                     # ★★ P0-1：验证通过后才把扣住的工具调用帧与残留缓冲
                     #   交出去。这一步必须在最终验证之后 —— 放在之前等于
@@ -1634,6 +1923,21 @@ def create_app() -> FastAPI:
                 #   「计数动了却什么都不显示」会让他以为防护根本没开。
                 if findings and action == Action.PASS.value:
                     action = Action.ALERT.value
+                # ★ 2026-11-28：用户已明确放行 → 按通过记账。
+                #   不能沿用「有发现就告警」的默认规则覆盖用户的裁决，
+                #   否则日志与 KPI 会把一次用户批准的放行又记成风险。
+                #   ★★ 独立审查 P0：必须是**每一条**高危发现都被放行过，
+                #   才允许改成通过。早期放行 A 之后，最终段可能又新增
+                #   从未裁决过的 B（凭证泄露 / 还原异常）—— 整批指纹
+                #   覆盖不了子集，直接改 PASS 会让 B 静默通过、账本说谎。
+                if (
+                    state["approved"]
+                    and not state["blocked"]
+                    and _high_findings_all_approved(
+                        findings, approved_rules
+                    )
+                ):
+                    action = Action.PASS.value
                 if state["interrupted"]:
                     # ★ P0-8：中断的响应内容不完整，任何「通过/提示」结论都无意义。
                     #   按链路级失败留痕（proxy_error 不计入 KPI 三档）。
@@ -3174,6 +3478,55 @@ def create_app() -> FastAPI:
         _config.save()
         logger.info("已切换当前中转站，启用 id=%s", result["active_id"])
         return {"ok": True, "active_id": result["active_id"]}
+
+    @app.get("/api/pending")
+    async def list_pending():
+        """桌面端轮询：当前等待用户裁决的高危拦截。
+
+        ★ 轮询本身就是「有人值守」的心跳：超过 PENDING_POLL_GRACE_S
+          没有任何轮询，引擎判定无人值守，拦截不再等待、直接阻断。
+        """
+        global _pending_last_poll
+        with _pending_lock:
+            _pending_last_poll = time.time()
+        return {"items": _pending_snapshot()}
+
+    @app.post("/api/pending/{item_id}/decide")
+    async def decide_pending(
+        item_id: str, payload: Dict[str, Any] = Body(...)
+    ):
+        """用户对某条高危拦截做出裁决。"""
+        decision = str(payload.get("decision") or "").strip()
+        if decision not in ("allow_once", "allow_always", "deny"):
+            raise HTTPException(
+                status_code=400,
+                detail="decision 必须是 allow_once / allow_always / deny",
+            )
+        if not _pending_decide(item_id, decision):
+            raise HTTPException(
+                status_code=404, detail="该待裁决项已超时或不存在"
+            )
+        return {"ok": True, "decision": decision}
+
+    @app.get("/api/decision-allowances")
+    async def list_decision_allowances(limit: int = Query(200, ge=1, le=1000)):
+        """列出用户设为「始终允许」的高危判据（供设置页撤销）。"""
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        return {"items": _storage.list_decision_allowances(limit)}
+
+    @app.post("/api/decision-allowances/remove")
+    async def remove_decision_allowance(payload: Dict[str, Any] = Body(...)):
+        """撤销一条「始终允许」。撤销后同判据会重新询问。"""
+        if _storage is None:
+            raise HTTPException(status_code=503, detail="存储未就绪")
+        fingerprint = str(payload.get("fingerprint") or "").strip()
+        if not fingerprint:
+            raise HTTPException(status_code=400, detail="缺少 fingerprint")
+        removed = _storage.remove_decision_allowance(fingerprint)
+        if not removed:
+            raise HTTPException(status_code=404, detail="该记录不存在")
+        return {"ok": True}
 
     @app.post("/api/pause")
     async def pause_protection(duration_min: int = Body(30, embed=True)):

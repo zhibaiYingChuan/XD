@@ -41,6 +41,7 @@ import {
   type EngineStatus,
 } from '../services/api';
 import { useToast } from '../components/Toast';
+import DecisionAllowances from '../components/DecisionAllowances';
 import { EngineOffline } from '../components/EngineOffline';
 import { copyToClipboard, openExternal, isTauri, getAppVersion } from '../lib/tauriShim';
 import { checkForUpdate, type UpdateCheck } from '../lib/updater';
@@ -217,6 +218,7 @@ export default function Settings() {
       'sec-engine',
       'sec-update',
       'sec-storage',
+      'sec-decision-allowance',
     ];
     const els = ids
       .map((id) => document.getElementById(id))
@@ -1055,7 +1057,7 @@ export default function Settings() {
       )}
 
       {/* ★ 页内导航（2026-10-20）。
-          这一页有 7 个区块、总高约 1500px，而视口只有 720 ——
+          这一页有 8 个区块、总高约 1500px，而视口只有 720 ——
           想改端口或看引擎状态要盲滚很久，且不知道下面还有什么。
           锚点常驻在顶部，滚到哪都能一键跳。 */}
       <div className="settings-anchors">
@@ -1067,6 +1069,7 @@ export default function Settings() {
           ['sec-engine', '运行状态'],
           ['sec-update', '软件更新'],
           ['sec-storage', '日志与存储'],
+          ['sec-decision-allowance', '放行记录'],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -1980,6 +1983,9 @@ export default function Settings() {
           </div>
         </div>
       </div>
+
+      {/* ═══ H. 高危拦截放行记录（可撤销） ═══ */}
+      <DecisionAllowances />
     </div>
   );
 }

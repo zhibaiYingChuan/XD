@@ -248,3 +248,23 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     safe_count      INTEGER NOT NULL DEFAULT 0,
     redaction_count INTEGER NOT NULL DEFAULT 0
 );
+
+-- ══════════════════════════════════════════════════════════════
+-- 高危拦截的用户裁决允许表（2026-11-28）
+--
+-- 背景：高危拦截原来只有「直接拦下」一条路，用户明知是误报
+-- 也只能去日志里事后标记，正干到一半的任务被硬生生打断。
+-- 现在拦截前会弹窗让用户选：拦截 / 仅本次允许 / 始终允许。
+--
+-- 用户在弹窗里选「始终允许」时写入本表：同一组高危判据
+-- （指纹相同）以后不再询问，但仍照常记日志、计入统计。
+--
+-- 隐私：只存判据指纹与命中摘要，不存响应正文。
+-- ══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS decision_allowance (
+    fingerprint   TEXT PRIMARY KEY,              -- sha256(高危判据集合) 前 16 位
+    summary       TEXT NOT NULL DEFAULT '',      -- 人类可读摘要（撤销列表展示用）
+    created_at    REAL NOT NULL,
+    seen_count    INTEGER NOT NULL DEFAULT 1,
+    last_seen     REAL NOT NULL
+);

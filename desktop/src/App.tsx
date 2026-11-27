@@ -9,6 +9,7 @@ import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import UpdateNotice from './components/UpdateNotice';
+import PendingDecision from './components/PendingDecision';
 import { ToastProvider } from './components/Toast';
 import Onboarding from './pages/Onboarding';
 import Dashboard from './pages/Dashboard';
@@ -92,6 +93,11 @@ function AppRoutes() {
       {/* ★ 更新提示挂在路由之外：无论用户在哪个页面，
           发现新版本都在同一个位置弹出，不随页面切换而重新挂载。 */}
       <UpdateNotice />
+      {/* ★ 2026-11-28：高危拦截的人工裁决弹窗。
+          同样挂在路由之外 —— 它在等一个 45 秒内必须给出的答复，
+          不能因为用户切页面就消失（切页面时消失，请求会在
+          超时后被拦截，而用户以为自己已经点了允许）。 */}
+      <PendingDecision />
     </>
   );
 }

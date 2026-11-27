@@ -1587,6 +1587,65 @@ class PersonalStorage:
     # ══════════════════════════════════════════════════════════
     # 中转站信誉
     # ══════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════
+    # 高危拦截的用户裁决允许表（★ 2026-11-28）
+    #
+    # 用户在拦截弹窗里选「始终允许」时写入。之后同一组高危判据
+    # （指纹相同）不再询问，但仍然照常写日志、计入统计 ——
+    # 「不再打扰」不等于「不再记录」。
+    # ══════════════════════════════════════════════════════════
+
+    def is_decision_allowed(self, fingerprint: str) -> bool:
+        """该判据指纹是否已被用户永久允许。空指纹一律返回 False。"""
+        fp = (fingerprint or "").strip()
+        if not fp:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM decision_allowance WHERE fingerprint = ?",
+            (fp,),
+        ).fetchone()
+        return row is not None
+
+    def add_decision_allowance(
+        self, fingerprint: str, summary: str = ""
+    ) -> None:
+        """写入/刷新一条永久允许（同指纹重复写入只累加次数）。"""
+        fp = (fingerprint or "").strip()
+        if not fp:
+            return
+        now = time.time()
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO decision_allowance
+                   (fingerprint, summary, created_at, seen_count, last_seen)
+                   VALUES (?,?,?,1,?)
+                   ON CONFLICT(fingerprint) DO UPDATE SET
+                       seen_count = seen_count + 1,
+                       last_seen = ?""",
+                (fp, (summary or "")[:200], now, now, now),
+            )
+
+    def list_decision_allowances(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """列出永久允许（供设置页查看与撤销）。"""
+        rows = self._conn.execute(
+            """SELECT * FROM decision_allowance
+                ORDER BY last_seen DESC LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_decision_allowance(self, fingerprint: str) -> bool:
+        """撤销一条永久允许。返回是否真的删掉了。"""
+        fp = (fingerprint or "").strip()
+        if not fp:
+            return False
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM decision_allowance WHERE fingerprint = ?",
+                (fp,),
+            )
+        return bool(cur.rowcount)
+
     def upsert_reputation(self, rep: RelayReputation) -> None:
         """写入/更新中转站信誉。"""
         with self._conn:
