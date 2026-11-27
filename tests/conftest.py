@@ -27,10 +27,29 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# ★★★ 2026-11-28：本机测试必须绕过系统代理。
+#
+#   实测（Windows + Steam++）：系统代理开着、且 ProxyOverride 不含
+#   127.0.0.1 时，urllib/httpx 会把 `http://127.0.0.1:<port>` 也交给
+#   代理（代理对本地地址返回 404）。e2e 测试因此永远等不到测试引擎
+#   就绪，整批报错 —— 与被测代码毫无关系。
+#
+#   在 conftest 阶段把回环地址并入 NO_PROXY，保证测试结果只取决于
+#   代码，而不是跑测试那台机器当时开着什么代理。
+for _key in ("NO_PROXY", "no_proxy"):
+    _parts = [
+        p.strip() for p in os.environ.get(_key, "").split(",") if p.strip()
+    ]
+    for _host in ("127.0.0.1", "localhost"):
+        if _host not in _parts:
+            _parts.append(_host)
+    os.environ[_key] = ",".join(_parts)
 
 # ★★★ 2026-11-13：把个人版 src 强制排到 sys.path 最前。
 #

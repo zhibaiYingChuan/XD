@@ -490,6 +490,30 @@ def _inject_build_secrets(config) -> bool:  # pragma: no cover - 已废弃，见
     return False
 
 
+_trust_env_warned = False
+
+
+def _trust_env_enabled() -> bool:
+    """出站请求是否允许读取系统代理（默认否）。
+
+    ★★ 2026-11-28 事故：httpx 默认 trust_env=True 会读 Windows WinINET
+      代理；Steam++ 等 MITM 代理会让中转站请求以
+      `CERTIFICATE_VERIFY_FAILED` 失败，勘合完全不可用。
+      默认直连；确实必须经代理的用户可设 XUANDUN_TRUST_ENV_PROXY=1。
+    """
+    global _trust_env_warned
+    enabled = os.environ.get("XUANDUN_TRUST_ENV_PROXY", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if enabled and not _trust_env_warned:
+        _trust_env_warned = True
+        logger.warning(
+            "已启用 XUANDUN_TRUST_ENV_PROXY：中转站请求将经系统代理转发；"
+            "若出现 CERTIFICATE_VERIFY_FAILED，请去掉该变量改用直连"
+        )
+    return enabled
+
+
 def _new_http_client(timeout_s: float) -> httpx.AsyncClient:
     """构造共享 HTTP 客户端（lifespan 与故障重建共用同一份参数）。
 
@@ -502,6 +526,22 @@ def _new_http_client(timeout_s: float) -> httpx.AsyncClient:
         ),
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         follow_redirects=False,      # ★ 安全：不自动跟随中转站重定向
+        # ★★ 2026-11-28 事故修复：中转站请求**不读系统代理**。
+        #
+        #   实测：用户开着 Steam++ 的网络加速（系统代理 127.0.0.1:26561），
+        #   httpx 默认 trust_env=True 会读取 Windows 的 WinINET 代理设置，
+        #   把 https://api.commandcode.ai 的请求交给该代理；代理用自己的
+        #   证书做 MITM，而 Python 不信任它的 CA —— 每一次对话都以
+        #   `[SSL: CERTIFICATE_VERIFY_FAILED]` 失败，勘合完全不可用。
+        #   同一地址 trust_env=False 直连时正常（返回 401，说明 TLS 通了）。
+        #
+        #   勘合的上游是用户自己配置的中转站，通常直连即可；把系统代理
+        #   静默套到安全网关的出站链路上，既会破坏 TLS，也让第三方
+        #   代理能读到中转站 Key 与全部对话内容 —— 默认必须直连。
+        #
+        #   ★ 例外：确实必须经系统代理才能访问中转站的用户，可显式设置
+        #     环境变量 XUANDUN_TRUST_ENV_PROXY=1 恢复旧行为（自担 MITM 风险）。
+        trust_env=_trust_env_enabled(),
     )
 
 
@@ -2900,8 +2940,12 @@ def create_app() -> FastAPI:
             }
 
         async def _probe(method: str, url: str, body: Optional[Dict[str, Any]] = None):
+            # ★ 与真实转发使用同一套 trust_env 语义：否则会出现
+            #   「测试连接失败、实际对话可用」的矛盾诊断。
             async with httpx.AsyncClient(
-                timeout=probe_timeout, follow_redirects=False
+                timeout=probe_timeout,
+                follow_redirects=False,
+                trust_env=_trust_env_enabled(),
             ) as client:
                 return await client.request(method, url, json=body, headers=headers)
 

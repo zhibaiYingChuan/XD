@@ -798,3 +798,71 @@ class TestMalformedSaveDoesNotPoisonRuntime:
         assert out["ok"] is True
         assert cfg.relay.api_key == "sk-A-real-key-0001"
         assert cfg.to_safe_dict()["relay"]["api_key"] != "sk-A-real-key-0001"
+
+# ══════════════════════════════════════════════════════════════
+# 出站链路：中转站请求不得走系统代理（★ 2026-11-28 事故）
+# ══════════════════════════════════════════════════════════════
+
+
+def test_relay_client_does_not_use_system_proxy(monkeypatch):
+    """中转站客户端必须直连，不读系统代理。
+
+    ★★ 实测事故：用户开着 Steam++ 的网络加速（系统代理 127.0.0.1:26561），
+      httpx 默认 trust_env=True 会读取 Windows WinINET 代理，把
+      https://api.commandcode.ai 的请求交给该代理；代理用自己的证书
+      MITM，而 Python 不信任它的 CA —— 每一次对话都以
+      `CERTIFICATE_VERIFY_FAILED` 失败，勘合完全不可用。
+      同一地址 trust_env=False 直连时正常（返回 401，说明 TLS 已通）。
+    """
+    import asyncio
+
+    monkeypatch.delenv("XUANDUN_TRUST_ENV_PROXY", raising=False)
+    client = app_mod._new_http_client(5.0)
+    try:
+        assert client.trust_env is False, (
+            "中转站客户端仍在读系统代理 —— "
+            "用户开加速器时每次对话都会因 TLS 证书校验失败而中断"
+        )
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_relay_client_proxy_opt_in(monkeypatch):
+    """确实必须经系统代理的用户可显式恢复旧行为。"""
+    import asyncio
+
+    monkeypatch.setenv("XUANDUN_TRUST_ENV_PROXY", "1")
+    client = app_mod._new_http_client(5.0)
+    try:
+        assert client.trust_env is True, (
+            "显式 opt-in 没有生效 —— 需要系统代理的用户将无法访问中转站"
+        )
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_trust_env_helper_variants(monkeypatch):
+    """opt-in 只认明确的正值；拼错/空值一律回落直连。"""
+    for raw in ("1", "true", " TRUE ", "yes", "on"):
+        monkeypatch.setenv("XUANDUN_TRUST_ENV_PROXY", raw)
+        assert app_mod._trust_env_enabled() is True, f"{raw!r} 应视为开启"
+    for raw in ("", "0", "false", "no", "off", "junk"):
+        monkeypatch.setenv("XUANDUN_TRUST_ENV_PROXY", raw)
+        assert app_mod._trust_env_enabled() is False, f"{raw!r} 应回落直连"
+    monkeypatch.delenv("XUANDUN_TRUST_ENV_PROXY", raising=False)
+    assert app_mod._trust_env_enabled() is False
+
+
+def test_relay_probe_uses_same_trust_env():
+    """「测试连接」必须与真实转发同一口径。
+
+    ★ 否则开代理时会出现「测试失败、实际对话可用」的矛盾诊断。
+    """
+    src = (ROOT / "src" / "daoti_xuandun_personal" / "proxy" / "app.py").read_text(
+        encoding="utf-8"
+    )
+    start = src.index("async def _probe(")
+    body = src[start:src.index("return await client.request", start)]
+    assert "trust_env=_trust_env_enabled()" in body, (
+        "中转站探测仍读系统代理 —— 会出现「测试失败、实际可用」的矛盾"
+    )
