@@ -147,7 +147,20 @@ const ENGINE_PHASE2_STEPS: u32 = 50; // 50 × 1s = 50s（Nuitka onefile 自解�
 const ENGINE_PHASE2_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 连续失败达到此值判定引擎永久失效
-const ENGINE_MAX_FAILURES: u32 = 5;
+///
+/// ★ 2026-11-28：健康监控每 5 秒一次，6 次 = 30 秒，
+///   与 ensure 路径的 UNRESPONSIVE_GRACE 对齐 —— 一次几秒的同步阻塞
+///   不该被放大成强杀重启。
+const ENGINE_MAX_FAILURES: u32 = 6;
+
+/// 「端口仍在 listen、但 /health 不回」的宽限期。
+///
+/// ★★ 2026-11-28（事故复盘）：连续次数不足以衡量「卡死」——
+///   ensure_engine_running 由界面请求触发，3 次可能只隔 1.5 秒；
+///   一次几秒的同步活（或一次被系统代理劫持的探测）就会让
+///   完全健康的引擎被误杀。改为时间窗：同一轮失败持续满 30 秒，
+///   才允许强杀重启。
+const UNRESPONSIVE_GRACE: Duration = Duration::from_secs(30);
 
 // ══════════════════════════════════════════════════════════════
 // 代理端口解析
@@ -662,6 +675,27 @@ pub struct EngineState {
     ///   用户看到的是「激活页一直转圈 + 总共约 30 秒的断流」。
     ///   现在：② 先等待重试，连续 3 次才当真正的卡死兜底重启。
     unresponsive: std::sync::atomic::AtomicU32,
+
+    /// 本轮「端口在听但 /health 不回」的起始时刻（单调时钟；None = 未开始）。
+    ///
+    /// ★★ 2026-11-28：与 unresponsive 计数配合，把「连续 3 次」
+    ///   升级为「持续满 UNRESPONSIVE_GRACE」。计数在界面高频请求下
+    ///   几秒就能攒满，时间窗才能区分「一时忙」与「真卡死」。
+    /// ★ 用 Instant 而不是 unix 秒：秒级截断会让宽限最多提前 1 秒，
+    ///   系统时钟回拨还会让差值恒为 0（永不重启）。
+    unresponsive_since: parking_lot::Mutex<Option<std::time::Instant>>,
+}
+
+/// 复位「无响应」状态（连续计数 + 起始时刻）。
+///
+/// ★★ 2026-11-28（独立审查 P1）：所有「引擎换了一台」的路径都必须调用它，
+///   否则上一台留下的起始时刻会让新引擎在自解压期就被判成「已卡死 30 秒」。
+///   收口点：ensure 的成功/重启分支、start_engine_process、stop_engine_locked。
+fn reset_unresponsive(state: &EngineState) {
+    state
+        .unresponsive
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    *state.unresponsive_since.lock() = None;
 }
 
 // Drop 时回收子进程（避免孤儿进程）
@@ -686,6 +720,16 @@ fn http_client(timeout_s: u64) -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(timeout_s))
         // ★ 安全：个人版代理只应被本机访问，禁止跟随重定向到外部
         .redirect(reqwest::redirect::Policy::none())
+        // ★★ 2026-11-28 事故修复：本函数的所有调用都是**本机引擎**
+        //   （proxy_call / probe_engine），必须显式绕过系统代理。
+        //
+        //   实测：用户开着 Steam++/Watt Toolkit 的网络加速（系统代理
+        //   127.0.0.1:26561，ProxyOverride 不含 127.0.0.1）。reqwest 0.13
+        //   默认启用 system-proxy，于是对 127.0.0.1:18765/health 的探测
+        //   被代理接管并返回 404 —— 桌面端把完全健康的引擎判成「卡死」，
+        //   每 15 秒强杀重启一次，用户看到的就是「勘合服务突然崩了」。
+        //   本机回环地址永远不该经过代理。
+        .no_proxy()
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))
 }
@@ -928,30 +972,43 @@ enum EngineProbe {
 }
 
 async fn probe_engine() -> EngineProbe {
+    probe_engine_detail().await.0
+}
+
+/// 健康探测 + 失败原因（原因只用于日志，不改变判定）。
+///
+/// ★ 2026-11-28：此前失败只记「未及时响应」，无法区分
+///   「超时 / HTTP 404（被系统代理接管）/ ready=false」——
+///   本次事故正是被代理返回 404，日志却看不出任何线索。
+async fn probe_engine_detail() -> (EngineProbe, String) {
     let Ok(client) = http_client(2) else {
-        return EngineProbe::Down;
+        return (EngineProbe::Down, "HTTP 客户端创建失败".to_string());
     };
     let health_url = format!("{}/health", proxy_base());
-    let Ok(Ok(resp)) = timeout(Duration::from_secs(2), client.get(health_url).send()).await
-    else {
-        return EngineProbe::Down;
+    let resp = match timeout(Duration::from_secs(2), client.get(health_url).send()).await {
+        Err(_) => return (EngineProbe::Down, "探测超时（2s）".to_string()),
+        Ok(Err(e)) => return (EngineProbe::Down, format!("请求失败：{e}")),
+        Ok(Ok(resp)) => resp,
     };
     if !resp.status().is_success() {
-        return EngineProbe::Down;
+        return (
+            EngineProbe::Down,
+            format!("HTTP {}（若为 404/407，检查系统代理是否接管了 127.0.0.1）", resp.status()),
+        );
     }
     // ★ 2xx 不代表是我们 —— 必须看身份标记。
     let Ok(body) = resp.json::<serde_json::Value>().await else {
-        return EngineProbe::Foreign;
+        return (EngineProbe::Foreign, "响应不是 JSON".to_string());
     };
     let instance = body.get("instance").and_then(|v| v.as_str()).unwrap_or("");
     if instance != expected_engine_instance() {
-        return EngineProbe::Foreign;
+        return (EngineProbe::Foreign, "身份标记不匹配".to_string());
     }
     let ready = body.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ready {
-        return EngineProbe::Down;
+        return (EngineProbe::Down, "引擎尚未就绪（ready=false）".to_string());
     }
-    EngineProbe::Ready
+    (EngineProbe::Ready, String::new())
 }
 
 /// 端口上是否有人在听（只做一次 TCP 连接，不判业务是否健康）。
@@ -1185,6 +1242,9 @@ fn start_engine_process(app: &tauri::AppHandle) -> Result<u32, String> {
         *child_guard = Some(child);
         drop(child_guard);
         *state.pid.lock() = Some(pid);
+        // ★ 所有 spawn 路径的统一收口：新引擎从零开始计「无响应」，
+        //   否则上一台留下的时间戳会让它在自解压期就被判成卡死。
+        reset_unresponsive(&state);
         Ok(pid)
     }
 }
@@ -1233,6 +1293,8 @@ async fn stop_engine_locked(app: &tauri::AppHandle) {
         // 把引擎重新拉起，用户点的停止等于没点。
         state.user_stopped.store(true, std::sync::atomic::Ordering::SeqCst);
         *state.pid.lock() = None;
+        // ★ 停掉即清空「无响应」计时：下一次拉起是一台新引擎
+        reset_unresponsive(&state);
         let mut st = state.status.lock();
         st.running = false;
         st.healthy = false;
@@ -1364,18 +1426,15 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
         // parking_lot 守卫非 Send，必须在 await 前显式释放
         let running = state.status.lock().running;
         if running && probe_engine().await == EngineProbe::Ready {
-            state
-                .unresponsive
-                .store(0, std::sync::atomic::Ordering::SeqCst);
+            reset_unresponsive(&state);
             return Ok(());
         }
 
         // 端口上的引擎已就绪（外部引擎，或我们拉起但 status 滞后）
-        match probe_engine().await {
+        let (probe, probe_reason) = probe_engine_detail().await;
+        match probe {
             EngineProbe::Ready => {
-                state
-                    .unresponsive
-                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                reset_unresponsive(&state);
                 let mut st = state.status.lock();
                 st.running = true;
                 st.healthy = true;
@@ -1400,40 +1459,61 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
             EngineProbe::Down => {
                 // ★★ 全局口径（2026-10-31）：先分清「死了」与「忙」。
                 //   端口仍在 listen = 进程活着，只是暂时没空回 /health。
-                //   这种情况给它时间重试，绝不在这里强杀重启；
-                //   连续 3 次仍不可用，才当作真正的卡死走兜底重启。
+                //   这种情况给它时间重试，绝不在这里强杀重启。
+                //
+                // ★★ 2026-11-28：判定从「连续 3 次」升级为「持续 30 秒」。
+                //   界面请求会高频调用 ensure，3 次可能只隔 1.5 秒；
+                //   一次几秒的同步阻塞就会误杀健康引擎。时间窗才可靠。
                 if port_listening(lock_proxy_port()).await {
                     // 先给它把手上那段活做完的机会
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    if probe_engine().await == EngineProbe::Ready {
-                        state
-                            .unresponsive
-                            .store(0, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    let (retry, retry_reason) = probe_engine_detail().await;
+                    if retry == EngineProbe::Ready {
+                        reset_unresponsive(&state);
                         let mut st = state.status.lock();
                         st.running = true;
                         st.healthy = true;
                         st.startup_error = None;
                         return Ok(());
                     }
+                    let reason = if retry_reason.is_empty() {
+                        probe_reason
+                    } else {
+                        retry_reason
+                    };
+                    // ★ 用单调时钟计时：不受系统时间调整影响，
+                    //   也避免 unix 秒截断带来的最多 1 秒误差。
+                    let elapsed = {
+                        let mut since = state.unresponsive_since.lock();
+                        let started = since.get_or_insert_with(std::time::Instant::now);
+                        started.elapsed()
+                    };
                     let n = state
                         .unresponsive
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                         + 1;
-                    if n < 3 {
+                    if elapsed < UNRESPONSIVE_GRACE {
                         log_line(
                             "WARN",
                             &format!(
-                                "引擎端口仍在监听但 /health 未及时响应（连续第 {n} 次），本次不重启"
+                                "引擎端口仍在监听但 /health 未及时响应（连续第 {n} 次，{reason}），\
+                                 已持续 {}s（宽限 {}s 内不重启）",
+                                elapsed.as_secs(),
+                                UNRESPONSIVE_GRACE.as_secs()
                             ),
                         );
                         return Err("引擎暂时没有响应，请稍后重试".to_string());
                     }
-                    log_line("WARN", "引擎连续 3 次无响应，判定为卡死，强制重启");
+                    log_line(
+                        "WARN",
+                        &format!(
+                            "引擎持续 {}s 无响应（{reason}），判定为卡死，强制重启",
+                            elapsed.as_secs()
+                        ),
+                    );
                 }
-                // 端口上没人听（真死了）或已判定卡死 → 归零计数并走拉起流程
-                state
-                    .unresponsive
-                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                // 端口上没人听（真死了）或已判定卡死 → 归零并走拉起流程
+                reset_unresponsive(&state);
             }
         }
 
@@ -1453,6 +1533,8 @@ async fn ensure_engine_running(app: &tauri::AppHandle) -> Result<(), String> {
                 st.started_at = Some(unix_now());
                 st.startup_error = None;
             }
+            // ★ 新引擎拥有全新的宽限窗口，不继承上一台的时间戳
+            reset_unresponsive(&state);
             state.starting.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -2674,6 +2756,7 @@ pub fn run() {
             lifecycle: tokio::sync::Mutex::new(()),
             starting: std::sync::atomic::AtomicBool::new(false),
             unresponsive: std::sync::atomic::AtomicU32::new(0),
+            unresponsive_since: parking_lot::Mutex::new(None),
         })
         .manage(TrayController::default())
         .invoke_handler(tauri::generate_handler![

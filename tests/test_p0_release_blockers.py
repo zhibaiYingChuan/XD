@@ -367,13 +367,63 @@ class TestHealthReadiness:
     def test_rust_requires_readiness_not_just_2xx(self):
         """Rust 的就绪判定不能只看 HTTP 2xx。"""
         src = LIB_RS.read_text(encoding="utf-8")
-        start = src.index("async fn probe_engine")
+        # ★ 2026-11-28：探测主体移入 probe_engine_detail（附带失败原因），
+        #   probe_engine 只是它的薄包装；判据要落在真正发请求的那段。
+        start = src.index("async fn probe_engine_detail")
         body = src[start:src.index("\n}\n", start)]
         assert "ready" in body, (
             "probe_engine 仍不问引擎「就绪了吗」—— "
             "引擎处于「起来了但检测/落库失效」时会被当成健康"
         )
         assert "instance" in body, "probe_engine 未校验身份"
+
+    def test_local_engine_client_bypasses_system_proxy(self):
+        """本机引擎的 HTTP 客户端必须绕过系统代理（★ 2026-11-28 事故）。
+
+        实测：用户开着 Steam++/Watt Toolkit 的网络加速（系统代理
+        127.0.0.1:26561，ProxyOverride 不含 127.0.0.1）。reqwest 0.13
+        默认启用 system-proxy，于是 127.0.0.1:18765/health 被代理接管
+        并返回 404 —— 桌面端把完全健康的引擎判成「卡死」，每 15 秒
+        强杀重启一次，用户看到的就是「勘合服务突然崩了」。
+        """
+        src = LIB_RS.read_text(encoding="utf-8")
+        start = src.index("fn http_client(")
+        body = src[start:src.index("\n}\n", start)]
+        assert ".no_proxy()" in body, (
+            "本机引擎客户端没有绕过系统代理 —— "
+            "用户开代理时会把健康引擎误判成卡死并反复强杀"
+        )
+
+    def test_unresponsive_restart_requires_a_time_window(self):
+        """判定「卡死」必须看持续时间，不能只看连续次数。
+
+        ensure_engine_running 由界面请求触发，3 次可能只隔 1.5 秒；
+        一次几秒的同步活（或一次被代理劫持的探测）就会误杀健康引擎。
+        """
+        src = LIB_RS.read_text(encoding="utf-8")
+        start = src.index("async fn ensure_engine_running")
+        body = src[start:src.index("\n}\n", start)]
+        assert "UNRESPONSIVE_GRACE" in body, (
+            "ensure_engine_running 没有时间宽限 —— "
+            "高频请求下几次探测失败就会强杀健康引擎"
+        )
+        assert "unresponsive_since" in body, (
+            "没有记录本轮失败的起始时刻，无法判断「一时忙」与「真卡死」"
+        )
+        # ★ 独立审查 P1：所有「换了一台引擎」的路径都必须复位计时，
+        #   否则上一台留下的起始时刻会让新引擎在自解压期被判成卡死。
+        assert "fn reset_unresponsive" in src, "缺少统一的复位入口"
+        for fn in ("fn start_engine_process", "async fn stop_engine_locked"):
+            begin = src.index(fn)
+            fn_body = src[begin:src.index("\n}\n", begin)]
+            assert "reset_unresponsive" in fn_body, (
+                f"{fn} 没有复位「无响应」计时 —— "
+                "重启后新引擎可能刚启动就被误判为已卡死 30 秒"
+            )
+        # ★ 用单调时钟，避免系统时间调整导致永不重启 / 提前强杀
+        assert "Instant::now" in body and ".elapsed()" in body, (
+            "无响应计时没有用单调时钟 —— 系统时间回拨会让宽限失效"
+        )
 
 
 # ══════════════════════════════════════════════════════════════
