@@ -1600,6 +1600,92 @@ async fn wait_engine_ready() -> bool {
 }
 
 /// 后台健康监控循环
+/// 待裁决心跳 + 主动唤起窗口（★ 2026-11-28 事故二）。
+///
+/// 为什么不能只靠前端轮询：
+///   1. 窗口隐藏到托盘 / 最小化时，WebView2 会把定时器节流到分钟级，
+///      引擎的「有人值守」心跳随之过期 —— 高危拦截会 0 等待直接阻断，
+///      用户根本没机会点「允许」；
+///   2. 即使窗口只是被 AI 工具挡在后面，用户也看不到弹窗，
+///      45 秒后同样按拦截处理。
+///
+/// 本任务独立于 WebView：每 2 秒直接问一次引擎的待裁决队列，
+/// 既刷新心跳，又在有项时把主窗口显示 / 置前，并通知前端立即刷新。
+fn spawn_pending_watcher(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // ★ 只在「待裁决项发生变化」时抢焦点：同一批项每 2 秒重复
+        //   set_focus 会把用户从别的窗口反复拽回来，比不弹更烦。
+        let mut last_ids: Vec<String> = Vec::new();
+        // 抢焦点冷却：连续多条新拦截时，10 秒内最多打扰一次。
+        let mut last_alert: Option<Instant> = None;
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            // 用户主动停止引擎时不打扰
+            if let Some(st) = app.try_state::<EngineState>() {
+                if st.user_stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    last_ids.clear();
+                    continue;
+                }
+            }
+
+            let Ok(v) = proxy_call(
+                reqwest::Method::GET, "/api/pending", None, REQ_FAST,
+            )
+            .await
+            else {
+                continue; // 引擎未就绪 / 重启中：静默，下一轮再试
+            };
+            let ids: Vec<String> = v
+                .get("items")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|it| {
+                            it.get("id").and_then(|i| i.as_str()).map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                last_ids.clear();
+                continue;
+            }
+
+            let win = app.get_webview_window("main");
+            let hidden = win
+                .as_ref()
+                .map(|w| !w.is_visible().unwrap_or(false))
+                .unwrap_or(false);
+            let changed = ids != last_ids;
+            if !changed && !hidden {
+                continue;
+            }
+            last_ids = ids;
+
+            if let Some(w) = win.as_ref() {
+                let focused = w.is_focused().unwrap_or(false);
+                let cooling = last_alert
+                    .map(|t| t.elapsed() < Duration::from_secs(10))
+                    .unwrap_or(false);
+                if !focused && !cooling {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                    // ★ Windows 的前台锁可能让 set_focus 失效；
+                    //   闪任务栏兜底，确保用户至少能注意到有东西在等。
+                    let _ = w.request_user_attention(
+                        Some(tauri::UserAttentionType::Critical),
+                    );
+                    last_alert = Some(Instant::now());
+                }
+            }
+            // 通知前端立即刷新（不必等下一次 1.5s 轮询）
+            let _ = app.emit("pending-decision", &v);
+        }
+    });
+}
+
 fn spawn_health_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut fail_streak: u32 = 0;
@@ -2846,6 +2932,7 @@ pub fn run() {
                 }
             });
             spawn_health_monitor(handle.clone());
+            spawn_pending_watcher(handle.clone());
             spawn_tray_pulse_monitor(handle);
             Ok(())
         })

@@ -21,6 +21,7 @@ import { ShieldAlert } from 'lucide-react';
 
 import { api } from '../services/api';
 import type { PendingDecision as Decision, PendingItem } from '../services/api';
+import { focusMainWindow, listenEvent } from '../lib/tauriShim';
 import { useI18n } from '../i18n';
 
 /** 轮询间隔。必须明显小于引擎的 10 秒无人值守宽限期。 */
@@ -38,23 +39,24 @@ export default function PendingDecision() {
   // 期间在途的轮询响应可能把它又带回来 —— 用本地集合挡住这次回闪。
   const decidedRef = useRef<Set<string>>(new Set());
 
+  // 拉一次待裁决列表。失败静默：引擎未就绪 / 重启中不该让弹窗消失。
+  const refresh = useCallback(async () => {
+    try {
+      const res = await api.listPending();
+      setItems((res.items || []).filter((x) => !decidedRef.current.has(x.id)));
+      setError(null);
+    } catch {
+      // ★ 不能在这里清空 items：一次网络抖动不该让正在等待的弹窗消失。
+    }
+  }, []);
+
   // 轮询：用 setTimeout 链而不是 setInterval ——
   // 上一次还没回来时不会叠出第二个请求。
   useEffect(() => {
     let alive = true;
     let timer: number | undefined;
     const poll = async () => {
-      try {
-        const res = await api.listPending();
-        if (!alive) return;
-        setItems(
-          (res.items || []).filter((x) => !decidedRef.current.has(x.id)),
-        );
-        setError(null);
-      } catch {
-        // 引擎未就绪 / 重启中：静默，下一轮再试。
-        // ★ 不能在这里清空 items：一次网络抖动不该让正在等待的弹窗消失。
-      }
+      await refresh();
       if (alive) timer = window.setTimeout(poll, POLL_MS);
     };
     void poll();
@@ -62,9 +64,30 @@ export default function PendingDecision() {
       alive = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, []);
+  }, [refresh]);
+
+  // Rust 侧待裁决看门狗发现待裁决项时会把窗口带到前台并发这个事件；
+  // 收到后立即刷新，不必等下一次轮询（窗口刚从隐藏恢复时尤其重要）。
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void listenEvent('pending-decision', () => {
+      void refresh();
+    }).then((u) => {
+      if (alive) unlisten = u;
+      else u();
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [refresh]);
 
   const open = items.length > 0;
+  // 兜底：即使没收到事件（例如浏览器模式），看到待裁决项也要把窗口带出来。
+  useEffect(() => {
+    if (open) void focusMainWindow();
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const id = window.setInterval(() => setTick((n) => n + 1), 1000);

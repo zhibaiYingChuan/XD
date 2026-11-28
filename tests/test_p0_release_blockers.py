@@ -394,6 +394,28 @@ class TestHealthReadiness:
             "用户开代理时会把健康引擎误判成卡死并反复强杀"
         )
 
+    def test_pending_watcher_brings_window_to_front(self):
+        """待裁决看门狗必须独立于 WebView，并主动唤起窗口。
+
+        ★ 实测事故：高危拦截弹窗只存在于前端；用户正在用 AI 工具时，
+          勘合窗口被挡在后面（或隐藏到托盘被系统节流），用户看不到弹窗，
+          45 秒后按拦截处理 —— 用户感受就是「又是直接拦截」。
+        """
+        src = LIB_RS.read_text(encoding="utf-8")
+        assert "fn spawn_pending_watcher" in src, "缺少待裁决看门狗"
+        assert "spawn_pending_watcher(handle.clone())" in src, (
+            "看门狗没有在 setup 里启动 —— 窗口隐藏时无人刷新心跳"
+        )
+        start = src.index("fn spawn_pending_watcher")
+        body = src[start:src.index("\n}\n", start)]
+        assert '"/api/pending"' in body, "看门狗没有轮询待裁决队列"
+        assert "set_focus" in body and ".show()" in body, (
+            "看门狗发现待裁决项时没有把窗口带到前台 —— 用户仍然看不见弹窗"
+        )
+        assert 'emit("pending-decision"' in body, (
+            "看门狗没有通知前端立即刷新，窗口从隐藏恢复后要等下一次轮询"
+        )
+
     def test_unresponsive_restart_requires_a_time_window(self):
         """判定「卡死」必须看持续时间，不能只看连续次数。
 

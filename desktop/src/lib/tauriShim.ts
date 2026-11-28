@@ -145,3 +145,40 @@ export async function getTrayState(): Promise<TrayState | null> {
     return null;
   }
 }
+
+// ══════════════════════════════════════════════════════════════
+// 事件与窗口（★ 2026-11-28：待裁决弹窗必须能主动唤起）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 订阅 Tauri 事件（浏览器模式返回空取消函数）。
+ *
+ * ★ 待裁决弹窗需要 Rust 侧看门狗把窗口带到前台后立即刷新，
+ *   不能只依赖 WebView 的定时器 —— 窗口隐藏时会被系统节流。
+ */
+export async function listenEvent<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => undefined;
+  try {
+    const mod = await import('@tauri-apps/api/event');
+    return await mod.listen<T>(event, (e) => handler(e.payload));
+  } catch {
+    return () => undefined;
+  }
+}
+
+/** 把主窗口显示到前台（仅 Tauri 环境；失败静默）。 */
+export async function focusMainWindow(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const mod = await import('@tauri-apps/api/window');
+    const w = mod.getCurrentWindow();
+    await w.show();
+    await w.unminimize();
+    await w.setFocus();
+  } catch {
+    /* 窗口 API 不可用时静默：不影响裁决本身 */
+  }
+}

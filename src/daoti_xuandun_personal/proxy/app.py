@@ -305,11 +305,13 @@ async def _await_user_decision(
     rule_keys = _decision_rule_keys(findings)
 
     if approved is not None and rule_keys and rule_keys <= approved:
+        logger.info("同一响应内已放行过该判据，直接放行（%s）", domain)
         return True, "allowed_this_stream"
 
     if fingerprint and _storage is not None:
         try:
             if _storage.is_decision_allowed(fingerprint):
+                logger.info("命中「始终允许」，放行高危响应（%s）", domain)
                 if approved is not None:
                     approved |= rule_keys
                 return True, "allowed_permanent"
@@ -318,6 +320,10 @@ async def _await_user_decision(
 
     # ★ 无人值守保护：桌面端没在轮询，弹窗根本不会出现，不能白等 45 秒。
     if not _pending_poll_recent():
+        logger.warning(
+            "无人值守（桌面端未轮询 /api/pending），高危拦截直接按拦截处理（%s）",
+            domain,
+        )
         return False, "unattended"
 
     wait_s = PENDING_DECISION_TIMEOUT_S if timeout is None else float(timeout)
@@ -339,12 +345,18 @@ async def _await_user_decision(
             "expires_at": now + max(0.0, wait_s),
             "decision": None,
         }
+    logger.info(
+        "高危拦截等待用户裁决（%s，判据 %s，%.0fs 内有效）",
+        domain, fingerprint or "-", wait_s,
+    )
 
     def _finish(decision: Optional[str]) -> Optional[Tuple[bool, str]]:
         """把一次裁决落到结果上；未裁决返回 None。"""
         if decision == "deny":
+            logger.info("用户裁决：拦截（%s）", domain)
             return False, "user_denied"
         if decision in ("allow_once", "allow_always"):
+            logger.info("用户裁决：%s（%s）", decision, domain)
             if approved is not None:
                 # ★ 必须用 update：`approved |= ...` 会在闭包里重新绑定，
                 #   把 approved 变成局部变量（UnboundLocalError）。
@@ -379,6 +391,7 @@ async def _await_user_decision(
         done = _finish(decision)
         if done is not None:
             return done
+        logger.warning("高危拦截等待超时，按拦截处理（%s）", domain)
         return False, "timeout"
     finally:
         _pending_discard(item_id)
